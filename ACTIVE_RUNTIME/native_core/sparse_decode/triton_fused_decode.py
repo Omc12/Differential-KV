@@ -244,12 +244,34 @@ def pool_stores_rotated_k() -> bool:
     within-block offset as an absolute position, and the decode gather being off
     by one) stops existing because there is no read-time position to get wrong.
 
-    DEFAULT OFF. This changes what every pool row means, so a session compressed
-    under one setting is not readable under the other, and it must be A/B'd on
-    GPU before it can flip. Every site that rotates on read consults THIS
-    function, so the convention cannot end up half-applied.
+    DEFAULT ON, and the A/B that flipped it (Qwen3.5-2B, validate_cuda_dkv
+    --long, same build, same prompts, only this flag differing):
+
+        DKV_ROTATED_POOL=0    FAILED (6)
+        DKV_ROTATED_POOL=1    FAILED (4)
+
+        32k@depth0.5   2/3 with 2 distinct outputs  ->  3/3, DETERMINISTIC
+        2k@depth0.0    output changed               ->  still failing
+        8k@depth0.5    unchanged                    ->  still 2/3
+        32k@depth0.9   unchanged                    ->  still 0/3
+
+    The 32k@0.5 result is the informative one: it was BOTH wrong and
+    nondeterministic at temperature 0, and removing the phase error fixed both
+    at once. That is what a systematic per-token position error looks like when
+    it lands near a decision boundary -- the ranking of two close candidates
+    flips on fp16 noise. Recall and determinism moving together is the signature
+    of the base scores becoming correct rather than of a threshold being nudged.
+
+    It is also the cheaper direction: no inverse-RoPE at ingest, and no rotation
+    of anchors_K/V_K/res_k in the gather, the router or the dense window.
+
+    Every site that rotates on read consults THIS function, so the convention
+    cannot end up half-applied. DKV_ROTATED_POOL=0 restores the unrotated pool.
+    A pool built under one setting is not readable under the other, which is a
+    non-issue in practice (the value is fixed for a process) but matters if a
+    session is ever persisted across a config change.
     """
-    return os.environ.get("DKV_ROTATED_POOL", "0") == "1"
+    return os.environ.get("DKV_ROTATED_POOL", "1") == "1"
 
 
 def resolve_sparse_bias(lse_sparse=None, lse_dense=None):
