@@ -156,6 +156,8 @@ def main():
     #   => prefill =  t(N) - N*d
     #
     # Backend-agnostic, so DKV and the dense baseline are measured identically.
+    _last = {"text": None}
+
     def timed(n):
         """Returns (seconds, tokens ACTUALLY generated).
 
@@ -173,6 +175,13 @@ def main():
             got = r
         else:
             got = max(len(w.tokenizer(r).input_ids) - ntok, 0)
+            # Keep the TEXT, not just the count. This benchmark times tokens; it
+            # cannot tell whether they are words, and that gap cost real work:
+            # every speed number here was taken on Qwen2.5-1.5B, whose DKV path
+            # emits 'ZEBR4471 dozensriages rollers Deploy...' nondeterministically
+            # at temperature 0. A 2.06x "speedup" was measured, reported, and only
+            # caught when the needle test was finally pointed at that model.
+            _last["text"] = r
         return dt, got
 
     N = args.steps
@@ -225,6 +234,30 @@ def main():
     print(f"  PREFILL {prefill_s:7.2f} s   ({1000*prefill_s/max(ntok,1):.3f} ms/prompt-token)")
     print(f"  DECODE  {1/d_s:7.1f} tps ({1000*d_s:.1f} ms/token)   <-- prefill excluded")
     print(f"  peak VRAM {torch.cuda.max_memory_allocated()/2**30:.2f} GB")
+
+    # ── OUTPUT SAMPLE — a tps number means nothing if the tokens are not words ──
+    # There is no cheap general correctness check here (this prompt has no known
+    # answer), so show the text and flag the obvious degeneracy markers. Anything
+    # that trips these invalidates the timing above, because a model emitting
+    # garbage takes a different path through sampling and stopping.
+    _txt = _last.get("text")
+    if _txt:
+        _gen = _txt.rsplit("assistant", 1)[-1].strip()[:400]
+        _shown = _gen[:110].replace("\n", "\\n")
+        print(f"  SAMPLE  {_shown!r}")
+        _flags = []
+        if _gen:
+            _nonascii = sum(ord(c) > 127 for c in _gen) / len(_gen)
+            if _nonascii > 0.15:
+                _flags.append(f"{100*_nonascii:.0f}% non-ASCII")
+            if "�" in _gen:
+                _flags.append("replacement chars")
+            _words = _gen.split()
+            if len(_words) >= 8 and len(set(_words)) / len(_words) < 0.4:
+                _flags.append("repetition loop")
+        if _flags:
+            print(f"  !! OUTPUT LOOKS DEGENERATE ({', '.join(_flags)}) — the timing")
+            print("     above is NOT a valid measurement of this configuration.")
 
     if n_eos:
         print(f"  !! {n_eos} of {len(all_trials)} trials EOS-limited and EXCLUDED "
