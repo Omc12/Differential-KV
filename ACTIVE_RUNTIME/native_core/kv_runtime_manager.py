@@ -2339,6 +2339,73 @@ class KVRuntimeManager:
         # and SUBMITTED blocks will be promoted to COMPRESSED shortly after decode starts.
         dense_blocks = [block for block in blocks if block.state == "ACCUMULATING"]
 
+        # ── BLOCK COVERAGE INVARIANT ──────────────────────────────────────────
+        # Decode reads exactly the two collections above and nothing else:
+        # COMPRESSED -> the sparse kernel, ACCUMULATING -> the dense window. A
+        # block in any OTHER state is served by NEITHER, and its tokens are then
+        # simply absent from attention -- silently, with no error, no exception
+        # and no shape change. Output stays well-formed; the content is just
+        # gone.
+        #
+        # WHY THIS IS THE ROOT AND THE BLOCK-0 FIXES ARE NOT.
+        # Whether a block reaches attention is an emergent property of three
+        # policies that do not know about each other:
+        #   1. compression eligibility  (streaming_sparse_ingest, THREE separate
+        #      protect_block_zero checks at :552, :608 and :1383, each with
+        #      different conditions)
+        #   2. the ACCUMULATING/SUBMITTED/COMPRESSED state machine
+        #   3. dense-window trimming in assemble_dense_window_kv, which evicts
+        #      the OLDEST blocks when DKV_MAX_DENSE_LEN is exceeded
+        # Nothing asserts that their composition covers every block, so each
+        # fix to one policy is a patch: the next policy change strands a block
+        # again, and again silently. This check is the missing invariant.
+        #
+        # MLX cannot reach this state at all. It materialises every compressed
+        # block and applies recency at ATTENTION time rather than by splitting
+        # storage (streaming_sparse_ingest.py:1177 says so), so a block is
+        # either in the arrays or in the live tail -- there is no third place.
+        # CUDA's SUBMITTED state exists only because compression is ASYNC, and
+        # that gap is what has no reader.
+        #
+        # The SUBMITTED exclusion above is the same hole, and its justification
+        # -- "neighboring full GPU-compressed blocks cover the same context
+        # region via sparse attention" -- is exactly wrong for the content that
+        # matters: a needle is by definition NOT redundant with its neighbours,
+        # and the first block of a session has no earlier neighbour at all.
+        _stranded = [b for b in blocks
+                     if b.state not in ("COMPRESSED", "ACCUMULATING")]
+        if _stranded:
+            # Recovery is OPT-IN, not default. The comment above records that
+            # serving SUBMITTED blocks densely overflowed the workspace on long
+            # contexts and collapsed generation to EOS, and a change made
+            # earlier in this session that assumed a dense fallback existed
+            # crashed with a device-side assert. Turning this on without
+            # measuring would repeat that. Detection, however, is unconditional:
+            # this class of bug must never again be silent.
+            if os.environ.get("DKV_STRICT_BLOCK_COVERAGE", "0") == "1":
+                dense_blocks = dense_blocks + [
+                    b for b in _stranded
+                    if getattr(b, "active_k", None) is not None
+                    or getattr(b, "active_k_cpu", None) is not None
+                ]
+            else:
+                _seen = getattr(self, "_coverage_warned", None)
+                if _seen is None:
+                    _seen = self._coverage_warned = set()
+                _key = (session_id, layer_idx)
+                if _key not in _seen:
+                    _seen.add(_key)
+                    _anchors = [getattr(b, "anchor_idx", "?") for b in _stranded[:8]]
+                    _toks = sum(b.token_count() for b in _stranded)
+                    print(f"[DKV] BLOCK COVERAGE: {len(_stranded)} block(s) "
+                          f"({_toks} tokens) are in NEITHER the compressed nor "
+                          f"the dense set for session={session_id} layer={layer_idx} "
+                          f"-- their tokens are invisible to attention. "
+                          f"states={sorted({b.state for b in _stranded})} "
+                          f"anchors={_anchors}. "
+                          f"DKV_STRICT_BLOCK_COVERAGE=1 serves them densely.",
+                          flush=True)
+
         result = (
             block_indices_tensor,
             dense_blocks,

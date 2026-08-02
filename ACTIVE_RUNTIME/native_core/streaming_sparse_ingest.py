@@ -1926,6 +1926,13 @@ class StreamingSparseIngestManager:
                               f"state={b.state} ak={'yes' if b.active_k is not None else 'none'} "
                               f"skip={getattr(b, 'skip_compression', False)} mbs={b.micro_block_size}", flush=True)
                     if eligible and window_ok:
+                        # Same force-exact marking as compress_deferred_blocks_for_layer.
+                        # THIS is the site the prefill path actually reaches; the
+                        # first version of this fix edited only the other one
+                        # (identical statement, different indentation, so a
+                        # replace-all silently matched one of two).
+                        if b.anchor_idx == 0 and StreamingKVBlock.protect_block_zero:
+                            b.skip_compression = True
                         b.state = "SUBMITTED"
                         blocks_to_compress.append(b)
                         self.update_metadata_state(session_id, layer_idx, b)
