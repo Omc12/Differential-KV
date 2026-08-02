@@ -391,8 +391,36 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
         _needle_n = _norm(NEEDLE)
         hits = sum(_needle_n in _norm(o) for o in outs)
         check(f"{label} ({ntok} tok) needle recall", hits == 3, f"{hits}/3 — {outs[0][:60]!r}")
-        check(f"{label} determinism at temperature 0", len(set(outs)) == 1,
-              f"{len(set(outs))} distinct outputs across 3 runs")
+        # Report WHICH run diverged, not just how many distinct outputs there
+        # were. "2 distinct across 3 runs" is compatible with two very different
+        # causes and cannot distinguish them:
+        #   run 1 alone differs      -> a WARM-UP effect (Triton autotune picking
+        #                               a config by timing, JIT compile, a cache
+        #                               populated on first use)
+        #   the odd run varies       -> a genuine race
+        # Every determinism failure in this investigation has been read without
+        # that distinction, so both explanations stayed live for many rounds.
+        _det_ok = len(set(outs)) == 1
+        if _det_ok:
+            _det_detail = "1 distinct output across 3 runs"
+        else:
+            # Label each DISTINCT output with its own letter. A first version
+            # marked anything != run 1 as "B", so three different outputs came
+            # out as "ABB" and were misreported as a warm-up -- the pattern that
+            # would have sent the next round chasing the wrong cause.
+            _letters, _pattern = {}, ""
+            for o in outs:
+                if o not in _letters:
+                    _letters[o] = chr(ord("A") + len(_letters))
+                _pattern += _letters[o]
+            _verdict = ("run 1 differs, runs 2-3 agree -> WARM-UP (autotune / JIT / "
+                        "first-use cache)" if _pattern == "ABB"
+                        else "every run differs -> race" if len(set(outs)) == len(outs)
+                        else "converges after run 1 is not the pattern -> race or state carry-over")
+            _det_detail = (f"{len(set(outs))} distinct across 3 runs, pattern={_pattern} "
+                           f"({_verdict}); "
+                           + " | ".join(f"{_letters[o]}={o[:40]!r}" for o in dict.fromkeys(outs)))
+        check(f"{label} determinism at temperature 0", _det_ok, _det_detail)
 
     if dense:
         return  # no Triton path to check — DKV was never loaded

@@ -1159,7 +1159,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                             _rp = getattr(kv_manager, "_route_probe_seen", None)
                             if _rp is None:
                                 _rp = kv_manager._route_probe_seen = set()
-                            _rp_key = (sid, captured_layer_idx)
+                            # Keyed on the CANDIDATE COUNT too, not just
+                            # (session, layer). Every prompt in a harness run
+                            # reuses session "default", so a (sid, layer) key
+                            # printed for the first prompt and stayed silent for
+                            # every one after it -- the 2k case reported while 8k
+                            # and 32k, the ones actually in question, did not.
+                            _rp_key = (sid, captured_layer_idx,
+                                       block_indices.numel() if block_indices is not None else -1)
                             if _rp_key not in _rp:
                                 _rp.add(_rp_key)
                                 _n_blocks = (block_indices.numel()
@@ -1282,6 +1289,35 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         selected_anchors = anchor_indices[block_idx_in_full]
                                         srl_state.current_step_slots = selected_slots[_keep0]
                                         srl_state.current_step_anchors = selected_anchors
+
+                                        # DKV_ROUTE_PROBE=2: report WHICH blocks
+                                        # were kept, once per (layer, candidate
+                                        # count). "Routing ran" does not answer
+                                        # the question that matters for a deep
+                                        # needle -- whether the block HOLDING it
+                                        # survived top-K. At 32k the router keeps
+                                        # 16 of ~122 blocks, and a depth-0.9
+                                        # needle sits near anchor ~29300, so this
+                                        # is a direct read of whether it was
+                                        # dropped rather than an inference from
+                                        # the model saying "None".
+                                        if os.environ.get("DKV_ROUTE_PROBE", "1") == "2":
+                                            _sp = getattr(kv_manager, "_route_sel_seen", None)
+                                            if _sp is None:
+                                                _sp = kv_manager._route_sel_seen = set()
+                                            _sp_key = (sid, captured_layer_idx,
+                                                       int(block_indices.numel()))
+                                            if _sp_key not in _sp:
+                                                _sp.add(_sp_key)
+                                                _sa = selected_anchors.tolist()
+                                                _all_a = anchor_indices.tolist()
+                                                print(f"[DKV] ROUTE SELECTION layer={captured_layer_idx} "
+                                                      f"kept {len(_sa)} of {len(_all_a)} blocks | "
+                                                      f"anchor span kept "
+                                                      f"[{min(_sa) if _sa else '-'}..{max(_sa) if _sa else '-'}] "
+                                                      f"of [{min(_all_a) if _all_a else '-'}.."
+                                                      f"{max(_all_a) if _all_a else '-'}] | "
+                                                      f"kept={sorted(_sa)}", flush=True)
                                         selected_slots = srl_state.current_step_slots
                                     else:
                                         # Reuse cached routing from the previous cadence step
