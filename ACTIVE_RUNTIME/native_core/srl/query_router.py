@@ -1146,6 +1146,55 @@ def route_blocks_relevance(
     # Max-reduce over L (dim=1) and H (dim=0 after reshape)
     relevance = relevance.reshape(H_kv * gpk, L, N).max(dim=1).values.max(dim=0).values   # [N]
 
+    # ── Edge-aware routing propagation (MLX parity) ──────────────────────────
+    # MLX applies this to the SAME relevance vector, between scoring and top-K:
+    #
+    #     relevance = _block_relevance_residual(q, ak, rk[:, :R_route], ...)
+    #     if _er_on:
+    #         relevance = _edge_propagate_relevance(relevance, ak, beta, max_nb)
+    #     sel = mx.argsort(relevance)[-k_eff:]
+    #                                       (mlx_dkv_wrapper.py:4024-4030)
+    #
+    # This function -- the one production actually routes with -- went straight
+    # from the max-reduce to torch.topk. DKV_EDGE_ROUTING defaults to "1" on
+    # BOTH runtimes, so the flag read as enabled while the production path never
+    # consulted it. There IS an edge implementation in this file already, but it
+    # lives in a different routing function, so route_blocks_relevance never saw
+    # it. Same family as DKV_COMPRESSED_MIN_CTX having no CUDA reader.
+    #
+    # What it does, in MLX's words: the router scores each block INDEPENDENTLY,
+    # so it has no notion of which blocks are CONNECTED. When what the query
+    # matches and what actually answers it live in different blocks, top-K can
+    # take the first and drop the second. This diffuses relevance one hop over a
+    # block-to-block similarity graph built from the anchor keys:
+    #
+    #     relevance <- relevance + beta * (A_hat . relevance)
+    #
+    # A_hat = row-normalised positive anchor-cosine adjacency, self-loops
+    # removed. k_eff is unchanged, so the same number of blocks is attended and
+    # decode throughput is flat; the NxN graph is tiny and this runs once per
+    # routing interval, not per token.
+    _er_on = os.environ.get("DKV_EDGE_ROUTING", "1").strip().lower() not in (
+        "0", "", "false", "off")
+    try:
+        _er_beta = float(os.environ.get("DKV_EDGE_ROUTE_BETA", "0.25"))
+    except ValueError:
+        _er_beta = 0.25
+    try:
+        _er_maxnb = int(os.environ.get("DKV_EDGE_ROUTE_MAXNB", "512"))
+    except ValueError:
+        _er_maxnb = 512
+    if _er_on and _er_beta > 0.0 and 3 <= N <= _er_maxnb:
+        # anc is [N, H_kv, D] and already in whatever rotational frame the pool
+        # uses, which is what MLX passes too (its `ak` is comp_anc_k).
+        _akf = anc.reshape(N, -1).float()
+        _akn = _akf / (_akf.norm(dim=-1, keepdim=True) + 1e-6)
+        _A = torch.matmul(_akn, _akn.t())                                  # cosine
+        _A = torch.clamp(_A - torch.eye(N, device=_A.device, dtype=_A.dtype), min=0.0)
+        _A = _A / (_A.sum(dim=-1, keepdim=True) + 1e-6)                    # row-normalised
+        _prop = torch.matmul(_A, relevance.float())
+        relevance = relevance + _er_beta * _prop.to(relevance.dtype)
+
     # Plain top-K, matching MLX's _block_relevance_residual exactly (this
     # function's own docstring). An earlier version force-included a "sink"
     # block (lowest anchor_indices) regardless of relevance, unconditionally

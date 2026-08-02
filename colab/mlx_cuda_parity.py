@@ -214,9 +214,28 @@ def stage_positions():
     g = _gather_routed_blocks_for_kernel(
         pool, torch.arange(N_BLK), anchors, cos, sin)
 
+    from native_core.sparse_decode.triton_fused_decode import pool_stores_rotated_k
+
     print("\n" + "=" * 74)
-    print("  [R1] residual-key RoPE position   (real _gather_routed_blocks_for_kernel)")
+    print("  [R1] residual-key RoPE handling   (real _gather_routed_blocks_for_kernel)")
     print("=" * 74)
+
+    # This stage guards BOTH conventions, because there are now two and the bug
+    # class is a site applying the wrong one. See pool_stores_rotated_k.
+    if pool_stores_rotated_k():
+        # MLX convention (DKV_ROTATED_POOL, default): the pool already holds
+        # POST-RoPE keys, so the gather must pass them through UNTOUCHED. Any
+        # rotation here would be a SECOND rotation.
+        worst = (g["res_k"] - res_k).abs().max().item()
+        worst_anc = (g["anchors_K"] - anchors_K).abs().max().item()
+        print(f"    convention: ROTATED pool (MLX) — gather must not rotate")
+        print(f"    max|gathered residual - stored| = {worst:.3e}")
+        print(f"    max|gathered anchor   - stored| = {worst_anc:.3e}")
+        ok = worst < 1e-6 and worst_anc < 1e-6
+        print(f"    {'PASS — passed through unrotated, as MLX stores them'
+               if ok else '*** FAIL — rotated a second time ***'}")
+        return ok
+
     worst_true = worst_off1 = 0.0
     for n in range(N_BLK):
         for ri in range(MAXRES):
@@ -233,6 +252,7 @@ def stage_positions():
                     worst_true = max(worst_true, d)
                 else:
                     worst_off1 = max(worst_off1, d)
+    print(f"    convention: UNROTATED pool — gather must rotate at the true position")
     print(f"    max|gathered - rope(key, anchor+1+offset)| = {worst_true:.3e}   <- TRUE position")
     print(f"    max|gathered - rope(key, anchor+offset)  | = {worst_off1:.3e}")
     ok = worst_true < 1e-5
