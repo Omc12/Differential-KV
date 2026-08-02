@@ -194,10 +194,47 @@ def _resolve_short_context_threshold() -> int:
         return 256
     if mode in ("0", "off", "false", "no"):
         return 1 << 30                     # effectively never compress
-    try:
-        return int(os.environ.get("DKV_COMPRESSED_MIN_CTX", "16384"))
-    except ValueError:
-        return 16384
+
+    # ── 'auto' CANNOT be honoured on CUDA yet. MEASURED, NOT ASSUMED. ────────
+    # The first version of this function mapped 'auto' to DKV_COMPRESSED_MIN_CTX
+    # (8192 under the serving defaults) on the reasoning that gating INGEST is
+    # equivalent to MLX's decode-time switch, "because a block that is never
+    # compressed stays readable through active_k and decode attends it densely".
+    #
+    # That reasoning was WRONG, and the GPU run said so in two lines:
+    #
+    #   WARNING: dense window (2823 tokens) exceeds workspace (1538).
+    #            Trimming oldest blocks to fit.
+    #   WARNING: 0 compressed blocks routed and this decoder has no dense-only
+    #            path -- attention output will be EMPTY ([1,8,1,0] instead of
+    #            [1,8,1,256]). dense_window_present=True, layer=3.
+    #
+    # followed by the pool ballooning to all 8301 slots and a device-side assert
+    # in vectorized_gather_kernel (index out of bounds) that aborted the process.
+    #
+    # So CUDA has no dense-only decode path. With nothing compressed, decode does
+    # not fall back to dense -- it returns an EMPTY tensor. And the dense-window
+    # workspace is sized (DKV_MAX_DENSE_LEN) far below a 2.8k context, so keeping
+    # everything dense also overflows it and trims the oldest blocks, which is
+    # where the needle at depth 0.0 lives.
+    #
+    # Net effect of that change on the shipped config: 2k@0.0 started passing
+    # (its blocks stopped being compressed) while 2k@0.5 went 3/3 -> 0/3 and the
+    # 8k case crashed. A strictly worse trade.
+    #
+    # 'auto' therefore resolves to 256 -- CUDA's long-standing behaviour -- until
+    # a real dense-only decode path exists. Honouring it needs THREE things, none
+    # of which is a config change:
+    #   1. a decode path that attends the dense window when N == 0
+    #      (the warning above is in native_triton_sparse_attn_decode)
+    #   2. DKV_MAX_DENSE_LEN sized to the threshold, not to 1538
+    #   3. whatever indexes the trimmed dense window fixed, so it stops
+    #      generating out-of-range gather indices
+    #
+    # The divergence this function documents is REAL and still unfixed: MLX runs
+    # dense below 8192 and CUDA compresses from 256, on the same nominal config.
+    # It just cannot be closed from this end.
+    return 256
 
 
 @dataclass
