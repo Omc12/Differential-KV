@@ -140,6 +140,20 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
+def _blocks_per_chunk() -> int:
+    """KV blocks each Triton program handles before the cross-chunk reduction.
+
+    Default 16 = the long-standing value. Raising it above the routed block count
+    forces num_chunks=1, which bypasses _dispatch_reduction altogether — the
+    cheapest way to test whether a recall failure lives in the per-block math or
+    in the multi-chunk merge.
+    """
+    try:
+        return max(1, int(os.environ.get("DKV_BLOCKS_PER_CHUNK", "16")))
+    except ValueError:
+        return 16
+
+
 def _partial_rope_apply(x, cos, sin):
     """Apply RoPE to x using cos/sin, honoring partial rotary (Qwen3.5/GLM-style
     partial_rotary_factor<1.0): cos/sin's last dim (rotary_dim) may be smaller
@@ -2180,7 +2194,18 @@ def native_triton_sparse_attn_decode(
             R_pad = triton.next_power_of_2(R)
             S_pad = triton.next_power_of_2(S_MAX)
             
-            BLOCKS_PER_CHUNK = 16
+            # DKV_BLOCKS_PER_CHUNK — DIAGNOSTIC KNOB, default 16 (unchanged).
+            # num_chunks = ceil(N / this), and num_chunks > 1 switches on the
+            # cross-chunk online-softmax reduction (_dispatch_reduction), which
+            # further forks: sequential below 8 chunks, parallel tree at 8+.
+            # Needle recall correlates exactly with that boundary on the
+            # production path: 2k (~5 blocks, 1 chunk) passes 3/3; 8k (~37
+            # blocks, 3 chunks -> sequential) gives 1/3 and ZEBRA-447; 32k
+            # (~120 blocks, 8 chunks -> parallel tree) gives ZEBRA-474-QUARTZ
+            # and None. Setting this above N forces num_chunks=1 and skips the
+            # reduction entirely, which isolates "the reduction is wrong" from
+            # "the per-block math is wrong" in ONE run.
+            BLOCKS_PER_CHUNK = _blocks_per_chunk()
             if N > BLOCKS_PER_CHUNK:
                 num_chunks = (N + BLOCKS_PER_CHUNK - 1) // BLOCKS_PER_CHUNK
             else:
