@@ -565,20 +565,29 @@ def compress_lowrank(
     fact_positions_V = None
     residual_V_vals = None
 
+    # Residual capacity the caller's pool will actually keep. Selecting past it
+    # is not "storing more", it is deciding by position which tokens get dropped.
+    _res_cap = int(max_residual) if (max_residual is not None and max_residual > 0) else n
+
     if n > 0 and (n_max_residual > 0 or force_exact):
-        if force_exact:
-            # FIX (needle digits): this block was flagged skip_compression because
-            # SVD cannot reproduce its exact values (a passcode / formula / table
-            # cell — Rule 1 \d{5,} etc). When the deferred path force-compresses it
-            # anyway, a LOW SVD error is still NOT exact, so digits decode to garbage
-            # ('847291' -> '84'). Store EVERY token position as an exact residual
-            # regardless of the error threshold; the pool truncates to its per-block
-            # residual capacity (keeping the earliest positions, where the exact
-            # content sits). Mirrors MLX's is_core exact-residual guarantee — the
-            # whole point of the exemption.
+        if force_exact and n <= _res_cap:
+            # This block was flagged skip_compression because SVD cannot reproduce
+            # its exact values (a passcode / formula / table cell — Rule 1 \d{5,}
+            # etc), and a LOW SVD error is still not exact ('847291' -> '84').
+            # Every token fits the budget, so store them all.
             fact_positions_K = torch.arange(n, device=rel_error_K.device)
             fact_positions_V = torch.arange(n, device=rel_error_V.device)
         else:
+            if force_exact:
+                # n EXCEEDS the budget. This used to select torch.arange(n) and
+                # let the pool keep the leading slice, defended as "keeping the
+                # earliest positions, where the exact content sits" -- an
+                # assumption about where in the block a code lands, false for
+                # anything past offset max_residual. MLX never selects by
+                # position; it ranks boosted joint error and takes the top
+                # max_residual (mlx_dkv_wrapper.py:2852). Same fix as the batched
+                # GPU path above; see the long note there.
+                n_max_residual = _res_cap
             # Residual coverage quota (MLX parity: DKV_RESIDUAL_COVERAGE_FRAC) —
             # ported from the GPU-batched compress path so the single-block sync
             # path also reserves evenly-spaced coverage slots instead of pure
@@ -1464,17 +1473,59 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                       f"anchor={getattr(block, 'anchor_idx', '?')}: absorbed up to "
                       f"{_absorbed*100:.1f}% per-token int8-U error", flush=True)
 
+        # Residual capacity the pool will actually keep for this block; anything
+        # selected beyond it is silently dropped by write_blocks_batched.
+        _res_cap = int(_pool_max_res) if _pool_max_res else T_active
+
         if T_active > 0 and (n_max_residual > 0 or _force_exact):
-            if _force_exact:
-                # A skip_compression (digit/formula/exact) block force-compressed
-                # by the deferred path must store EVERY token as an exact residual
-                # regardless of the 0.08 error threshold, else digits decode to
-                # garbage ('847291'->'84'). The pool truncates to
-                # max_residual_tokens (earliest positions, where the exact content
-                # sits). Mirrors MLX is_core.
+            if _force_exact and T_active <= _res_cap:
+                # Every token FITS in the pool's residual budget, so store them
+                # all: no ranking decision to make, nothing gets truncated.
                 fact_positions_K = torch.arange(T_active, device=rel_error_K.device)
                 fact_positions_V = torch.arange(T_active, device=rel_error_V.device)
             else:
+                # T_active EXCEEDS the budget (or this is an ordinary block), so
+                # the choice of WHICH tokens get
+                # an exact residual is a real decision -- and this used to make it
+                # by position:
+                #
+                #     fact_positions_K = torch.arange(T_active)   # 0,1,2,...,255
+                #
+                # write_blocks_batched then keeps only the leading slice
+                # (native_block_pool.py:684, `res_K_positions[:, :mr]`), so with
+                # T_active=256 and max_residual=128 a skip block got exact
+                # residuals for block-local offsets 0-127 and NOTHING for 128-255.
+                # Those tokens fell back to the rank-32 low-rank reconstruction --
+                # in a block that was flagged skip_compression precisely because it
+                # holds digits the SVD must not smear.
+                #
+                # The old comment defended this as "earliest positions, where the
+                # exact content sits". That is an assumption about where in a
+                # 257-token block a code happens to land, and it is false half the
+                # time. Whether a needle survived came down to
+                # needle_position % 257 < 128, which is why recall has looked
+                # erratic rather than monotone in depth, and why codes come back
+                # TRUNCATED at a token boundary ('ZEBRA-4471-QUARTZ' ->
+                # 'ZEBRA-447', -> 'ZEBRA-47-QUARTZ') -- the signature of a
+                # multi-token code straddling offset 127, exact before it and
+                # low-rank after.
+                #
+                # MLX has no positional path at all. It ALWAYS ranks:
+                #     top_k = argsort(capture_scores)[:, -max_residual:][:, ::-1]
+                # (mlx_dkv_wrapper.py:2852) with is_core tokens -- digits,
+                # all-caps runs, '-', '_' (:2711) -- boosted so they win that
+                # ranking. So the MLX-parity behaviour when the budget binds is to
+                # RANK, not to slice. Fall through to the shared ranked selection
+                # below with the full budget: it scores by the same joint absolute
+                # V-balanced error and already applies _boost_vec, which is where
+                # CUDA's equivalent of is_core lives.
+                if _force_exact:
+                    # A skip block keeps the FULL budget: the adaptive median
+                    # tiering above may have capped it at 8 or 16, which is a
+                    # policy for easy prose blocks, not for one flagged as
+                    # holding verbatim content.
+                    n_max_residual = _res_cap
+
                 # ── MLX-parity residual selection ───────────────────────────
                 # MLX ranks ONE joint score and takes ONE index set:
                 #     errors_v_balanced = errors_v * v_gain

@@ -481,6 +481,82 @@ def stage_sparse_bias():
     return ok
 
 
+def stage_skip_block_budget():
+    """A 'skip_compression' block is only exact for its FIRST max_residual tokens.
+
+    Rules 1/1b/3/5 flag a block as skip_compression when it holds a passcode,
+    formula or table cell -- content the SVD must not smear. lowrank.py then
+    selected residual positions as torch.arange(T_active) and the pool kept the
+    leading slice (native_block_pool.py:684, `res_K_positions[:, :mr]`).
+
+    With CUDA's 257-token block (1 anchor + 256 active) and max_residual=128,
+    that means offsets 0-127 are exact and 128-255 are NOT -- inside the block
+    the exemption was supposed to protect. Whether a needle survives reduces to
+      needle_position % 257 < 128
+    which is not monotone in depth, and which truncates a multi-token code that
+    straddles offset 127: exact before it, rank-32 after.
+
+    MLX has no positional path. It always ranks (mlx_dkv_wrapper.py:2852)
+        top_k = argsort(capture_scores)[:, -max_residual:][:, ::-1]
+    with is_core tokens (digits, all-caps runs, '-', '_' -- :2711) boosted so
+    they win that ranking.
+
+    This calls the REAL compress_lowrank on a block whose high-error tokens sit
+    in the SECOND half, and reports which of them survive the pool's cap.
+    """
+    from native_core.compression.lowrank import compress_lowrank
+
+    T, feat, rank, cap = 256, 128, 16, 128
+    needle_offsets = [40, 200, 233]                            # two past the cap
+
+    # Build the hard tokens the way build_deltas does, NOT as high-magnitude
+    # outliers. A large outlier row dominates sigma_1, so the top-rank basis
+    # captures it and it comes out the BEST-reconstructed row in the block --
+    # a first version of this stage did exactly that and reported every needle
+    # dropped even with the fix in place. What makes a token hard is being
+    # ORTHOGONAL to what the other tokens share, at ordinary magnitude.
+    g = torch.Generator().manual_seed(5)
+    n_basis = rank + 8                                         # > rank: truncation bites
+    basis = torch.randn(n_basis, feat, generator=g)
+    basis = basis / basis.norm(dim=1, keepdim=True)
+    coef = torch.randn(T, n_basis, generator=g)
+    deltas = (coef * torch.linspace(1.0, 0.05, n_basis)) @ basis
+    for off in needle_offsets:
+        v = torch.randn(feat, generator=g)
+        v = v - basis.T @ (basis @ v)                          # out of the filler span
+        deltas[off] = v / v.norm() * deltas.norm(dim=1).median()
+
+    lr = compress_lowrank(deltas, rank, force_exact=True, max_residual=cap)
+    chosen = lr.residual_K_positions
+    chosen = chosen.tolist() if chosen is not None else []
+
+    # The pool applies its OWN truncation on write and it is a LEADING SLICE, not
+    # a budget the compressor is trusted to have respected:
+    #   native_block_pool.py:683  mr = min(res_K_positions.shape[1], max_residual)
+    #   native_block_pool.py:684  self.residual_K_positions[pidx, :mr] = res[:, :mr]
+    # Checking compress_lowrank's return alone therefore proves nothing -- a first
+    # version of this stage did exactly that, saw all 256 positions come back, and
+    # reported PASS against the unfixed code. Model the write.
+    stored = set(chosen[:cap])
+    kept = {o for o in needle_offsets if o in stored}
+    positional = stored == set(range(cap))
+    sel = stored
+
+    print("\n" + "=" * 74)
+    print("  [R5] skip_compression block: which tokens actually get an exact residual")
+    print("=" * 74)
+    print(f"    T_active={T}  max_residual={cap}  hard tokens at {needle_offsets}")
+    print(f"    slots the POOL keeps    : {len(sel)}"
+          f"{'  == exactly range(%d): SELECTED BY POSITION' % cap if positional else '  (ranked)'}")
+    print(f"    hard tokens kept        : {sorted(kept)}")
+    print(f"    hard tokens DROPPED     : {sorted(set(needle_offsets) - kept)}")
+    past_cap = [o for o in needle_offsets if o >= cap]
+    ok = all(o in sel for o in past_cap)
+    print(f"    {'PASS — tokens past offset %d are selected on merit' % cap if ok else
+              '*** FAIL — every token past offset %d was dropped by POSITION ***' % cap}")
+    return ok
+
+
 def main():
     N, S, feat, rank = 8, 256, 512, 32
     nb, nr = 5, 137                      # needle block / row
@@ -559,7 +635,8 @@ def main():
     results = [("R1 residual RoPE position", stage_positions()),
                ("R2 block routing",          stage_routing()),
                ("R3 decode needle weight",   stage_decode()),
-               ("R4 sparse-bias partition",  stage_sparse_bias())]
+               ("R4 sparse-bias partition",  stage_sparse_bias()),
+               ("R5 skip-block budget",      stage_skip_block_budget())]
     print("\n" + "=" * 74)
     for name, ok in results:
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
