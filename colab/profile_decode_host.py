@@ -16,6 +16,7 @@ number the CUDA-graph plan asks for.
     python colab/profile_decode_host.py --model Qwen/Qwen2.5-1.5B-Instruct --ctx 16000
 """
 import argparse
+import gc
 import os
 import sys
 import time
@@ -124,19 +125,52 @@ def main():
     # reported 39% when the true figure against unprofiled wall was 67%, which is
     # the difference between "inconclusive" and "abort". Correct with a clean
     # wall measured outside the profiler.
+    # This is the THIRD generate in the process (warmup -> profiled -> clean), and
+    # generate() re-prefills every call into a pool the earlier runs already grew.
+    # Measured 220.6 s here against a 38.2 s profiled wall for identical work -- a
+    # ~6x gap, stable across runs, in the direction that is physically impossible
+    # for "profiler overhead". Clear the session first so the clean run starts from
+    # comparable state rather than on top of the profiled run's blocks.
+    try:
+        w.clear_session(getattr(w, "active_session", None) or "default")
+    except Exception as _e:                                          # noqa: BLE001
+        print(f"  (clean-wall: clear_session failed, state not reset: {_e})")
+    gc.collect()
+    torch.cuda.empty_cache()
     torch.cuda.synchronize()
     _t = time.perf_counter()
     w.generate(prompt=prompt, max_new_tokens=args.steps, temperature=0.0,
                top_p=1.0, repetition_penalty=1.0)
     torch.cuda.synchronize()
     clean_wall = time.perf_counter() - _t
+
+    # The profiler ADDS host bookkeeping per op; it cannot make the same work
+    # ~6x faster. clean_wall > wall therefore means the two runs did not do
+    # comparable work, so the ratio is meaningless and any verdict from it is too.
+    clean_valid = clean_wall <= wall
+    ratio = wall / max(clean_wall, 1e-9)
     print(f"  clean wall (no profiler) {clean_wall:8.3f} s   "
-          f"(profiler inflated by {wall/max(clean_wall,1e-9):.2f}x)")
-    print(f"  GPU busy vs CLEAN wall   {100*self_cuda/clean_wall:7.1f}%   <-- USE THIS")
+          f"(profiler inflated by {ratio:.2f}x)")
+    if not clean_valid:
+        print(f"  !! CLEAN WALL INVALID: {clean_wall:.1f}s > profiled {wall:.1f}s.")
+        print("     The profiler cannot speed work up, so these two runs did not do")
+        print("     the same work -- the clean run is the 3rd generate in this process")
+        print("     and re-prefills into an already-grown pool. Ignore the ratio above.")
+        print("     Re-measure in a FRESH PROCESS before trusting any GPU-busy number.")
+    print(f"  GPU busy vs CLEAN wall   {100*self_cuda/clean_wall:7.1f}%"
+          f"   {'<-- USE THIS' if clean_valid else '<-- DO NOT USE (see above)'}")
+    print(f"  GPU busy vs PROFILED wall{100*self_cuda/wall:7.1f}%"
+          f"   {'(profiler-inflated denominator)' if clean_valid else '<-- fall back to this'}")
     print("=" * 78)
 
-    verdict = 100 * self_cuda / clean_wall
+    # Judge on whichever denominator is not known-broken.
+    verdict = 100 * self_cuda / (clean_wall if clean_valid else wall)
     print("\n  CUDA-GRAPH PLAN, STAGE 0 CRITERION")
+    if not clean_valid:
+        print("  Denominator = PROFILED wall, because the clean wall failed its")
+        print("  sanity check. The profiler inflates this denominator, so the true")
+        print("  GPU-busy figure is HIGHER than shown -- i.e. this reads on the")
+        print("  optimistic side for PROCEED. Treat the verdict as provisional.")
     if verdict > 60:
         print(f"  GPU busy {verdict:.0f}% > 60%  ->  ABORT. The cost is real compute;")
         print("  graphs remove dispatch, not compute. Do not build Stages 1-4.")
