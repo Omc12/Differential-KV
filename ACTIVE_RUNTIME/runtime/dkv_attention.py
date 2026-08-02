@@ -120,6 +120,18 @@ _SRL_VALIDATE_EVERY = int(os.environ.get("DKV_VALIDATE_EVERY", "50"))
 # one flag's expectations (e.g. an "interval") to the other would be wrong.
 _DECODE_CACHE_CUDA = os.environ.get("DKV_DECODE_CACHE_CUDA", "0") == "1"
 
+# ── Re-materialisation cache (DKV_REMAT_CACHE, default OFF) ──────────────────
+# Read once at import; see native_core/sparse_decode/remat_cache.py for the
+# staleness contract. _LAST_DKV_LAYER tracks which layer index is the last
+# DKV-compressed one per manager, so the per-token step counter advances exactly
+# once per generated token rather than once per layer.
+try:
+    from native_core.sparse_decode.remat_cache import remat_enabled as _remat_enabled
+    _REMAT_ENABLED = _remat_enabled()
+except Exception:                                              # noqa: BLE001
+    _REMAT_ENABLED = False
+_LAST_DKV_LAYER: dict = {}
+
 # ── Sparse LSE Bias Configuration ─────────────────────────────────────────────
 _SPARSE_BIAS_ENV = os.environ.get("DKV_SPARSE_BIAS", "0.0").strip().lower()
 if _SPARSE_BIAS_ENV.startswith("auto"):
@@ -2662,7 +2674,65 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         early_boost=getattr(_cfg, "early_layer_rank_boost", False),
                                         max_rank_early=getattr(_cfg, "max_rank_early", 0),
                                     )
-                                    attn_out_b = native_triton_sparse_attn_decode_combined(
+                                    # ── Re-materialisation cache (DKV_REMAT_CACHE) ──
+                                    # Skips the per-token U@V rebuild entirely by
+                                    # materialising routed blocks once per interval and
+                                    # attending the result with a plain SDPA. See
+                                    # native_core/sparse_decode/remat_cache.py.
+                                    _remat_out = None
+                                    if _REMAT_ENABLED and block_indices is not None \
+                                            and block_indices.numel() > 0:
+                                        from native_core.sparse_decode.remat_cache import (
+                                            RematCache as _RC, reconstruct_blocks as _rb,
+                                            attend_with_remat as _awr,
+                                        )
+                                        _ws = kv_manager.decode_workspace.setdefault(sid, {})
+                                        _rc = _ws.get("_remat_cache")
+                                        if _rc is None:
+                                            _rc = _RC()
+                                            _ws["_remat_cache"] = _rc
+                                        # Self-populate the last-DKV-layer index: the
+                                        # step counter must advance ONCE PER TOKEN, not
+                                        # once per layer. Without this it stays at -1,
+                                        # the counter never advances, and the interval
+                                        # refresh is silently dead (the cache would then
+                                        # only refresh on routing/pool change).
+                                        _mid = id(kv_manager)
+                                        if captured_layer_idx > _LAST_DKV_LAYER.get(_mid, -1):
+                                            _LAST_DKV_LAYER[_mid] = captured_layer_idx
+                                        _step = _ws.get("_remat_step", 0)
+                                        _smgr2 = getattr(kv_manager, "_streaming_mgr", None)
+                                        _poolgen = (_smgr2._metadata_versions.get(sid, {})
+                                                    .get(captured_layer_idx, 0)
+                                                    if _smgr2 is not None else 0)
+                                        _rkey = _RC.make_key(captured_layer_idx,
+                                                             current_version, _poolgen, _step)
+                                        _hit = _rc.get(_rkey)
+                                        if _hit is None:
+                                            _g = _gather_routed_blocks_for_kernel(
+                                                pool, block_indices, anchor_indices,
+                                                cos_all, sin_all)
+                                            _Km, _Vm = _rb(
+                                                _g["U"], _g["V_K"], _g["V_V"],
+                                                _g["anchors_K"], _g["anchors_V"],
+                                                _g["scales"], _g["U_scale"],
+                                                _layer_active_rank)
+                                            _rc.put(_rkey, _Km, _Vm)
+                                            _seq_cached = _g["seq_lens"]
+                                            _ws[("_remat_seq", captured_layer_idx)] = _seq_cached
+                                        else:
+                                            _Km, _Vm = _hit
+                                            _seq_cached = _ws[("_remat_seq", captured_layer_idx)]
+                                        _remat_out = _awr(
+                                            query_states[b_idx:b_idx+1], _Km, _Vm,
+                                            _seq_cached, _dk_combined, _dv_combined,
+                                            dense_len, num_key_value_groups)
+                                        # advance once per token, on the LAST DKV layer
+                                        if captured_layer_idx == _LAST_DKV_LAYER.get(id(kv_manager), -1):
+                                            _ws["_remat_step"] = _step + 1
+
+                                    attn_out_b = _remat_out if _remat_out is not None else \
+                                        native_triton_sparse_attn_decode_combined(
                                         q=query_states[b_idx:b_idx+1],
                                         block_indices=block_indices,
                                         pool=pool,
