@@ -2779,9 +2779,21 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             query_states[b_idx:b_idx+1], _Km, _Vm,
                                             _seq_cached, _dk_combined, _dv_combined,
                                             dense_len, num_key_value_groups)
-                                        # advance once per token, on the LAST DKV layer
-                                        if captured_layer_idx == _LAST_DKV_LAYER.get(id(kv_manager), -1):
+                                        # Advance once per token, on the LAST DKV layer.
+                                        # `_LAST_DKV_LAYER` learns the max layer index by
+                                        # watching layers go by, so on the FIRST token it
+                                        # equals the current layer at every layer and the
+                                        # counter advanced once per LAYER (~28x) instead of
+                                        # once per token. Harmless for output but it shifts
+                                        # every interval boundary, which would confound an
+                                        # interval sweep. Only advance once the highest
+                                        # layer index has actually stopped growing, i.e.
+                                        # from the second token onward.
+                                        _last = _LAST_DKV_LAYER.get(_mid, -1)
+                                        if captured_layer_idx == _last and _ws.get("_remat_saw_last"):
                                             _ws["_remat_step"] = _step + 1
+                                        if captured_layer_idx == _last:
+                                            _ws["_remat_saw_last"] = True
 
                                     attn_out_b = _remat_out if _remat_out is not None else \
                                         native_triton_sparse_attn_decode_combined(
