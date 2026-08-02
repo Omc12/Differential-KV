@@ -150,7 +150,8 @@ def test_3_rank_mask():
           f"max|diff|={(out - ref).abs().max().item():.3e}")
 
 
-def test_4_needle(quick=False, long_ctx=False):
+def test_4_needle(quick=False, long_ctx=False, dense=False,
+                  model_id="Qwen/Qwen3.5-2B"):
     """End-to-end recall + determinism at temperature 0."""
     print("\n=== 4. End-to-end needle + determinism ===", flush=True)
     import random
@@ -188,9 +189,41 @@ def test_4_needle(quick=False, long_ctx=False):
         return " ".join(parts)
 
     os.environ.setdefault("DKV_ENGAGE_THRESHOLD", "1024")
-    w = PyTorchDKVHFWrapper(model_id="Qwen/Qwen3.5-2B",
-                            config={"mode": "fp16"}, device="cuda")
-    w.ensure_loaded()
+
+    if dense:
+        # DENSE CONTROL — uncompressed HF attention, same prompts.
+        #
+        # This is the control that separates "DKV lost the needle" from "the model
+        # cannot do this at this length". At 32k the DKV arm fails at depth 0.5/0.9
+        # even with routing DISABLED (DKV_TOPK_BLOCKS=0, i.e. every compressed block
+        # attended), which rules out retrieval and points at prefill/compression —
+        # but only if dense succeeds on the identical prompt. If dense fails too,
+        # nothing is wrong with DKV at all and the needle is simply not recoverable
+        # by this model at this length.
+        #
+        # Built as plain HF rather than a flag: there is no DKV_DISABLE env var, and
+        # asserting one existed would silently validate DKV against itself.
+        import torch as _t
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        _tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        _model = AutoModelForCausalLM.from_pretrained(
+            model_id, dtype=_t.float16, device_map="cuda",
+            trust_remote_code=True).eval()
+        print(f"  [dense control] {model_id} — plain HF attention, DKV NOT loaded")
+
+        class _DenseW:
+            tokenizer = _tok
+            def generate(self, prompt, max_new_tokens, **kw):
+                ids = _tok(prompt, return_tensors="pt").to("cuda")
+                with _t.inference_mode():
+                    out = _model.generate(**ids, max_new_tokens=max_new_tokens,
+                                          do_sample=False)
+                return _tok.decode(out[0])
+        w = _DenseW()
+    else:
+        w = PyTorchDKVHFWrapper(model_id=model_id,
+                                config={"mode": "fp16"}, device="cuda")
+        w.ensure_loaded()
 
     cases = [("2k", 200, 0.0), ("2k", 200, 0.5), ("2k", 200, 0.9)]
     if not quick:
@@ -222,6 +255,9 @@ def test_4_needle(quick=False, long_ctx=False):
         check(f"{label} determinism at temperature 0", len(set(outs)) == 1,
               f"{len(set(outs))} distinct outputs across 3 runs")
 
+    if dense:
+        return  # no Triton path to check — DKV was never loaded
+
     # If the Triton kernel silently fell back, DKV_TRITON_STRICT should have
     # raised — but check the counter too in case a path bypasses it.
     from native_core.sparse_decode import triton_fused_decode as tfd
@@ -238,12 +274,23 @@ if __name__ == "__main__":
                          "DKV_REMAT_CACHE default-ON: the cache freezes the routed "
                          "block set, and that risk scales with how many blocks the "
                          "router chooses between (16 of ~43 at 8k, 16 of ~170 at 32k).")
+    ap.add_argument("--dense", action="store_true",
+                    help="run the needle cases on plain HF attention with DKV NOT "
+                         "loaded. The control that separates 'DKV lost the needle' "
+                         "from 'the model cannot do this at this length'.")
+    ap.add_argument("--model", default="Qwen/Qwen3.5-2B",
+                    help="model id. Use a smaller one for the --dense control if "
+                         "the default OOMs at long context (dense has no compressed "
+                         "KV to fall back on).")
     args = ap.parse_args()
 
     test_1_environment()
-    test_2_exact_keys_default()
-    test_3_rank_mask()
-    test_4_needle(quick=args.quick, long_ctx=args.long)
+    if not args.dense:
+        # Both inspect DKV internals; neither is meaningful with DKV unloaded.
+        test_2_exact_keys_default()
+        test_3_rank_mask()
+    test_4_needle(quick=args.quick, long_ctx=args.long,
+                  dense=args.dense, model_id=args.model)
 
     print("\n" + "=" * 60)
     if FAILURES:
