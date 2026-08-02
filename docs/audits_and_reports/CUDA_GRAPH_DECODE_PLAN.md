@@ -229,3 +229,49 @@ therefore meaningless -- it is measuring compression. `--steps` now defaults to
 
 **Do not treat Stage 0 as done.** Re-run with enough generated tokens that decode
 dominates before deciding whether to build Stages 1-4.
+
+## Stage 0 — DONE. Verdict: fix the SYNCS first, graphs second.
+
+Qwen2.5-1.5B, 15,849-tok prompt, **195 tokens generated** (prefill ~11% of the
+window, so this IS decode-dominated, unlike the first attempt).
+
+    wall              42.218 s
+    self CPU          14.804 s  (35.1%)
+    self GPU          16.497 s  (39.1%)   -> "inconclusive" by the 25/60 rule
+
+| op | count | per token | per layer/token | CPU |
+|---|---|---|---|---|
+| **cudaStreamSynchronize** | **67,142** | **344** | **12.3** | **6254 ms (42.2%)** |
+| cudaLaunchKernel | 948,909 | 4,866 | 174 | 2139 ms (14.5%) |
+| cudaMemcpyAsync | 131,309 | 673 | 24 | 1451 ms (9.8%) |
+| aten::nonzero | 14,776 | 76 | 2.7 | 132 ms |
+
+**344 pipeline drains per generated token, ~12 per layer.** That is 42% of host
+CPU and ~32 ms of the ~102 ms/token decode budget spent purely waiting. It is
+also why GPU-busy sits at 39%: the GPU is repeatedly forced to idle mid-step.
+
+### The verdict is NOT "build graphs"
+
+The 25/60 rule returns "inconclusive", but the op table says something more
+specific and more useful: **the dominant single cost is host syncs, and syncs can
+be removed without CUDA graphs.** A captured graph would eliminate them, but so
+would keeping the routing decisions device-resident -- and that is a far smaller,
+far safer change than graph capture, which risks silently replaying stale
+routing.
+
+Do this before Stages 1-4:
+
+1. `aten::nonzero` -- 76 calls/token, and nonzero ALWAYS syncs (data-dependent
+   output size). Replace with fixed-size masked selection; K is now a constant
+   16, so the output shape can be static.
+2. `query_router.py` -- ~30 `.item()`/`.cpu()`/`.tolist()` sites, on a function
+   that runs per layer per token. `k_final = int(k_final_t.item())` (line 257) is
+   documented as "unavoidable for loop bound" -- it is avoidable now that K is
+   fixed, because the loop bound no longer depends on a device value.
+3. Re-measure. Target: <10 syncs/token. If decode does not improve materially
+   after that, the remaining cost is the 4,866 launches/token, and THAT is the
+   graph case.
+
+Only 2 of the 3 known sync classes were addressed today (heat-update throttle,
+numeric-guard gating). The nonzero and router classes are untouched and are
+larger.
