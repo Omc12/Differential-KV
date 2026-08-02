@@ -140,6 +140,32 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
+def _exact_residual_semantics(device=None) -> bool:
+    """Does the decode kernel SUBSTITUTE residuals, or merely ADD them?
+
+    Must agree with how the compressor STORED them — this is a storage-format
+    contract, not a tuning knob. `_exact_keys_enabled` in lowrank.py is the single
+    source of truth, so this just forwards to it rather than reading the env
+    again and risking the two drifting apart.
+
+      ON  -> residual_{K,V}_values are the anchor-relative EXACT value; the kernel
+             replaces the token's score and removes its lossy twin from the value
+             accumulation. MLX's scheme ("exact residual rows appended and their
+             lossy low-rank twins masked") and what dkv_decode.metal does.
+      OFF -> they are a correction to the low-rank reconstruction; the kernel adds
+             them and the twin stays. Approximate.
+
+    Substitution is implemented in the Triton kernels as of this change; before
+    it, CUDA had no choice but OFF, which is why _exact_keys_enabled defaults CUDA
+    to correction form. Flipping that default is a separate, GPU-gated decision.
+    """
+    try:
+        from native_core.compression.lowrank import _exact_keys_enabled
+        return bool(_exact_keys_enabled(device))
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
 def _blocks_per_chunk() -> int:
     """KV blocks each Triton program handles before the cross-chunk reduction.
 
@@ -360,6 +386,7 @@ if HAS_TRITON:
         R: tl.constexpr, R_REAL: tl.constexpr, S_MAX: tl.constexpr, INV_SCALE: tl.constexpr, BLOCKS_PER_CHUNK: tl.constexpr, NUM_CHUNKS: tl.constexpr,
         MAX_RESIDUAL: tl.constexpr, MAX_FACT: tl.constexpr,
         HAS_RESIDUAL: tl.constexpr, HAS_FACT: tl.constexpr,
+        EXACT_RESIDUAL: tl.constexpr,
     ):
         h_q = tl.program_id(0)
         chunk_id = tl.program_id(1)
@@ -435,7 +462,22 @@ if HAS_TRITON:
                                      ri * stride_res_k_s + h_kv * stride_res_k_h +
                                      offs_d * stride_res_k_d).to(tl.float32)
                         r_corr = tl.sum(q * rk) * INV_SCALE
-                        s = tl.where(offs_s == r_pos_k, s + r_corr, s)
+                        if EXACT_RESIDUAL:
+                            # MLX / Metal SUBSTITUTION. rk is the anchor-relative
+                            # EXACT key, so exact_K = ak + rk and this token's true
+                            # score is s_anchor + q·rk. Writing that REPLACES the
+                            # score, dropping delta_scores[p] — the lossy low-rank
+                            # twin — which is exactly what MLX means by "exact
+                            # residual rows appended and their lossy low-rank twins
+                            # masked", and what dkv_decode.metal already does. Same
+                            # shape as the C2 fact-anchor override below.
+                            s = tl.where(offs_s == r_pos_k, s_anchor + r_corr, s)
+                        else:
+                            # Correction form: rk is (exact - recon), so ADD and keep
+                            # the twin. Approximate: the twin's delta stays in, and
+                            # the two terms are rotated in different frames (base at
+                            # the block anchor, rk at the token's true position).
+                            s = tl.where(offs_s == r_pos_k, s + r_corr, s)
 
             # ── C2: Fact Anchor Override — replace scores at flagged positions ──
             if HAS_FACT:
@@ -506,7 +548,22 @@ if HAS_TRITON:
                         rv = tl.load(pool_res_v_ptr + pool_idx * stride_res_v_n +
                                      ri * stride_res_v_s + h_kv * stride_res_v_h +
                                      offs_d * stride_res_v_d).to(tl.float32)
-                        O_res_corr += p_at * rv
+                        if EXACT_RESIDUAL:
+                            # Substitution on the V side too, or the score would be
+                            # exact while the value stayed lossy. The row currently
+                            # contributes p_at·(av + delta_V[p]) via o_delta and the
+                            # shared av term; the exact value is av + rv, so the
+                            # correction is p_at·(rv - delta_V[p]). delta_V[p] is
+                            # recomputed from this position's U row exactly as the
+                            # C2 fact-anchor value override does. The load must be
+                            # r_mask'd: R here is R_pad, wider than the pool's rank.
+                            u_val_ptrs = (pool_u_ptr + pool_idx * stride_u_n
+                                          + r_pos_v * stride_u_s + offs_r * stride_u_r)
+                            u_val = tl.load(u_val_ptrs, mask=r_mask, other=0.0).to(tl.float32) * u_scale
+                            dv_recon = tl.sum(u_val[:, None] * vv, axis=0) * scale
+                            O_res_corr += p_at * (rv - dv_recon)
+                        else:
+                            O_res_corr += p_at * rv
 
             O_i = O_i * alpha + (p_anchor + p_delta_sum) * av + o_delta + O_fact_corr + O_res_corr
             m_i = m_new
@@ -2273,7 +2330,8 @@ def native_triton_sparse_attn_decode(
                 N, H_q, g["anchors_K"].shape[1], num_key_value_groups, D_pad,
                 R_pad, R, S_pad, inv_scale, BLOCKS_PER_CHUNK, num_chunks,
                 MAX_RESIDUAL=g["max_res_pad"], MAX_FACT=g["max_fact"],
-                HAS_RESIDUAL=g["has_res"], HAS_FACT=g["has_fact"]
+                HAS_RESIDUAL=g["has_res"], HAS_FACT=g["has_fact"],
+                EXACT_RESIDUAL=_exact_residual_semantics(q.device),
             )
             
             if num_chunks > 1:
@@ -2526,6 +2584,7 @@ if HAS_TRITON:
         BLOCKS_PER_CHUNK: tl.constexpr, NUM_CHUNKS: tl.constexpr,
         MAX_RESIDUAL: tl.constexpr, MAX_FACT: tl.constexpr,
         HAS_RESIDUAL: tl.constexpr, HAS_FACT: tl.constexpr,
+        EXACT_RESIDUAL: tl.constexpr,
         DENSE_PER_CHUNK: tl.constexpr,   # dense tokens each chunk processes (0 disables the loop)
         BLOCK_SIZE_T: tl.constexpr = 64,  # Parallelize dense window loads in blocks of 64
     ):
@@ -2593,7 +2652,22 @@ if HAS_TRITON:
                                      ri * stride_res_k_s + h_kv * stride_res_k_h +
                                      offs_d * stride_res_k_d).to(tl.float32)
                         r_corr = tl.sum(q * rk) * INV_SCALE
-                        s = tl.where(offs_s == r_pos_k, s + r_corr, s)
+                        if EXACT_RESIDUAL:
+                            # MLX / Metal SUBSTITUTION. rk is the anchor-relative
+                            # EXACT key, so exact_K = ak + rk and this token's true
+                            # score is s_anchor + q·rk. Writing that REPLACES the
+                            # score, dropping delta_scores[p] — the lossy low-rank
+                            # twin — which is exactly what MLX means by "exact
+                            # residual rows appended and their lossy low-rank twins
+                            # masked", and what dkv_decode.metal already does. Same
+                            # shape as the C2 fact-anchor override below.
+                            s = tl.where(offs_s == r_pos_k, s_anchor + r_corr, s)
+                        else:
+                            # Correction form: rk is (exact - recon), so ADD and keep
+                            # the twin. Approximate: the twin's delta stays in, and
+                            # the two terms are rotated in different frames (base at
+                            # the block anchor, rk at the token's true position).
+                            s = tl.where(offs_s == r_pos_k, s + r_corr, s)
 
             if HAS_FACT:
                 for fi in range(MAX_FACT):
@@ -2647,7 +2721,22 @@ if HAS_TRITON:
                         rv = tl.load(pool_res_v_ptr + pool_idx * stride_res_v_n +
                                      ri * stride_res_v_s + h_kv * stride_res_v_h +
                                      offs_d * stride_res_v_d).to(tl.float32)
-                        O_res_corr += p_at * rv
+                        if EXACT_RESIDUAL:
+                            # Substitution on the V side too, or the score would be
+                            # exact while the value stayed lossy. The row currently
+                            # contributes p_at·(av + delta_V[p]) via o_delta and the
+                            # shared av term; the exact value is av + rv, so the
+                            # correction is p_at·(rv - delta_V[p]). delta_V[p] is
+                            # recomputed from this position's U row exactly as the
+                            # C2 fact-anchor value override does. The load must be
+                            # r_mask'd: R here is R_pad, wider than the pool's rank.
+                            u_val_ptrs = (pool_u_ptr + pool_idx * stride_u_n
+                                          + r_pos_v * stride_u_s + offs_r * stride_u_r)
+                            u_val = tl.load(u_val_ptrs, mask=r_mask, other=0.0).to(tl.float32) * u_scale
+                            dv_recon = tl.sum(u_val[:, None] * vv, axis=0) * scale
+                            O_res_corr += p_at * (rv - dv_recon)
+                        else:
+                            O_res_corr += p_at * rv
 
             O_i = O_i * alpha + (p_anchor + p_delta_sum) * av + o_delta + O_fact_corr + O_res_corr
             m_i = m_new
@@ -2882,6 +2971,7 @@ def native_triton_sparse_attn_decode_combined(
             R_pad, R, S_pad, inv_scale, BLOCKS_PER_CHUNK, num_chunks,
             MAX_RESIDUAL=g["max_res_pad"], MAX_FACT=g["max_fact"],
             HAS_RESIDUAL=g["has_res"], HAS_FACT=g["has_fact"],
+            EXACT_RESIDUAL=_exact_residual_semantics(q.device),
             DENSE_PER_CHUNK=DENSE_PER_CHUNK,
         )
 
