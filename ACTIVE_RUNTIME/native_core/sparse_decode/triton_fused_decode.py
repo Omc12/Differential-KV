@@ -196,6 +196,62 @@ def _exact_residual_semantics(device=None) -> bool:
         return False
 
 
+def pool_stores_rotated_k() -> bool:
+    """DKV_ROTATED_POOL — store POST-RoPE keys, as MLX does.
+
+    THE ROOT ARCHITECTURAL DIVERGENCE BETWEEN THE TWO RUNTIMES.
+
+        MLX   mlx_dkv_wrapper.py:4565  keys_rot = self.rope(keys, offset=offset0)
+              mlx_dkv_wrapper.py:4613  manager.ingest_streaming(sid, layer_idx,
+                                                               keys_rot[...], ...)
+        CUDA  dkv_attention.py:888     unrot_key_states = key_states.clone()
+              dkv_attention.py:900     query_states, key_states = apply_rotary_pos_emb(...)
+              dkv_attention.py:1013    curr_k = unrot_key_states[...]   <- PRE-RoPE
+
+    MLX compresses keys that are ALREADY ROTATED, so a block's delta is
+    (k_rot[t] - anchor_rot) and the reconstruction anchor_rot + delta_recon
+    lands in each token's TRUE rotational frame. Its only error is low-rank
+    truncation.
+
+    CUDA compresses UNROTATED keys and rotates on read -- but it rotates the
+    anchor AND THE ENTIRE V_K BASIS at the ANCHOR's position
+    (_gather_routed_blocks_for_kernel), because a per-token rotation would cost
+    a D-dim reconstruction per token and defeat the point of the low-rank form.
+    So every compressed token's key comes out as
+
+        R(anchor_pos) . (anchor_raw + delta_recon_raw)
+
+    when its true key is
+
+        R(true_pos) . (anchor_raw + delta_raw)
+
+    i.e. EVERY compressed token carries a RoPE phase error of up to a full
+    block (256 positions) ON TOP of truncation error. That is the
+    "Project-Then-Attend approximation" the comments refer to, and it is not an
+    approximation MLX makes at all.
+
+    It also means residual corrections cannot cancel it: the residual key is
+    rotated at the token's TRUE position while the base term it corrects is
+    rotated at the anchor, so the two live in different frames and their sum is
+    not the exact key in either one. Both residual formats have this problem --
+    the CORRECTION form adds across frames, and the EXACT form's substitution
+    still keeps the anchor-rotated s_anchor term.
+
+    Turning this ON makes CUDA store what MLX stores. It then costs LESS, not
+    more: no inverse-RoPE at ingest, no rotation of anchors_K/V_K/res_k in the
+    decode gather, and no rotation in the router. The whole class of read-time
+    position bugs (both of which were real and fixed earlier: the router using a
+    within-block offset as an absolute position, and the decode gather being off
+    by one) stops existing because there is no read-time position to get wrong.
+
+    DEFAULT OFF. This changes what every pool row means, so a session compressed
+    under one setting is not readable under the other, and it must be A/B'd on
+    GPU before it can flip. Every site that rotates on read consults THIS
+    function, so the convention cannot end up half-applied.
+    """
+    return os.environ.get("DKV_ROTATED_POOL", "0") == "1"
+
+
 def resolve_sparse_bias(lse_sparse=None, lse_dense=None):
     """DKV_SPARSE_BIAS -> the additive nats applied to the sparse half's LSE.
 
@@ -1461,7 +1517,12 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     g["scales"]    = _G(pool_for_kernel.scales,    "scales")
     g["seq_lens"]  = _G(pool_for_kernel.seq_lens,  "seq_lens")
 
-    do_rot = (anchor_indices is not None and cos is not None and sin is not None)
+    # Under DKV_ROTATED_POOL the pool already holds POST-RoPE keys (MLX's
+    # convention), so every rotation below would be a SECOND rotation. Skipping
+    # it is not an optimisation, it is required for correctness -- and it is
+    # also strictly cheaper.
+    do_rot = (anchor_indices is not None and cos is not None and sin is not None
+              and not pool_stores_rotated_k())
     cos_anc = sin_anc = None
     if do_rot:
         cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
@@ -2523,7 +2584,12 @@ def native_triton_sparse_attn_decode(
                     # Apply RoPE rotation with correct absolute token positions.
                     # Without this, q_rot(pos_q) @ k_unrot gives wrong attention scores
                     # for dense (ACCUMULATING) blocks, breaking NIAH retrieval on CUDA.
-                    if dense_blocks and cos is not None and sin is not None:
+                    # Dense-window blocks come from the same pool/ingest path, so
+                    # under DKV_ROTATED_POOL their keys are already POST-RoPE and
+                    # rotating again would corrupt the recent window -- the one
+                    # part of attention that is otherwise exact.
+                    if (dense_blocks and cos is not None and sin is not None
+                            and not pool_stores_rotated_k()):
                         _dense_pos_list = []
                         for _blk in (dense_blocks or []):
                             _dense_pos_list.extend(_blk.token_indices)

@@ -980,6 +980,19 @@ def route_blocks_relevance(
     # the top-K better than the decayed score — worth measuring, not a proven fix.
     _route_rope = os.environ.get("DKV_ROUTER_ROPE", "1") == "1"
 
+    # Under DKV_ROTATED_POOL the pool holds POST-RoPE keys (MLX's convention),
+    # so rotating here would rotate them a second time. MLX's own router does no
+    # rotation at all for exactly this reason: _block_relevance_residual takes
+    # comp_anc_k / comp_res_k already in their true frames and just scores q.k.
+    # This is the single source of truth for the convention -- see
+    # triton_fused_decode.pool_stores_rotated_k.
+    try:
+        from native_core.sparse_decode.triton_fused_decode import pool_stores_rotated_k
+        if pool_stores_rotated_k():
+            _route_rope = False
+    except Exception:                                            # noqa: BLE001
+        pass
+
     # Promote Q to 3D if it is 2D
     is_3d = (Q.dim() == 3)
     if is_3d:

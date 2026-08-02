@@ -24,6 +24,7 @@ from native_core.sparse_decode.triton_fused_decode import (
     _DKV_DEBUG_NUMERICS,
     HAS_TRITON,
     resolve_sparse_bias as _resolve_sparse_bias,
+    pool_stores_rotated_k as _pool_rotated_k,
 )
 from native_core.compression.lowrank import reconstruct_batch_U
 
@@ -1010,7 +1011,15 @@ def apply_dkv_attention_patch(model, kv_manager):
                         sid = session_ids[b_idx]
                         if sid == "dummy_session":
                             continue
-                        curr_k = unrot_key_states[b_idx:b_idx+1]
+                        # DKV_ROTATED_POOL: ingest POST-RoPE keys, which is what
+                        # MLX does (mlx_dkv_wrapper.py:4613 passes keys_rot).
+                        # key_states was rotated in place at :900; unrot_key_states
+                        # is the pre-RoPE clone taken at :888. See
+                        # triton_fused_decode.pool_stores_rotated_k for why the
+                        # unrotated convention costs every compressed token a RoPE
+                        # phase error of up to a full block.
+                        curr_k = (key_states[b_idx:b_idx+1] if _pool_rotated_k()
+                                  else unrot_key_states[b_idx:b_idx+1])
                         curr_v = value_states[b_idx:b_idx+1]
                         kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
                         if captured_layer_idx == 0:
@@ -3542,7 +3551,13 @@ def _dkv_decode_forward_impl(
         sid = session_ids[b_idx]
         if sid == "dummy_session":
             continue
-        curr_k = unrot_key[b_idx:b_idx+1]
+        # Same convention as the monkeypatch path's ingest — see
+        # triton_fused_decode.pool_stores_rotated_k. Path B receives both forms
+        # (HF applies RoPE before calling in, dkv_backend inverse-RoPEs to
+        # recover `unrot_key`), so under DKV_ROTATED_POOL the inverse-RoPE is
+        # simply not consumed here.
+        curr_k = (key[b_idx:b_idx+1] if _pool_rotated_k()
+                  else unrot_key[b_idx:b_idx+1])
         curr_v = value[b_idx:b_idx+1]
         kv_manager.ingest_streaming(sid, layer_idx, curr_k, curr_v)
 
