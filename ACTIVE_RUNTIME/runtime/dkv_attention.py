@@ -2468,16 +2468,29 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         )
                                     else:
                                         _dp2 = torch.zeros(_max_dense, dtype=torch.long, device=query_states.device)
-                                        _pos2 = 0
+                                        # Concatenate on the HOST, then transfer ONCE.
+                                        # This loop used to build a device tensor per dense
+                                        # block -- torch.tensor(python_list, device=cuda) is
+                                        # a pageable host->device copy, i.e. a sync, and the
+                                        # sync recorder ranked this line #1 at 30,184 of
+                                        # 61,338 recorded syncs (49%). That is 5.5 per layer
+                                        # per token, which is exactly L_dense/block_size =
+                                        # 1538/256 = 6 dense blocks. One transfer instead.
+                                        # Order and truncation are unchanged: the old loop
+                                        # appended token_indices block by block and stopped
+                                        # at _max_dense, which is this concat-then-truncate.
+                                        _flat2 = []
                                         for _blk in (dense_blocks or []):
-                                            _tl2 = _blk.token_indices
-                                            _n2 = len(_tl2)
-                                            if _n2 > 0 and _pos2 < _max_dense:
-                                                _fit = min(_n2, _max_dense - _pos2)
-                                                _dp2[_pos2:_pos2 + _fit].copy_(
-                                                    torch.tensor(_tl2[:_fit], dtype=torch.long, device=_dp2.device)
-                                                )
-                                                _pos2 += _fit
+                                            if _blk.token_indices:
+                                                _flat2.extend(_blk.token_indices)
+                                                if len(_flat2) >= _max_dense:
+                                                    break
+                                        del _flat2[_max_dense:]
+                                        _pos2 = len(_flat2)
+                                        if _pos2:
+                                            _dp2[:_pos2].copy_(
+                                                torch.tensor(_flat2, dtype=torch.long, device=_dp2.device)
+                                            )
 
                                         _cos_d2 = cos_all[0, _dp2.clamp(min=0, max=cos_all.shape[1] - 1)]
                                         _sin_d2 = sin_all[0, _dp2.clamp(min=0, max=sin_all.shape[1] - 1)]
