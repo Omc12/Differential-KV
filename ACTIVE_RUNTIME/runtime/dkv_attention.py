@@ -1206,7 +1206,45 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # unconditionally -- kept as the default for backward
                                 # compatibility (existing perf characteristics), with this
                                 # as an accuracy-over-speed escape hatch.
-                                _route_per_layer = os.environ.get("DKV_ROUTE_PER_LAYER", "0") == "1"
+                                # DEFAULT FLIPPED TO PER-LAYER: MLX PARITY, AND
+                                # THE LAYER-0 ASSUMPTION IS BROKEN ON HYBRIDS.
+                                #
+                                # The comment above already records the parity
+                                # gap -- MLX routes every layer independently and
+                                # treats SHARING as the opt-in. But sharing is
+                                # worse than a policy difference here, because
+                                # the sharing branch keys on
+                                #
+                                #     captured_layer_idx == 0
+                                #
+                                # and captured_layer_idx is the MODEL's layer
+                                # index. Qwen3.5-2B is a hybrid: only every 4th
+                                # layer is full-attention, so DKV sees layers
+                                # 3, 7, 11, 15, 19, 23 and NEVER 0. The route
+                                # probe confirms it -- it prints layer=3 .. 23,
+                                # no layer 0. So the selection branch never runs,
+                                # every layer falls to "reuse the layer-0
+                                # decision", and there is no layer-0 decision to
+                                # reuse: current_step_slots stays None and the
+                                # reroute is skipped entirely.
+                                #
+                                # This file already flags the same trap elsewhere
+                                # ("the same hardcoded-layer-0 hazard as the
+                                # decode-side check below -- captured_layer_idx
+                                # is this closure's own attended layer, always a
+                                # valid probe on hybrid models"), so it was known
+                                # for one check and left standing for this one.
+                                #
+                                # Routing per layer removes the assumption rather
+                                # than working around it, and is what the
+                                # reference does. Cost is one relevance BMM per
+                                # DKV layer per routing interval -- six on this
+                                # model, over an NxD anchor matrix -- not per
+                                # token. DKV_ROUTE_ONCE=1 restores sharing (which
+                                # is MLX's own name for the opt-in).
+                                _route_per_layer = (
+                                    os.environ.get("DKV_ROUTE_PER_LAYER", "1") == "1"
+                                    and os.environ.get("DKV_ROUTE_ONCE", "0") != "1")
                                 if captured_layer_idx == 0 or _route_per_layer:
                                     # SRL routing cadence: route every N tokens to amortise
                                     # the D2H cost of entropy/.item(), centroid/.tolist(),
