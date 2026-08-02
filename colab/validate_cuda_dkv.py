@@ -151,7 +151,7 @@ def test_3_rank_mask():
 
 
 def test_4_needle(quick=False, long_ctx=False, dense=False,
-                  model_id="Qwen/Qwen3.5-2B"):
+                  model_id="Qwen/Qwen3.5-2B", chunk=0):
     """End-to-end recall + determinism at temperature 0."""
     print("\n=== 4. End-to-end needle + determinism ===", flush=True)
     import random
@@ -215,10 +215,46 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
             tokenizer = _tok
             def generate(self, prompt, max_new_tokens, **kw):
                 ids = _tok(prompt, return_tensors="pt").to("cuda")
+                if not chunk:
+                    with _t.inference_mode():
+                        out = _model.generate(**ids, max_new_tokens=max_new_tokens,
+                                              do_sample=False)
+                    return _tok.decode(out[0])
+
+                # CHUNKED prefill. Without it the dense control cannot REACH the
+                # lengths DKV is tested at: single-shot 32k OOMs inside
+                # torch_chunk_gated_delta_rule on linear-attention ACTIVATIONS
+                # (not the KV cache), which is how the first dense run died right
+                # after passing 32k@depth0.0. DKV chunks internally, so comparing
+                # a chunked DKV against an unchunked dense measures prefill
+                # strategy, not the KV cache — same reasoning as bench_dkv_tps.py.
+                from transformers import DynamicCache
+                seq = ids["input_ids"][0].tolist()
+                cache = DynamicCache()
+                gen = []
                 with _t.inference_mode():
-                    out = _model.generate(**ids, max_new_tokens=max_new_tokens,
-                                          do_sample=False)
-                return _tok.decode(out[0])
+                    for i in range(0, len(seq), chunk):
+                        ch = seq[i:i + chunk]
+                        out = _model(
+                            input_ids=_t.tensor([ch], device="cuda"),
+                            position_ids=_t.tensor(
+                                [list(range(i, i + len(ch)))], device="cuda"),
+                            past_key_values=cache, use_cache=True)
+                    nxt = int(out.logits[0, -1].argmax())
+                    pos = len(seq)
+                    for _ in range(max_new_tokens):
+                        gen.append(nxt)
+                        if nxt == _tok.eos_token_id:
+                            break
+                        out = _model(
+                            input_ids=_t.tensor([[nxt]], device="cuda"),
+                            position_ids=_t.tensor([[pos]], device="cuda"),
+                            past_key_values=cache, use_cache=True)
+                        nxt = int(out.logits[0, -1].argmax())
+                        pos += 1
+                # prompt-prefixed to match the unchunked path, which the caller
+                # splits on "assistant".
+                return prompt + _tok.decode(gen)
         w = _DenseW()
     else:
         w = PyTorchDKVHFWrapper(model_id=model_id,
@@ -250,7 +286,18 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
             r = w.generate(prompt=prompt, max_new_tokens=24, temperature=0.0,
                            top_p=1.0, repetition_penalty=1.0)
             outs.append(r.rsplit("assistant", 1)[-1].strip())
-        hits = sum(NEEDLE in o for o in outs)
+        # Match on alphanumerics only. The needle is one code rendered with
+        # different TOKEN boundaries by different tokenizers -- Qwen2.5-1.5B emits
+        # 'ZEBR-A-4471-QUARTZ' and 'ZEBR-A4471-QUARTZ', which are exact recalls
+        # that a raw substring test scores as misses. Normalising punctuation
+        # removes those false negatives WITHOUT weakening the real check: the
+        # actual failures still fail, because they get the CONTENT wrong, not the
+        # punctuation -- 'ZEBRA-47-QUARTZ' -> ZEBRA47QUARTZ (digits dropped),
+        # 'ZEBRA-47-ALUMINUM' -> ZEBRA47ALUMINUM, 'ZEBA-4471-QUARTZ' -> ZEBA...
+        # (letter dropped). All three still miss. Raw output is still reported.
+        _norm = lambda s: "".join(c for c in s.upper() if c.isalnum())  # noqa: E731
+        _needle_n = _norm(NEEDLE)
+        hits = sum(_needle_n in _norm(o) for o in outs)
         check(f"{label} ({ntok} tok) needle recall", hits == 3, f"{hits}/3 — {outs[0][:60]!r}")
         check(f"{label} determinism at temperature 0", len(set(outs)) == 1,
               f"{len(set(outs))} distinct outputs across 3 runs")
@@ -282,6 +329,11 @@ if __name__ == "__main__":
                     help="model id. Use a smaller one for the --dense control if "
                          "the default OOMs at long context (dense has no compressed "
                          "KV to fall back on).")
+    ap.add_argument("--chunk", type=int, default=0,
+                    help="--dense only: prefill in chunks of this many tokens. "
+                         "Needed to reach 32k — single-shot dense prefill OOMs on "
+                         "linear-attention activations, not the KV cache. 1024 "
+                         "matches what DKV does internally.")
     args = ap.parse_args()
 
     test_1_environment()
@@ -290,7 +342,7 @@ if __name__ == "__main__":
         test_2_exact_keys_default()
         test_3_rank_mask()
     test_4_needle(quick=args.quick, long_ctx=args.long,
-                  dense=args.dense, model_id=args.model)
+                  dense=args.dense, model_id=args.model, chunk=args.chunk)
 
     print("\n" + "=" * 60)
     if FAILURES:
