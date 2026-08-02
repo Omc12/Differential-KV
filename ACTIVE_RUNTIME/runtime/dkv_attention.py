@@ -1097,11 +1097,54 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 session_config = getattr(kv_manager, "session_configs", {}).get(sid, {})
                                 srl_enabled = session_config.get("srl_enabled", True)
 
+                        # ── How many blocks before routing engages ───────────
+                        # MLX has ONE condition:  if topk_blocks > 0 and nb > k_eff
+                        # (mlx_dkv_wrapper.py:4021) -- routing engages as soon as
+                        # there are more blocks than the budget, i.e. from 17.
+                        #
+                        # This side ALSO required block_indices.numel() >
+                        # srl_state.routing_threshold, a CUDA-only gate with no
+                        # MLX counterpart. routing_threshold comes from the model
+                        # size (hf_dkv_wrapper.py:704-710): 25 / 40 / 50 by param
+                        # count, so Qwen3.5-2B gets 40. With a 257-token block and
+                        # the recency window excluded that lands as:
+                        #
+                        #    2k  (2822 tok)   ~6 compressed blocks   6 > 40  NO
+                        #    8k  (10903 tok) ~38 compressed blocks  38 > 40  NO
+                        #    32k (32571 tok) ~122 compressed blocks 122 > 40 YES
+                        #
+                        # Two consequences, both observed:
+                        #
+                        #  1. Routing never ran at 2k or 8k, so every routing fix
+                        #     produced byte-identical results there -- the same
+                        #     "my change had no effect" signature that has already
+                        #     cost this investigation several rounds.
+                        #
+                        #  2. 8k sits ON the boundary. Blocks keep compressing as
+                        #     decode proceeds, so the count crosses 40 PART WAY
+                        #     THROUGH a generation, and which token it crosses at
+                        #     depends on when async compression lands. Routing
+                        #     switching on mid-generation, at a nondeterministic
+                        #     moment, is a temperature-0 run that does not
+                        #     reproduce -- which is exactly what 8k@depth0.5 shows
+                        #     (2/3 recall, 2 distinct outputs) while 8k@0.0 and
+                        #     8k@0.9 are stable.
+                        #
+                        # The gate is also REDUNDANT for the default router:
+                        # route_blocks_relevance already returns block_indices
+                        # unchanged when N <= k_eff. So all the threshold adds is
+                        # a SECOND, different boundary that no reference has.
+                        # Keep it only for the legacy "srl" router, which was
+                        # tuned with it.
+                        _router_mode_gate = os.environ.get("DKV_ROUTER", "residual").lower()
+                        _route_min = (srl_state.routing_threshold
+                                      if (_router_mode_gate == "srl" and srl_state is not None)
+                                      else 0)
                         if (
                             srl_enabled
                             and srl_state is not None
                             and block_indices is not None
-                            and block_indices.numel() > srl_state.routing_threshold
+                            and block_indices.numel() > _route_min
                         ):
                             try:
                                 from native_core.srl.query_router import route_query_fixed_k
