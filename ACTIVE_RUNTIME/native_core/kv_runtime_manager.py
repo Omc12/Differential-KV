@@ -2407,12 +2407,60 @@ class KVRuntimeManager:
             # crashed with a device-side assert. Turning this on without
             # measuring would repeat that. Detection, however, is unconditional:
             # this class of bug must never again be silent.
-            if os.environ.get("DKV_STRICT_BLOCK_COVERAGE", "0") == "1":
-                dense_blocks = dense_blocks + [
+            # DEFAULT ON. This is the MLX-parity behaviour, and it belongs HERE,
+            # at the reader, not in the producers.
+            #
+            # MLX does not guarantee coverage by making every compression path
+            # correct. It guarantees it STRUCTURALLY: decode materialises every
+            # compressed block and concatenates the live tail, so a block is
+            # either in the arrays or in the tail and there is no third place for
+            # it to be. Coverage is a property of the READER.
+            #
+            # CUDA had it as an emergent property of every producer being right,
+            # and three separate producers were not:
+            #   18c6afe  protect_block_zero stranded block 0 unless a regex hit
+            #   9454190  async compression still in flight when decode began
+            #   c7be3ef  the GPU batch reported success while skipping a block
+            # Each was found only because this check reported it, each was fixed,
+            # and the SAME block (anchor 1542, every DKV layer) is still stranded
+            # after all three -- a fourth producer path nobody has found yet.
+            #
+            # Chasing the fourth would be the same move that already failed three
+            # times. The reader can close the whole class in one place: whatever a
+            # producer does or fails to do, a block that is not published to the
+            # pool is served densely from the raw KV it still holds. That is exact
+            # -- uncompressed KV is the ground truth -- so the worst case is
+            # slower, never wrong.
+            #
+            # KNOWN COST, stated plainly: serving extra blocks densely can exceed
+            # DKV_MAX_DENSE_LEN and trigger assemble_dense_window_kv's trim. That
+            # is a real limit and it needs sizing work. But trimming warns, while
+            # dropping a block is silent -- and a silently missing block is how
+            # every one of the three bugs above stayed hidden. Prefer the loud
+            # failure. DKV_STRICT_BLOCK_COVERAGE=0 restores the silent behaviour
+            # for A/B.
+            if os.environ.get("DKV_STRICT_BLOCK_COVERAGE", "1") != "0":
+                _recoverable = [
                     b for b in _stranded
                     if getattr(b, "active_k", None) is not None
                     or getattr(b, "active_k_cpu", None) is not None
                 ]
+                dense_blocks = dense_blocks + _recoverable
+                _lost = [b for b in _stranded if b not in _recoverable]
+                _seen = getattr(self, "_coverage_warned", None)
+                if _seen is None:
+                    _seen = self._coverage_warned = set()
+                _key = (session_id, layer_idx)
+                if _key not in _seen:
+                    _seen.add(_key)
+                    print(f"[DKV] BLOCK COVERAGE: recovered {len(_recoverable)} "
+                          f"unpublished block(s) into the dense set "
+                          f"(session={session_id} layer={layer_idx}, "
+                          f"states={sorted({b.state for b in _stranded})}, "
+                          f"anchors={[getattr(b, 'anchor_idx', '?') for b in _stranded[:8]]})"
+                          + (f"; {len(_lost)} had no raw KV and REMAIN INVISIBLE"
+                             if _lost else "."),
+                          flush=True)
             else:
                 _seen = getattr(self, "_coverage_warned", None)
                 if _seen is None:
