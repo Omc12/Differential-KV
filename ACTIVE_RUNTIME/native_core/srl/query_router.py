@@ -1066,20 +1066,41 @@ def route_blocks_relevance(
         except ValueError:
             r_route = 0
         R_all = res_k.shape[1]
-        # Default: score against EVERY stored residual, as MLX does
-        # (_block_relevance_residual takes the max over all R with an
-        # `res_valid` -inf mask, which this function mirrors below).
+        # Route on the top-64 residuals, which is what MLX actually does:
         #
-        # This used to cap at a hardcoded 64. That was invisible while the pool
-        # also held 64, but `max_residual_tokens` is now 128 (MLX's value), so
-        # the cap silently hid HALF of every block's exact keys from routing --
-        # and residual keys are precisely the verbatim content (digits, codes)
-        # that routing most needs to see. Same class of bug as the kernel's
-        # 64-wide residual scratch (handoff §9u): a constant sized for the old
-        # default that nothing revalidated when the default moved.
+        #     _rr = int(os.environ.get("DKV_ROUTE_RESIDUALS", "0"))
+        #     self.route_residuals = _rr if _rr > 0 else min(64, self.max_residual)
+        #     R_route = min(self.route_residuals, self.max_residual)
+        #                       (mlx_dkv_wrapper.py:1756-1757 and :4022)
         #
-        # DKV_ROUTE_RESIDUALS>0 still caps it explicitly, for cost control.
-        R = min(R_all, r_route) if r_route > 0 else R_all
+        # THE COMMENT THIS REPLACES CLAIMED THE OPPOSITE. It said "score against
+        # EVERY stored residual, as MLX does" and removed a cap of 64 as a bug.
+        # MLX has never scored against every residual: 64 is its default, chosen
+        # by a documented sweep recorded at :1750-1755 -- "R=16/32 -> NIAH ok but
+        # SYNTHESIS breaks ... R=64 -> NIAH AND synthesis both pass ... the sweet
+        # spot; R=128 -> 6.9 tps". The cap was removed on a misreading of the
+        # reference, so this is a regression being undone, not a new policy.
+        #
+        # The removal's reasoning was also wrong about what entries 64..127 are.
+        # It argued the cap "silently hid HALF of every block's exact keys from
+        # routing -- and residual keys are precisely the verbatim content
+        # (digits, codes) that routing most needs to see". But the residual array
+        # is stored RANKED BEST-FIRST WITH THE COVERAGE SCAFFOLD APPENDED -- that
+        # ordering is load-bearing precisely because the head of the array IS the
+        # routing signature. So the tail is mostly evenly-spaced coverage rows:
+        # low-error, deliberately non-distinctive filler positions. They are not
+        # extra verbatim content.
+        #
+        # Feeding them to a MAX can only add noise. res_scores is
+        # s_res.max(dim=-1), so one generic filler token that happens to match
+        # the query lifts its whole block's relevance above a block that actually
+        # holds the answer. That costs nothing when routing is comfortable and
+        # everything when it is marginal -- which is exactly the regime the
+        # remaining failures live in (8k@0.5 at 16 of ~42 blocks, 32k@0.9 at
+        # 16 of ~128).
+        #
+        # DKV_ROUTE_RESIDUALS>0 still sets it explicitly, same as MLX.
+        R = min(R_all, r_route) if r_route > 0 else min(64, R_all)
         rk = res_k[slots_long, :R].clone()                      # [N, R, H_kv, D]
         rvalid = (res_pos[slots_long, :R] >= 0)         # [N, R]
 
