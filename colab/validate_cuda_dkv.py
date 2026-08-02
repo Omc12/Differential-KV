@@ -85,22 +85,44 @@ def test_1_environment():
 
 
 def test_2_exact_keys_default():
-    """The storage format must match what the Triton decoder implements."""
+    """The storage format must match what the decode kernel implements."""
     print("\n=== 2. Residual storage format (exact-keys gate) ===", flush=True)
-    for k in ("DKV_RESIDUAL_EXACT_KEYS", "DKV_RESIDUAL_EXCLUDE_SVD"):
-        os.environ.pop(k, None)
-    from native_core.compression.lowrank import _exact_keys_enabled
 
-    cuda_default = _exact_keys_enabled(torch.device("cuda:0"))
-    check("CUDA defaults to CORRECTION form (exact_keys=False)",
-          cuda_default is False,
-          "Triton ADDS residuals and never removes the low-rank twin; "
-          "exact-form residuals would double-count every residual token")
+    # SAVE AND RESTORE. This popped both vars to read the default and never put
+    # them back, so `DKV_RESIDUAL_EXACT_KEYS=1 python validate_cuda_dkv.py` ran
+    # test 4 with the variable DELETED — the flag under test was destroyed by the
+    # test above it, and the run looked like a clean no-op instead of an error.
+    _saved = {k: os.environ.get(k)
+              for k in ("DKV_RESIDUAL_EXACT_KEYS", "DKV_RESIDUAL_EXCLUDE_SVD")}
+    try:
+        for k in _saved:
+            os.environ.pop(k, None)
+        from native_core.compression.lowrank import _exact_keys_enabled
 
-    os.environ["DKV_RESIDUAL_EXACT_KEYS"] = "1"
-    forced = _exact_keys_enabled(torch.device("cuda:0"))
-    del os.environ["DKV_RESIDUAL_EXACT_KEYS"]
-    check("explicit override still honoured", forced is True)
+        # The two Triton decode kernels now SUBSTITUTE (EXACT_RESIDUAL), matching
+        # Metal and MLX. The default is still correction form because three other
+        # readers only ADD -- prefill's _prefill_fused_history_attend_compiled,
+        # fused_decode_mps, and the PyTorch vectorized decoder -- and the storage
+        # format has to satisfy all of them. See _exact_keys_enabled for the list.
+        cuda_default = _exact_keys_enabled(torch.device("cuda:0"))
+        check("CUDA defaults to CORRECTION form (3 readers still ADD-only)",
+              cuda_default is False,
+              "Triton kernels substitute now; prefill + MPS fallback + PyTorch "
+              "decoder do not, and exact-form values would double-count there")
+
+        os.environ["DKV_RESIDUAL_EXACT_KEYS"] = "1"
+        forced_on = _exact_keys_enabled(torch.device("cuda:0"))
+        check("explicit override still honoured", forced_on is True)
+    finally:
+        for k, v in _saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        if _saved.get("DKV_RESIDUAL_EXACT_KEYS") is not None:
+            print(f"  [config] caller's DKV_RESIDUAL_EXACT_KEYS="
+                  f"{_saved['DKV_RESIDUAL_EXACT_KEYS']} restored for test 4",
+                  flush=True)
 
 
 def test_3_rank_mask():

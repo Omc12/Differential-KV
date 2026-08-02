@@ -97,8 +97,24 @@ def remat_freeze_routing() -> bool:
     return os.environ.get("DKV_REMAT_FREEZE_ROUTING", "1") == "1"
 
 
+def _exact_form() -> bool:
+    """Are residuals stored as the anchor-relative EXACT value, or a correction?
+
+    Forwards to lowrank._exact_keys_enabled so this can never disagree with what
+    the compressor wrote — that mismatch silently doubles or halves every residual
+    token. Now defaults ON everywhere (MLX/Metal/Triton all substitute).
+    """
+    try:
+        from native_core.compression.lowrank import _exact_keys_enabled
+        return bool(_exact_keys_enabled(torch.device("cuda")
+                                        if torch.cuda.is_available() else None))
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
 def _scatter_residuals(X: torch.Tensor, res_val: torch.Tensor,
-                       res_pos: torch.Tensor) -> torch.Tensor:
+                       res_pos: torch.Tensor,
+                       anchors: Optional[torch.Tensor] = None) -> torch.Tensor:
     """Add the sparse exact-value corrections into a materialised [N, S, H, D].
 
     `residual_*_values` hold `exact - lowrank_recon` at the worst-reconstructed
@@ -128,7 +144,22 @@ def _scatter_residuals(X: torch.Tensor, res_val: torch.Tensor,
     # Masked-out rows contribute an exact zero to scatter_add_ at a clamped-but-
     # valid index, so skipping the work saves nothing and costs a pipeline drain.
     index = pos.clamp(0, S - 1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, H, D)
-    src = res_val.to(X.dtype) * keep.unsqueeze(-1).unsqueeze(-1).to(X.dtype)
+    keep_f = keep.unsqueeze(-1).unsqueeze(-1)
+
+    if anchors is not None and _exact_form():
+        # SUBSTITUTION (MLX / Metal / Triton EXACT_RESIDUAL). res_val is the
+        # anchor-relative EXACT value, so the row IS anchor + res — the low-rank
+        # estimate at that position is discarded rather than nudged. scatter_,
+        # not scatter_add_: adding would leave the lossy twin in and count the
+        # anchor twice. Rows whose position is padding keep their existing value,
+        # which is why the masked src falls back to X's own row.
+        exact = anchors.unsqueeze(1) + res_val.to(X.dtype)          # [N, MAX_RES, H, D]
+        current = X.gather(dim=1, index=index)
+        src = torch.where(keep_f, exact, current)
+        return X.scatter_(dim=1, index=index, src=src)
+
+    # CORRECTION form: res_val is (exact - recon); add it and keep the twin.
+    src = res_val.to(X.dtype) * keep_f.to(X.dtype)
     return X.scatter_add_(dim=1, index=index, src=src)
 
 
@@ -187,8 +218,8 @@ def reconstruct_blocks(
 
     # Applied in fp32, before the cast back: the corrections are small deltas on
     # top of a much larger anchor, which is exactly where fp16 rounding eats them.
-    K = _scatter_residuals(K, res_k, res_pos)
-    V = _scatter_residuals(V, res_v, res_pos_v)
+    K = _scatter_residuals(K, res_k, res_pos, anchors_K.float())
+    V = _scatter_residuals(V, res_v, res_pos_v, anchors_V.float())
     return K.to(V_K.dtype), V.to(V_V.dtype)
 
 

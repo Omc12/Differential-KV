@@ -80,28 +80,24 @@ def _residual_error_threshold() -> float:
 def _exact_keys_enabled(device=None) -> bool:
     """DKV_RESIDUAL_EXACT_KEYS — MLX-parity residual semantics.
 
-    OFF (default): residual_{K,V}_values hold a CORRECTION to the low-rank
-    reconstruction and the decode kernel ADDS them.
+    ON (default on MPS; CUDA pending, see the reader list below):
+    residual_{K,V}_values hold the anchor-relative EXACT value, so
+    `anchor + residual` is the true K/V, and the decode kernel SUBSTITUTES it — replacing the token's score and removing its lossy twin from
+    the block's value accumulation. This is what MLX does (it masks the twin and
+    re-attends the exact row) and what dkv_decode.metal does.
 
-    ON: they hold the anchor-relative EXACT value, so `anchor + residual` is the
-    true K/V, and the kernel SUBSTITUTES it — replacing the token's score and
-    removing its lossy twin from the block's value accumulation. This is what
-    MLX does (it masks the twin to -inf and re-attends the exact row).
+    OFF: they hold a CORRECTION to the low-rank reconstruction and the kernel ADDS
+    them, leaving the twin in. Approximate; kept as an escape hatch.
 
     Read via a function, not a module constant, because the tests and the
     per-block compress paths toggle it per-process after import.
 
-    DEFAULT IS DEVICE-DEPENDENT, because this is a STORAGE FORMAT and it has to
-    match whichever decode kernel reads it back:
-
-        MPS/Metal  -> ON.  dkv_decode.metal implements substitution.
-                      This is also MLX's default (it gates the same behaviour on
-                      DKV_RESIDUAL_EXCLUDE_SVD, default "1",
-                      mlx_dkv_wrapper.py:1763).
-        CUDA       -> OFF. triton_fused_decode.py applies residuals as a pure
-                      correction (`s += q.residual_K`, `O += p*residual_V`) and
-                      never removes the lossy twin, so exact-form residuals
-                      would add nearly the whole key a second time.
+    The CUDA default is OFF because the STORAGE FORMAT has to satisfy every
+    decoder that reads it, and three of them still only ADD. The two Triton decode
+    kernels now substitute (EXACT_RESIDUAL), which was the original blocker; the
+    remaining three are listed at the return below. Until they are ported, CUDA
+    runs a lower-fidelity residual algorithm than Metal and MLX on identical
+    inputs — a real gap, now tracked rather than described as a design choice.
 
     Pass the target `device`; an explicit DKV_RESIDUAL_EXACT_KEYS (or MLX's
     DKV_RESIDUAL_EXCLUDE_SVD) overrides the default either way.
@@ -123,22 +119,33 @@ def _exact_keys_enabled(device=None) -> bool:
     if v is not None:
         return str(v).strip().lower() not in ("0", "off", "false", "no", "")
 
-    # No explicit setting: the storage format MUST match whatever decode kernel
-    # will read it back, and that is chosen by device.
+    # No explicit setting: the storage format MUST match EVERY decoder that reads
+    # it back, and they do not all agree yet.
     #
-    #   Metal (MPS)   -- implements substitution (replaces the token's score AND
-    #                    backs the low-rank twin out of the value sum), so it
-    #                    wants the anchor-relative EXACT form. Default ON.
-    #   Triton (CUDA) -- applies residuals as a pure CORRECTION:
-    #                      s += q . residual_K          (triton_fused_decode.py)
-    #                      O += p * residual_V
-    #                    with no removal of the lossy twin. Handing it
-    #                    exact-form residuals adds almost the whole key a second
-    #                    time on top of the SVD estimate. Default OFF until the
-    #                    Triton kernel grows the substitution path.
+    # SUBSTITUTES (wants EXACT form):
+    #   dkv_decode.metal
+    #   mlx_dkv_wrapper           (DKV_RESIDUAL_EXCLUDE_SVD default "1")
+    #   triton_fused_decode._fused_sparse_decode_kernel      via EXACT_RESIDUAL
+    #   triton_fused_decode._fused_decode_combined_kernel    via EXACT_RESIDUAL
+    #   remat_cache._scatter_residuals
     #
-    # This used to return True unconditionally, which silently mismatched the
-    # CUDA decoder. Set DKV_RESIDUAL_EXACT_KEYS explicitly to override either way.
+    # STILL ADDS ONLY (needs EXACT form to stay off, or it double-counts):
+    #   triton_fused_decode.py:914   _prefill_fused_history_attend_compiled
+    #   triton_fused_decode.py:1606  fused_decode_mps
+    #   triton_fused_decode.py:1974  PyTorch vectorized decoder
+    #
+    # Those three still do a bare `scatter_add_` of the residual onto the low-rank
+    # row with no substitution branch, so exact-form values land on top of the
+    # twin instead of replacing it -- adding nearly the whole key a second time.
+    # That is observable today on MPS, where the default is already exact: Metal
+    # substitutes correctly while its PyTorch fallback double-counts, which is why
+    # test_sparse_residual_correctness reports attention error 0.047 WITH
+    # residuals against 0.014 without, and out_with_res ~2x the dense reference.
+    #
+    # So the CUDA default stays correction-form for now. This is no longer "the
+    # format bends to the weakest decoder" as an accepted design -- it is a
+    # tracked debt with an exact list. Port substitution to those three and this
+    # becomes `return True` on every device, matching MLX.
     dev_type = getattr(device, "type", None)
     if dev_type is None and device is not None:
         dev_type = str(device).split(":")[0]
