@@ -1425,7 +1425,28 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         # Recompute recon against the SAME int8-dequant U decode reads so the
         # residual absorbs that error and reconstruction is exact.
         recon_K_for_res, recon_V_for_res = recon_K, recon_V
-        if _force_exact and pool is not None and T_active > 0:
+        # EVERY block, not just force-exact ones. The comment above states the
+        # invariant — "the residual absorbs that error and reconstruction is
+        # exact" — but the `_force_exact and` gate applied it only to skip blocks.
+        # For an ordinary compressed block the residual was
+        #     delta - recon_fp16
+        # while decode reconstructs recon_int8, so the corrected value came out
+        #     recon_int8 + (delta - recon_fp16) = delta + (recon_int8 - recon_fp16)
+        # i.e. the ENTIRE int8-U quantisation error survived, uncorrected, on
+        # exactly the tokens residuals exist to make exact.
+        #
+        # The magnitude is not marginal. The `absorbed` telemetry below is that
+        # same quantity, and on a Qwen3.5-2B 8k run it reports 86.4%, 90.5%,
+        # 96.9% and 100.9% of the per-token delta norm — above 100% meaning the
+        # int8 reconstruction differs from the fp16 one by more than the delta it
+        # is approximating. Skip blocks had this corrected and passed; ordinary
+        # blocks did not, which is consistent with depth 0.0 (uncompressed, below
+        # short_context_threshold) and skip-rule blocks recalling the needle while
+        # ordinary compressed blocks return it with the digits wrong.
+        #
+        # Costs one int8 quantise + [T, wr] @ [wr, feat] matmul per block at
+        # prefill — the same work already paid for skip blocks, now for all.
+        if pool is not None and T_active > 0:
             _wr = min(U_masked.shape[2], pool.U.shape[2])          # write_rank
             _U_w = U_masked[i, :T_active, :_wr]                    # [T, wr] fp16, as written
             _V_w = V_masked[i, :_wr, :]                            # [wr, feat] fp16, as written
