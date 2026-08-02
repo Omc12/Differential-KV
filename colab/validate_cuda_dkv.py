@@ -230,7 +230,21 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
                 # strategy, not the KV cache — same reasoning as bench_dkv_tps.py.
                 from transformers import DynamicCache
                 seq = ids["input_ids"][0].tolist()
-                cache = DynamicCache()
+                # Build the cache FROM THE CONFIG. Qwen3.5 is a hybrid model --
+                # linear-attention layers interleaved with full-attention ones --
+                # and a bare DynamicCache() allocates only full-attention layers,
+                # so the model's own _update_linear_attn_mask raises
+                #   "has_previous_state can only be called on LinearAttention
+                #    layers, and the current Cache seem to only contain Attention
+                #    layers"
+                # on the very first chunk. Passing config makes transformers build
+                # the per-layer-type structure the model actually expects. Falls
+                # back for older transformers / non-hybrid models like Qwen2.5,
+                # where the bare constructor is correct.
+                try:
+                    cache = DynamicCache(config=_model.config)
+                except TypeError:
+                    cache = DynamicCache()
                 gen = []
                 with _t.inference_mode():
                     for i in range(0, len(seq), chunk):
