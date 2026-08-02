@@ -596,14 +596,52 @@ def compress_lowrank(
                 cov_frac = float(os.environ.get("DKV_RESIDUAL_COVERAGE_FRAC", "0"))
             except ValueError:
                 cov_frac = 0.0
-            top_k_K = _topk_with_coverage(rel_error_K, min(n_max_residual, n), cov_frac)
-            top_k_V = _topk_with_coverage(rel_error_V, min(n_max_residual, n), cov_frac)
+            # ── MLX-parity residual selection ────────────────────────────────
+            # This path still ranked rel_error_K and rel_error_V SEPARATELY and
+            # kept two different index sets:
+            #
+            #     top_k_K = _topk_with_coverage(rel_error_K, ...)
+            #     top_k_V = _topk_with_coverage(rel_error_V, ...)
+            #     fact_positions_K = top_k_K.indices[mask_K]
+            #     fact_positions_V = top_k_V.indices[mask_V]
+            #
+            # which is exactly the form 42eb66c removed from the batched GPU
+            # path, left behind here. Two independent defects:
+            #
+            #  1. SPLIT SETS. A token can be selected for K and not for V. Its
+            #     score is then made exact while its VALUE stays the lossy
+            #     low-rank reconstruction, so attention locates the token
+            #     correctly and reads the wrong content back. That is the
+            #     ZEBRA-447 / partial-code signature, and it is a V-side failure
+            #     that no amount of K-side work can reach.
+            #
+            #  2. RELATIVE vs ABSOLUTE. Dividing by each token's own norm ranks
+            #     by FRACTIONAL error, so a low-norm token with a small absolute
+            #     error outranks a high-norm needle with a large one. Attention
+            #     error is absolute -- q.k does not care what fraction of the key
+            #     was lost -- so MLX ranks absolute (mlx_dkv_wrapper.py:2547,
+            #     errors_v_balanced = errors_v * v_gain; joint = sqrt(eK^2+eV^2)).
+            #
+            # rel_error_* stays as it is above: MLX uses it for the median tier
+            # (:3822) and the budget ladder here mirrors that, unchanged.
+            _err_V_bal = error_V if v_gain is None else error_V * v_gain
+            joint_err = torch.sqrt(error_K.float() ** 2 + _err_V_bal.float() ** 2)
+            top_k_J = _topk_with_coverage(joint_err, min(n_max_residual, n), cov_frac)
 
-            mask_K = (top_k_K.values > error_threshold) & (error_K[top_k_K.indices] > 1e-4)
-            fact_positions_K = top_k_K.indices[mask_K]
-
-            mask_V = (top_k_V.values > error_threshold) & (error_V[top_k_V.indices] > 1e-4)
-            fact_positions_V = top_k_V.indices[mask_V]
+            # NOTE error_threshold is now compared against an ABSOLUTE joint
+            # score rather than a relative one. That is the same change the
+            # batched path made (:1600 compares _residual_error_threshold()
+            # against joint_err), so both paths agree, and the default is 0.0 --
+            # MLX applies no floor at all -- so nothing is filtered unless
+            # DKV_RESIDUAL_ERR_THRESHOLD is set deliberately.
+            #
+            # A token qualifies if EITHER half is non-degenerate; with one shared
+            # index set, dropping it on K alone would strand its V.
+            _idx = top_k_J.indices
+            mask_J = (top_k_J.values > error_threshold) & (
+                (error_K[_idx] > 1e-4) | (error_V[_idx] > 1e-4))
+            fact_positions_K = _idx[mask_J]
+            fact_positions_V = fact_positions_K
         
         if fact_positions_K.numel() > 0:
             # DKV_RESIDUAL_EXACT_KEYS (MLX parity) — store the residual K as the
