@@ -116,6 +116,22 @@ values identical, writes into the buffer, address stable across repeated gathers
 deferred batch dispatch is possible (fails closed, see `_batch_queue_active`).
 Still to do: q/out/lse buffers, `block_indices` itself, and the dense workspace.
 
+**MEASURED: no effect.** 102.7 vs 102.1 ms/token, peak VRAM identical, recall
+unchanged (all six depth cases pass). The gather allocations were not the cost.
+Keep it only as a graph PREREQUISITE (fixed addresses), not as an optimisation
+in its own right -- and note that it is the third change predicted to help that
+returned ~0:
+
+| change | predicted | measured |
+|---|---|---|
+| Path A vs Path B (fused kernel) | large | 0% |
+| routing top-K 64 -> 16 (4x less work) | large | 19% |
+| static gather buffers | moderate | 0% |
+
+All three were inferred from op tables rather than measured on the generate()
+path. Stage 0 exists to stop this; it was skipped. `colab/profile_decode_host.py`
+now implements it.
+
 
 Pre-allocate, once per session, at fixed addresses:
 
