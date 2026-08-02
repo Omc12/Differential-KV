@@ -316,3 +316,58 @@ This is algorithmic, not dispatch. Options, in order of expected value:
    Qwen2.5-1.5B the pool is 0.89x dense KV -- a real but small win. Whether that
    is worth 11x decode is a product decision, not an engineering one.
 3. Graphs: 1.6x ceiling. Do last, if at all.
+
+## RETRACTION: "algorithmic, not dispatch" was WRONG. The cache was never ported.
+
+MLX runs the SAME low-rank algorithm at ~75% of dense decode speed while saving
+more VRAM. If reconstruction were inherently ~20x more expensive per attended
+token, MLX could not do that. The conclusion above ("this is algorithmic") is
+therefore false, and so is the ABORT framing that followed from it.
+
+The real difference is in `dkv_attention.py:105-121`, in a comment that already
+spelled it out:
+
+> **MLX's `DKV_DECODE_CACHE`** re-routes and RE-MATERIALIZES (dequantize +
+> reconstruct) the selected blocks once every `DKV_DECODE_CACHE_INTERVAL` tokens
+> (default 16), trading staleness for speed.
+>
+> **This CUDA flag** (`DKV_DECODE_CACHE_CUDA`) never re-routes or
+> re-materializes anything; it only caches the gather/index-select step.
+
+    _DECODE_CACHE_CUDA = os.environ.get("DKV_DECODE_CACHE_CUDA", "0") == "1"
+
+So CUDA rebuilds U @ V for all 16 routed blocks (16 x 257 tokens) EVERY token,
+EVERY layer. MLX does it once per 16 tokens. That is ~16x more reconstruction
+work, and reconstruction is precisely the ~64 ms/token I mislabelled a "GPU
+floor". It is not a floor -- it is an unported cache.
+
+This is the FOURTH instance of the naming-collision pattern found in this
+project (after DKV_MAX_RESIDUAL/_TOKENS, DKV_RESIDUAL_EXCLUDE_SVD/_EXACT_KEYS,
+DKV_SVD_SEED/DKV_RSVD_SEED): MLX's knob is default ON, CUDA's same-sounding knob
+is a DIFFERENT, narrower feature that is default OFF.
+
+It also explains why the static-gather experiment returned 0%: it optimised the
+gather, which is what the narrow CUDA cache already covers, while the expensive
+re-materialisation has no cache on CUDA at all.
+
+### Expected value, if reconstruction is amortised 1/16 as MLX does
+
+| reconstruction share of the 64 ms/token GPU | resulting decode |
+|---|---|
+| 60% | 28.0 ms/token (36 tps) |
+| 80% | 16.0 ms/token (63 tps) |
+| 90% | 10.0 ms/token (100 tps) |
+
+Dense is 107.8 tps; MLX lands at ~75% of dense. Consistent with reconstruction
+being ~85-90% of DKV's decode GPU time.
+
+### Revised priority
+
+1. **Port MLX's re-materialisation cache to CUDA.** This is the item. Interval
+   16, staleness-for-speed, re-route on interval boundaries. Correctness gate is
+   the needle DEPTH sweep, since stale routing is exactly what it risks.
+2. Sync reduction (nonzero, query_router) -- still worth doing, and worth MORE
+   once reconstruction stops dominating, because the CPU will no longer be hidden
+   behind 64 ms of GPU work.
+3. CUDA graphs -- re-evaluate only after 1 and 2; the 67%-GPU-busy abort figure
+   is measured against an implementation that does 16x redundant work.
