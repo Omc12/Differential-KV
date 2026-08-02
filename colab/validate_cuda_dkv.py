@@ -127,27 +127,33 @@ def test_3_rank_mask():
           triton.next_power_of_2(LAYER_RANK) > POOL_RANK,
           f"R_pad={triton.next_power_of_2(LAYER_RANK)} > pool_rank={POOL_RANK}")
 
-    # Numerical check of the partial-RoPE rewrite against the known-correct
-    # helper, at the geometry that actually broke (head_dim 256, rotary_dim 64).
-    # Runs on the GPU here; it is the same check that passed on CPU.
+    # Numerical check of the partial-RoPE rewrite against the known-correct helper.
+    #
+    # BOTH production geometries, not just one. This covered only (256, 64) --
+    # Qwen3.5-2B's PARTIAL rope -- so Qwen2.5-1.5B's (128, 128), where
+    # rotary_dim == head_dim and the "pass-through" tail is empty, had no coverage
+    # at all. That is exactly the model whose DKV output is garbage, so the
+    # untested geometry and the broken one are the same geometry.
     from runtime.dkv_attention import _apply_rope_single
-    B, KV, L, HD, RD = 1, 2, 7, 256, 64
-    k = torch.randn(B, KV, L, HD, device=dev)
-    cos = torch.randn(1, 1, L, RD, device=dev)
-    sin = torch.randn(1, 1, L, RD, device=dev)
-    ref = _apply_rope_single(k, cos, sin)
+    for _name, HD, RD in (("Qwen3.5-2B partial rope", 256, 64),
+                          ("Qwen2.5-1.5B full rope", 128, 128)):
+        B, KV, L = 1, 2, 7
+        k = torch.randn(B, KV, L, HD, device=dev)
+        cos = torch.randn(1, 1, L, RD, device=dev)
+        sin = torch.randn(1, 1, L, RD, device=dev)
+        ref = _apply_rope_single(k, cos, sin)
 
-    rot_dim, half_r = RD, RD // 2
-    half = torch.empty_like(k[..., :rot_dim])
-    half[..., :half_r] = -k[..., half_r:rot_dim]
-    half[..., half_r:] = k[..., :half_r]
-    out = torch.empty_like(k)
-    torch.mul(k[..., :rot_dim], cos, out=out[..., :rot_dim])
-    out[..., :rot_dim].addcmul_(half, sin)
-    out[..., rot_dim:].copy_(k[..., rot_dim:])
-    check("partial-RoPE matches reference on GPU",
-          torch.equal(out, ref) or (out - ref).abs().max().item() < 1e-5,
-          f"max|diff|={(out - ref).abs().max().item():.3e}")
+        rot_dim, half_r = RD, RD // 2
+        half = torch.empty_like(k[..., :rot_dim])
+        half[..., :half_r] = -k[..., half_r:rot_dim]
+        half[..., half_r:] = k[..., :half_r]
+        out = torch.empty_like(k)
+        torch.mul(k[..., :rot_dim], cos, out=out[..., :rot_dim])
+        out[..., :rot_dim].addcmul_(half, sin)
+        out[..., rot_dim:].copy_(k[..., rot_dim:])
+        check(f"partial-RoPE matches reference on GPU — {_name} (HD={HD}, RD={RD})",
+              torch.equal(out, ref) or (out - ref).abs().max().item() < 1e-5,
+              f"max|diff|={(out - ref).abs().max().item():.3e}")
 
 
 def test_4_needle(quick=False, long_ctx=False, dense=False,
