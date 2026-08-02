@@ -28,12 +28,25 @@ exact. This is the same trade MLX makes.
 Consequences that MUST be gated by the needle DEPTH sweep
 (colab/validate_cuda_dkv.py), because a needle whose block is routed only AFTER
 a refresh boundary is invisible until the next one:
-  * refresh on interval boundaries AND on any routing-version change
+  * refresh on interval boundaries
   * refresh on pool writes (a flushed block changes what reconstruction means)
 
-STATUS: opt-in (DKV_REMAT_CACHE=1), default OFF, NOT validated on GPU.
-The math below is verified on CPU against a direct reference — run this file
-directly to check. Correctness of the *caching policy* is what needs hardware.
+CORRECTED 2026-08-02: this list also said "refresh on any routing-version change",
+and called it a correctness requirement. On GPU that made the cache
+unconditionally dead — reconstruct ran every layer of every token, a 0% hit rate,
+because routing legitimately changes almost every token. Freezing the routed set
+for the interval is not a violation of the contract above, it IS the contract:
+"blocks selected at refresh time keep being attended". See remat_freeze_routing()
+for the measurement and the escape hatch.
+
+What that implies about the measured win: remat was ~1.35x faster on GPU while
+hitting 0%, so the gain is the materialise+SDPA formulation replacing the Triton
+per-token reconstruction — NOT caching. Cache hits are additional headroom on
+top, and they are what DKV_REMAT_INTERVAL was always meant to buy.
+
+STATUS: opt-in (DKV_REMAT_CACHE=1), default OFF. Residual correctness is
+GPU-validated (8k needle 3/3 at depth 0.0/0.5/0.9). The routing freeze is NOT yet
+GPU-validated — it is precisely the staleness policy the depth sweep exists to gate.
 """
 from __future__ import annotations
 
@@ -61,6 +74,27 @@ def remat_interval() -> int:
         return max(1, int(os.environ.get("DKV_REMAT_INTERVAL", "16")))
     except ValueError:
         return 16
+
+
+def remat_freeze_routing() -> bool:
+    """Hold the ROUTED BLOCK SET for the interval, not just its materialisation.
+
+    This is what makes the cache a cache. Measured on GPU: with the routing
+    version in the key, `reconstruct_blocks` ran 5,376 times for 192 tokens x 28
+    layers -- every layer of every token, a 0% hit rate. `current_version`
+    increments whenever the routed set changes (dkv_attention.py:1304) and routing
+    legitimately changes almost every token, so no entry could ever survive an
+    interval and DKV_REMAT_INTERVAL had no effect at any value.
+
+    MLX, which this ports, "re-routes AND re-materialises the selected blocks once
+    every DKV_DECODE_CACHE_INTERVAL tokens" -- it freezes routing too. Doing the
+    same is what this flag turns on, and it matches the staleness contract this
+    module documented from the start.
+
+    DKV_REMAT_FREEZE_ROUTING=0 restores refresh-on-routing-change, i.e. the
+    known-good 0%-hit behaviour, as an escape hatch if recall regresses.
+    """
+    return os.environ.get("DKV_REMAT_FREEZE_ROUTING", "1") == "1"
 
 
 def _scatter_residuals(X: torch.Tensor, res_val: torch.Tensor,
@@ -175,9 +209,18 @@ class RematCache:
 
     @staticmethod
     def make_key(layer_idx: int, routing_version: int, pool_generation: int,
-                 step: int, interval: Optional[int] = None) -> tuple:
+                 step: int, interval: Optional[int] = None,
+                 freeze_routing: Optional[bool] = None) -> tuple:
         iv = interval if interval is not None else remat_interval()
-        return (layer_idx, routing_version, pool_generation, step // max(1, iv))
+        frz = remat_freeze_routing() if freeze_routing is None else freeze_routing
+        # Dropping routing_version from the key IS the freeze: the entry then
+        # survives a routing change and the blocks selected at refresh time keep
+        # being attended until the interval elapses. Keeping it made the cache
+        # unconditionally dead (see remat_freeze_routing). pool_generation stays
+        # in either way -- a flushed block changes what a slot MEANS, which is a
+        # correctness refresh, not a routing-freshness one.
+        rv = 0 if frz else routing_version
+        return (layer_idx, rv, pool_generation, step // max(1, iv))
 
     def get(self, key: tuple):
         v = self._store.get(key)
@@ -339,16 +382,35 @@ if __name__ == "__main__":
           f"{torch.allclose(o1, o2, atol=1e-4)}   (want True)")
     print(f"attend output shape {tuple(o1.shape)}  (expect (1, {H_q}, 1, {D}))")
 
+    def K(rv=1, pg=7, st=0, frz=True):
+        return RematCache.make_key(3, routing_version=rv, pool_generation=pg,
+                                   step=st, interval=16, freeze_routing=frz)
+
     c = RematCache()
-    k0 = RematCache.make_key(3, routing_version=1, pool_generation=7, step=0, interval=16)
-    k1 = RematCache.make_key(3, routing_version=1, pool_generation=7, step=15, interval=16)
-    k2 = RematCache.make_key(3, routing_version=1, pool_generation=7, step=16, interval=16)
-    k3 = RematCache.make_key(3, routing_version=2, pool_generation=7, step=0, interval=16)
-    k4 = RematCache.make_key(3, routing_version=1, pool_generation=8, step=0, interval=16)
+    k0, k1, k2 = K(), K(st=15), K(st=16)
+    k3, k4 = K(rv=2), K(pg=8)
     print(f"same interval reuses (step 0 vs 15)   : {k0 == k1}   (want True)")
     print(f"interval boundary refreshes (0 vs 16) : {k0 != k2}   (want True)")
-    print(f"routing change refreshes              : {k0 != k3}   (want True)")
     print(f"pool write refreshes                  : {k0 != k4}   (want True)")
+
+    # THE FREEZE. Routing changes almost every token, so keeping routing_version
+    # in the key gave a 0% hit rate on GPU and made DKV_REMAT_INTERVAL inert at
+    # every value. Frozen (default), a routing change must NOT refresh; with
+    # DKV_REMAT_FREEZE_ROUTING=0 the old behaviour must come back intact.
+    print(f"frozen: routing change does NOT refresh: {k0 == k3}   (want True)")
+    u0, u3 = K(frz=False), K(rv=2, frz=False)
+    print(f"unfrozen: routing change DOES refresh  : {u0 != u3}   (want True)")
+    print(f"unfrozen still refreshes on interval   : "
+          f"{K(frz=False) != K(st=16, frz=False)}   (want True)")
+    print(f"unfrozen still refreshes on pool write : "
+          f"{K(frz=False) != K(pg=8, frz=False)}   (want True)")
+    # INTERVAL=1 must equal no-cache in BOTH modes -- that is the diagnostic that
+    # separates a reconstruction bug from a staleness one, so it has to survive.
+    for _frz in (True, False):
+        _a = RematCache.make_key(3, 1, 7, step=0, interval=1, freeze_routing=_frz)
+        _b = RematCache.make_key(3, 1, 7, step=1, interval=1, freeze_routing=_frz)
+        print(f"INTERVAL=1 refreshes every step (frz={int(_frz)}) : "
+              f"{_a != _b}   (want True)")
 
     c.put(k0, K, V)
     print(f"hit on same key                       : {c.get(k0) is not None}   (want True)")
