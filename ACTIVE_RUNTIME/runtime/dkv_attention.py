@@ -1140,6 +1140,49 @@ def apply_dkv_attention_patch(model, kv_manager):
                         _route_min = (srl_state.routing_threshold
                                       if (_router_mode_gate == "srl" and srl_state is not None)
                                       else 0)
+                        # ── ROUTING REACHABILITY PROBE ───────────────────────
+                        # Say ONCE per session/layer whether the router ran, and
+                        # if not, WHICH condition stopped it.
+                        #
+                        # This exists because "the change had no effect" has now
+                        # been the wrong conclusion three times, from three
+                        # different mechanisms: a swallowed exception (1b0de37),
+                        # an unreachable branch (c3514e0) and an outer gate
+                        # (140748b). Each time the algorithm was edited before
+                        # anyone checked the code ran, and each time the edit was
+                        # inert. The BLOCK COVERAGE check ended that guessing for
+                        # block reachability by simply reporting the fact; this
+                        # is the same instrument for routing.
+                        #
+                        # Costs one dict lookup per layer after the first token.
+                        if os.environ.get("DKV_ROUTE_PROBE", "1") != "0":
+                            _rp = getattr(kv_manager, "_route_probe_seen", None)
+                            if _rp is None:
+                                _rp = kv_manager._route_probe_seen = set()
+                            _rp_key = (sid, captured_layer_idx)
+                            if _rp_key not in _rp:
+                                _rp.add(_rp_key)
+                                _n_blocks = (block_indices.numel()
+                                             if block_indices is not None else 0)
+                                if not srl_enabled:
+                                    _why = "srl_enabled=False (session config)"
+                                elif srl_state is None:
+                                    _why = ("srl_state is None -- SRL index not built "
+                                            "(pool.W_proj missing, or finalize_srl_index "
+                                            "never ran for this session)")
+                                elif block_indices is None:
+                                    _why = "block_indices is None -- no compressed blocks"
+                                elif _n_blocks <= _route_min:
+                                    _why = (f"only {_n_blocks} candidate block(s), "
+                                            f"needs > {_route_min}")
+                                else:
+                                    _why = None
+                                print(f"[DKV] ROUTE PROBE layer={captured_layer_idx} "
+                                      f"session={sid} candidates={_n_blocks} "
+                                      f"router={_router_mode_gate} "
+                                      + ("ROUTING RUNS" if _why is None
+                                         else f"ROUTER SKIPPED: {_why}"), flush=True)
+
                         if (
                             srl_enabled
                             and srl_state is not None

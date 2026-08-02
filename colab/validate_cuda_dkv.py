@@ -239,6 +239,35 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
         print("  [config] --no-serving-defaults: bare wrapper defaults, "
               "NOT the shipped configuration")
 
+    # SYNCHRONOUS COMPRESSION FOR THE CORRECTNESS RUN.
+    #
+    # kv_runtime_manager.py:832-841 already documents why, about its own runtime:
+    #
+    #     "different tokens run to run. That makes both the generated text and
+    #      per-layer cosine-vs-dense useless as A/B metrics -- two runs of the
+    #      SAME build disagree by more than most changes being evaluated. Set
+    #      this for any fidelity measurement; leave it off in production, where
+    #      the overlap is the point."
+    #
+    # Background compression means a block's representation at a given decode
+    # step -- exact dense while SUBMITTED, low-rank once COMPRESSED -- depends on
+    # when a worker thread happens to finish. So the "determinism at temperature
+    # 0" check has been measuring the compression thread's timing, not the
+    # kernel. That is the likeliest reading of 8k@depth0.5 sitting at 2/3 with 2
+    # distinct outputs while 8k@0.0 and 8k@0.9 are stable: same build, same
+    # prompt, different overlap.
+    #
+    # It is also the MLX-parity setting. MLX compresses at the point a block
+    # leaves the window, so it has no overlap and no such variance -- and it
+    # returns 3/3 distinct=1 on all nine of these cases.
+    #
+    # setdefault, so DKV_SYNC_COMPRESS=0 still measures the production
+    # (overlapped) configuration deliberately.
+    os.environ.setdefault("DKV_SYNC_COMPRESS", "1")
+    print(f"  [config] DKV_SYNC_COMPRESS={os.environ['DKV_SYNC_COMPRESS']} "
+          f"(1 = compress synchronously, as MLX does; the determinism check is "
+          f"meaningless with background compression -- see the note here)")
+
     if dense:
         # DENSE CONTROL — uncompressed HF attention, same prompts.
         #
