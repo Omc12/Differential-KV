@@ -88,8 +88,11 @@ def _scatter_residuals(X: torch.Tensor, res_val: torch.Tensor,
     N, S, H, D = X.shape
     pos = res_pos.long()
     keep = (pos >= 0) & (pos < S)
-    if not bool(keep.any()):
-        return X
+    # No `if not keep.any()` early-out: that is bool() on a device tensor, i.e. a
+    # sync, and it ran twice per reconstruct (K and V). The recorder put it at
+    # 10,752 hits -- the single largest site in the whole run, and self-inflicted.
+    # Masked-out rows contribute an exact zero to scatter_add_ at a clamped-but-
+    # valid index, so skipping the work saves nothing and costs a pipeline drain.
     index = pos.clamp(0, S - 1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, H, D)
     src = res_val.to(X.dtype) * keep.unsqueeze(-1).unsqueeze(-1).to(X.dtype)
     return X.scatter_add_(dim=1, index=index, src=src)

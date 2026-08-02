@@ -176,36 +176,47 @@ def main():
         return dt, got
 
     N = args.steps
-    eos_limited = False
 
     def one_trial():
-        """One (decode s/token, prefill s) estimate from the two-point fit."""
-        nonlocal eos_limited
+        """(decode s/token, prefill s, ..., ok) from the two-point fit.
+
+        ok=False means EOS-limited: both runs stopped at the same EOS, so the two
+        points differ only by noise and prefill cannot be separated from decode.
+        """
         t1, g1 = timed(N)
         t2, g2 = timed(2 * N)
         if g2 <= g1:
-            # Both runs stopped at the same EOS, so the two points differ only by
-            # noise and prefill cannot be separated. Report that honestly rather
-            # than emitting a nonsense rate.
-            eos_limited = True
-            print(f"\n  !! EOS-LIMITED: {g1} and {g2} tokens generated for requests of "
-                  f"{N} and {2*N}. Decode rate is NOT separable from prefill here.")
-            return t1 / max(g1, 1), float("nan"), t1, g1, t2, g2
+            print(f"\n  !! EOS-LIMITED trial: {g1} and {g2} tokens generated for "
+                  f"requests of {N} and {2*N}. Decode is NOT separable from prefill.")
+            return t1 / max(g1, 1), float("nan"), t1, g1, t2, g2, False
         d = (t2 - t1) / (g2 - g1)
-        return d, max(t1 - g1 * d, 0.0), t1, g1, t2, g2
+        return d, max(t1 - g1 * d, 0.0), t1, g1, t2, g2, True
 
-    # REPEAT AND TAKE THE MEDIAN. This harness has been measured at ~25% run-to-run
+    # REPEAT AND TAKE THE MEDIAN. This harness has been measured at ~38% prefill
     # spread: the same nominal config produced 102.1, 79.9 and 99.6 ms/token on
     # three occasions, and a single-shot 79.9 was briefly read as a real 22% win.
     # A median of >=3 is the cheapest defence against reporting noise as a result.
-    trials = [one_trial() for _ in range(max(1, args.repeat))]
+    all_trials = [one_trial() for _ in range(max(1, args.repeat))]
+
+    # EOS-limited trials MUST NOT enter the aggregate. Their decode figure is
+    # t1/g1, which still contains the whole prefill, so it is not the same
+    # quantity as the other trials -- mixing one in produced a 150.5 ms/token
+    # outlier, a 254% "spread" and a nan prefill in a run whose two clean trials
+    # agreed to within 10 ms. Drop them and say how many were dropped.
+    trials = [t for t in all_trials if t[6]]
+    n_eos = len(all_trials) - len(trials)
+    if not trials:
+        print(f"\n  !! ALL {len(all_trials)} TRIALS EOS-LIMITED — no separable decode "
+              f"rate. Raise --steps or use a prompt that generates more tokens.")
+        trials = all_trials
     d_all = sorted(t[0] for t in trials)
     p_all = sorted(t[1] for t in trials)
     mid = len(trials) // 2
     d_s, prefill_s = d_all[mid], p_all[mid]
     d_lo, d_hi = d_all[0], d_all[-1]
     p_lo, p_hi = p_all[0], p_all[-1]
-    _, _, t1, g1, t2, g2 = trials[-1]
+    _, _, t1, g1, t2, g2, _ = trials[-1]
+    eos_limited = not trials[0][6]
 
     mode = f"DENSE (DKV off{', chunked prefill ' + str(args.chunk) if args.chunk else ', single-shot prefill'})" if args.dense else f"DKV preset={args.preset}"
     print("\n" + "=" * 66)
@@ -215,6 +226,9 @@ def main():
     print(f"  DECODE  {1/d_s:7.1f} tps ({1000*d_s:.1f} ms/token)   <-- prefill excluded")
     print(f"  peak VRAM {torch.cuda.max_memory_allocated()/2**30:.2f} GB")
 
+    if n_eos:
+        print(f"  !! {n_eos} of {len(all_trials)} trials EOS-limited and EXCLUDED "
+              f"from the median (their decode figure still contains prefill)")
     if len(trials) > 1:
         d_spread = 100 * (d_hi - d_lo) / max(d_s, 1e-9)
         print(f"  median of {len(trials)}   decode {1000*d_lo:.1f}-{1000*d_hi:.1f} ms/token "
