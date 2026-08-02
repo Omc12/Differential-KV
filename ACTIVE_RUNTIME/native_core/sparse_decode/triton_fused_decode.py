@@ -98,6 +98,33 @@ def _gather_into(src, indices, cache, name):
 _heat_call_counter = 0
 
 
+def _occupied_slots(pool, n_fallback: int):
+    """Slots holding real data, as ONE device sync instead of `current_blocks`.
+
+    Both eviction call sites built this with a Python comprehension:
+
+        [i for i in range(pool.current_blocks) if pool.seq_lens[i].item() > 0]
+
+    `.item()` on a CUDA tensor is a full device synchronisation, so that is one
+    sync PER POOL SLOT. The pool is shared across layers, so current_blocks is
+    ~(context/block_span)*n_layers -- around 3,000 slots at 32k on a 24-layer
+    model. That comprehension is therefore ~3,000 syncs every time the heat
+    throttle fires, which is the opposite of what the throttle exists to
+    prevent: _heat_update_due was introduced to remove 27 of every 28 syncs from
+    this exact code path, and the line immediately below it reintroduced three
+    orders of magnitude more.
+
+    One comparison on device, one `.tolist()`, one sync.
+    """
+    seq_lens = getattr(pool, "seq_lens", None)
+    if seq_lens is None:
+        return []
+    n = int(getattr(pool, "current_blocks", n_fallback) or n_fallback)
+    if n <= 0:
+        return []
+    return (seq_lens[:n] > 0).nonzero(as_tuple=True)[0].tolist()
+
+
 def _heat_update_due() -> bool:
     """True on 1 call in DKV_HEAT_INTERVAL (default 32).
 
@@ -1909,10 +1936,7 @@ def _pytorch_vectorized_sparse_attn_decode(
                 _slot_list = block_indices.cpu().tolist()
                 for _sid in _slot_list:
                     _tiered.update_heat(_sid, routing_score=1.0)
-                _occupied = [i for i in range(getattr(pool, "current_blocks", N))
-                             if getattr(pool, "seq_lens", None) is not None
-                             and pool.seq_lens[i].item() > 0]
-                _tiered.maybe_evict(_occupied)
+                _tiered.maybe_evict(_occupied_slots(pool, N), protected=_slot_list)
             _prefetch = getattr(_mgr, "_kt_prefetch_engine", None)
             if _prefetch is not None and "_slot_list" in dir():
                 _prefetch.submit(session_id, _slot_list)
@@ -2351,8 +2375,7 @@ def native_triton_sparse_attn_decode(
                 for _sid in _slot_list:
                     _tiered.update_heat(_sid, routing_score=1.0)
                 # Proactively evict cold slots when pool fill is high (async no-op if below thresh).
-                _occupied = [i for i in range(getattr(pool, "current_blocks", N)) if getattr(pool, "seq_lens", None) is not None and pool.seq_lens[i].item() > 0]
-                _tiered.maybe_evict(_occupied)
+                _tiered.maybe_evict(_occupied_slots(pool, N), protected=_slot_list)
 
             # Feature 2: submit routed slots to the prefetch engine so they are
             # H2D-warm before the next decode step begins.

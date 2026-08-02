@@ -60,18 +60,48 @@ class TieredBlockStore:
         for slot_id in self._heat:
             self._heat[slot_id] *= decay_factor
 
-    def maybe_evict(self, occupied_slots: List[int]) -> int:
+    def maybe_evict(self, occupied_slots: List[int], protected=None) -> int:
+        """Evict the coldest GPU slots once the pool passes evict_threshold.
+
+        `protected` is the set of slots the CALLER is about to read this step.
+        Passing it is not an optimisation, it is a correctness requirement, for
+        two compounding reasons:
+
+        1. evict_slot() sets `self.pool.seq_lens[slot_id] = 0`, and seq_lens is
+           exactly what the decode kernel loads as `actual_s` to decide how many
+           of a block's tokens are real:
+               actual_s = tl.load(pool_seq_lens_ptr + pool_idx)
+               s = tl.where(offs_s < actual_s, s, -inf)
+           A zeroed slot therefore does not error -- it silently contributes its
+           ANCHOR ONLY, dropping all 256 of the block's tokens from the softmax.
+
+        2. Both callers run maybe_evict AFTER routing has picked block_indices
+           and BEFORE the kernel reads the pool, in the same decode step. So a
+           routed block could be zeroed out from under the launch that was about
+           to read it.
+
+        And the block most at risk is the one that matters. update_heat computes
+            new_heat = 0.7*current*DECAY + 0.3*routing_score
+        so a block routed for the FIRST time sits at 0.3 while blocks routed for
+        many steps have converged near 1.0. A block that has only just become
+        relevant -- which is precisely the needle's block at the moment the
+        query reaches for it -- is among the COLDEST, and the sort below picks
+        the coldest first. The heat policy, unprotected, preferentially evicts
+        what routing just asked for.
+        """
         if getattr(self.pool, 'max_blocks', 0) <= 0:
             return 0
-            
+
         occupancy = len(occupied_slots) / float(self.pool.max_blocks)
         if occupancy <= self.evict_threshold:
             return 0
 
-        # Filter out WARMING slots or those not on GPU
+        # Filter out WARMING slots, those not on GPU, and anything the caller is
+        # about to read.
+        _protected = set(protected) if protected else ()
         evictable_slots = [
             s for s in occupied_slots
-            if self._tier.get(s, 'GPU') == 'GPU'
+            if self._tier.get(s, 'GPU') == 'GPU' and s not in _protected
         ]
 
         # Sort by heat ascending
