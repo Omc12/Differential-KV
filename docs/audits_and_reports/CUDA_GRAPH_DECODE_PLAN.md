@@ -275,3 +275,44 @@ Do this before Stages 1-4:
 Only 2 of the 3 known sync classes were addressed today (heat-update throttle,
 numeric-guard gating). The nonzero and router classes are untouched and are
 larger.
+
+## VERDICT: ABORT on graphs. Decode is GPU-bound, not dispatch-bound.
+
+The 39% GPU-busy figure was **my tool's bug**: it divided GPU time by the
+PROFILED wall. torch.profiler inflates wall by 1.71x on this workload (host
+bookkeeping per op) but does not slow kernels, so GPU% was understated.
+
+    profiled wall  42.2 s      clean wall  24.7 s  (4.76 prefill + 195 x 102.1 ms)
+    GPU busy       16.5 s  ->  16.5 / 24.7 = 67% of CLEAN wall
+
+**67% > 60% -> Stage 0 says ABORT.** Do not build Stages 1-4.
+
+### Ceiling if graphs were built anyway
+
+    decode GPU floor  ~64 ms/token   (16.5s GPU minus ~4s prefill, over 195 tok)
+    decode today       102 ms/token
+    perfect graphs     1.6x  ->  16 tps      dense: 107.8 tps
+
+So the largest and riskiest remaining item buys at most 1.6x and leaves DKV ~7x
+slower than dense. The 344 syncs/token are real but largely OVERLAP GPU work at
+67% occupancy, so removing them returns far less than the raw 32 ms/token
+suggests.
+
+### What the real problem is
+
+DKV spends ~64 ms/token of GPU time attending 5,650 tokens. Dense spends 9.3
+ms/token TOTAL attending 15,849. Per attended token DKV costs roughly 20x more
+GPU work. That is the low-rank reconstruction: rebuilding K/V from U@V for 16
+blocks x 257 tokens, every layer, every step -- work dense simply does not do,
+because it reads its KV directly.
+
+This is algorithmic, not dispatch. Options, in order of expected value:
+
+1. **Cheaper reconstruction.** Reconstruction is O(K x S x R x D) per layer per
+   token. Reducing rank, or caching reconstructed blocks across steps while
+   routing is stable (DKV_DECODE_CACHE does this on MLX and is credited with
+   14.6x there), attacks the actual cost.
+2. **Accept the trade.** DKV's value was never decode speed; it is KV memory. On
+   Qwen2.5-1.5B the pool is 0.89x dense KV -- a real but small win. Whether that
+   is worth 11x decode is a product decision, not an engineering one.
+3. Graphs: 1.6x ceiling. Do last, if at all.

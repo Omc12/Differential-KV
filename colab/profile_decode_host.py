@@ -86,7 +86,24 @@ def main():
     print(f"  GPU-emitting ops  {launches:8d}   ({launches/gen:8.0f} per generated token)")
     print("=" * 78)
 
-    verdict = 100 * self_cuda / wall
+    # CRITICAL: `wall` here is the PROFILED wall, which torch.profiler inflates
+    # (measured 1.71x on this workload -- it adds host bookkeeping per op but does
+    # not slow kernels). Dividing GPU time by it UNDERSTATES GPU-busy badly: it
+    # reported 39% when the true figure against unprofiled wall was 67%, which is
+    # the difference between "inconclusive" and "abort". Correct with a clean
+    # wall measured outside the profiler.
+    torch.cuda.synchronize()
+    _t = time.perf_counter()
+    w.generate(prompt=prompt, max_new_tokens=args.steps, temperature=0.0,
+               top_p=1.0, repetition_penalty=1.0)
+    torch.cuda.synchronize()
+    clean_wall = time.perf_counter() - _t
+    print(f"  clean wall (no profiler) {clean_wall:8.3f} s   "
+          f"(profiler inflated by {wall/max(clean_wall,1e-9):.2f}x)")
+    print(f"  GPU busy vs CLEAN wall   {100*self_cuda/clean_wall:7.1f}%   <-- USE THIS")
+    print("=" * 78)
+
+    verdict = 100 * self_cuda / clean_wall
     print("\n  CUDA-GRAPH PLAN, STAGE 0 CRITERION")
     if verdict > 60:
         print(f"  GPU busy {verdict:.0f}% > 60%  ->  ABORT. The cost is real compute;")
