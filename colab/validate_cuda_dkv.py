@@ -150,7 +150,7 @@ def test_3_rank_mask():
           f"max|diff|={(out - ref).abs().max().item():.3e}")
 
 
-def test_4_needle(quick=False):
+def test_4_needle(quick=False, long_ctx=False):
     """End-to-end recall + determinism at temperature 0."""
     print("\n=== 4. End-to-end needle + determinism ===", flush=True)
     import random
@@ -195,6 +195,14 @@ def test_4_needle(quick=False):
     cases = [("2k", 200, 0.0), ("2k", 200, 0.5), ("2k", 200, 0.9)]
     if not quick:
         cases += [("8k", 800, 0.0), ("8k", 800, 0.5), ("8k", 800, 0.9)]
+    if long_ctx:
+        # ~32k. This is the gate for making DKV_REMAT_CACHE the default.
+        # The remat cache freezes the ROUTED BLOCK SET for DKV_REMAT_INTERVAL
+        # tokens, so its staleness risk scales with how many blocks the router is
+        # choosing between: at 8k it picks 16 of ~43, at 32k 16 of ~170. A frozen
+        # choice that was safe at 8k is not evidence it is safe here, which is why
+        # 8k passing is not sufficient to flip the default.
+        cases += [("32k", 2400, 0.0), ("32k", 2400, 0.5), ("32k", 2400, 0.9)]
     for label, n_filler, depth in cases:
         label = f"{label}@depth{depth:.1f}"
         ctx = build(n_filler, depth)
@@ -225,12 +233,17 @@ def test_4_needle(quick=False):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="skip the 8k prompt")
+    ap.add_argument("--long", action="store_true",
+                    help="also run ~32k depth cases. This is the gate for making "
+                         "DKV_REMAT_CACHE default-ON: the cache freezes the routed "
+                         "block set, and that risk scales with how many blocks the "
+                         "router chooses between (16 of ~43 at 8k, 16 of ~170 at 32k).")
     args = ap.parse_args()
 
     test_1_environment()
     test_2_exact_keys_default()
     test_3_rank_mask()
-    test_4_needle(quick=args.quick)
+    test_4_needle(quick=args.quick, long_ctx=args.long)
 
     print("\n" + "=" * 60)
     if FAILURES:
