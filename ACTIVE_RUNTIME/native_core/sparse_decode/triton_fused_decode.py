@@ -169,6 +169,71 @@ def _exact_residual_semantics(device=None) -> bool:
         return False
 
 
+def resolve_sparse_bias(lse_sparse=None, lse_dense=None):
+    """DKV_SPARSE_BIAS -> the additive nats applied to the sparse half's LSE.
+
+    Single source of truth: dkv_attention.py's merge and the inline merge in
+    native_triton_sparse_attn_decode both go through here, because they used to
+    parse the env string separately and could drift.
+
+    WHY 'auto' IS 0.0 ON CUDA
+    -------------------------
+    The adaptive formula is identical on both runtimes, character for character:
+
+        bias = max(0, BASE - 0.5 * max(0, (lse_dense - lse_sparse) - 4.0))
+
+    but it is evaluated on a DIFFERENT PARTITION of the softmax:
+
+      MLX  (mlx_dkv_wrapper.py:771, :1031)
+        sparse = anchors + low-rank deltas, lossy TWIN of each exact residual
+                 forced to -inf
+        dense  = mx.concatenate([res_k_all, dense_k]) -- the EXACT residual keys
+                 concatenated IN FRONT of the recency window
+
+      CUDA (this file, :460-483 and :2434)
+        sparse = anchors + low-rank deltas, twins KEPT, residual correction
+                 applied in place INSIDE the same softmax
+        dense  = the recency window only
+
+    So a query matching an exact residual raises lse_DENSE on MLX and
+    lse_SPARSE on CUDA -- opposite signs into the same subtraction. MLX's own
+    comment on the decay branch reads "decays to 0 as the dense half (e.g. an
+    exact needle residual) pulls ahead". On CUDA the needle pulls the other half
+    ahead, so `diff` goes NEGATIVE and the bias pins at BASE. Reaching the decay
+    branch on CUDA would require the recency window to beat ALL of compressed
+    history by 4 nats -- the opposite of the condition it was written for.
+
+    'auto' on CUDA was therefore never adaptive: it was a constant +2.0 nats,
+    e^2 = 7.4x, up-weighting compressed history against the recent window on
+    every token of every query. MLX resolves 'auto' to 0.0 in exactly the
+    structural situation CUDA is in -- its fused path, where residuals share the
+    softmax with the lossy keys (mlx_dkv_wrapper.py:4078: "Since the adaptive
+    form can't be reproduced per-token here, 'auto' resolves to 0.0").
+
+    'adaptive[,BASE]' keeps the old behaviour so the two can be A/B'd; an
+    explicit numeric value is still honoured as a flat bias.
+    """
+    env = os.environ.get("DKV_SPARSE_BIAS", "0.0").strip().lower()
+    if env.startswith("auto"):
+        return 0.0
+    if env.startswith("adaptive"):
+        if lse_sparse is None or lse_dense is None:
+            return 0.0
+        parts = env.split(",")
+        try:
+            base = float(parts[1]) if len(parts) > 1 and parts[1] else 2.0
+        except ValueError:
+            base = 2.0
+        diff = lse_dense - lse_sparse
+        if torch.is_tensor(diff):
+            return torch.clamp(base - 0.5 * torch.clamp(diff - 4.0, min=0.0), min=0.0)
+        return max(0.0, base - 0.5 * max(0.0, diff - 4.0))
+    try:
+        return float(env)
+    except ValueError:
+        return 0.0
+
+
 def _blocks_per_chunk() -> int:
     """KV blocks each Triton program handles before the cross-chunk reduction.
 
@@ -2475,34 +2540,27 @@ def native_triton_sparse_attn_decode(
 
                     s = torch.bmm(q_reshaped, k_permuted).view(H_q, -1) * inv_scale
                     
-                    # ── Sparse LSE Bias (Ported from MLX) ────────────────────
-                    bias_env = os.environ.get("DKV_SPARSE_BIAS", "0.0").strip().lower()
-                    if bias_env.startswith("auto"):
-                        bias_parts = bias_env.split(",")
-                        try:
-                            bias_base = float(bias_parts[1]) if len(bias_parts) > 1 and bias_parts[1] else 2.0
-                        except ValueError:
-                            bias_base = 2.0
-                        
-                        lse_dense = torch.logsumexp(s, dim=-1)
-                        lse_sparse = m_i + torch.log(torch.clamp(l_i, min=1e-9))
-                        diff = lse_dense - lse_sparse
-                        diff_clamped = torch.clamp(diff - 4.0, min=0.0)
-                        adaptive_bias = torch.clamp(bias_base - 0.5 * diff_clamped, min=0.0)
-                        
-                        factor = torch.exp(adaptive_bias)
+                    # ── Sparse LSE Bias ──────────────────────────────────────
+                    # See resolve_sparse_bias: 'auto' is 0.0 here because CUDA's
+                    # sparse half CONTAINS the exact residuals, which inverts the
+                    # sign of (lse_dense - lse_sparse) relative to the partition
+                    # the adaptive formula was written against. Scaling l_i and
+                    # O_i by e^bias is the online-softmax equivalent of adding
+                    # `bias` to lse_sparse: O_i is the un-normalised numerator
+                    # (out * l_out, above) and l_i its denominator, so the merge
+                    # below weights this half by e^bias more.
+                    _bias = resolve_sparse_bias(
+                        m_i + torch.log(torch.clamp(l_i, min=1e-9)),
+                        torch.logsumexp(s, dim=-1))
+                    if torch.is_tensor(_bias):
+                        factor = torch.exp(_bias)
                         l_i = l_i * factor
                         O_i = O_i * factor.unsqueeze(-1)
-                    else:
-                        try:
-                            bias_val = float(bias_env)
-                        except ValueError:
-                            bias_val = 0.0
-                        if bias_val != 0.0:
-                            factor = math.exp(bias_val)
-                            l_i = l_i * factor
-                            O_i = O_i * factor
-                    
+                    elif _bias != 0.0:
+                        factor = math.exp(_bias)
+                        l_i = l_i * factor
+                        O_i = O_i * factor
+
                     m_b = s.max(-1).values
                     m_new = torch.maximum(m_i, m_b)
                     a = torch.exp(m_i - m_new)

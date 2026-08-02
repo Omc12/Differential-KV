@@ -412,6 +412,75 @@ def stage_decode():
     return ok
 
 
+def stage_sparse_bias():
+    """DKV_SPARSE_BIAS='auto' is evaluated on a DIFFERENT partition on each side.
+
+    The formula is identical, character for character:
+
+        bias = max(0, BASE - 0.5 * max(0, (lse_dense - lse_sparse) - 4.0))
+
+        mlx_dkv_wrapper.py:857          triton_fused_decode.py:2489
+                                        dkv_attention.py:157
+
+    What differs is what the two LSEs contain.
+
+      MLX (mlx_dkv_wrapper.py:771, :1031)
+        sparse = anchors + low-rank deltas, with the lossy TWIN of every exact
+                 residual set to -inf
+        dense  = mx.concatenate([res_k_all, dense_k]) -- the EXACT residual keys
+                 CONCATENATED IN FRONT of the recency window
+
+      CUDA (triton_fused_decode.py:460-483, :2434)
+        sparse = anchors + low-rank deltas, twins KEPT, the residual correction
+                 applied in place inside the same softmax
+        dense  = the recency window only
+
+    So a needle that matches an exact residual raises lse_DENSE on MLX and
+    lse_SPARSE on CUDA -- opposite signs into the same subtraction. MLX's comment
+    for the decay branch says it "decays to 0 as the dense half (e.g. an exact
+    needle residual) pulls ahead". On CUDA the needle pulls the OTHER half ahead,
+    which drives diff negative and pins the bias at BASE.
+
+    This measures the bias each side computes for the same physical situation.
+    """
+    print("\n" + "=" * 74)
+    print("  [R4] DKV_SPARSE_BIAS='auto': same formula, different partition")
+    print("=" * 74)
+
+    BASE = 2.0
+    bias = lambda lse_d, lse_s: max(0.0, BASE - 0.5 * max(0.0, (lse_d - lse_s) - 4.0))  # noqa: E731
+
+    # One needle scoring far above filler, in a compressed block's exact residual.
+    # Logs are per-half logsumexps; only their DIFFERENCE matters to the formula.
+    lse_lossy_blocks = 6.0      # 16 routed blocks of low-rank filler
+    lse_needle_exact = 14.0     # the exact residual row the query matches
+    lse_recency      = 5.0      # ~30 recent tokens, no needle
+
+    def lse_add(*xs):
+        import math
+        m = max(xs)
+        return m + math.log(sum(math.exp(x - m) for x in xs))
+
+    for who, lse_s, lse_d in (
+        ("MLX  (residuals in DENSE)", lse_lossy_blocks,
+         lse_add(lse_needle_exact, lse_recency)),
+        ("CUDA (residuals in SPARSE)", lse_add(lse_lossy_blocks, lse_needle_exact),
+         lse_recency),
+    ):
+        d = lse_d - lse_s
+        b = bias(lse_d, lse_s)
+        print(f"    {who}:  lse_sparse {lse_s:6.2f}  lse_dense {lse_d:6.2f}"
+              f"  diff {d:+6.2f}  ->  bias {b:.2f}"
+              f"{'  (decayed to 0)' if b == 0 else f'  (PINNED at BASE, e^{b:.0f} = {2.718 ** b:.1f}x)'}")
+
+    print("    the decay branch needs diff > +4, i.e. the recency window beating ALL")
+    print("    of compressed history by 4 nats -- the OPPOSITE of the needle condition")
+    print("    it was written for. On CUDA 'auto' is therefore not adaptive at all.")
+    ok = bias(lse_add(lse_needle_exact, lse_recency), lse_lossy_blocks) == 0.0
+    print(f"    {'PASS — reproduced: MLX decays, CUDA saturates' if ok else '*** formula did not reproduce ***'}")
+    return ok
+
+
 def main():
     N, S, feat, rank = 8, 256, 512, 32
     nb, nr = 5, 137                      # needle block / row
@@ -489,7 +558,8 @@ def main():
 
     results = [("R1 residual RoPE position", stage_positions()),
                ("R2 block routing",          stage_routing()),
-               ("R3 decode needle weight",   stage_decode())]
+               ("R3 decode needle weight",   stage_decode()),
+               ("R4 sparse-bias partition",  stage_sparse_bias())]
     print("\n" + "=" * 74)
     for name, ok in results:
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")

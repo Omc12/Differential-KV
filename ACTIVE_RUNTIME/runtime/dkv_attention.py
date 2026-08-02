@@ -23,6 +23,7 @@ from native_core.sparse_decode.triton_fused_decode import (
     fused_decode_mps,
     _DKV_DEBUG_NUMERICS,
     HAS_TRITON,
+    resolve_sparse_bias as _resolve_sparse_bias,
 )
 from native_core.compression.lowrank import reconstruct_batch_U
 
@@ -133,31 +134,24 @@ except Exception:                                              # noqa: BLE001
 _LAST_DKV_LAYER: dict = {}
 
 # ── Sparse LSE Bias Configuration ─────────────────────────────────────────────
-_SPARSE_BIAS_ENV = os.environ.get("DKV_SPARSE_BIAS", "0.0").strip().lower()
-if _SPARSE_BIAS_ENV.startswith("auto"):
-    _SPARSE_BIAS_MODE = "auto"
-    _parts = _SPARSE_BIAS_ENV.split(",")
-    try:
-        _SPARSE_BIAS_BASE = float(_parts[1]) if len(_parts) > 1 and _parts[1] else 2.0
-    except ValueError:
-        _SPARSE_BIAS_BASE = 2.0
-    _SPARSE_BIAS = 0.0
-else:
-    _SPARSE_BIAS_MODE = "fixed"
-    _SPARSE_BIAS_BASE = 0.0
-    try:
-        _SPARSE_BIAS = float(_SPARSE_BIAS_ENV)
-    except ValueError:
-        _SPARSE_BIAS = 0.0
+# Parsing lives in resolve_sparse_bias (triton_fused_decode.py), which both merge
+# sites now call. The module-level constants that used to sit here were parsed at
+# IMPORT time, so any env change after import was silently ignored -- the same
+# class of trap as the validator writing DKV_RESIDUAL_EXACT_ROPE after the module
+# that reads it was already loaded.
 
 def _apply_sparse_bias(lse_sparse, lse_dense):
-    if _SPARSE_BIAS_MODE == "auto":
-        diff = lse_dense - lse_sparse
-        diff_clamped = torch.clamp(diff - 4.0, min=0.0)
-        adaptive_bias = torch.clamp(_SPARSE_BIAS_BASE - 0.5 * diff_clamped, min=0.0)
-        return torch.where(lse_sparse <= -1e9, lse_sparse, lse_sparse + adaptive_bias)
-    elif _SPARSE_BIAS != 0.0:
-        return torch.where(lse_sparse <= -1e9, lse_sparse, lse_sparse + _SPARSE_BIAS)
+    """Delegates to resolve_sparse_bias so this and the inline merge inside
+    native_triton_sparse_attn_decode cannot drift -- they were two independent
+    copies of the same formula, and the formula turned out to be wrong for
+    CUDA's softmax partition. The full argument is in resolve_sparse_bias's
+    docstring; the short version is that CUDA keeps the exact residuals in the
+    SPARSE half while MLX keeps them in the DENSE half, which flips the sign of
+    (lse_dense - lse_sparse) in the needle case and pinned 'auto' at its maximum
+    +2.0 nats instead of decaying it to 0."""
+    bias = _resolve_sparse_bias(lse_sparse, lse_dense)
+    if torch.is_tensor(bias) or bias != 0.0:
+        return torch.where(lse_sparse <= -1e9, lse_sparse, lse_sparse + bias)
     return lse_sparse
 
 # ── Context-aware bypass threshold ────────────────────────────────────────────
@@ -2404,6 +2398,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 and pool is not None
                                 and block_indices is not None
                                 and block_indices.numel() > 0
+                                # Deliberately still a RAW STRING test, not
+                                # resolve_sparse_bias(). 'auto' now resolves to a
+                                # 0.0 bias, but letting it satisfy this gate too
+                                # would ALSO switch production from the
+                                # non-combined kernel to the combined one in the
+                                # same change -- two variables moving at once, and
+                                # no way to attribute a recall shift to either.
+                                # Kernel choice stays exactly as it is today.
                                 and os.environ.get("DKV_SPARSE_BIAS", "0.0").strip().lower() in ("0", "0.0", "", "false", "off")
                             )
                             if _use_combined:
