@@ -1,5 +1,6 @@
 import torch
 from dataclasses import dataclass
+from unittest.mock import patch
 import pytest
 import os
 import sys
@@ -406,16 +407,26 @@ def test_dynamic_decay_and_weights():
     
     # Query Q = [1.0, 0.0]
     Q = torch.tensor([[1.0, 0.0]], dtype=torch.float32) # [1, 2] query
-    
-    # Route query
-    selected = route_query(
-        Q=Q,
-        srl_state=srl_state,
-        pool=pool,
-        scale=1.0,
-        layer_idx=0
-    )
-    
+
+    # Route query under HIGH-QUALITY routing, which is the mode this assertion
+    # describes. 5903322 moved the 2-hop chunk-graph expansion and the dynamic
+    # anchor-neighborhood expansion behind DKV_HIGH_QUALITY_ROUTING, leaving
+    # semantic+lexical+recency+sink as the default. Graph-hop decay is exactly
+    # what the expansion provides, so with it off the result is [101, 108] --
+    # the semantic seed plus the RECENCY pick (108 is the last block), which is
+    # correct fast-mode behaviour, not a routing bug.
+    #
+    # Patched rather than set via os.environ because query_router reads the flag
+    # once at import (query_router.py:72), so an env var set here would not be seen.
+    with patch("native_core.srl.query_router._HIGH_QUALITY_ROUTING", True):
+        selected = route_query(
+            Q=Q,
+            srl_state=srl_state,
+            pool=pool,
+            scale=1.0,
+            layer_idx=0
+        )
+
     selected_list = selected.tolist()
     # Selected list must prefer 103 (high query similarity neighbor of 101)
     assert 103 in selected_list
@@ -519,11 +530,29 @@ def test_dynamic_scaling_and_seeds():
             self.layers = []
 
     class DummyModel(torch.nn.Module):
+        """Reports a parameter count without allocating one.
+
+        This used to hold a real `torch.zeros(num_params)`, so faking a 7B model
+        allocated 26.08 GiB -- and ensure_loaded() does `.to(device)`, which OOMed
+        an 8 GB card (the 500M and 1.5B cases "passed" only by wasting 2 GB and
+        6 GB of VRAM first). The wrapper never reads the values; all three
+        consumers want metadata only:
+          hf_dkv_wrapper.py:682  sum(p.numel() ...)  -> picks srl_k_min/k_max/threshold
+          hf_dkv_wrapper.py:167  param.requires_grad_(False)
+          hf_dkv_wrapper.py:636  param.dtype quantization sniff
+        So keep one tiny REAL parameter -- `.to(device)` walks `_parameters`
+        directly and has to find something movable -- and report the intended
+        size from parameters() with a meta tensor, which allocates nothing.
+        """
         def __init__(self, num_params):
             super().__init__()
-            self.param = torch.nn.Parameter(torch.zeros(num_params))
+            self.param = torch.nn.Parameter(torch.zeros(1))
+            self._fake_numel = int(num_params)
             self.config = DummyConfig()
             self.model = DummyLayers()
+
+        def parameters(self, recurse: bool = True):
+            yield torch.empty(self._fake_numel, device="meta")
 
     class DummyTokenizer:
         def __init__(self):
@@ -771,14 +800,20 @@ def test_prime_node_and_adaptive_k():
     # Concentric zoning will select active centers 101 and 103 (both score 1.0).
     # Active centers pull in slots [101, 102, 103, 104] under Center/Around roles.
     # Unrelated centers 105, 107 and children 106, 108 score 0.0 (below threshold) and are not retrieved.
+    #
+    # HIGH-QUALITY routing, for the same reason as test_dynamic_decay_and_weights:
+    # pulling CHILDREN in via Center/Around zoning IS the neighborhood expansion
+    # that 5903322 made opt-in. In fast mode this returns [101, 103, 108] --
+    # both centers by semantic score, plus recency -- with the children dropped.
     Q = torch.tensor([[1.0, 0.0]], dtype=torch.float32)
-    selected = route_query(
-        Q=Q,
-        srl_state=srl_state,
-        pool=pool,
-        scale=1.0,
-        layer_idx=0
-    )
+    with patch("native_core.srl.query_router._HIGH_QUALITY_ROUTING", True):
+        selected = route_query(
+            Q=Q,
+            srl_state=srl_state,
+            pool=pool,
+            scale=1.0,
+            layer_idx=0
+        )
     selected_list = selected.tolist()
     assert 101 in selected_list
     assert 102 in selected_list
