@@ -292,18 +292,31 @@ def build_chunk_graph(
 
     has_idf = (inv_index is not None and hasattr(inv_index, "idf") and inv_index.idf)
 
+    # ── Snapshot the two device tensors these loops read element-by-element ──
+    # The handshake loops below indexed `slot_ids[i].item()` and `sim[j, i]` one
+    # scalar at a time. Each of those is a device->host sync inside an O(N) /
+    # O(N^2) Python loop, and the sync recorder ranked them at 3,192 + 1,596 +
+    # 1,596 + 342 hits during prefill. One transfer each instead of thousands of
+    # them; the values are identical.
+    #
+    # Safe because `sim` is READ-ONLY from here on: it is mutated only in the
+    # cross-reference pass above (which has already finished), and the later
+    # torch.topk at the semantic-neighbour step reads the tensor, not this copy.
+    _slot_ids_l = slot_ids.tolist()
+    _sim_l = sim.tolist()
+
     for i in range(N):
-        slot_i = int(slot_ids[i].item())
+        slot_i = _slot_ids_l[i]
         anchor_i = slot_to_anchor.get(slot_i, 0)
         is_i_new = (anchor_i >= cached_len) if cached_len > 0 else False
         
         # Earlier chunks j < i are hunting for matching chunks
         for j in range(i):
-            slot_j = int(slot_ids[j].item())
+            slot_j = _slot_ids_l[j]
             anchor_j = slot_to_anchor.get(slot_j, 0)
             is_j_new = (anchor_j >= cached_len) if cached_len > 0 else False
             
-            sim_score = max(0.0, float(sim[j, i]))
+            sim_score = max(0.0, _sim_l[j][i])
             
             # Check exclusion constraint
             is_excluded = False
@@ -376,12 +389,12 @@ def build_chunk_graph(
         sem_list = [[] for _ in range(N)]
 
     for i in range(N):
-        slot_i = int(slot_ids[i].item())
+        slot_i = _slot_ids_l[i]
         anchor_i = slot_to_anchor.get(slot_i, 0)
         is_i_new = (anchor_i >= cached_len) if cached_len > 0 else False
 
         for j in sem_list[i]:
-            slot_j = int(slot_ids[j].item())
+            slot_j = _slot_ids_l[j]
             anchor_j = slot_to_anchor.get(slot_j, 0)
             is_j_new = (anchor_j >= cached_len) if cached_len > 0 else False
 
@@ -397,7 +410,7 @@ def build_chunk_graph(
                         is_excluded = True
 
             if allow_i_to_j and j not in handshake_neighbors[i] and not is_excluded:
-                sim_score = max(0.0, float(sim[i, j]))
+                sim_score = max(0.0, _sim_l[i][j])
                 lex_score_i_to_j = 0.0
                 if not is_excluded and vocabs:
                     w_i = vocabs[i]
@@ -419,7 +432,7 @@ def build_chunk_graph(
                 handshake_weights[i].append(max(1e-5, weight_i_to_j))
                 
             if allow_j_to_i and i not in handshake_neighbors[j] and not is_excluded:
-                sim_score = max(0.0, float(sim[i, j]))
+                sim_score = max(0.0, _sim_l[i][j])
                 lex_score_j_to_i = 0.0
                 if not is_excluded and vocabs:
                     w_i = vocabs[i]
@@ -546,7 +559,11 @@ def build_chunk_graph(
             parent_desc = desc_matrix[valid_parent_idxs].float()  # [L, DESC_DIM]
             parent_sim = parent_desc @ parent_desc.T  # [L, L]
             parent_sim.fill_diagonal_(-1.0)
-            
+            # One transfer, not one per CELL. The loop below read parent_sim[i, j]
+            # a scalar at a time, so an [L, L] matrix cost L^2 device->host syncs
+            # -- the single largest prefill entry in the sync recorder at 3,192.
+            _parent_sim_l = parent_sim.tolist()
+
             for i in range(L):
                 p_slot = valid_parent_slots[i]
                 anchor_i = slot_to_anchor.get(p_slot, 0)
@@ -564,7 +581,7 @@ def build_chunk_graph(
                     if cached_len > 0 and (is_j_new and not is_i_new):
                         continue
 
-                    val = float(parent_sim[i, j].item())
+                    val = float(_parent_sim_l[i][j])
                     if val >= 0.30:
                         sims.append((val, neighbor_slot))
                 

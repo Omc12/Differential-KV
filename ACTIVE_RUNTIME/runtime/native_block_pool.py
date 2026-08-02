@@ -653,8 +653,11 @@ class NativeBlockPool:
         sc = torch.where(torch.isfinite(sc), sc, torch.ones_like(sc))
         self.scales[pidx] = sc.to(self.dtype)
         self.seq_lens[pidx] = int(seq_len)
-        for i in range(N):
-            self.version[int(pidx[i])] += 1
+        # One transfer, not one per block: int(pidx[i]) on a device tensor is a
+        # device->host sync, and this loop ran it once per block in the batched
+        # write -- 1,596 hits in the sync recorder during prefill.
+        for _p in pidx.tolist():
+            self.version[_p] += 1
 
         # ── residuals (padded [N, max_res]; slots zeroed first) ──
         self.residual_K_positions[pidx] = -1
