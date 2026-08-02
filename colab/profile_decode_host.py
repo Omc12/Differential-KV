@@ -39,6 +39,14 @@ def main():
     ap.add_argument("--steps", type=int, default=192,
                     help="MUST be large. generate() re-prefills every call, so a\n                         small count leaves the window prefill-dominated: at 16\n                         steps the top CPU entries were rSVD compression, not\n                         decode at all.")
     ap.add_argument("--topk", type=int, default=25)
+    ap.add_argument("--find-syncs", action="store_true",
+                    help="Name every implicit host sync via "
+                         "torch.cuda.set_sync_debug_mode('warn'). Use a SHORT "
+                         "--ctx/--steps: it prints a warning per sync and there "
+                         "are ~344 per token. This is how to locate the syncs "
+                         "instead of guessing which code path causes them -- "
+                         "grepping for .item()/.nonzero() finds sites that may "
+                         "not be on the active router path at all.")
     args = ap.parse_args()
 
     from colab.bench_dkv_tps import build_prompt          # same prompt builder
@@ -57,6 +65,12 @@ def main():
     w.generate(prompt=prompt, max_new_tokens=8, temperature=0.0, top_p=1.0,
                repetition_penalty=1.0)
 
+    if args.find_syncs:
+        import warnings
+        warnings.simplefilter("always")
+        torch.cuda.set_sync_debug_mode("warn")
+        print("\n  SYNC DEBUG ON — every implicit sync below names its call site.\n")
+
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
@@ -64,6 +78,8 @@ def main():
         r = w.generate(prompt=prompt, max_new_tokens=args.steps, temperature=0.0,
                        top_p=1.0, repetition_penalty=1.0)
     torch.cuda.synchronize()
+    if args.find_syncs:
+        torch.cuda.set_sync_debug_mode("default")
     wall = time.perf_counter() - t0
     gen = max(len(w.tokenizer(r).input_ids) - ntok, 1)
 
