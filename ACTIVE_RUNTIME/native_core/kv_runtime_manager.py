@@ -1534,6 +1534,31 @@ class KVRuntimeManager:
         if self._streaming_mgr is not None:
             self._streaming_mgr.compress_deferred_blocks(session_id)
 
+            # Drain the compression queue before decode starts. Blocks queued
+            # above are SUBMITTED, which is in NEITHER collection
+            # get_cached_decode_blocks reads, so anything still in flight when
+            # the first token is decoded is invisible to attention -- silently.
+            # See AsyncCompressor.wait_until_idle for the measurement.
+            #
+            # This is the prefill/decode BOUNDARY only, so ingest-time
+            # compression stays fully async and decode throughput is unchanged;
+            # the cost is one wait for work that was already running
+            # concurrently with the rest of prefill.
+            #
+            # DKV_AWAIT_COMPRESS=0 restores the previous racy behaviour for A/B.
+            _c = getattr(self._streaming_mgr, "compressor", None)
+            if (_c is not None and hasattr(_c, "wait_until_idle")
+                    and os.environ.get("DKV_AWAIT_COMPRESS", "1") != "0"):
+                try:
+                    _t = float(os.environ.get("DKV_AWAIT_COMPRESS_TIMEOUT", "30"))
+                except ValueError:
+                    _t = 30.0
+                if not _c.wait_until_idle(timeout=_t):
+                    print(f"[DKV] compression queue did not drain within {_t}s; "
+                          f"blocks still in flight will be reported by the "
+                          f"BLOCK COVERAGE check rather than silently dropped.",
+                          flush=True)
+
 
 
     def finalize_compressed_blocks(self):

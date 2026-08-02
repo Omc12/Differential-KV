@@ -333,6 +333,52 @@ class AsyncCompressor:
             )
             self._adjust_pending(-1)
 
+    def wait_until_idle(self, timeout: float = 30.0) -> bool:
+        """Block until every submitted block has finished compressing.
+
+        WHY THIS HAS TO EXIST. A block moves ACCUMULATING -> SUBMITTED the moment
+        it is queued here, and its GPU tensors are released immediately
+        (_submit_block_for_compression sets block.active_k = None). It only
+        becomes COMPRESSED when this worker finishes it. Between those two
+        points the block is in NEITHER of the two collections decode reads
+        (kv_runtime_manager.get_cached_decode_blocks: state == COMPRESSED -> the
+        sparse kernel, state == "ACCUMULATING" -> the dense window), so its
+        tokens are absent from attention -- silently.
+
+        Nothing waited for this queue before decode began, so the size of that
+        hole was set by a race between the compression worker and the first
+        decoded token. Measured on a 2822-token prompt, the coverage check
+        reports it on every DKV layer of Qwen3.5-2B:
+
+            BLOCK COVERAGE: 1 block(s) (256 tokens) are in NEITHER the
+            compressed nor the dense set ... states=['SUBMITTED']
+            anchors=[1542]   (layers 3, 7, 11, 15, 19, 23)
+
+        256 tokens invisible on the FIRST decode step -- the step that picks the
+        answer's opening token.
+
+        MLX has no equivalent gap: it compresses at the point a block leaves the
+        window, so a block is either in the session arrays or in the live tail.
+        Draining here gives CUDA the same invariant without making compression
+        synchronous everywhere -- the queue only has to be empty at the
+        prefill/decode boundary, not during ingest.
+
+        Returns True if the queue drained, False on timeout (caller continues;
+        the coverage check will then report whatever is still in flight rather
+        than losing it silently).
+        """
+        if not self._running:
+            return True
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._stats_lock:
+                drained = self.stats["completed"] >= self.stats["submitted"]
+            if drained and all(q.is_empty() for q in self._queues):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.0005)
+
     # ── Stats ─────────────────────────────────────────────────────────────────
 
     def summary(self) -> dict:
