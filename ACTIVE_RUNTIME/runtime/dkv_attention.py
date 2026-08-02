@@ -2715,13 +2715,36 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         if _hit is None:
                                             _g = _grb(pool, block_indices,
                                                       anchor_indices, cos_all, sin_all)
+                                            # The residuals are a CORRECTNESS
+                                            # requirement, not a refinement: they
+                                            # carry the exact values of the tokens
+                                            # the SVD reconstructs worst (codes,
+                                            # digits). Dropping them attends every
+                                            # routed block at pure low-rank
+                                            # fidelity and loses exact recall
+                                            # while still reading fluently.
+                                            # res_k is already rotated at the
+                                            # residuals' TRUE token positions by
+                                            # the gather (DKV_RESIDUAL_EXACT_ROPE).
+                                            _has_res = _g.get("has_res", False)
                                             _Km, _Vm = _rb(
                                                 _g["U"], _g["V_K"], _g["V_V"],
                                                 _g["anchors_K"], _g["anchors_V"],
                                                 _g["scales"], _g["U_scale"],
-                                                _layer_active_rank)
+                                                _layer_active_rank,
+                                                res_k=_g["res_k"] if _has_res else None,
+                                                res_pos=_g["res_pos"] if _has_res else None,
+                                                res_v=_g["res_v"] if _has_res else None,
+                                                res_pos_v=_g["res_pos_v"] if _has_res else None)
                                             _rc.put(_rkey, _Km, _Vm)
-                                            _seq_cached = _g["seq_lens"]
+                                            # clone: under DKV_STATIC_GATHER the gather
+                                            # returns a PERSISTENT buffer that the next
+                                            # layer's gather overwrites, and this is held
+                                            # across tokens. Same invariant the gather's
+                                            # batch-queue note states — anything outliving
+                                            # the call must own its memory. _Km/_Vm are
+                                            # fresh bmm outputs, so only this needs it.
+                                            _seq_cached = _g["seq_lens"].clone()
                                             _ws[("_remat_seq", captured_layer_idx)] = _seq_cached
                                         else:
                                             _Km, _Vm = _hit
