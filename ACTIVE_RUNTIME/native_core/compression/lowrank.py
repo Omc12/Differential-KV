@@ -1391,8 +1391,36 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         _boost_vec = None
 
         block_token_ids = _gather_block_token_ids(block, manager)
-        if block_token_ids and getattr(manager, "tokenizer", None) is not None \
-                and len(block_token_ids) == T_active:
+
+        # ALIGN TO THE ACTIVE ROWS. _gather_block_token_ids returns
+        # block.token_indices, which is [anchor, anchor+1, ... ] -- 1 + T_active
+        # entries, because the anchor occupies block-local slot 0 and active_k is
+        # k[..., 1:] (streaming_sparse_ingest.py:1246 vs :1216). The gate below
+        # demanded len == T_active exactly, so for a FULL block it compared
+        # 257 == 256 and the whole content-aware boost was skipped -- silently,
+        # with no else branch, on every full block there has ever been.
+        #
+        # That boost is CUDA's counterpart to MLX's is_core capture
+        # (mlx_dkv_wrapper.py:2711 flags digits, all-caps runs of length >= 2,
+        # '-' and '_', and :2794 multiplies joint_errors by the result so those
+        # tokens win the top-k). Without it the residual set is chosen on
+        # reconstruction error alone, and a code like ZEBRA-4471-QUARTZ has to
+        # out-error 250 tokens of prose filler to earn a slot -- in a block whose
+        # low median error puts it in the "easy" tier with a budget of EIGHT.
+        #
+        # _boost_vec is multiplied against joint_err, which is indexed by DELTA
+        # row j == active token j == token_indices[1 + j]. So the row must be
+        # built from the tokens AFTER the anchor; using the raw list would also
+        # shift every boost one position off even where the length matched.
+        _ids_active = None
+        if block_token_ids:
+            if len(block_token_ids) == T_active + 1:
+                _ids_active = block_token_ids[1:]      # drop the anchor
+            elif len(block_token_ids) == T_active:
+                _ids_active = block_token_ids          # already active-aligned
+        block_token_ids = _ids_active
+
+        if block_token_ids and getattr(manager, "tokenizer", None) is not None:
             try:
                 _sid = getattr(block, "session_id", None)
                 _cached_boost = None
