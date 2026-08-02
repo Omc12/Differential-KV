@@ -37,6 +37,27 @@ from typing import TYPE_CHECKING, List, Optional
 import torch
 
 from native_core.srl.chunk_descriptor import compute_query_descriptor
+
+
+def _rope_partial(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """RoPE honouring partial rotary (rotary_dim may be < head_dim).
+
+    Rotates the leading `rotary_dim` slice and passes the remainder through
+    unrotated. Reduces EXACTLY to `x*cos + rotate_half(x)*sin` when
+    rotary_dim >= head_dim, so full-rotary models are bit-identical.
+
+    Mirrors triton_fused_decode._partial_rope_apply; kept local so the router has
+    no import dependency on the Triton module (which is optional on non-CUDA).
+    """
+    rot = cos.shape[-1]
+    D = x.shape[-1]
+    if rot >= D:
+        h = D // 2
+        return x * cos + torch.cat([-x[..., h:], x[..., :h]], dim=-1) * sin
+    x_rot, x_pass = x[..., :rot], x[..., rot:]
+    h = rot // 2
+    rotated = x_rot * cos + torch.cat([-x_rot[..., h:], x_rot[..., :h]], dim=-1) * sin
+    return torch.cat([rotated, x_pass], dim=-1)
 from native_core.srl.inverted_index import lookup as inverted_lookup, lookup_occurrences
 
 if TYPE_CHECKING:
@@ -972,17 +993,39 @@ def route_blocks_relevance(
     anc = pool.anchors_K[slots_long].clone()                    # [N, H_kv, D] fp16
 
     if _route_rope and anchor_indices is not None and cos is not None and sin is not None:
-        cos_flat = cos.reshape(-1, anc.shape[-1])
-        sin_flat = sin.reshape(-1, anc.shape[-1])
+        # Reshape by cos's OWN last dim (rotary_dim), not the key's head_dim.
+        #
+        # cos/sin come from rotary_emb as [1, L, rotary_dim]. Reshaping them to
+        # (-1, head_dim) is only valid when rotary_dim == head_dim. On a partial-
+        # rotary model (Qwen3.5-2B: head_dim 256, rotary_dim 64) it RAISES —
+        #   RuntimeError: shape '[-1, 256]' is invalid for input of size 697792
+        # — at every context length tested (2822, 10903, 32942 tokens; L*64 is
+        # not a multiple of 256 in any of them). The call site in dkv_attention.py
+        # wraps this in `except Exception: # SRL failure is non-fatal` with the
+        # message behind DKV_SRL_VERBOSE, so the router simply never ran on that
+        # model and decode silently fell back to attending every block.
+        #
+        # That is why seven consecutive changes to this function produced
+        # byte-identical needle results on Qwen3.5-2B: none of them executed.
+        # Qwen2.5-1.5B is full-rotary (128 == 128) so the reshape happened to be
+        # valid there, which is why the two models behaved so differently.
+        #
+        # Even where the reshape does not raise it is wrong: it packs
+        # head_dim/rotary_dim consecutive POSITIONS into one row, so the table is
+        # that many times too short and every deeper anchor clamps to the last row.
+        _rot_dim = cos.shape[-1]
+        cos_flat = cos.reshape(-1, _rot_dim)
+        sin_flat = sin.reshape(-1, _rot_dim)
         # .long(): index tensors must be long/int/byte/bool. anchor_indices is
         # int32 (metadata) which is valid, but coerce defensively so a narrower
         # int dtype (e.g. int16) can never raise "tensors used as indices...".
         anc_pos = anchor_indices.long().clamp(min=0, max=cos_flat.shape[0] - 1)
-        cos_anc = cos_flat[anc_pos].to(device=anc.device, dtype=anc.dtype).unsqueeze(1)  # [N, 1, D]
-        sin_anc = sin_flat[anc_pos].to(device=anc.device, dtype=anc.dtype).unsqueeze(1)  # [N, 1, D]
-        half_d = anc.shape[-1] // 2
-        anc_half = torch.cat([-anc[..., half_d:], anc[..., :half_d]], dim=-1)
-        anc = anc * cos_anc + anc_half * sin_anc
+        cos_anc = cos_flat[anc_pos].to(device=anc.device, dtype=anc.dtype).unsqueeze(1)  # [N, 1, rot]
+        sin_anc = sin_flat[anc_pos].to(device=anc.device, dtype=anc.dtype).unsqueeze(1)  # [N, 1, rot]
+        # Partial-rotary aware: rotate the leading rotary_dim slice, pass the
+        # tail through. Reduces to the original full-width form when
+        # rotary_dim == head_dim, so full-rotary models are bit-identical.
+        anc = _rope_partial(anc, cos_anc, sin_anc)
     else:
         cos_anc = sin_anc = None
 
@@ -1028,18 +1071,19 @@ def route_blocks_relevance(
         rvalid = (res_pos[slots_long, :R] >= 0)         # [N, R]
 
         if _route_rope and cos is not None and sin is not None:
-            cos_flat = cos.reshape(-1, rk.shape[-1])
-            sin_flat = sin.reshape(-1, rk.shape[-1])
+            # Same fix as the anchor rotation above: reshape by cos's own
+            # rotary_dim, never by the key's head_dim.
+            _rot_dim = cos.shape[-1]
+            cos_flat = cos.reshape(-1, _rot_dim)
+            sin_flat = sin.reshape(-1, _rot_dim)
             # .long(): pool.residual_K_positions is int16 (native_block_pool.py),
             # which PyTorch REJECTS as an index dtype ("tensors used as indices
             # must be long, int, byte or bool tensors"). This is the crash that
             # took down SRL-gated decode routing. Coerce before indexing cos/sin.
             res_p = res_pos[slots_long, :R].long().clamp(min=0, max=cos_flat.shape[0] - 1)
-            cos_res = cos_flat[res_p].to(device=rk.device, dtype=rk.dtype).unsqueeze(2)  # [N, R, 1, D]
-            sin_res = sin_flat[res_p].to(device=rk.device, dtype=rk.dtype).unsqueeze(2)  # [N, R, 1, D]
-            half_d = rk.shape[-1] // 2
-            rk_half = torch.cat([-rk[..., half_d:], rk[..., :half_d]], dim=-1)
-            rk = rk * cos_res + rk_half * sin_res
+            cos_res = cos_flat[res_p].to(device=rk.device, dtype=rk.dtype).unsqueeze(2)  # [N, R, 1, rot]
+            sin_res = sin_flat[res_p].to(device=rk.device, dtype=rk.dtype).unsqueeze(2)  # [N, R, 1, rot]
+            rk = _rope_partial(rk, cos_res, sin_res)
 
         # Permute rk to [H_kv, D, N * R]
         rk_permuted = rk.permute(2, 3, 0, 1).reshape(H_kv, D, N * R)
