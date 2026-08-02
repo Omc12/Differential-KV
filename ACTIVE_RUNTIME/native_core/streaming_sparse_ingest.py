@@ -613,7 +613,30 @@ class StreamingSparseIngestManager:
         self._metadata_versions.setdefault(session_id, {})
         self.session_prefill_lens[session_id] = prefill_len
         if session_id not in self.session_micro_block_sizes:
-            if prefill_len > 0:
+            # DKV_ADAPTIVE_BLOCK_SIZE — default OFF = MLX parity (fixed block).
+            #
+            # MLX has ONE block size (block_size=256) for every prompt. This
+            # length-bucketed schedule is a CUDA-only invention, and it changes
+            # more than memory layout:
+            #
+            #  * RANK IS FIXED AT 32 WHILE THE BLOCK SHRINKS. At S=16 the rank
+            #    exceeds the block, so the "low-rank" factorisation is essentially
+            #    lossless; at S=256 it is 8x compression. The fidelity regime — and
+            #    therefore what the needle tests measure — silently changes with
+            #    prompt length, which is why short contexts pass easily.
+            #  * THE ROUTED TOKEN BUDGET moves with it. K blocks x span tokens is
+            #    the quantity that has to match MLX's 4096, and span here has been
+            #    observed at 65 (2822-token prompt) and 129 (7739-token prompt) in
+            #    the same model on consecutive runs.
+            #  * POOL SIZING assumes >=257 (max(pool_block_size, 257)), so a 16-
+            #    to 128-token block wastes most of every slot.
+            #  * RESULTS ARE NOT COMPARABLE ACROSS CONTEXT LENGTHS, which makes a
+            #    depth sweep at 2k/8k/32k three different algorithms rather than
+            #    one algorithm at three lengths.
+            #
+            # Set DKV_ADAPTIVE_BLOCK_SIZE=1 to restore the schedule.
+            _adaptive = os.environ.get("DKV_ADAPTIVE_BLOCK_SIZE", "0") == "1"
+            if _adaptive and prefill_len > 0:
                 if prefill_len < 256:
                     raw_target = 16
                 elif prefill_len < 1024:
