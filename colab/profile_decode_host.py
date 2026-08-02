@@ -36,7 +36,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
     ap.add_argument("--ctx", type=int, default=16000)
-    ap.add_argument("--steps", type=int, default=16)
+    ap.add_argument("--steps", type=int, default=192,
+                    help="MUST be large. generate() re-prefills every call, so a\n                         small count leaves the window prefill-dominated: at 16\n                         steps the top CPU entries were rSVD compression, not\n                         decode at all.")
     ap.add_argument("--topk", type=int, default=25)
     args = ap.parse_args()
 
@@ -106,6 +107,12 @@ def main():
     print("=" * 78)
     print("\nRead the CPU column, not the CUDA one. Three optimisations aimed at")
     print("GPU-side work already returned ~0; the remaining cost is host-side.")
+    _prefill_frac = ntok / max(ntok + gen, 1)
+    print(f"\nWINDOW COMPOSITION: {ntok} prefilled vs {gen} generated tokens.")
+    if gen < 64:
+        print("  !! PREFILL-DOMINATED. generate() re-prefills every call, so these")
+        print("     rankings describe COMPRESSION, not decode. Re-run with more")
+        print("     --steps before drawing any decode conclusion.")
 
 
 if __name__ == "__main__":

@@ -200,3 +200,32 @@ the worst failure mode this project has. Required before flipping the default:
 
 Prefill. It is variable-shaped by nature and is 4.83 s vs dense 1.45 s — a real
 problem, but a different one, and chunked prefill is not graph-shaped.
+
+## Stage 0, first run — answered the PREFILL question, not the decode one
+
+Qwen2.5-1.5B, 15,849-tok prompt, **only 9 tokens generated**, so the window is
+prefill-dominated. Recorded because the finding is real, just not about decode.
+
+    wall              12.438 s
+    self CPU           3.486 s  (28.0%)
+    self GPU           5.195 s  (41.8%)   -> verdict "inconclusive"
+
+    cudaMemcpyAsync      37,723 calls   1132 ms  32.5%
+    cudaStreamSynchronize 22,488 calls    603 ms  17.3%
+    cudaLaunchKernel    245,497 calls    541 ms  15.5%
+
+**Attribution: this is the compression path.** `lowrank.py:335` does
+`deltas.cpu()` per block by design ("Perform all operations on CPU to guarantee
+zero GPU-CPU telemetry synchronizations"), followed by ~29 `.item()` calls per
+compress. At 1,764 compressed slots that is ~50k memcpys/syncs -- matching the
+counts. `aten::normal_` and `aten::linalg_qr` at n=28 are rSVD, once per layer.
+
+So it explains **DKV prefill 4.76 s vs dense 1.45 s (3.3x)**, which is a real and
+separate problem: SVD is computed on the host, so every block round-trips.
+
+It does NOT bound the decode gap, and the "inconclusive" 42% GPU-busy verdict is
+therefore meaningless -- it is measuring compression. `--steps` now defaults to
+192 and the tool warns when the window is prefill-dominated.
+
+**Do not treat Stage 0 as done.** Re-run with enough generated tokens that decode
+dominates before deciding whether to build Stages 1-4.
