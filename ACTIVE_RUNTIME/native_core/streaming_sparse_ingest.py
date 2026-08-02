@@ -1555,6 +1555,42 @@ class StreamingSparseIngestManager:
                         _ok = compress_layer_blocks_gpu(_sub, _rank, manager=self.manager)
                         if _ok:
                             _gpu_compressed_count += len(_sub)
+                            # POST-CONDITION. compress_layer_blocks_gpu runs
+                            # SYNCHRONOUSLY, so by the time it returns _ok every
+                            # block it accepted must have left SUBMITTED. It
+                            # reports one bool for the whole sub-batch, though,
+                            # so a block it silently skipped stays SUBMITTED --
+                            # and SUBMITTED is in NEITHER collection decode reads
+                            # (kv_runtime_manager.get_cached_decode_blocks), so
+                            # those tokens vanish from attention with no error.
+                            #
+                            # This is not hypothetical: the comment above records
+                            # the same class of bug ("used to leave some of them
+                            # stuck in SUBMITTED when the fallback saw
+                            # skip_compression=True"), and the coverage check
+                            # still reports one block stranded this way on every
+                            # DKV layer of a 2822-token prompt:
+                            #   states=['SUBMITTED'] anchors=[1542]
+                            #   layers 3, 7, 11, 15, 19, 23
+                            # which survived both the block-0 fix and the
+                            # queue drain because it is neither of those paths.
+                            #
+                            # Rather than chase which internal branch skipped it,
+                            # enforce the invariant the two FAILURE branches below
+                            # already maintain: after a compression attempt a
+                            # block is either COMPRESSED (published to the pool)
+                            # or ACCUMULATING (served densely). Never SUBMITTED.
+                            # An unpublished block still has its raw KV, so
+                            # falling back to dense is exact -- strictly better
+                            # than dropping it.
+                            for _b in _sub:
+                                if _b.state == "SUBMITTED":
+                                    _b.state = "ACCUMULATING"
+                                    self.update_metadata_state(session_id, layer_idx, _b)
+                                    print(f"[DKV] compress reported success but left "
+                                          f"anchor={_b.anchor_idx} layer={layer_idx} "
+                                          f"SUBMITTED (unpublished); serving it dense.",
+                                          flush=True)
                         else:
                             _gpu_all_success = False
                             # The GPU helper may return False without raising.  It
