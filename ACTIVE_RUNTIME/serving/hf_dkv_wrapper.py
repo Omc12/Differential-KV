@@ -1544,7 +1544,12 @@ class PyTorchDKVHFWrapper:
             if stop_generation:
                 break
 
-            if next_id.item() in self.stop_token_ids:
+            # next_id_val already holds next_id.item() from the sample step
+            # above. Calling .item() again is a SECOND device sync on the same
+            # value, once per generated token -- torch.cuda.set_sync_debug_mode
+            # named this line and line 1474 as the only per-token syncs in the
+            # generate loop.
+            if next_id_val in self.stop_token_ids:
                 break
 
             # Pass the correct absolute position so RoPE rotates at the right angle.
