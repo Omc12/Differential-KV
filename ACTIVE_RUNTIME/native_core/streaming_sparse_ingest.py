@@ -151,6 +151,55 @@ def _new_metadata_tensor(rows: int) -> torch.Tensor:
         return torch.full((rows, 4), -1, dtype=torch.int32)
 
 
+def _resolve_short_context_threshold() -> int:
+    """Context length below which blocks are kept DENSE (never SVD-compressed).
+
+    THIS EXISTS BECAUSE TWO SHIPPED SERVING DEFAULTS HAD NO EFFECT ON CUDA.
+
+    decode_config.BEST_DECODE_DEFAULTS -- what cli.py and the OpenAI gateway
+    apply, and what validate_cuda_dkv.py prints as "serving defaults applied" --
+    sets DKV_COMPRESSED_DECODE=auto and DKV_COMPRESSED_MIN_CTX=8192. A search
+    across every .py/.cpp/.cu/.mm/.h/.metal file in the repo finds exactly one
+    consumer of either name: serving/mlx_dkv_wrapper.py:4477 and :4482. No CUDA
+    path read them. They were inert on the runtime the validator validates,
+    while being printed at the top of every run as though they applied.
+
+    The behaviours were therefore 32x apart on the same nominal config:
+
+        MLX   _resolve_compressed_decode(seq_len) -> dense below 8192 tokens
+        CUDA  short_context_threshold = 256       -> compress from 256 tokens
+
+    That is not a numerical divergence, it is a different code path for the
+    same request. At the validator's 2k cases (2822 tokens) MLX runs DENSE and
+    CUDA runs COMPRESSED -- which is worth knowing before comparing their needle
+    results, because "MLX passes 2k@0.0" partly means "MLX never compressed it".
+
+    CUDA has no decode-time dense/sparse switch to mirror MLX's directly, but it
+    does not need one: gating INGEST has the same net effect, because a block
+    that is never compressed is still readable through active_k and decode
+    attends it densely. short_context_threshold is that gate and it was simply
+    set 32x too low relative to the shipped policy.
+
+    Mirrors _resolve_compressed_decode's tri-state exactly:
+      "1"/"on"/"true"   -> always compress (256, the previous CUDA behaviour)
+      "0"/"off"/"false" -> never compress
+      "auto"            -> dense below DKV_COMPRESSED_MIN_CTX
+
+    NOTE: MLX defaults DKV_COMPRESSED_MIN_CTX to 16384 and BEST_DECODE_DEFAULTS
+    overrides it to 8192; this reads the same variable with the same fallback,
+    so both runtimes move together.
+    """
+    mode = os.environ.get("DKV_COMPRESSED_DECODE", "1").strip().lower()
+    if mode in ("1", "on", "true", "yes"):
+        return 256
+    if mode in ("0", "off", "false", "no"):
+        return 1 << 30                     # effectively never compress
+    try:
+        return int(os.environ.get("DKV_COMPRESSED_MIN_CTX", "16384"))
+    except ValueError:
+        return 16384
+
+
 @dataclass
 class StreamingKVBlock:
     """
@@ -426,7 +475,7 @@ class StreamingKVBlock:
     _metadata_idx: int = -1   # -1 = not yet assigned
 
     # ── Configurable thresholds (class level for slot-friendliness) ──
-    short_context_threshold: ClassVar[int] = 256
+    short_context_threshold: ClassVar[int] = 256   # overwritten by the manager
     protect_block_zero: ClassVar[bool] = True
 
     def __eq__(self, other):
@@ -550,7 +599,7 @@ class StreamingSparseIngestManager:
         native_pool = None,
         device: str = "cuda",
         recency_window: int = 512,
-        short_context_threshold: int = 256,
+        short_context_threshold: int = None,
         protect_block_zero: bool = True,
     ):
         self.compressor = compressor
@@ -560,6 +609,8 @@ class StreamingSparseIngestManager:
         self.native_pool = native_pool
         self.device = device
         self.recency_window = recency_window
+        if short_context_threshold is None:
+            short_context_threshold = _resolve_short_context_threshold()
         self.short_context_threshold = short_context_threshold
         self.protect_block_zero = protect_block_zero
         StreamingKVBlock.short_context_threshold = short_context_threshold
