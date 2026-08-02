@@ -1186,9 +1186,12 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         # the intended block.  Keep only rows that actually matched.
                                         mask = (selected_slots.unsqueeze(1) == block_indices.unsqueeze(0))
                                         has_match = mask.any(dim=1)
-                                        block_idx_in_full = mask.to(torch.uint8).argmax(dim=1)[has_match]
+                                        # Same two-syncs-on-one-predicate pattern as the
+                                        # per-layer reroute below; resolve the shape once.
+                                        _keep0 = torch.nonzero(has_match, as_tuple=True)[0]
+                                        block_idx_in_full = mask.to(torch.uint8).argmax(dim=1)[_keep0]
                                         selected_anchors = anchor_indices[block_idx_in_full]
-                                        srl_state.current_step_slots = selected_slots[has_match]
+                                        srl_state.current_step_slots = selected_slots[_keep0]
                                         srl_state.current_step_anchors = selected_anchors
                                         selected_slots = srl_state.current_step_slots
                                     else:
@@ -1214,10 +1217,20 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     # onto block 0.
                                     mask = (selected_anchors.unsqueeze(1) == anchor_indices.unsqueeze(0))
                                     has_match = mask.any(dim=1)
-                                    if bool(has_match.any()):
-                                        block_idx_in_layer = mask.to(torch.uint8).argmax(dim=1)[has_match]
+                                    # ONE sync, not three. bool(has_match.any()) and
+                                    # each boolean-mask index below were three separate
+                                    # device->host syncs on the SAME predicate -- the
+                                    # sync recorder put them at 5,376 hits each, ~1 per
+                                    # layer per decoded token, 26% of all syncs
+                                    # combined. torch.nonzero resolves the shape once;
+                                    # .numel() is then free and integer indexing is a
+                                    # plain gather. x[bool_mask] and x[nonzero(mask)]
+                                    # select the same rows in the same order.
+                                    _keep = torch.nonzero(has_match, as_tuple=True)[0]
+                                    if _keep.numel() > 0:
+                                        block_idx_in_layer = mask.to(torch.uint8).argmax(dim=1)[_keep]
                                         block_indices = block_indices[block_idx_in_layer]
-                                        anchor_indices = selected_anchors[has_match]
+                                        anchor_indices = selected_anchors[_keep]
 
                                         # Cache is structured and self-evicting based on layer_idx and anchors_tuple comparison
                                         _srl_rerouted = True
