@@ -2306,13 +2306,29 @@ def native_triton_sparse_attn_decode(
                         _rot_fired = bool(_dense_pos_list) and len(_dense_pos_list) == k_kv.shape[2]
                         if _rot_fired:
                             _dp = torch.tensor(_dense_pos_list, dtype=torch.long, device=k_kv.device)
-                            # cos/sin: [1, seq_len, head_dim]  (standard rotary_emb output)
-                            _cos_d = cos[0, _dp.clamp(max=cos.shape[1] - 1)].unsqueeze(0).unsqueeze(1)  # [1,1,L,D]
+                            # cos/sin here are the RAW rotary_emb output, so the
+                            # last dim is ROTARY_DIM, not head_dim. The old comment
+                            # claimed "[1,1,L,D]" and the code below rotated full
+                            # width off that assumption, which is fine only when
+                            # partial_rotary_factor == 1.0. On Qwen3.5-2B
+                            # (head_dim 256, rotary_dim 64) it raised
+                            #   size of tensor a (256) must match tensor b (64)
+                            # the moment this path could actually be reached --
+                            # which was never, until the S_MAX autotune collision
+                            # above it was fixed. Note the two OTHER hand-rolled
+                            # rotations in this file (~735, ~845) take cos_SLICED,
+                            # already expanded to head_dim, which is why the
+                            # PyTorch fallback survived on the same model.
+                            _cos_d = cos[0, _dp.clamp(max=cos.shape[1] - 1)].unsqueeze(0).unsqueeze(1)  # [1,1,L,rotary_dim]
                             _sin_d = sin[0, _dp.clamp(max=sin.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
-                            _hd = k_kv.shape[-1] // 2
-                            _k_half = torch.cat([-k_kv[..., _hd:], k_kv[..., :_hd]], dim=-1)
-                            k_kv = (k_kv * _cos_d.to(k_kv.dtype)
-                                    + _k_half * _sin_d.to(k_kv.dtype))
+                            # _partial_rope_apply rotates the leading rotary_dim
+                            # slice and passes the tail through; it reduces to the
+                            # exact expression this replaced when rotary_dim >= D,
+                            # so full-rotary models (Qwen2.5, rotary_dim == 128 ==
+                            # head_dim) are bit-identical.
+                            k_kv = _partial_rope_apply(k_kv,
+                                                       _cos_d.to(k_kv.dtype),
+                                                       _sin_d.to(k_kv.dtype))
 
                     H_q, D = q_sq.shape
                     H_kv = k_kv.shape[1]
