@@ -279,22 +279,41 @@ if HAS_TRITON:
         tl.store(PartLSE_ptr + chunk * num_q_heads + q_head,
                  m + tl.log(tl.where(l > 0.0, l, 1e-9)))
 
-    # Working Triton kernel matching the actual NativeBlockPool layout
-    # Feature 3: @triton.autotune over RANK and S_MAX shapes.
-    # Triton pre-compiles one kernel per (R, S_MAX, D) combination seen at runtime
-    # and benchmarks them to pick the fastest config.  The inner rank loop unrolls
-    # completely for each specialisation → full register reuse, no loop overhead.
+    # Working Triton kernel matching the actual NativeBlockPool layout.
+    # Triton pre-compiles one kernel per (R, S_MAX, D) combination seen at runtime,
+    # since all three are constexpr — the inner rank loop unrolls completely for
+    # each specialisation → full register reuse, no loop overhead. autotune then
+    # picks num_warps per (R, D); it does NOT choose S_MAX or BLOCKS_PER_CHUNK,
+    # which are caller-supplied correctness parameters — see the note below.
     @triton.autotune(
         configs=[
-            # Each config specialises (S_MAX tile, BLOCKS_PER_CHUNK).
-            # R (rank) and D (head_dim) are already constexpr — they specialise
-            # automatically per unique launch.  These configs tune the blocking.
-            triton.Config({"S_MAX": 64,  "BLOCKS_PER_CHUNK": 16}, num_warps=4),
-            triton.Config({"S_MAX": 64,  "BLOCKS_PER_CHUNK": 8},  num_warps=4),
-            triton.Config({"S_MAX": 64,  "BLOCKS_PER_CHUNK": 16}, num_warps=8),
-            triton.Config({"S_MAX": 128, "BLOCKS_PER_CHUNK": 8},  num_warps=4),
-            triton.Config({"S_MAX": 128, "BLOCKS_PER_CHUNK": 16}, num_warps=4),
-            triton.Config({"S_MAX": 128, "BLOCKS_PER_CHUNK": 16}, num_warps=8),
+            # ONLY num_warps is tuned here. S_MAX and BLOCKS_PER_CHUNK used to be
+            # Config kwargs, which broke this kernel two ways at once:
+            #
+            # 1. CRASH. autotune injects Config kwargs as keyword arguments, and
+            #    the call site also passes both POSITIONALLY (they sit at fixed
+            #    slots in the constexpr list). Every launch raised
+            #      TypeError: dynamic_func() got multiple values for argument 'S_MAX'
+            #    so native_triton_sparse_attn_decode ALWAYS fell back to the
+            #    PyTorch decoder. That is the DKV_SPARSE_BIAS=auto path, i.e. the
+            #    serving default -- so production has never run this kernel. It
+            #    stayed hidden because validate_cuda_dkv.py exercised the OTHER
+            #    entry point (native_triton_sparse_attn_decode_combined), where
+            #    fallback_count=0 was true and meaningless.
+            #
+            # 2. WRONG RESULTS if it had launched. Neither value is a tuning knob.
+            #    S_MAX is the block's padded sequence length -- the caller passes
+            #    next_power_of_2(pool.max_seq_len), 256 for this pool -- and
+            #    `offs_s = tl.arange(0, S_MAX)` indexes tokens with it, so a config
+            #    picking 64 would silently read the first 64 tokens of a 256-token
+            #    block and drop the rest. BLOCKS_PER_CHUNK is worse: the caller
+            #    derives num_chunks AND the launch grid from it, so autotuning it
+            #    desynchronises the grid from the work decomposition.
+            #
+            # R (rank) and D (head_dim) are constexpr and specialise per launch
+            # already; `key` re-tunes warps when either changes.
+            triton.Config({}, num_warps=4),
+            triton.Config({}, num_warps=8),
         ],
         key=["R", "D"],         # specialise per (rank, head_dim) pair
         reset_to_zero=["out_ptr", "m_ptr", "l_ptr"],
