@@ -157,7 +157,8 @@ def test_3_rank_mask():
 
 
 def test_4_needle(quick=False, long_ctx=False, dense=False,
-                  model_id="Qwen/Qwen3.5-2B", chunk=0):
+                  model_id="Qwen/Qwen3.5-2B", chunk=0,
+                  no_serving_defaults=False):
     """End-to-end recall + determinism at temperature 0."""
     print("\n=== 4. End-to-end needle + determinism ===", flush=True)
     import random
@@ -195,6 +196,26 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
         return " ".join(parts)
 
     os.environ.setdefault("DKV_ENGAGE_THRESHOLD", "1024")
+
+    # VALIDATE WHAT SHIPS. decode_config.BEST_DECODE_DEFAULTS is what cli.py and
+    # the OpenAI gateway apply before constructing the manager; this script
+    # applied none of them, so every result it has ever produced was on a
+    # configuration production does not run. DKV_SPARSE_BIAS is the sharp one:
+    # serving sets "auto", dkv_attention.py:136 falls back to "0.0" without it,
+    # and those are DIFFERENT MERGE PATHS -- dkv_needle_diag.py's header says
+    # running without it "silently exercised the combined kernel, a path
+    # production never uses, which masked the deep-needle bug".
+    # setdefault, so an explicit env still wins and every A/B in the runbook
+    # keeps working.
+    if not no_serving_defaults:
+        from serving.decode_config import BEST_DECODE_DEFAULTS
+        for _k, _v in BEST_DECODE_DEFAULTS.items():
+            os.environ.setdefault(_k, _v)
+        print("  [config] serving defaults applied: "
+              + ", ".join(f"{k}={os.environ[k]}" for k in BEST_DECODE_DEFAULTS))
+    else:
+        print("  [config] --no-serving-defaults: bare wrapper defaults, "
+              "NOT the shipped configuration")
 
     if dense:
         # DENSE CONTROL — uncompressed HF attention, same prompts.
@@ -354,6 +375,11 @@ if __name__ == "__main__":
                          "Needed to reach 32k — single-shot dense prefill OOMs on "
                          "linear-attention activations, not the KV cache. 1024 "
                          "matches what DKV does internally.")
+    ap.add_argument("--no-serving-defaults", action="store_true",
+                    help="do NOT apply decode_config.BEST_DECODE_DEFAULTS. Off by "
+                         "default so this script validates the SHIPPED config; use "
+                         "this to reproduce older runs, which tested a path "
+                         "production never uses.")
     args = ap.parse_args()
 
     test_1_environment()
@@ -362,7 +388,8 @@ if __name__ == "__main__":
         test_2_exact_keys_default()
         test_3_rank_mask()
     test_4_needle(quick=args.quick, long_ctx=args.long,
-                  dense=args.dense, model_id=args.model, chunk=args.chunk)
+                  dense=args.dense, model_id=args.model, chunk=args.chunk,
+                  no_serving_defaults=args.no_serving_defaults)
 
     print("\n" + "=" * 60)
     if FAILURES:
