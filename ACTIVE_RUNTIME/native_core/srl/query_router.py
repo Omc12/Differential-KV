@@ -903,6 +903,29 @@ def route_blocks_relevance(
     # "16" covered only 16*64=1024 tokens and dropped a distant needle's block from
     # the top-K, breaking deep-context retrieval unless the user knew to set K=64.
     _pool_default = int(getattr(pool, "routing_topk_default", 16) or 16)
+
+    # Derive K from the block span the pool ACTUALLY wrote, so the routed TOKEN
+    # budget stays at MLX's 4096 regardless of how wide the blocks came out.
+    #
+    # K on its own is not the comparable quantity — K * block_span is. MLX has a
+    # FIXED block_size of 256, so its K=16 always means 4096 routed tokens. This
+    # side blocks ADAPTIVELY: kv_runtime_manager's own pool-sizing code says the
+    # "REAL mean block size (adaptive schedule mean ~= 32 for short contexts)"
+    # and uses max(32, min(micro_block_size, 64)), while routing_topk_default is
+    # computed 180 lines later from max(micro_block_size, 257). Both cannot be
+    # right, and the anchors settle it: a Qwen3.5-2B 8k run logs block anchors at
+    # 0, 1235, 1300, 1365, 2405, 2470 ... — spaced 65, i.e. 64 tokens + 1 anchor,
+    # not 257. So K=16 was routing ~1040 tokens where MLX routes 4096, a 4x
+    # coverage shortfall that grows worse the longer the context.
+    #
+    # Using the observed span keeps BOTH regimes right: 256-token blocks still
+    # give 4096//257 -> 16 (unchanged, and the 16k measurement behind the current
+    # default stays valid), while 64-token blocks now give 64 for the same token
+    # budget. Falls back to the pool's static default before the first write.
+    _span = int(getattr(pool, "observed_block_span", 0) or 0)
+    if _span > 0:
+        _pool_default = max(16, 4096 // max(1, _span + 1))   # +1 for the anchor row
+
     _topk_env = os.environ.get("DKV_TOPK_BLOCKS")
     if _topk_env is None or _topk_env.strip() == "":
         topk = _pool_default

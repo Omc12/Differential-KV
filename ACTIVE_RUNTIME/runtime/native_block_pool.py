@@ -132,6 +132,10 @@ class NativeBlockPool:
         # the decode-side cache knows when stratified U data has changed.
         self._stratified_generation: int = 0
 
+        # Widest routing block actually written, in tokens. 0 until the first
+        # write; the router falls back to routing_topk_default until then.
+        self.observed_block_span: int = 0
+
         self.lazy = lazy
         if not lazy:
             self._allocate_tensors(initial_blocks)
@@ -653,6 +657,17 @@ class NativeBlockPool:
         sc = torch.where(torch.isfinite(sc), sc, torch.ones_like(sc))
         self.scales[pidx] = sc.to(self.dtype)
         self.seq_lens[pidx] = int(seq_len)
+        # Record the ACTUAL span of a routing block, host-side and free (seq_len is
+        # already a Python int here, so no device read). The router needs it: K is
+        # meaningless on its own, the quantity that has to match MLX is the routed
+        # TOKEN budget K * span. MLX has a fixed block_size=256 so K=16 always
+        # means 4096 tokens; this side blocks ADAPTIVELY (~32-64 tokens for short
+        # contexts, ~256 for long — see the avg_block_sz note in
+        # kv_runtime_manager), so a K derived from an assumed 257 routes 4x too
+        # few tokens whenever the real blocks are 64 wide.
+        _span = int(seq_len)
+        if _span > 0:
+            self.observed_block_span = max(getattr(self, "observed_block_span", 0), _span)
         # One transfer, not one per block: int(pidx[i]) on a device tensor is a
         # device->host sync, and this loop ran it once per block in the batched
         # write -- 1,596 hits in the sync recorder during prefill.
