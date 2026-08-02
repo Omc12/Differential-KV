@@ -1337,6 +1337,12 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         # same list).  Silently applying one block's tokens to every other
         # block's residual selection was a pre-existing bug; look them up
         # fresh per block instead of relying on Python for-loop leakage.
+        # Reset PER BLOCK. Assigning this only inside the boost branch would let
+        # one block's multipliers leak into the next block's ranking through the
+        # loop variable — the same failure already called out above for
+        # block_token_ids.
+        _boost_vec = None
+
         block_token_ids = _gather_block_token_ids(block, manager)
         if block_token_ids and getattr(manager, "tokenizer", None) is not None \
                 and len(block_token_ids) == T_active:
@@ -1388,6 +1394,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                                        dtype=rel_error_K.dtype)
                     rel_error_K = rel_error_K * _bt
                     rel_error_V = rel_error_V * _bt
+                    _boost_vec = _bt
                     try:
                         _margin = int(os.environ.get("DKV_RESIDUAL_FLOOR_MARGIN", "4"))
                     except ValueError:
@@ -1447,15 +1454,54 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                 fact_positions_K = torch.arange(T_active, device=rel_error_K.device)
                 fact_positions_V = torch.arange(T_active, device=rel_error_V.device)
             else:
-                top_k_K = _topk_with_coverage(rel_error_K, n_max_residual, _cov_frac_batch)
-                top_k_V = _topk_with_coverage(rel_error_V, n_max_residual, _cov_frac_batch)
+                # ── MLX-parity residual selection ───────────────────────────
+                # MLX ranks ONE joint score and takes ONE index set:
+                #     errors_v_balanced = errors_v * v_gain
+                #     joint_errors      = sqrt(errors_k**2 + errors_v_balanced**2)
+                #     top_k_indices     = argsort(joint_errors)[-n_res:]
+                # (mlx_dkv_wrapper.py:2630 and :3853, boost applied to
+                # joint_errors at :2794.)
+                #
+                # This side ranked rel_error_K and rel_error_V SEPARATELY and kept
+                # two different index sets. Two independent consequences, both
+                # wrong, and both invisible in the 2k tests:
+                #
+                #  1. SPLIT SETS. A token could be selected for K and not for V.
+                #     Its score then becomes exact while the value attended stays
+                #     the lossy low-rank estimate — attention lands on the right
+                #     token and reads the wrong content. That is the observed
+                #     failure shape exactly: ZEBRA-447 / ZEBRA-474-QUARTZ, the
+                #     needle located but its digits wrong. (compress_lowrank
+                #     already forced fact_positions_V = fact_positions_K, but only
+                #     under exact-keys, so the default CUDA path kept the split.)
+                #
+                #  2. RELATIVE vs ABSOLUTE. Dividing by each token's own norm
+                #     ranks by *fractional* error, so a low-magnitude token with a
+                #     small absolute error outranks a high-magnitude needle with a
+                #     large one. Attention error is absolute — q·k does not care
+                #     what fraction of the key was lost — so MLX ranks absolute.
+                #     The relative form spends the budget on tokens that barely
+                #     move the logits.
+                #
+                # rel_error_* stays as-is above: MLX uses it for the median tier
+                # (:3822) and this path mirrors that, unchanged.
+                _err_V_bal = error_V
+                if _v_gain is not None:
+                    _err_V_bal = error_V * _v_gain[i].to(error_V.dtype)
+                joint_err = torch.sqrt(error_K.float() ** 2 + _err_V_bal.float() ** 2)
+                if _boost_vec is not None:
+                    joint_err = joint_err * _boost_vec.to(joint_err.dtype)
+
+                top_k_J = _topk_with_coverage(joint_err, n_max_residual, _cov_frac_batch)
 
                 _err_thr = _residual_error_threshold()   # MLX: 0.0, see resolver
-                mask_K = (top_k_K.values > _err_thr) & (error_K[top_k_K.indices] > 1e-4)
-                fact_positions_K = top_k_K.indices[mask_K]
-
-                mask_V = (top_k_V.values > _err_thr) & (error_V[top_k_V.indices] > 1e-4)
-                fact_positions_V = top_k_V.indices[mask_V]
+                # A token qualifies if EITHER half is non-degenerate; with one
+                # shared index set, dropping it on K alone would strand its V.
+                _idx = top_k_J.indices
+                mask_J = (top_k_J.values > _err_thr) & (
+                    (error_K[_idx] > 1e-4) | (error_V[_idx] > 1e-4))
+                fact_positions_K = _idx[mask_J]
+                fact_positions_V = fact_positions_K
 
             if fact_positions_K.numel() > 0:
                 # DKV_RESIDUAL_EXACT_KEYS — must match compress_lowrank's form
