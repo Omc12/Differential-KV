@@ -1080,7 +1080,35 @@ def route_blocks_relevance(
             # which PyTorch REJECTS as an index dtype ("tensors used as indices
             # must be long, int, byte or bool tensors"). This is the crash that
             # took down SRL-gated decode routing. Coerce before indexing cos/sin.
-            res_p = res_pos[slots_long, :R].long().clamp(min=0, max=cos_flat.shape[0] - 1)
+            # ABSOLUTE position, not the within-block offset. residual_K_positions
+            # stores an index into the block's ACTIVE-token array (0..T_active-1);
+            # the anchor holds block-local slot 0, so the residual's true position
+            # is anchor_idx + 1 + offset (streaming_sparse_ingest.py:1206/1216,
+            # dkv_attention.py:1385, dkv_decode.metal:153).
+            #
+            # This used the raw offset, so EVERY residual key in the pool was
+            # rotated as if it lived in the first 256 tokens of the sequence. A
+            # residual in the block at anchor 5911 was rotated at position ~137.
+            # The anchor above is rotated at its TRUE position, so the two halves
+            # of the relevance score were computed in different rotational frames
+            # and then combined with torch.maximum — meaning the residual term,
+            # the one that exists to keep a buried code's block in the top-K,
+            # contributed a number with no defined relationship to q. It could
+            # promote an arbitrary block and demote the needle's.
+            #
+            # MLX never hits this: it captures keys POST-RoPE at their true
+            # positions (mlx_dkv_wrapper.py:4448) and _block_relevance_residual
+            # does no rotation at all. CUDA stores UNROTATED K by design
+            # (dkv_backend.py:40) and re-rotates on read, so read sites are
+            # exactly where the position convention has to be re-derived — and
+            # both CUDA read sites had it wrong.
+            _res_off = res_pos[slots_long, :R].long().clamp(min=0)
+            if anchor_indices is not None:
+                _anc_abs = anchor_indices.long().to(_res_off.device).view(-1, 1)
+                res_p = _anc_abs + 1 + _res_off
+            else:
+                res_p = _res_off
+            res_p = res_p.clamp(min=0, max=cos_flat.shape[0] - 1)
             cos_res = cos_flat[res_p].to(device=rk.device, dtype=rk.dtype).unsqueeze(2)  # [N, R, 1, rot]
             sin_res = sin_flat[res_p].to(device=rk.device, dtype=rk.dtype).unsqueeze(2)  # [N, R, 1, rot]
             rk = _rope_partial(rk, cos_res, sin_res)

@@ -1411,7 +1411,25 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
             # zero NIAH regressions).  Default ON; DKV_RESIDUAL_EXACT_ROPE=0 restores
             # the anchor-position approximation.
             if os.environ.get("DKV_RESIDUAL_EXACT_ROPE", "1") == "1":
-                _abs_pos = (anchor_indices_clamped.unsqueeze(1)
+                # +1: residual_K_positions index the ACTIVE-token array, and the
+                # anchor occupies block-local slot 0, so active token j sits at
+                # absolute position anchor_idx + 1 + j — not anchor_idx + j.
+                # Three independent statements of that layout:
+                #   streaming_sparse_ingest.py:1206/1216  anchor = k[..., 0],
+                #                                         active = k[..., 1:]
+                #   dkv_attention.py:1385                 positions = anchor_indices
+                #                                         + arange(1 + max_seq_len)
+                #   dkv_decode.metal:153                  "the kernel's anchor
+                #                                         rotation lands delta token
+                #                                         t at absolute anchor_pos
+                #                                         + t + 1 -- its true position"
+                # Without it every exact-residual key is rotated one token early.
+                # One position is not a rounding error at the top of the RoPE
+                # spectrum: theta_0 = 1.0 rad, so the fastest pair is off by a
+                # full radian while the slow pairs barely move — the exact
+                # signature of a code that comes back with the right letters and
+                # the wrong digits (ZEBRA-447 / ZEBRA-474-QUARTZ).
+                _abs_pos = (anchor_indices_clamped.unsqueeze(1) + 1
                             + res_pos_g.clamp(min=0).long())          # [N, MAX_RES]
                 _abs_pos = _abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1)
                 _cos_rk = cos_flat[_abs_pos].to(device=res_k_g.device,

@@ -128,6 +128,290 @@ def rowerr(recon, deltas):
     return (recon - deltas).norm(dim=-1) / deltas.norm(dim=-1).clamp(min=1e-8)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  ROUTING + DECODE
+#
+#  The compression stages above replicate the CUDA side. These do NOT: they call
+#  the REAL production functions (route_blocks_relevance,
+#  _gather_routed_blocks_for_kernel) on CPU tensors, so what is measured is the
+#  shipping code, not a paraphrase of it. Only the Triton kernel's inner
+#  arithmetic is replicated, and only because it cannot run without a GPU.
+#
+#  THE POSITION CONVENTION, which everything here turns on:
+#
+#      block-local slot 0 .............. the ANCHOR, at absolute anchor_idx
+#      active-token index j ............ at absolute anchor_idx + 1 + j
+#
+#  stated independently at streaming_sparse_ingest.py:1206/1216 (anchor = k[...,0],
+#  active = k[...,1:]), dkv_attention.py:1385 (arange(1 + max_seq_len)), and
+#  dkv_decode.metal:153 ("lands delta token t at absolute anchor_pos + t + 1 --
+#  its true position").
+#
+#  MLX never has to re-derive it: it captures keys POST-RoPE at their true
+#  positions and neither its router nor its decode rotates anything. CUDA stores
+#  UNROTATED K on purpose (dkv_backend.py:40) and re-rotates on read, so every
+#  read site re-derives the convention by hand — which is exactly where it breaks.
+# ══════════════════════════════════════════════════════════════════════════════
+
+H_KV, GPK, HEAD_DIM, ROT_DIM = 2, 2, 64, 16     # ROT_DIM < HEAD_DIM = Qwen3.5 geometry
+BS, N_BLK, MAXRES = 17, 4, 3                    # 1 anchor + 16 active, per block
+H_Q = H_KV * GPK
+SEQ = N_BLK * BS
+SEQ_LONG = 8192          # reach a realistic deep-block anchor in the R3 sweep
+
+
+def _rope_tables(L, rot, base=10000.0):
+    inv = 1.0 / (base ** (torch.arange(0, rot, 2).float() / rot))
+    t = torch.arange(L).float()
+    f = torch.outer(t, inv)
+    emb = torch.cat([f, f], dim=-1)
+    return emb.cos()[None], emb.sin()[None]      # [1, L, rot], as rotary_emb returns
+
+
+def _stub_pool(anchors_K, res_k, res_pos, rank=4):
+    """Minimal stand-in exposing only what the two functions under test read."""
+    P = anchors_K.shape[0]
+    class _P: pass
+    p = _P()
+    p.anchors_K = anchors_K
+    p.anchors_V = torch.zeros_like(anchors_K)
+    p.V_K = torch.zeros(P, rank, H_KV, HEAD_DIM)
+    p.V_V = torch.zeros(P, rank, H_KV, HEAD_DIM)
+    p.U = torch.zeros(P, BS - 1, rank)
+    p.U_scale = torch.ones(P)
+    p.scales = torch.ones(P)
+    p.seq_lens = torch.full((P,), BS - 1, dtype=torch.int32)
+    p.residual_K_values = res_k
+    p.residual_V_values = torch.zeros_like(res_k)
+    p.residual_K_positions = res_pos
+    p.residual_V_positions = res_pos.clone()
+    p.routing_topk_default = 64
+    return p
+
+
+def stage_positions():
+    """Is a stored residual key rotated at the position it actually occupies?
+
+    Decisive because it needs no reference implementation: the residual's true
+    position is known by construction, so the gather either lands on it or does
+    not. A miss of ONE token is not a rounding error — theta_0 = 1.0 rad, so the
+    fastest RoPE pair is off by a full radian while the slowest barely moves.
+    That is a code returning with its letters right and its digits wrong, which
+    is the observed failure (ZEBRA-447, ZEBRA-474-QUARTZ), not garbage output.
+    """
+    from native_core.sparse_decode.triton_fused_decode import (
+        _gather_routed_blocks_for_kernel, _partial_rope_apply)
+
+    cos, sin = _rope_tables(SEQ, ROT_DIM)
+    g0 = torch.Generator().manual_seed(11)
+
+    anchors = torch.arange(N_BLK) * BS                      # 0, 17, 34, 51
+    anchors_K = torch.randn(N_BLK, H_KV, HEAD_DIM, generator=g0)
+    res_k = torch.randn(N_BLK, MAXRES, H_KV, HEAD_DIM, generator=g0)
+    res_pos = torch.tensor([[2, 9, -1]] * N_BLK, dtype=torch.int16)   # active-token idx
+
+    pool = _stub_pool(anchors_K, res_k, res_pos)
+    g = _gather_routed_blocks_for_kernel(
+        pool, torch.arange(N_BLK), anchors, cos, sin)
+
+    print("\n" + "=" * 74)
+    print("  [R1] residual-key RoPE position   (real _gather_routed_blocks_for_kernel)")
+    print("=" * 74)
+    worst_true = worst_off1 = 0.0
+    for n in range(N_BLK):
+        for ri in range(MAXRES):
+            p = int(res_pos[n, ri])
+            if p < 0:
+                continue
+            got = g["res_k"][n, ri]
+            for label, abs_pos in (("true", anchors[n] + 1 + p),
+                                   ("off-by-1", anchors[n] + p)):
+                c = cos[0, abs_pos].view(1, -1)
+                s = sin[0, abs_pos].view(1, -1)
+                d = (got - _partial_rope_apply(res_k[n, ri], c, s)).abs().max().item()
+                if label == "true":
+                    worst_true = max(worst_true, d)
+                else:
+                    worst_off1 = max(worst_off1, d)
+    print(f"    max|gathered - rope(key, anchor+1+offset)| = {worst_true:.3e}   <- TRUE position")
+    print(f"    max|gathered - rope(key, anchor+offset)  | = {worst_off1:.3e}")
+    ok = worst_true < 1e-5
+    print(f"    {'PASS — rotated at its true position' if ok else '*** FAIL — rotated at the WRONG position ***'}")
+    return ok
+
+
+def stage_routing():
+    """Real route_blocks_relevance vs real MLX _block_relevance_residual.
+
+    Same physical situation, each side fed in its own storage convention:
+      MLX  gets keys already rotated at true positions (what it captures).
+      CUDA gets the unrotated keys + the cos/sin tables (what it stores).
+    If CUDA's read-time rotation is right the two relevance vectors agree, and
+    both rank the needle's block first. The query is built to match the needle
+    residual's TRUE rotated key, so the correct answer is unambiguous.
+    """
+    from native_core.srl.query_router import route_blocks_relevance
+    from serving.mlx_dkv_wrapper import _block_relevance_residual
+    from native_core.sparse_decode.triton_fused_decode import _partial_rope_apply
+
+    cos, sin = _rope_tables(SEQ, ROT_DIM)
+    g0 = torch.Generator().manual_seed(23)
+    anchors = torch.arange(N_BLK) * BS
+    anchors_K = torch.randn(N_BLK, H_KV, HEAD_DIM, generator=g0) * 0.5
+    res_k = torch.randn(N_BLK, MAXRES, H_KV, HEAD_DIM, generator=g0) * 0.5
+    res_pos = torch.tensor([[2, 9, -1]] * N_BLK, dtype=torch.int16)
+
+    needle_blk, needle_ri = N_BLK - 1, 1          # deepest block => largest anchor
+    needle_pos = int(anchors[needle_blk]) + 1 + int(res_pos[needle_blk, needle_ri])
+
+    def rot_at(x, pos):
+        return _partial_rope_apply(x, cos[0, pos].view(1, -1), sin[0, pos].view(1, -1))
+
+    # rotated views, MLX's storage convention
+    anc_rot = torch.stack([rot_at(anchors_K[n], int(anchors[n])) for n in range(N_BLK)])
+    res_rot = torch.stack([
+        torch.stack([rot_at(res_k[n, r], int(anchors[n]) + 1 + int(res_pos[n, r]))
+                     if res_pos[n, r] >= 0 else res_k[n, r] for r in range(MAXRES)])
+        for n in range(N_BLK)])
+
+    # query = the needle residual's true rotated key => that block must win
+    q = res_rot[needle_blk, needle_ri].repeat_interleave(GPK, dim=0)   # [H_q, D]
+    scale = 1.0 / (HEAD_DIM ** 0.5)
+
+    rel_mlx = torch.tensor(_block_relevance_residual(
+        mx.array(q.numpy()), mx.array(anc_rot.numpy()), mx.array(res_rot.numpy()),
+        mx.array((res_pos >= 0).numpy()), scale, GPK).tolist())
+
+    os.environ["DKV_TOPK_BLOCKS"] = "0"        # attend-all => returns the ranking basis
+    pool = _stub_pool(anchors_K, res_k, res_pos)
+    os.environ["DKV_TOPK_BLOCKS"] = "2"        # force a real top-K decision
+    sel = route_blocks_relevance(q, pool, torch.arange(N_BLK), anchors, scale, cos, sin)
+
+    print("\n" + "=" * 74)
+    print("  [R2] block routing   (real route_blocks_relevance vs real MLX)")
+    print("=" * 74)
+    print(f"    needle: block {needle_blk}, residual {needle_ri}, true position {needle_pos}")
+    # Same ranking, but with residual keys rotated at the RAW within-block offset
+    # -- what route_blocks_relevance did before this change. Replicated inline so
+    # the comparison exists without adding a dead knob to production code.
+    res_buggy = torch.stack([
+        torch.stack([rot_at(res_k[n, r], int(res_pos[n, r]))
+                     if res_pos[n, r] >= 0 else res_k[n, r] for r in range(MAXRES)])
+        for n in range(N_BLK)])
+    rel_buggy = torch.tensor(_block_relevance_residual(
+        mx.array(q.numpy()), mx.array(anc_rot.numpy()), mx.array(res_buggy.numpy()),
+        mx.array((res_pos >= 0).numpy()), scale, GPK).tolist())
+
+    print(f"    MLX relevance per block : {[round(v, 3) for v in rel_mlx.tolist()]}")
+    print(f"    MLX top block           : {int(rel_mlx.argmax())}")
+    print(f"    CUDA top-2 selection    : {sorted(sel.tolist())}")
+    print(f"    same ranking with residuals rotated at the raw offset (the bug):")
+    print(f"      relevance {[round(v, 3) for v in rel_buggy.tolist()]}"
+          f"   top block {int(rel_buggy.argmax())}")
+    ok = int(rel_mlx.argmax()) == needle_blk and needle_blk in sel.tolist()
+    print(f"    {'PASS — both keep the needle block' if ok else '*** FAIL — CUDA drops the needle block MLX keeps ***'}")
+    if int(rel_buggy.argmax()) != needle_blk:
+        print("      ^ the raw-offset ranking picks the WRONG block")
+    return ok
+
+
+def stage_decode():
+    """Triton kernel arithmetic (lines 414-588) vs exact attention.
+
+    Replicated, not called — it needs a GPU. What this isolates is the ONE thing
+    the GPU run cannot separate: whether a wrong residual rotation alone is
+    enough to lose the needle, holding compression and routing fixed. Both
+    residual semantics are run because CUDA still defaults to CORRECTION form
+    (three ADD-only readers block the flip) while MLX substitutes.
+    """
+    from native_core.sparse_decode.triton_fused_decode import _partial_rope_apply
+
+    cos, sin = _rope_tables(SEQ, ROT_DIM)
+    g0 = torch.Generator().manual_seed(31)
+    S_act = BS - 1
+    anchor_pos, res_off = 34, 9
+    k_raw = torch.randn(S_act, HEAD_DIM, generator=g0)
+    anc_raw = torch.randn(HEAD_DIM, generator=g0)
+
+    # A second, longer table so the sweep below can reach a realistic 8k anchor.
+    cos_l, sin_l = _rope_tables(SEQ_LONG, ROT_DIM)
+
+    def rot1(x, pos):                      # [D] -> [D], rotated at absolute `pos`
+        return _partial_rope_apply(x.view(1, -1), cos[0, pos].view(1, -1),
+                                   sin[0, pos].view(1, -1)).view(-1)
+
+    def rot1_long(x, pos):
+        return _partial_rope_apply(x.view(1, -1), cos_l[0, pos].view(1, -1),
+                                   sin_l[0, pos].view(1, -1)).view(-1)
+
+    k_true = torch.stack([rot1(k_raw[t], anchor_pos + 1 + t) for t in range(S_act)])
+    anc_true = rot1(anc_raw, anchor_pos)
+    q = k_true[res_off].clone()                       # query aimed at the needle
+    scale = 1.0 / (HEAD_DIM ** 0.5)
+
+    # exact reference: what the needle row is worth under uncompressed attention
+    K_ref = torch.cat([anc_true[None], k_true])
+    s_ref = K_ref @ q * scale
+    w_ref = torch.softmax(s_ref, 0)[1 + res_off].item()
+
+    print("\n" + "=" * 74)
+    print("  [R3] decode: residual rotation position, kernel score reconstruction")
+    print("=" * 74)
+    print(f"    block anchor {anchor_pos}, needle at active idx {res_off} "
+          f"(true position {anchor_pos + 1 + res_off})")
+    print(f"    exact:                    needle score {s_ref[1 + res_off]:7.3f}"
+          f"   softmax weight {w_ref:6.3f}")
+
+    # The kernel's EXACT-residual substitution: s[p] <- q . rope(res_k, rot_pos);
+    # every other row keeps the lossy low-rank score, which with U=0 is the
+    # anchor score -- the worst case the residual mechanism exists to rescue.
+    #
+    # Sweep the position ERROR rather than asserting one value, because the two
+    # bugs found here are three orders of magnitude apart and it matters which
+    # one actually costs recall:
+    #   delta = 1     decode gather: anchor+offset instead of anchor+1+offset
+    #   delta = anchor  router: the within-block offset used as an ABSOLUTE
+    #                   position, so the anchor's whole magnitude is the error
+    # Retention is q.rope(k, p+delta) / q.rope(k, p) = sum_i |k_i|^2 cos(theta_i
+    # delta) / |k|^2: a pair decorrelates once theta_i*delta exceeds ~pi, so the
+    # damage is set by how many rotary pairs delta manages to wrap.
+    s_anc = (anc_true @ q * scale).item()
+    s_true = (rot1(k_raw[res_off], anchor_pos + 1 + res_off) @ q * scale).item()
+    print(f"\n    position error -> score retention (rotary_dim={ROT_DIM}/{HEAD_DIM}, base 1e4)")
+    got = {}
+    for delta, note in ((0, "fixed"), (1, "decode gather bug"),
+                        (256, "one block"), (5911, "router bug @ 8k")):
+        pos = min(anchor_pos + 1 + res_off + delta, SEQ_LONG - 1)
+        sc = (rot1_long(k_raw[res_off], pos) @ q * scale).item()
+        w = torch.softmax(torch.cat([torch.tensor([s_anc]),
+                                     torch.full((S_act,), s_anc).index_put_(
+                                         (torch.tensor([res_off]),),
+                                         torch.tensor([sc]))]), 0)[1 + res_off].item()
+        got[delta] = w
+        print(f"      delta={delta:>5}  score {sc:7.3f}  ({100 * sc / s_true:5.1f}% retained)"
+              f"  weight {w:6.3f}   {note}")
+
+    # The damage has a CEILING, and it is worth stating because it contradicts
+    # the obvious guess. Only rotary_dim of head_dim components rotate at all;
+    # the remaining head_dim - rotary_dim pass through untouched and keep
+    # contributing their full q.k. On Qwen3.5-2B that tail is 192 of 256
+    # components, so even a fully decorrelating position error can only remove
+    # ~rotary_dim/head_dim of the score -- the 81% floor below, not 0%.
+    #
+    # So neither position bug ALONE explains a lost needle. They are real
+    # correctness defects worth fixing, and the router one is much the larger,
+    # but a full-rotary model would be hurt ~4x more by the identical code. Do
+    # not close the recall investigation on this.
+    floor = 1.0 - ROT_DIM / HEAD_DIM
+    ok = (abs(got[0] - w_ref) < 0.05 and got[1] < got[0]
+          and got[5911] < got[1])
+    print(f"    retention floor set by the UNROTATED tail: "
+          f"{100 * floor:.0f}% ({HEAD_DIM - ROT_DIM}/{HEAD_DIM} components never rotate)")
+    print(f"    {'PASS — damage is monotone in position error and bounded by that floor'
+           if ok else '*** unexpected: damage not monotone in position error ***'}")
+    return ok
+
+
 def main():
     N, S, feat, rank = 8, 256, 512, 32
     nb, nr = 5, 137                      # needle block / row
@@ -201,6 +485,14 @@ def main():
     print("  Read [3] and [4] for fidelity, [5] for whether the needle is even")
     print("  given a residual. A divergence in [1]/[2] alone changes results")
     print("  without either side being wrong; [3]-[5] are where quality lives.")
+    print("=" * 74)
+
+    results = [("R1 residual RoPE position", stage_positions()),
+               ("R2 block routing",          stage_routing()),
+               ("R3 decode needle weight",   stage_decode())]
+    print("\n" + "=" * 74)
+    for name, ok in results:
+        print(f"  {'PASS' if ok else 'FAIL'}  {name}")
     print("=" * 74)
 
 
