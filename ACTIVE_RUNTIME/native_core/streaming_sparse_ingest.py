@@ -579,10 +579,34 @@ def _is_block_compression_eligible(block: StreamingKVBlock, is_last_block: bool 
     # decode. Confirmed empirically: anchor=0 stuck at state=ACCUMULATING
     # indefinitely on an 8k-token Qwen3.5-2B prompt with the needle at the
     # very start -- dense recalled it in full, DKV never did.
+    #
+    # THE HATCH ABOVE WAS TOO NARROW. It released block 0 only when the block
+    # was ALSO flagged skip_compression, i.e. only when one of the Rule 1-5
+    # regexes happened to match its text. When no rule matched, block 0 stayed
+    # protected and the exact data loss the comment describes still happened.
+    #
+    # That is the 2k@depth0.0 failure. On the 8k prompt "Rule 5 skip block
+    # anchor=0: word 'helpful' occurs 1 times" fires -- the chat template's
+    # system line -- so the hatch opens and 8k@depth0.0 recalls 3/3. On the 2k
+    # prompt no rule matches block 0, so it is never compressed, is trimmed out
+    # of the dense window as the oldest block, and the needle placed at depth 0.0
+    # -- which lives in block 0 -- is invisible to every decode step. CUDA
+    # returns token salad 0/3, deterministically, while MLX on the identical
+    # 2822-token prompt with compression forced on returns it 3/3 (MLX applies
+    # recency at ATTENTION time and has no state a block can be stranded in).
+    #
+    # Whether a needle at the start of a document survives therefore depended on
+    # whether an unrelated regex matched the system prompt. That is not a policy.
+    #
+    # The deferred path now releases block 0 unconditionally, and the caller
+    # marks it force-exact before submitting, so protect_block_zero is honoured
+    # the way it is already honoured for skip blocks: block 0 is protected from
+    # LOSSY compression by being compressed LOSSLESSLY, not by being left out of
+    # attention entirely.
     _block_zero_protected = (
         block.anchor_idx == 0
         and StreamingKVBlock.protect_block_zero
-        and not (ignore_skip_compression and block.skip_compression)
+        and not ignore_skip_compression
     )
     if _block_zero_protected or block.is_outlier:
         return False
@@ -1794,6 +1818,15 @@ class StreamingSparseIngestManager:
                 )
                 window_ok = (b.anchor_idx + b.token_count()) < (total_seq_len - self.recency_window)
                 if eligible and window_ok:
+                    # protect_block_zero now means "never LOSSY", not "never
+                    # compressed" -- see _is_block_compression_eligible. Marking
+                    # it skip_compression is what makes lowrank.py take the
+                    # force-exact path (_force_exact reads this same flag at
+                    # lowrank.py:1412), so block 0 keeps every position as an
+                    # exact residual. Leaving it out of attention was the only
+                    # other option and it lost the data outright.
+                    if b.anchor_idx == 0 and StreamingKVBlock.protect_block_zero:
+                        b.skip_compression = True
                     b.state = "SUBMITTED"
                     blocks_to_compress.append(b)
                     self.update_metadata_state(session_id, layer_idx, b)
