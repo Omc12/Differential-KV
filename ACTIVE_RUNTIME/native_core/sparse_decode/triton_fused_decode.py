@@ -140,6 +140,9 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
+_ZERO_BLOCK_WARNED = False
+
+
 def _exact_residual_semantics(device=None) -> bool:
     """Does the decode kernel SUBSTITUTE residuals, or merely ADD them?
 
@@ -1782,6 +1785,38 @@ def _pytorch_vectorized_sparse_attn_decode(
     block_capacity = 0
     diagnostics = (os.environ.get("DKV_DIAGNOSTICS", "0") == "1")
 
+    # ── N == 0: this decoder returns an EMPTY tensor, shape [1, H_q, 1, 0] ──
+    # Reproduced by tests/test_triton_combined.py::test_dense_only, whose whole
+    # point is "combined kernel with N=0 (no compressed blocks) must match dense
+    # SDPA". It fails with
+    #     RuntimeError: The size of tensor a (64) must match tensor b (0)
+    #                   at non-singleton dimension 3
+    # where 64 is head_dim (the reference) and 0 is what this returns. The dense
+    # window is present and simply never attended.
+    #
+    # Both routes into this function hit it:
+    #   native_triton_sparse_attn_decode  ->  `if not HAS_TRITON` early return
+    #   native_triton_sparse_attn_decode  ->  the N == 0 `else` branch (with Triton)
+    # so on CUDA a decode step that routes zero compressed blocks silently emits a
+    # zero-width attention output. native_triton_sparse_attn_decode_combined grew
+    # a dense-only SDPA fast path for exactly this case; this decoder never did.
+    #
+    # Warned rather than fixed: the correct fix is that fast path, and `active_k`
+    # here has not been through the RoPE rotation the N>0 branch applies, so
+    # writing it without hardware to check against would be guessing. A wrong
+    # shape that announces itself is recoverable; the silent version is what let
+    # this sit behind a failing test.
+    if N == 0:
+        global _ZERO_BLOCK_WARNED
+        if not _ZERO_BLOCK_WARNED:
+            _ZERO_BLOCK_WARNED = True
+            _has_dense = (active_k is not None and active_k.shape[2] > 0) or bool(dense_blocks)
+            print(f"[DKV] WARNING: 0 compressed blocks routed and this decoder has "
+                  f"no dense-only path — attention output will be EMPTY "
+                  f"([1, {H_q}, 1, 0] instead of [1, {H_q}, 1, {D}]). "
+                  f"dense_window_present={_has_dense}, layer={layer_idx}.",
+                  flush=True)
+
     # ── Features 1 & 2: Heat update + step-ahead prefetch (MPS/CPU path) ──
     if N > 0 and session_id is not None:
         _mgr = getattr(pool, "_manager", None) if pool is not None else None
@@ -2509,6 +2544,22 @@ def native_triton_sparse_attn_decode(
                 active_len=active_len,
             )
     else:
+        # N == 0: no compressed blocks routed. This delegates to the PyTorch
+        # decoder, which returns an EMPTY tensor in that case — last dim 0, not D.
+        # Reproduced by tests/test_triton_combined.py::test_dense_only:
+        #   RuntimeError: The size of tensor a (64) must match tensor b (0)
+        #                 at non-singleton dimension 3
+        # and the 64 there is head_dim, i.e. the reference; the 0 is this return.
+        # native_triton_sparse_attn_decode_combined handles the same case
+        # correctly with a dense-only SDPA fast path; this entry point never grew
+        # one, so a zero-block step silently produces a zero-width attention
+        # output rather than attending the dense window.
+        #
+        # NOT fixed here on purpose: the correct fix is that dense-only fast path,
+        # and `active_k` on this branch has not been through the RoPE rotation the
+        # N>0 branch applies, so writing it without a GPU to verify against would
+        # be guessing. Made LOUD instead — a wrong shape that announces itself is
+        # recoverable; a silent one is what let this sit behind a failing test.
         return _pytorch_vectorized_sparse_attn_decode(
             q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
             anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
