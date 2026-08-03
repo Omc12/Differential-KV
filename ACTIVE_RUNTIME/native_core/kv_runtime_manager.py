@@ -3879,8 +3879,12 @@ class KVRuntimeManager:
                 rel_error_K = error_K / norm_K
                 rel_error_V = error_V / norm_V
 
-                # Default SVD error threshold and residual fraction
-                error_threshold = 0.08
+                # Residual budget. The flat 0.08 relative-error floor that used
+                # to live here is gone: MLX applies NO floor (it takes the top
+                # n_res by capture score outright), and the shared resolver
+                # _residual_error_threshold() defaults to 0.0 for exactly that
+                # reason. The selection below uses it.
+                _boost_vec = None
                 n_max_residual = int(n * 0.15)
 
                 # OPT-A: Adaptive residual budget — 3-tier block classifier by median reconstruction error.
@@ -3938,9 +3942,12 @@ class KVRuntimeManager:
                                 _session_boosts[block.anchor_idx] = (boost_row, n_boosted)
 
                         if boost_row is not None and n_boosted > 0:
-                            _bt = torch.tensor(boost_row, device=rel_error_K.device, dtype=rel_error_K.dtype)
-                            rel_error_K = rel_error_K * _bt
-                            rel_error_V = rel_error_V * _bt
+                            # Carried to the JOINT score below, not multiplied
+                            # into the relative errors. MLX applies the boost to
+                            # joint_errors (mlx_dkv_wrapper.py:3813) and leaves
+                            # rel_error_* raw for the median tier, which is
+                            # computed above this block.
+                            _boost_vec = torch.tensor(boost_row, device=rel_error_K.device, dtype=rel_error_K.dtype)
                             try:
                                 _margin = int(_os.environ.get("DKV_RESIDUAL_FLOOR_MARGIN", "4"))
                             except Exception:
@@ -3971,19 +3978,61 @@ class KVRuntimeManager:
                         residual_K_pos = torch.arange(_npos, device=rel_error_K.device)
                         residual_V_pos = torch.arange(_npos, device=rel_error_V.device)
                     else:
-                        # Residual coverage quota (MLX parity: DKV_RESIDUAL_COVERAGE_FRAC),
-                        # ported from the GPU-batched compress path so the day-to-day
-                        # decode-triggered async path also reserves evenly-spaced
-                        # coverage slots instead of pure error-ranked selection.
-                        # Default 0 (off) preserves prior behavior.
-                        top_k_K = _topk_with_coverage(rel_error_K, min(n_max_residual, n), _cov_frac)
-                        top_k_V = _topk_with_coverage(rel_error_V, min(n_max_residual, n), _cov_frac)
+                        # ── MLX-parity residual selection ───────────────────
+                        # ONE joint ABSOLUTE score, ONE index set — the same
+                        # correction 42eb66c made to the GPU-batched path
+                        # (compression/lowrank.py:1614-1631) and compress_lowrank
+                        # (:615-632). This third producer was left on the old
+                        # form, so blocks compressed HERE — the async worker,
+                        # which is the DEFAULT in production (DKV_SYNC_COMPRESS
+                        # is only set for fidelity runs) — still got residuals
+                        # chosen the way MLX does not choose them:
+                        #
+                        #  1. SPLIT SETS. rel_error_K and rel_error_V were ranked
+                        #     independently, so a token could win a K slot and
+                        #     lose its V slot: attention lands on the right token
+                        #     and reads the lossy low-rank value back. Line 4000
+                        #     force-aligns residual_V_pos to residual_K_pos under
+                        #     exact-keys, but the SELECTION was still made on the
+                        #     K half alone, so the V error never entered the
+                        #     ranking at all.
+                        #  2. RELATIVE vs ABSOLUTE. Dividing by each token's own
+                        #     norm ranks by FRACTIONAL error, so a low-norm filler
+                        #     token with a tiny absolute error outranks a
+                        #     high-norm needle with a large one. q·k does not care
+                        #     what fraction of a key was lost, so MLX ranks
+                        #     absolute (mlx_dkv_wrapper.py:2627 errors_v_balanced,
+                        #     :2630 joint = sqrt(eK² + eV_bal²)).
+                        #
+                        # The boost also moves: MLX multiplies it into
+                        # joint_errors (:3813), not into the relative errors. The
+                        # median TIER above still reads the raw rel_error_*, which
+                        # is what MLX does too (:3818-3826) — it is computed
+                        # before the boost, so that ordering is already right.
+                        #
+                        # No v_gain here: compress_lowrank_batch does a plain
+                        # batched SVD on the stacked deltas and never builds one,
+                        # unlike the other two paths. That is a REMAINING gap in
+                        # this path, not something this change introduces.
+                        from native_core.compression.lowrank import (
+                            _residual_error_threshold as _res_err_thr,
+                        )
+                        joint_err = torch.sqrt(
+                            error_K.float() ** 2 + error_V.float() ** 2)
+                        if _boost_vec is not None:
+                            joint_err = joint_err * _boost_vec.to(joint_err.dtype)
 
-                        mask_K = (top_k_K.values > error_threshold) & (error_K[top_k_K.indices] > 1e-4)
-                        residual_K_pos = top_k_K.indices[mask_K]
+                        top_k_J = _topk_with_coverage(
+                            joint_err, min(n_max_residual, n), _cov_frac)
 
-                        mask_V = (top_k_V.values > error_threshold) & (error_V[top_k_V.indices] > 1e-4)
-                        residual_V_pos = top_k_V.indices[mask_V]
+                        # A token qualifies if EITHER half is non-degenerate:
+                        # with one shared index set, dropping it on K alone would
+                        # strand its V.
+                        _idx = top_k_J.indices
+                        mask_J = (top_k_J.values > _res_err_thr()) & (
+                            (error_K[_idx] > 1e-4) | (error_V[_idx] > 1e-4))
+                        residual_K_pos = _idx[mask_J]
+                        residual_V_pos = residual_K_pos
 
                     device = deltas_raw.device
                     if residual_K_pos.numel() > 0:
