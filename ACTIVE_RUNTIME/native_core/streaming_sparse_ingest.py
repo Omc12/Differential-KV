@@ -1131,8 +1131,20 @@ class StreamingSparseIngestManager:
         micro_block_size = self.session_micro_block_sizes.get(session_id, self.micro_block_size)
 
         if seq_len == 1:
-            # Force micro_block_size to 32 for the active accumulation window during decode
-            micro_block_size = 32
+            # MLX uses ONE block size for prefill and decode alike (256). Hardcoding
+            # 32 here gave decode-created blocks a THIRD width that
+            # DKV_ADAPTIVE_BLOCK_SIZE=0 did not govern, so "fixed block size, MLX
+            # parity" was never actually fixed. It also made mixed-width batches
+            # reachable, and _submit_blocks_batched reads its shape metadata from
+            # blocks_list[0].micro_block_size and applies it to EVERY block in the
+            # batch -- so a 256-wide block behind a 32-wide one is reshaped to 32.
+            #
+            # Following the session size costs a larger dense accumulation window
+            # during decode (256 vs 32 tokens ~= a few MB), and for short
+            # generations it simply never fills, which means freshly generated
+            # tokens stop being lossily compressed at all.
+            if os.environ.get("DKV_ADAPTIVE_BLOCK_SIZE", "0") == "1":
+                micro_block_size = 32
             # ───────────────────────────────────────────────────────────────────
             # DECODE PATH (T=1)
             # Phase 29 Fix #1: Ring buffer — zero torch.cat allocations per token.
