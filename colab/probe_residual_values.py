@@ -151,11 +151,14 @@ def main():
         anc, pidx, slen = hit
 
         rk_pos = pool.residual_K_positions[pidx].tolist()
-        rk_val = pool.residual_K_values[pidx].float()          # [MAX_RES, H_kv, D]
-        anchors_K = pool.anchors_KV[pidx, 0].float()           # [H_kv, D]
+        # .cpu() here, not at the comparison: K_true is built on CPU and mixing
+        # devices in the cosine is what the first run tripped over.
+        rk_val = pool.residual_K_values[pidx].float().cpu()    # [MAX_RES, H_kv, D]
+        anchors_K = pool.anchors_KV[pidx, 0].float().cpu()     # [H_kv, D]
 
         attn = layers[li].self_attn
-        cos_l, sin_l, n_ok, n_used, n_fail = [], [], 0, 0, 0
+        cos_l, sin_l, np_l, nt_l = [], [], [], []
+        n_ok, n_used, n_fail = 0, 0, 0
         for p in range(n_lo, n_hi + 1):
             off = p - anc - 1
             if off < 0 or off >= slen or p not in cap[li]:
@@ -200,6 +203,8 @@ def main():
             a_, b_ = K_pool / (K_pool.norm() + 1e-9), K_true / (K_true.norm() + 1e-9)
             cos_l.append(float((a_ * b_).sum()))
             sin_l.append(float((K_pool - K_true).norm() / (K_true.norm() + 1e-9)))
+            np_l.append(float(K_pool.norm()))
+            nt_l.append(float(K_true.norm()))
             n_ok += 1
 
         if n_ok == 0:
@@ -208,7 +213,7 @@ def main():
             continue
         import statistics as st
         print(f"{li:>5} {n_used:>7} {st.mean(cos_l):>20.4f} {st.mean(sin_l):>10.4f} "
-              f"{float((anchors_K + rk_val[0]).norm()):>10.2f} {'-':>10}")
+              f"{st.mean(np_l):>10.2f} {st.mean(nt_l):>10.2f}")
 
     print("\ncos ~1.0 -> stored residuals are CORRECT; loss is downstream of the pool.")
     print("cos <<1  -> the residual VALUES are wrong; membership was a red herring.")
