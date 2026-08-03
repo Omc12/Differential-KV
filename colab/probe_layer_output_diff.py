@@ -48,8 +48,13 @@ import os
 import random
 import sys
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ACTIVE_RUNTIME"))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# BOTH, because the two entry points in this repo disagree: mlx_needle_parity
+# imports `serving.*` (ACTIVE_RUNTIME on the path) while validate_cuda_dkv
+# imports `ACTIVE_RUNTIME.serving.*` (repo root on the path). Putting both on
+# sys.path makes either spelling work instead of picking one and being wrong.
+sys.path.insert(0, os.path.join(_ROOT, "ACTIVE_RUNTIME"))
+sys.path.insert(0, _ROOT)
 
 import torch
 
@@ -184,7 +189,7 @@ def run_dkv(model_id, prompt):
     for k, v in BEST_DECODE_DEFAULTS.items():
         os.environ.setdefault(k, v)
     os.environ.setdefault("DKV_SYNC_COMPRESS", "1")
-    from ACTIVE_RUNTIME.serving.hf_dkv_wrapper import PyTorchDKVHFWrapper
+    from serving.hf_dkv_wrapper import PyTorchDKVHFWrapper
     w = PyTorchDKVHFWrapper(model_id=model_id, config={"mode": "fp16"},
                             device="cuda")
     w.ensure_loaded()
