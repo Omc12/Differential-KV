@@ -977,6 +977,7 @@ def _tf32_matmul():
 # generation, which separates "prefill recomputed it" from "storage moved it".
 _ANCHOR_FP: dict = {}
 _ANCHOR_FP_SHOWN = 0
+_ANCHOR_FP_CASE = None   # DKV_ROUTE_TRACE_TOKEN of the prompt being compared
 
 
 def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
@@ -1733,8 +1734,26 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         # stays silent while the router still reads a changed |anc|, the change
         # happens between this write and that read.
         if os.environ.get("DKV_ROUTE_TRACE", "0") == "1":
-            global _ANCHOR_FP, _ANCHOR_FP_SHOWN
+            global _ANCHOR_FP, _ANCHOR_FP_SHOWN, _ANCHOR_FP_CASE
             try:
+                # THE CASE MUST BE PART OF THE KEY. The first version keyed only
+                # (layer_idx, anchor_idx) and compared GLOBALLY across the whole
+                # suite, so 2k@depth0.0's block at (layer 3, anchor 257) was
+                # compared against 2k@depth0.5's -- a DIFFERENT PROMPT, which of
+                # course has different keys at the same position. Every line it
+                # printed was a false positive, and the line cap was exhausted
+                # inside that burst so it never reached the within-case repeats
+                # it exists to compare.
+                #
+                # DKV_ROUTE_TRACE_TOKEN is set by the validator once per case and
+                # is identical across that case's repeats, so it is exactly the
+                # discriminator needed: same value => same prompt => the anchor
+                # for a given (layer, anchor_idx) MUST be identical.
+                _case = os.environ.get("DKV_ROUTE_TRACE_TOKEN", "?")
+                if _case != _ANCHOR_FP_CASE:
+                    _ANCHOR_FP_CASE = _case
+                    _ANCHOR_FP = {}          # new prompt: nothing to compare to
+                    _ANCHOR_FP_SHOWN = 0     # budget is per case, not per suite
                 _ak = torch.stack([b.anchor_kv[0, 0] for b in blocks_list], dim=0)
                 _nrm = _ak.float().flatten(1).norm(dim=1).tolist()
                 for _b, _n in zip(blocks_list, _nrm):
@@ -1742,12 +1761,14 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                     _prev = _ANCHOR_FP.get(_key)
                     if _prev is None:
                         _ANCHOR_FP[_key] = (_n, _b.pool_idx)
-                    elif abs(_prev[0] - _n) > 1e-3 and _ANCHOR_FP_SHOWN < 24:
+                    elif abs(_prev[0] - _n) > 1e-3 and _ANCHOR_FP_SHOWN < 16:
                         _ANCHOR_FP_SHOWN += 1
-                        print(f"[DKV] ANCHOR FP MISMATCH layer={_key[0]} "
-                              f"anchor={_key[1]} |anc| {_prev[0]:.4f} -> {_n:.4f} "
+                        print(f"[DKV] ANCHOR FP MISMATCH case={_case} "
+                              f"layer={_key[0]} anchor={_key[1]} "
+                              f"|anc| {_prev[0]:.4f} -> {_n:.4f} "
                               f"slot {_prev[1]} -> {_b.pool_idx} "
-                              f"(recomputed differently BEFORE storage)", flush=True)
+                              f"(SAME prompt, recomputed differently "
+                              f"BEFORE storage)", flush=True)
                         _ANCHOR_FP[_key] = (_n, _b.pool_idx)
             except Exception as _fe:                             # noqa: BLE001
                 if _ANCHOR_FP_SHOWN < 1:

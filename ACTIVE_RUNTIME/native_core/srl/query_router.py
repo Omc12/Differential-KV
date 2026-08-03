@@ -917,6 +917,7 @@ def route_blocks_relevance(
     cos:            Optional[torch.Tensor] = None,
     sin:            Optional[torch.Tensor] = None,
     srl_state:      Optional[Any] = None,
+    layer_idx:      Optional[int] = None,   # trace only: which layer asked
 ) -> torch.Tensor:                  # [K<=N] selected slot IDs, best-first, distinct
     """MLX-parity block router: rank blocks by exact q·k relevance, take top-K.
 
@@ -1403,7 +1404,7 @@ def route_blocks_relevance(
                         _fp = f" | slot={_slot} |anc|={_an:.4f} n_res={_nres}"
                     except Exception as _fe:                     # noqa: BLE001
                         _fp = f" | fingerprint failed: {_fe}"
-                    print(f"[DKV] ROUTE TRACE step={_st} tok={_tgt} "
+                    print(f"[DKV] ROUTE TRACE step={_st} layer={layer_idx} tok={_tgt} "
                           f"anchor={int(_anc[_p].item())} rank={_rank}/{N} k={k_eff} "
                           f"kept={_kept} "
                           f"rel={float(relevance[_p].item()):.5f} "

@@ -1447,6 +1447,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                                 cos            = cos_all,
                                                 sin            = sin_all,
                                                 srl_state      = srl_state,
+                                                layer_idx      = captured_layer_idx,
                                             )
                                         srl_state.current_step_slots = selected_slots
 
