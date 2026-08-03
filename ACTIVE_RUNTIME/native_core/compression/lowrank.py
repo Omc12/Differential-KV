@@ -1756,20 +1756,42 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                     _ANCHOR_FP_SHOWN = 0     # budget is per case, not per suite
                 _ak = torch.stack([b.anchor_kv[0, 0] for b in blocks_list], dim=0)
                 _nrm = _ak.float().flatten(1).norm(dim=1).tolist()
+                # WRITE-SIDE MAP for the block under trace, printed
+                # UNCONDITIONALLY. Comparing norms alone cannot see the failure
+                # actually present: at 8k@depth0.0 the needle is at token 9, so
+                # its anchor is TOKEN 0, whose key is causal over a single token
+                # and therefore deterministic at every layer -- yet the router
+                # reads layer 7 / slot 31 as 34.1113, 32.7502 and 36.5400 on the
+                # three repeats, and 36.5400 is layer 11's repeat-1 value. A
+                # deterministic key cannot change, so the value written is right
+                # and the SLOT it is read back from is wrong. A norm comparison
+                # is silent on exactly that, because the norm it stored matches.
+                #
+                # So record what this side actually believes: (layer, anchor) ->
+                # slot, at the moment of the write. The ROUTE TRACE prints the
+                # same triple at read time. Disagreement between them is a
+                # metadata/slot mapping bug; agreement with a changed |anc| means
+                # the slot was overwritten after this write.
+                #
+                # Printing unconditionally also supplies COVERAGE: no WRITE MAP
+                # line for a case means this compress path never ran there, and
+                # the fingerprint's silence would have meant nothing. That
+                # distinction is the one this investigation keeps paying for.
+                _tt = None
+                try:
+                    _tt = int(_case)
+                except (TypeError, ValueError):
+                    pass
                 for _b, _n in zip(blocks_list, _nrm):
-                    _key = (getattr(_b, "layer_idx", None), int(_b.anchor_idx))
-                    _prev = _ANCHOR_FP.get(_key)
-                    if _prev is None:
-                        _ANCHOR_FP[_key] = (_n, _b.pool_idx)
-                    elif abs(_prev[0] - _n) > 1e-3 and _ANCHOR_FP_SHOWN < 16:
+                    _lay = getattr(_b, "layer_idx", None)
+                    _a = int(_b.anchor_idx)
+                    if (_tt is not None and _a <= _tt < _a + T_active + 1
+                            and _ANCHOR_FP_SHOWN < 24):
                         _ANCHOR_FP_SHOWN += 1
-                        print(f"[DKV] ANCHOR FP MISMATCH case={_case} "
-                              f"layer={_key[0]} anchor={_key[1]} "
-                              f"|anc| {_prev[0]:.4f} -> {_n:.4f} "
-                              f"slot {_prev[1]} -> {_b.pool_idx} "
-                              f"(SAME prompt, recomputed differently "
-                              f"BEFORE storage)", flush=True)
-                        _ANCHOR_FP[_key] = (_n, _b.pool_idx)
+                        print(f"[DKV] WRITE MAP case={_case} layer={_lay} "
+                              f"anchor={_a} slot={_b.pool_idx} "
+                              f"|anc|={_n:.4f} T={T_active}", flush=True)
+                    _ANCHOR_FP[(_lay, _a)] = (_n, _b.pool_idx)
             except Exception as _fe:                             # noqa: BLE001
                 if _ANCHOR_FP_SHOWN < 1:
                     _ANCHOR_FP_SHOWN += 1
