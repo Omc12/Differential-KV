@@ -421,6 +421,28 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 #   - micro_block_size cached — eliminates O(N·L) block scan per token
 # ---------------------------------------------------------------------------
 
+def first_dkv_layer_index(layers) -> int:
+    """Index of the first layer DKV actually attends — NOT model layer 0.
+
+    Derived from the model at patch time, never hardcoded, so it is correct for
+    any interleaving pattern rather than for the one hybrid that happened to be
+    tested. Qwen3.5-2B puts attention at every 4th layer (first = 3); a model
+    that put it at 0,1,2 then went linear gives 0; one that front-loads linear
+    layers gives whatever index its first attention layer sits at. Nothing here
+    knows the period, the count, or the model family — only "does this layer
+    have self_attn", which is the same predicate the patch loop uses to decide
+    what to wrap. The two therefore cannot disagree.
+
+    Thirteen once-per-token gates in dkv_forward compare against this. They used
+    to compare against 0, which is dead on any model whose layer 0 is not an
+    attention layer -- see the note at the call site.
+    """
+    for i, l in enumerate(layers):
+        if hasattr(l, "self_attn"):
+            return i
+    return 0        # no attention layers at all; the patch loop wraps nothing
+
+
 def apply_dkv_attention_patch(model, kv_manager):
     """
     Monkey-patches the HF model's attention layers to route KV operations
@@ -555,11 +577,7 @@ def apply_dkv_attention_patch(model, kv_manager):
     # index 0"). It just was not applied to the gates. Defining it once here
     # fixes all of them together and stays correct for any architecture, rather
     # than special-casing hybrids at thirteen call sites.
-    try:
-        _first_dkv_layer = next(i for i, l in enumerate(model.model.layers)
-                                if hasattr(l, "self_attn"))
-    except StopIteration:
-        _first_dkv_layer = 0
+    _first_dkv_layer = first_dkv_layer_index(model.model.layers)
 
     for i, layer in enumerate(model.model.layers):
         if not hasattr(layer, "self_attn"):
