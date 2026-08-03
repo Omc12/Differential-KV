@@ -308,7 +308,25 @@ def pool_stores_rotated_k() -> bool:
     non-issue in practice (the value is fixed for a process) but matters if a
     session is ever persisted across a config change.
     """
-    return os.environ.get("DKV_ROTATED_POOL", "1") == "1"
+    # DEFAULT 0. This shipped as "1" while EVERY prefill capture site stored
+    # `unrot_key_states` unconditionally, so the pool held PRE-RoPE keys and this
+    # predicate told the decode gather to skip the rotation they needed
+    # (`do_rot = ... and not pool_stores_rotated_k()`). Compressed keys were
+    # therefore never rotated at all.
+    #
+    # probe_residual_values measured it at 32k@depth0.9: anchor+residual scores
+    # cos = 1.0000 against UNROTATED ground truth and 0.84-0.98 against rotated,
+    # with |K_pool| == |K_true| at every layer -- the exact signature of a pure
+    # rotation, since RoPE is orthogonal.
+    #
+    # 0 is also the VALIDATED configuration: the unrotated pool re-rotates
+    # residual keys at their true absolute position on read
+    # (DIFFKV_RESIDUAL_EXACT_ROPE, A100-validated 75%->88% random-code recall).
+    # Ingest now honours this flag, so =1 is a real MLX-parity option rather than
+    # a claim nothing implemented -- but it needs its own validation before it
+    # can be the default, because it makes the SVD model post-RoPE deltas whose
+    # phase wraps many times within a 256-token block.
+    return os.environ.get("DKV_ROTATED_POOL", "0") == "1"
 
 
 def resolve_sparse_bias(lse_sparse=None, lse_dense=None):

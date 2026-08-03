@@ -29,6 +29,27 @@ from native_core.sparse_decode.triton_fused_decode import (
 )
 from native_core.compression.lowrank import reconstruct_batch_U
 
+
+def _ingest_k(rot_k, unrot_k):
+    """The K that PREFILL stores must match what the decoder assumes it stored.
+
+    `pool_stores_rotated_k()` tells the decode gather whether to re-rotate
+    (`do_rot = ... and not pool_stores_rotated_k()`). Every prefill capture site
+    passed `unrot_key_states` UNCONDITIONALLY while that predicate returned True,
+    so the pool held PRE-RoPE keys and the decoder skipped the rotation they
+    needed -- RoPE was simply absent from all compressed content.
+
+    Measured, not inferred: probe_residual_values scored anchor+residual against
+    ground truth and got cos_RAW = 1.0000 (bit exact, unrotated) versus
+    cos_ROT = 0.84-0.98, with |K_pool| == |K_true| at every layer because RoPE is
+    orthogonal. It also explains the depth gradient -- at depth 0.0 the block sits
+    near position 0 where RoPE is ~identity, so it passed while deeper needles
+    degraded.
+
+    Routing through one helper means the two sides cannot silently disagree again.
+    """
+    return rot_k if _pool_rotated_k() else unrot_k
+
 # ── Phase 1: C++ extension fast path ─────────────────────────────────────────
 # Import dkv_core C++ extension if built. When available, the hot path uses:
 #   - dkv_core.anchor_screen()          instead of Python two_level_gate()
@@ -1035,7 +1056,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                         if sid != "dummy_session":
                             kv_manager.capture_prefill_kv(
                                 sid, captured_layer_idx,
-                                unrot_key_states[b_idx:b_idx+1].detach(),
+                                _ingest_k(key_states, unrot_key_states)[b_idx:b_idx+1].detach(),
                                 value_states[b_idx:b_idx+1].detach(),
                             )
 
@@ -3495,7 +3516,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     # 2x variant: capture unrotated KV into blocks now.
                                     kv_manager.capture_prefill_kv(
                                         sid, captured_layer_idx,
-                                        unrot_key_states[b_idx:b_idx+1].detach(),
+                                        _ingest_k(key_states, unrot_key_states)[b_idx:b_idx+1].detach(),
                                         cv.detach(),
                                     )
                             attn_output = torch.cat(attn_outputs, dim=0)
@@ -3526,7 +3547,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 if sid != "dummy_session":
                                     kv_manager.capture_prefill_kv(
                                         sid, captured_layer_idx,
-                                        unrot_key_states[b_idx:b_idx+1].detach(),
+                                        _ingest_k(key_states, unrot_key_states)[b_idx:b_idx+1].detach(),
                                         curr_v.detach(),
                                     )
                             attn_output = torch.cat(attn_outputs, dim=0)
@@ -3546,7 +3567,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     chunk_q = query_states[b_idx:b_idx+1, :, c_start:c_end, :]
                                     chunk_k = key_states[b_idx:b_idx+1, :, c_start:c_end, :]
                                     chunk_v = value_states[b_idx:b_idx+1, :, c_start:c_end, :]
-                                    chunk_unrot_k = unrot_key_states[b_idx:b_idx+1, :, c_start:c_end, :]
+                                    chunk_unrot_k = _ingest_k(key_states, unrot_key_states)[b_idx:b_idx+1, :, c_start:c_end, :]
 
                                     # 1. Path A: Causal Local Self-Attention over new chunk
                                     out_local, lse_local = _flash_local_attention(chunk_q, chunk_k, chunk_v)
