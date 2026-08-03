@@ -133,10 +133,35 @@ def main():
                     rank = ol.index(target_block)
                     cut = float(r[ol[min(k_eff, nb) - 1]].item())
                     state["n"] += 1
+                    # WHICH TERM CARRIES IT? CUDA's relevance is
+                    # max(s_anc, max_r(s_anc + q.rk)), so it is >= s_anc BY
+                    # CONSTRUCTION -- and CUDA scores this block <= 8. So if
+                    # MLX's 15-19 comes from the ANCHOR, the two runtimes'
+                    # anchors disagree; if it comes from a RESIDUAL, their
+                    # residual sets or values do. Recomputed here with MLX's own
+                    # inputs and MLX's own formula (mlx_dkv_wrapper.py:1198-1216,
+                    # the gpk>1 2-D branch), so the split is measured, not
+                    # inferred.
+                    _q = mx.array(q)
+                    H_q, D = _q.shape
+                    H_kv = comp_anc_k.shape[1]
+                    _qh = _q.reshape(H_kv, gpk, D)
+                    s_anc = mx.sum((mx.expand_dims(_qh, 2)
+                                    * mx.expand_dims(comp_anc_k.transpose(1, 0, 2), 1)
+                                    ).astype(mx.float32), axis=-1) * scale
+                    a_blk = float(mx.max(s_anc[:, :, target_block]).item())
+                    s_res = mx.sum((mx.expand_dims(mx.expand_dims(_qh, 2), 3)
+                                    * mx.expand_dims(comp_res_k.transpose(2, 0, 1, 3), 1)
+                                    ).astype(mx.float32), axis=-1) * scale
+                    s_res = mx.where(mx.expand_dims(mx.expand_dims(res_valid, 0), 1),
+                                     s_res, -1e30)
+                    r_blk = float(mx.max(s_res[:, :, target_block, :]).item())
                     print(f"[MLX ROUTE] block={target_block} rank={rank}/{nb} "
                           f"k={k_eff} kept={rank < k_eff} "
                           f"rel={float(r[target_block].item()):.5f} "
-                          f"top={float(r[ol[0]].item()):.5f} cut={cut:.5f}",
+                          f"top={float(r[ol[0]].item()):.5f} cut={cut:.5f} "
+                          f"| s_anc={a_blk:.5f} res_max={r_blk:.5f} "
+                          f"carried_by={'ANCHOR' if a_blk >= r_blk else 'RESIDUAL'}",
                           flush=True)
             except Exception as e:                               # noqa: BLE001
                 print(f"[MLX ROUTE] trace failed: {e}", flush=True)

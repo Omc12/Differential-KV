@@ -1337,12 +1337,33 @@ def route_blocks_relevance(
                 if not _kept or _ROUTE_TRACE_KEPT_SHOWN < _ROUTE_TRACE_MAX:
                     if _kept:
                         _ROUTE_TRACE_KEPT_SHOWN += 1
+                    # SPLIT THE SCORE. MLX's probe reports, for this same block,
+                    # s_anc=1.5-6.6 and res_max=15.1-19.1 -- the RESIDUAL carries
+                    # the whole thing, and the anchor alone would rank it
+                    # nowhere. CUDA's total lands in the same range as MLX's
+                    # ANCHOR-ONLY term, so the question is whether CUDA's
+                    # residual term is merely smaller or contributing NOTHING.
+                    # Reported, not inferred: `res_scores is None` means the
+                    # guard at the top of the residual branch rejected the pool's
+                    # arrays outright, and n_valid==0 means every residual slot
+                    # was masked by res_pos < 0.
+                    if res_scores is None:
+                        _rs = "res=NONE(guard rejected pool arrays)"
+                    else:
+                        _rs = (f"res_max={float(res_scores.reshape(-1, N)[:, _p].max().item()):.5f}")
+                    try:
+                        _nv = int(rvalid[_p].sum().item())
+                        _rw = int(rvalid.shape[1])
+                    except Exception:                            # noqa: BLE001
+                        _nv, _rw = -1, -1
                     print(f"[DKV] ROUTE TRACE step={_st} tok={_tgt} "
                           f"anchor={int(_anc[_p].item())} rank={_rank}/{N} k={k_eff} "
                           f"kept={_kept} "
                           f"rel={float(relevance[_p].item()):.5f} "
                           f"top={float(relevance[int(_order[0].item())].item()):.5f} "
-                          f"cut={float(relevance[_cut_i].item()):.5f}", flush=True)
+                          f"cut={float(relevance[_cut_i].item()):.5f} | "
+                          f"s_anc={float(s_anc.reshape(-1, N)[:, _p].max().item()):.5f} "
+                          f"{_rs} n_valid={_nv}/{_rw}", flush=True)
             else:
                 print(f"[DKV] ROUTE TRACE tok={_tgt}: no anchor <= token "
                       f"(min anchor={int(_anc.min().item())}) -- token is before "
