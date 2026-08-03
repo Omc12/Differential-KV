@@ -93,6 +93,17 @@ def main():
     cap = {i: {} for i in attn_layers}       # layer -> {abs_pos: hidden vector}
     seen = {i: 0 for i in attn_layers}       # running absolute position per layer
 
+    # Capture the needle's WHOLE BLOCK, not just its own tokens. The needle's key
+    # is exact (it is a residual), so it can only lose the softmax if OTHER slots
+    # score spuriously high -- and those are the non-residual slots rebuilt from
+    # anchor + U@V. Measuring them needs ground truth across the block.
+    # Anchors sit at multiples of (block_size + 1) = 257; verified against the
+    # observed anchors 0/257/.../29041, and 29041 == 113*257.
+    _SPAN = 257
+    blk_lo = (n_lo // _SPAN) * _SPAN
+    blk_hi = blk_lo + _SPAN
+    cap_lo, cap_hi = min(n_lo, blk_lo), max(n_hi, blk_hi)
+
     def mk_hook(li):
         def hook(mod, args, kwargs):
             hs = kwargs.get("hidden_states")
@@ -103,7 +114,7 @@ def main():
             start = seen[li]
             T = hs.shape[1]
             seen[li] = start + T
-            lo, hi = max(n_lo, start), min(n_hi, start + T - 1)
+            lo, hi = max(cap_lo, start), min(cap_hi, start + T - 1)
             if lo > hi:
                 return
             for p in range(lo, hi + 1):
@@ -138,8 +149,9 @@ def main():
               f"(True -> compare against cos_ROT; False -> against cos_RAW)")
     except Exception:
         pass
+    print("  RESIDUAL slots (needle, exact form) | LOW-RANK slots (the rest of the block)")
     print(f"{'layer':>5} {'slots':>7} {'cos_ROT':>12} {'cos_RAW':>12} "
-          f"{'rel_err':>9} {'|K_pool|':>9} {'|K_true|':>9}")
+          f"{'rel_err':>9} {'lr_cos':>9} {'lr_rel':>9} {'n_lr':>6}")
 
     for li in attn_layers:
         blocks = manager.get_streaming_blocks("default", li)
@@ -165,6 +177,22 @@ def main():
         anchors_K = pool.anchors_KV[pidx, 0].float().cpu()     # [H_kv, D]
 
         attn = layers[li].self_attn
+        Dh = anchors_K.shape[-1]
+
+        def _gt(p):
+            """True post-RoPE key at absolute position p, from the model's weights."""
+            if p not in cap[li]:
+                return None, None
+            h = cap[li][p].to(model.device, dtype=next(attn.parameters()).dtype)
+            kt = attn.k_proj(h.unsqueeze(0))
+            if getattr(attn, "k_norm", None) is not None:
+                kt = attn.k_norm(kt.view(1, -1, Dh))
+            kt = kt.view(1, 1, -1, Dh).transpose(1, 2)          # [1, H_kv, 1, D]
+            c, s = rot(kt, torch.tensor([[p]], device=model.device))
+            k_rot = _partial_rope_apply(kt.float(), c.float().unsqueeze(1),
+                                        s.float().unsqueeze(1))
+            return k_rot.reshape(-1).cpu(), kt.float().reshape(-1).cpu()
+
         cos_l, sin_l, np_l, nt_l, raw_l = [], [], [], [], []
         n_ok, n_used, n_fail = 0, 0, 0
         for p in range(n_lo, n_hi + 1):
@@ -179,33 +207,19 @@ def main():
 
             K_pool = (anchors_K + rk_val[ri]).flatten()         # [H_kv*D]
 
-            # ground truth from the model's own weights, at this absolute position
+            # ground truth from the model's own weights, at this absolute position.
+            # RoPE is ORTHOGONAL, so |rotated| == |unrotated| exactly -- scoring
+            # against BOTH is what distinguished a pool/decoder frame disagreement
+            # from a probe bug when they produced the same signature.
             try:
-                h = cap[li][p].to(model.device,
-                                  dtype=next(attn.parameters()).dtype)
-                kt = attn.k_proj(h.unsqueeze(0))
-                Dh = anchors_K.shape[-1]
-                if getattr(attn, "k_norm", None) is not None:
-                    kt = attn.k_norm(kt.view(1, -1, Dh))
-                kt = kt.view(1, 1, -1, Dh).transpose(1, 2)      # [1, H_kv, 1, D]
-                pid = torch.tensor([[p]], device=model.device)
-                c, s = rot(kt, pid)
-                # rot returns [B, T, rotary_dim]; _partial_rope_apply wants it
-                # broadcastable against [B, H_kv, T, D] -- verified shape contract.
-                k_rot = _partial_rope_apply(kt.float(), c.float().unsqueeze(1),
-                                            s.float().unsqueeze(1))
-                K_true = k_rot.reshape(-1).cpu()
-                # RoPE is ORTHOGONAL, so |rotated| == |unrotated| exactly. If the
-                # pool turns out to hold PRE-RoPE keys, comparing against the
-                # rotated truth yields precisely what the first run showed --
-                # identical norms with a depressed cosine -- and that would be a
-                # probe bug, not a runtime one. Score both and let the data say.
-                K_true_raw = kt.float().reshape(-1).cpu()
+                K_true, K_true_raw = _gt(p)
             except Exception as e:                              # noqa: BLE001
                 if n_fail == 0:
                     print(f"  [layer {li}] ground truth failed: "
                           f"{type(e).__name__}: {str(e)[:120]}")
                 n_fail += 1
+                continue
+            if K_true is None:
                 continue
             if K_true.shape != K_pool.shape:
                 if n_fail == 0:
@@ -228,10 +242,37 @@ def main():
             print(f"{li:>5}  no comparable slots "
                   f"(captured={len(cap[li])}, failed={n_fail})")
             continue
+        # ── the LOW-RANK half: slots NOT in the residual set ──────────────────
+        # The needle's own key is exact, so it can only lose the softmax if other
+        # slots score spuriously high. Those are the ~half of each block rebuilt
+        # from anchor + U@V. Under a ROTATED pool the SVD models post-RoPE deltas
+        # whose phase wraps many times inside a 256-token block, so this is the
+        # number that could have got worse exactly as the residual half got exact.
+        U_q = pool.U[pidx].float().cpu() * float(pool.U_scale[pidx].item())   # [S,R]
+        V_K = pool.V_KV[pidx, 0].float().cpu()                                # [R,H_kv,D]
+        blk_scale = float(pool.scales[pidx].item())
+        rk_set = set(x for x in rk_pos if x >= 0)
+        lr_cos, lr_rel = [], []
+        for off in range(0, slen):
+            if off in rk_set:
+                continue                                    # residual slots done above
+            K_t, _ = _gt(anc + 1 + off)
+            if K_t is None:
+                continue
+            dv = torch.einsum('r,rhd->hd', U_q[off], V_K) * blk_scale
+            K_lr = (anchors_K + dv).reshape(-1)
+            if K_lr.shape != K_t.shape:
+                break
+            lr_cos.append(float((K_lr / (K_lr.norm() + 1e-9)
+                                 * K_t / (K_t.norm() + 1e-9)).sum()))
+            lr_rel.append(float((K_lr - K_t).norm() / (K_t.norm() + 1e-9)))
+
         import statistics as st
+        lr_c = st.mean(lr_cos) if lr_cos else float("nan")
+        lr_r = st.mean(lr_rel) if lr_rel else float("nan")
         print(f"{li:>5} {n_used:>7} {st.mean(cos_l):>12.4f} "
               f"{st.mean(raw_l):>12.4f} {st.mean(sin_l):>9.4f} "
-              f"{st.mean(np_l):>9.2f} {st.mean(nt_l):>9.2f}")
+              f"{lr_c:>9.4f} {lr_r:>9.4f} {len(lr_cos):>6}")
 
     print("\nREAD THIS AS:")
     print("  Compare the column that MATCHES pool_stores_rotated_k() above.")
