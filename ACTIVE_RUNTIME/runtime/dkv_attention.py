@@ -155,6 +155,125 @@ try:
 except Exception:                                              # noqa: BLE001
     _REMAT_ENABLED = False
 _LAST_DKV_LAYER: dict = {}
+_REMAT_UNROTATED_WARNED = False
+
+
+def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
+                  pool, block_indices, anchor_indices, cos_all, sin_all,
+                  layer_active_rank, q, dense_k, dense_v, dense_len,
+                  num_key_value_groups):
+    """MLX's decode form: materialise the routed blocks, then plain SDPA.
+
+    MLX builds each routed block's real keys and values --
+        full_k = concat([ak, ak + delta_k])            (mlx_dkv_wrapper.py:4053)
+    -- and runs ONE scaled_dot_product_attention over
+    [materialised blocks | residual rows | dense window]. CUDA's kernel instead
+    uses project-then-attend, s = s_anchor + (q.V_K).U.scale, and never forms the
+    key. Algebraically the same; numerically NOT -- different operation order and
+    rounding, at rank 32 over 256 rows per block.
+
+    WHY THIS LIVES HERE NOW. It used to sit inside the `if _use_combined:` branch,
+    and _use_combined is False whenever DKV_SPARSE_BIAS is "auto" -- which is what
+    decode_config.BEST_DECODE_DEFAULTS sets, i.e. the shipped configuration and
+    the one the validator runs. So DKV_REMAT_CACHE=1 was UNREACHABLE on the path
+    production actually takes: the flag read as enabled, the code never executed,
+    and a run with it set was indistinguishable from a run without. That is the
+    fifth knob in this project found dead in exactly this way, and remat_cache's
+    own docstring opens by warning about the previous four.
+
+    Returns the attention output, or None when remat is off/not applicable, in
+    which case the caller falls through to its normal kernel.
+
+    dense_k/dense_v must ALREADY be RoPE-rotated, which is what both call sites
+    hold under DKV_ROTATED_POOL (the default). Under an unrotated pool the
+    non-combined path rotates inside its own kernel, so remat would attend
+    unrotated dense keys -- it declines instead of silently attending garbage.
+    """
+    global _REMAT_UNROTATED_WARNED
+    if not _REMAT_ENABLED:
+        return None
+    if block_indices is None or block_indices.numel() == 0:
+        return None
+    if dense_k is None or not dense_len:
+        return None
+    try:
+        from native_core.sparse_decode.triton_fused_decode import (
+            pool_stores_rotated_k as _psr,
+        )
+        if not _psr():
+            if not _REMAT_UNROTATED_WARNED:
+                _REMAT_UNROTATED_WARNED = True
+                print("[DKV] DKV_REMAT_CACHE ignored: the pool holds UNROTATED "
+                      "keys (DKV_ROTATED_POOL=0), and this path's dense window "
+                      "is only rotated inside the sparse kernel. Declining "
+                      "rather than attending unrotated dense keys.", flush=True)
+            return None
+    except Exception:                                            # noqa: BLE001
+        return None
+
+    from native_core.sparse_decode.remat_cache import (
+        RematCache as _RC, reconstruct_blocks as _rb, attend_with_remat as _awr,
+    )
+    # Lives in triton_fused_decode, not this module.
+    from native_core.sparse_decode.triton_fused_decode import (
+        _gather_routed_blocks_for_kernel as _grb,
+    )
+    _ws = kv_manager.decode_workspace.setdefault(sid, {})
+    _rc = _ws.get("_remat_cache")
+    if _rc is None:
+        _rc = _RC()
+        _ws["_remat_cache"] = _rc
+    # Self-populate the last-DKV-layer index: the step counter must advance ONCE
+    # PER TOKEN, not once per layer. Without this it stays at -1, the counter
+    # never advances, and the interval refresh is silently dead.
+    _mid = id(kv_manager)
+    if captured_layer_idx > _LAST_DKV_LAYER.get(_mid, -1):
+        _LAST_DKV_LAYER[_mid] = captured_layer_idx
+    _step = _ws.get("_remat_step", 0)
+    _smgr2 = getattr(kv_manager, "_streaming_mgr", None)
+    _poolgen = (_smgr2._metadata_versions.get(sid, {}).get(captured_layer_idx, 0)
+                if _smgr2 is not None else 0)
+    _rkey = _RC.make_key(captured_layer_idx, current_version, _poolgen, _step)
+    _hit = _rc.get(_rkey)
+    if _hit is None:
+        _g = _grb(pool, block_indices, anchor_indices, cos_all, sin_all)
+        # The residuals are a CORRECTNESS requirement, not a refinement: they
+        # carry the exact values of the tokens the SVD reconstructs worst (codes,
+        # digits). Dropping them attends every routed block at pure low-rank
+        # fidelity and loses exact recall while still reading fluently. res_k is
+        # already rotated at the residuals' TRUE positions by the gather.
+        _has_res = _g.get("has_res", False)
+        _Km, _Vm = _rb(
+            _g["U"], _g["V_K"], _g["V_V"], _g["anchors_K"], _g["anchors_V"],
+            _g["scales"], _g["U_scale"], layer_active_rank,
+            res_k=_g["res_k"] if _has_res else None,
+            res_pos=_g["res_pos"] if _has_res else None,
+            res_v=_g["res_v"] if _has_res else None,
+            res_pos_v=_g["res_pos_v"] if _has_res else None)
+        _rc.put(_rkey, _Km, _Vm)
+        # clone: under DKV_STATIC_GATHER the gather returns a PERSISTENT buffer
+        # that the next layer's gather overwrites, and this is held across
+        # tokens. _Km/_Vm are fresh bmm outputs, so only this needs it.
+        _seq_cached = _g["seq_lens"].clone()
+        _ws[("_remat_seq", captured_layer_idx)] = _seq_cached
+    else:
+        _Km, _Vm = _hit
+        _seq_cached = _ws[("_remat_seq", captured_layer_idx)]
+    out = _awr(q, _Km, _Vm, _seq_cached, dense_k, dense_v, dense_len,
+               num_key_value_groups)
+    # Advance once per token, on the LAST DKV layer. _LAST_DKV_LAYER learns the
+    # max layer index by watching layers go by, so on the FIRST token it equals
+    # the current layer at every layer; only advance once it has stopped growing.
+    _last = _LAST_DKV_LAYER.get(_mid, -1)
+    if captured_layer_idx == _last and _ws.get("_remat_saw_last"):
+        _ws["_remat_step"] = _step + 1
+    if captured_layer_idx == _last:
+        _ws["_remat_saw_last"] = True
+    if not getattr(_remat_attend, "_logged", False):
+        _remat_attend._logged = True
+        print("[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) "
+              f"is running on layer {captured_layer_idx}.", flush=True)
+    return out
 
 # ── Sparse LSE Bias Configuration ─────────────────────────────────────────────
 # Parsing lives in resolve_sparse_bias (triton_fused_decode.py), which both merge
@@ -1643,6 +1762,15 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # workspace shape is always [1, kv_heads, max_dense_len, head_dim];
                         # dense_len tells us how many positions are actually valid this step.
                         dense_k_assembled, dense_v_assembled, dense_len = None, None, 0
+                        # Bind unconditionally. current_version is otherwise only
+                        # assigned inside `if anchor_indices is not None and ...`
+                        # below, and _remat_attend is now called on the
+                        # non-combined path where that condition need not hold --
+                        # Python evaluates call arguments before the callee's own
+                        # guards, so an unbound name would raise here rather than
+                        # be caught. 0 is the correct "no routing yet" value and
+                        # matches what the cache read at :1794 falls back to.
+                        current_version = 0
                         if dense_blocks:
                             dense_k_assembled, dense_v_assembled, dense_len, dense_blocks = kv_manager.assemble_dense_window_kv(
                                 sid, captured_layer_idx, dense_blocks, query_states.dtype
@@ -3018,100 +3146,15 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         early_boost=getattr(_cfg, "early_layer_rank_boost", False),
                                         max_rank_early=getattr(_cfg, "max_rank_early", 0),
                                     )
-                                    # ── Re-materialisation cache (DKV_REMAT_CACHE) ──
-                                    # Skips the per-token U@V rebuild entirely by
-                                    # materialising routed blocks once per interval and
-                                    # attending the result with a plain SDPA. See
-                                    # native_core/sparse_decode/remat_cache.py.
-                                    _remat_out = None
-                                    if _REMAT_ENABLED and block_indices is not None \
-                                            and block_indices.numel() > 0:
-                                        from native_core.sparse_decode.remat_cache import (
-                                            RematCache as _RC, reconstruct_blocks as _rb,
-                                            attend_with_remat as _awr,
-                                        )
-                                        # Lives in triton_fused_decode, not this module.
-                                        from native_core.sparse_decode.triton_fused_decode import (
-                                            _gather_routed_blocks_for_kernel as _grb,
-                                        )
-                                        _ws = kv_manager.decode_workspace.setdefault(sid, {})
-                                        _rc = _ws.get("_remat_cache")
-                                        if _rc is None:
-                                            _rc = _RC()
-                                            _ws["_remat_cache"] = _rc
-                                        # Self-populate the last-DKV-layer index: the
-                                        # step counter must advance ONCE PER TOKEN, not
-                                        # once per layer. Without this it stays at -1,
-                                        # the counter never advances, and the interval
-                                        # refresh is silently dead (the cache would then
-                                        # only refresh on routing/pool change).
-                                        _mid = id(kv_manager)
-                                        if captured_layer_idx > _LAST_DKV_LAYER.get(_mid, -1):
-                                            _LAST_DKV_LAYER[_mid] = captured_layer_idx
-                                        _step = _ws.get("_remat_step", 0)
-                                        _smgr2 = getattr(kv_manager, "_streaming_mgr", None)
-                                        _poolgen = (_smgr2._metadata_versions.get(sid, {})
-                                                    .get(captured_layer_idx, 0)
-                                                    if _smgr2 is not None else 0)
-                                        _rkey = _RC.make_key(captured_layer_idx,
-                                                             current_version, _poolgen, _step)
-                                        _hit = _rc.get(_rkey)
-                                        if _hit is None:
-                                            _g = _grb(pool, block_indices,
-                                                      anchor_indices, cos_all, sin_all)
-                                            # The residuals are a CORRECTNESS
-                                            # requirement, not a refinement: they
-                                            # carry the exact values of the tokens
-                                            # the SVD reconstructs worst (codes,
-                                            # digits). Dropping them attends every
-                                            # routed block at pure low-rank
-                                            # fidelity and loses exact recall
-                                            # while still reading fluently.
-                                            # res_k is already rotated at the
-                                            # residuals' TRUE token positions by
-                                            # the gather (DKV_RESIDUAL_EXACT_ROPE).
-                                            _has_res = _g.get("has_res", False)
-                                            _Km, _Vm = _rb(
-                                                _g["U"], _g["V_K"], _g["V_V"],
-                                                _g["anchors_K"], _g["anchors_V"],
-                                                _g["scales"], _g["U_scale"],
-                                                _layer_active_rank,
-                                                res_k=_g["res_k"] if _has_res else None,
-                                                res_pos=_g["res_pos"] if _has_res else None,
-                                                res_v=_g["res_v"] if _has_res else None,
-                                                res_pos_v=_g["res_pos_v"] if _has_res else None)
-                                            _rc.put(_rkey, _Km, _Vm)
-                                            # clone: under DKV_STATIC_GATHER the gather
-                                            # returns a PERSISTENT buffer that the next
-                                            # layer's gather overwrites, and this is held
-                                            # across tokens. Same invariant the gather's
-                                            # batch-queue note states — anything outliving
-                                            # the call must own its memory. _Km/_Vm are
-                                            # fresh bmm outputs, so only this needs it.
-                                            _seq_cached = _g["seq_lens"].clone()
-                                            _ws[("_remat_seq", captured_layer_idx)] = _seq_cached
-                                        else:
-                                            _Km, _Vm = _hit
-                                            _seq_cached = _ws[("_remat_seq", captured_layer_idx)]
-                                        _remat_out = _awr(
-                                            query_states[b_idx:b_idx+1], _Km, _Vm,
-                                            _seq_cached, _dk_combined, _dv_combined,
-                                            dense_len, num_key_value_groups)
-                                        # Advance once per token, on the LAST DKV layer.
-                                        # `_LAST_DKV_LAYER` learns the max layer index by
-                                        # watching layers go by, so on the FIRST token it
-                                        # equals the current layer at every layer and the
-                                        # counter advanced once per LAYER (~28x) instead of
-                                        # once per token. Harmless for output but it shifts
-                                        # every interval boundary, which would confound an
-                                        # interval sweep. Only advance once the highest
-                                        # layer index has actually stopped growing, i.e.
-                                        # from the second token onward.
-                                        _last = _LAST_DKV_LAYER.get(_mid, -1)
-                                        if captured_layer_idx == _last and _ws.get("_remat_saw_last"):
-                                            _ws["_remat_step"] = _step + 1
-                                        if captured_layer_idx == _last:
-                                            _ws["_remat_saw_last"] = True
+                                    # MLX-parity decode form; see _remat_attend.
+                                    _remat_out = _remat_attend(
+                                        kv_manager, sid, captured_layer_idx,
+                                        current_version, pool, block_indices,
+                                        anchor_indices, cos_all, sin_all,
+                                        _layer_active_rank,
+                                        query_states[b_idx:b_idx+1],
+                                        _dk_combined, _dv_combined, dense_len,
+                                        num_key_value_groups)
 
                                     attn_out_b = _remat_out if _remat_out is not None else \
                                         native_triton_sparse_attn_decode_combined(
@@ -3138,7 +3181,28 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     early_boost=getattr(_cfg, "early_layer_rank_boost", False),
                                     max_rank_early=getattr(_cfg, "max_rank_early", 0),
                                 )
-                                attn_out_b = native_triton_sparse_attn_decode(
+                                # THE PRODUCTION PATH. _use_combined is False
+                                # whenever DKV_SPARSE_BIAS is "auto", which is
+                                # what BEST_DECODE_DEFAULTS sets, so this branch
+                                # -- not the combined one -- is what ships and
+                                # what the validator measures. remat lived only
+                                # in the other branch, which is why
+                                # DKV_REMAT_CACHE=1 changed nothing here.
+                                #
+                                # dense_k/v_assembled are already RoPE-rotated
+                                # under DKV_ROTATED_POOL (the default);
+                                # _remat_attend declines when they are not,
+                                # rather than attending unrotated keys.
+                                _remat_out = _remat_attend(
+                                    kv_manager, sid, captured_layer_idx,
+                                    current_version, pool, block_indices,
+                                    anchor_indices, cos_all, sin_all,
+                                    _layer_active_rank,
+                                    query_states[b_idx:b_idx+1],
+                                    dense_k_assembled, dense_v_assembled,
+                                    dense_len, num_key_value_groups)
+                                attn_out_b = _remat_out if _remat_out is not None else \
+                                    native_triton_sparse_attn_decode(
                                     q=query_states[b_idx:b_idx+1],
                                     block_indices=block_indices,
                                     pool=pool,
