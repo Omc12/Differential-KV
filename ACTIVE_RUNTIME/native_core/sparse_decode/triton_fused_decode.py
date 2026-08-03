@@ -1708,6 +1708,24 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
                 # the wrong digits (ZEBRA-447 / ZEBRA-474-QUARTZ).
                 _abs_pos = (anchor_indices_clamped.unsqueeze(1) + 1
                             + res_pos_g.clamp(min=0).long())          # [N, MAX_RES]
+                # A CLAMP HERE IS SILENT CORRUPTION, NOT A GUARD. cos_flat is
+                # whatever RoPE table the caller passed; nothing in this function
+                # guarantees it spans the whole context. If it is short, every
+                # residual key past its end is rotated at the LAST table row
+                # instead of its own position -- the key stays value-exact but
+                # points the wrong way, so `anchor + residual` scores WORSE than
+                # the bare anchor. Report it rather than let it pass as a guard;
+                # gated on the trace flag so production pays nothing.
+                if os.environ.get("DKV_ROUTE_TRACE") == "1":
+                    _lim = cos_flat.shape[0] - 1
+                    _over = int((_abs_pos > _lim).sum().item())
+                    if _over and not getattr(_gather_routed_blocks_for_kernel,
+                                             "_clamp_warned", False):
+                        _gather_routed_blocks_for_kernel._clamp_warned = True
+                        print(f"[DKV] ROPE CLAMP {_over} residual positions exceed "
+                              f"the cos/sin table (rows={cos_flat.shape[0]}, "
+                              f"max_requested={int(_abs_pos.max().item())}) — those "
+                              f"keys are rotated at the WRONG position", flush=True)
                 _abs_pos = _abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1)
                 _cos_rk = cos_flat[_abs_pos].to(device=res_k_g.device,
                                                 dtype=res_k_g.dtype).unsqueeze(2)   # [N, MAX_RES, 1, D]
