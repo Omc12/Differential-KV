@@ -218,8 +218,27 @@ def reconstruct_blocks(
 
     # Applied in fp32, before the cast back: the corrections are small deltas on
     # top of a much larger anchor, which is exactly where fp16 rounding eats them.
+    # Done BEFORE the anchor row is prepended, so res_pos stays a plain row index
+    # and _scatter_residuals needs no offset.
     K = _scatter_residuals(K, res_k, res_pos, anchors_K.float())
     V = _scatter_residuals(V, res_v, res_pos_v, anchors_V.float())
+
+    # ── PREPEND THE ANCHOR ROW ────────────────────────────────────────────────
+    # The anchor is a REAL TOKEN, not just a reference point: a block stores
+    # `anchor = k[..., 0]` and `active = k[..., 1:]`
+    # (streaming_sparse_ingest.py:1206/1216). Both references attend it as its
+    # own row --
+    #     MLX     full_k = concatenate([ak_e, ak_e + delta_k], axis=2)
+    #                                            (mlx_dkv_wrapper.py:4053)
+    #     Triton  p_anchor = exp(s_anchor - m_new); l_i += p_anchor + p_delta_sum
+    #                                            (triton_fused_decode.py:751)
+    # -- so each block contributes 1 + seq_len rows. This function returned only
+    # the S delta rows, folding the anchor into each of them and DROPPING the
+    # anchor token itself: 16 real tokens gone at K=16, 122 when attending all.
+    # That made remat quietly not-MLX's-form, so measuring "materialise vs
+    # project-then-attend" with it was measuring two differences at once.
+    K = torch.cat([anchors_K.unsqueeze(1).float(), K], dim=1)
+    V = torch.cat([anchors_V.unsqueeze(1).float(), V], dim=1)
     return K.to(V_K.dtype), V.to(V_V.dtype)
 
 
@@ -306,8 +325,12 @@ def attend_with_remat(
     H_q = q.shape[1]
     dev, dt = q.device, q.dtype
 
+    # Row 0 is the block's ANCHOR and is always live; rows 1..seq_len are its
+    # active tokens. reconstruct_blocks now returns 1 + S rows per block, so the
+    # validity bound is seq_lens + 1 -- using seq_lens here would drop the last
+    # real token of every block instead.
     valid = (torch.arange(S, device=dev).view(1, S) <
-             seq_lens.to(dev).view(N, 1))                       # [N, S]
+             (seq_lens.to(dev).view(N, 1) + 1))                 # [N, S]
     k_parts = [K_mat.reshape(N * S, H_kv, D)]
     v_parts = [V_mat.reshape(N * S, H_kv, D)]
     mask_parts = [valid.reshape(N * S)]
