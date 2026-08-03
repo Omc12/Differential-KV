@@ -972,6 +972,13 @@ def _tf32_matmul():
         torch.backends.cuda.matmul.allow_tf32 = _prev
 
 
+# DKV_ROUTE_TRACE anchor fingerprint: (layer_idx, anchor_idx) -> (|anchor|, slot).
+# Detects the SAME logical block being handed a DIFFERENT anchor on a later
+# generation, which separates "prefill recomputed it" from "storage moved it".
+_ANCHOR_FP: dict = {}
+_ANCHOR_FP_SHOWN = 0
+
+
 def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     """
     Compress a list of StreamingKVBlock objects batched together entirely on the GPU.
@@ -1704,6 +1711,48 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                 _n = min(int(_fpv.numel()), _max_res)
                 _rv_pos_pad[_i, :_n] = _fpv[:_n]
                 _rv_val_pad[_i, :_n] = _rv_val[_i][:_n].view(_n, heads, head_dim)
+
+        # ── DKV_ROUTE_TRACE — is the ANCHOR ITSELF different this generation? ──
+        #
+        # The route trace showed the same logical block (same layer, same
+        # anchor_idx), resolving to the SAME slot, reading back a different
+        # |anchors_K| on repeat 2 of an identical prompt. tests/
+        # test_pool_recycle_aliasing.py then proved the pool stores faithfully:
+        # allocate/free/grow and both write paths (including batched writes into
+        # LIFO-recycled non-monotonic slots) all keep each block's bytes in its
+        # own slot. So storage is innocent and the value HANDED to it must
+        # already differ.
+        #
+        # This is the last place that value exists before it becomes pool bytes.
+        # Keyed on (layer_idx, anchor_idx) -- anchor_idx alone repeats across
+        # layers and would compare unrelated blocks. Reports only MISMATCHES,
+        # so a clean run is silent and a divergent one names the exact block.
+        #
+        # If this fires, the anchor is being COMPUTED differently on the second
+        # generation and the defect is in prefill, not in the KV store. If it
+        # stays silent while the router still reads a changed |anc|, the change
+        # happens between this write and that read.
+        if os.environ.get("DKV_ROUTE_TRACE", "0") == "1":
+            global _ANCHOR_FP, _ANCHOR_FP_SHOWN
+            try:
+                _ak = torch.stack([b.anchor_kv[0, 0] for b in blocks_list], dim=0)
+                _nrm = _ak.float().flatten(1).norm(dim=1).tolist()
+                for _b, _n in zip(blocks_list, _nrm):
+                    _key = (getattr(_b, "layer_idx", None), int(_b.anchor_idx))
+                    _prev = _ANCHOR_FP.get(_key)
+                    if _prev is None:
+                        _ANCHOR_FP[_key] = (_n, _b.pool_idx)
+                    elif abs(_prev[0] - _n) > 1e-3 and _ANCHOR_FP_SHOWN < 24:
+                        _ANCHOR_FP_SHOWN += 1
+                        print(f"[DKV] ANCHOR FP MISMATCH layer={_key[0]} "
+                              f"anchor={_key[1]} |anc| {_prev[0]:.4f} -> {_n:.4f} "
+                              f"slot {_prev[1]} -> {_b.pool_idx} "
+                              f"(recomputed differently BEFORE storage)", flush=True)
+                        _ANCHOR_FP[_key] = (_n, _b.pool_idx)
+            except Exception as _fe:                             # noqa: BLE001
+                if _ANCHOR_FP_SHOWN < 1:
+                    _ANCHOR_FP_SHOWN += 1
+                    print(f"[DKV] ANCHOR FP failed: {_fe}", flush=True)
 
         pool.write_blocks_batched(
             pool_indices=torch.tensor([b.pool_idx for b in blocks_list], device=gpu_device, dtype=torch.long),
