@@ -217,6 +217,40 @@ class TieredBlockStore:
                     del self._cpu_store[slot_id]
                 self._warm_futures.pop(slot_id, None)
 
+    def invalidate_slot(self, slot_id: int) -> None:
+        """Forget everything about a slot whose contents have become dead.
+
+        Called by NativeBlockPool.free_block. The pool recycles slot IDs, so
+        every id here is one that a DIFFERENT block is about to be written into.
+
+        Without this, tiering bookkeeping outlives the block it describes, and
+        restore_slot is keyed on nothing but the slot id:
+
+            self.pool.U[slot_id].copy_(store_data['U'], ...)
+            self.pool.seq_lens[slot_id] = store_data['seq_len']
+
+        so a stale _tier[slot]=='CPU' plus a stale _cpu_store entry means the
+        next ensure_warm/prefetch of that slot copies the OLD block's U, V_KV,
+        anchors_KV and seq_len straight over the new one -- asynchronously, on
+        _h2d_stream, racing the decode kernel that is reading the same slot.
+        That is silent cross-block corruption whose timing decides the output,
+        which is what a temperature-0 run that produces different text on
+        different repeats looks like.
+
+        A restore already in flight is synchronised rather than abandoned: the
+        copy is queued on _h2d_stream and would otherwise land on top of
+        whatever write_block puts here next.
+        """
+        event = self._warm_futures.pop(slot_id, None)
+        if event is not None and self.is_cuda and torch.cuda.is_available():
+            try:
+                event.synchronize()
+            except Exception:                                    # noqa: BLE001
+                pass
+        self._tier.pop(slot_id, None)
+        self._cpu_store.pop(slot_id, None)
+        self._heat.pop(slot_id, None)
+
     def get_tier(self, slot_id: int) -> str:
         return self._tier.get(slot_id, 'GPU')
         

@@ -437,9 +437,46 @@ class NativeBlockPool:
             if self._ref_counts[pool_idx] <= 0:
                 self._ref_counts[pool_idx] = 0
                 self._last_used[pool_idx] = _time.time() # Mark freed time as last used
+                # seq_lens is the pool's OCCUPANCY SIGNAL, not just kernel
+                # metadata. Freeing a slot without clearing it made occupancy a
+                # HIGH-WATER MARK that never came back down:
+                #
+                #   _occupied_slots() (triton_fused_decode.py:125) is literally
+                #       (seq_lens[:current_blocks] > 0).nonzero()
+                #   and its result is what TieredBlockStore.maybe_evict divides
+                #   by max_blocks to decide whether the pool is past
+                #   DKV_TIER_EVICT_THRESH (0.80).
+                #
+                # Every clear_session frees its slots, so a process that runs
+                # several prompts (a benchmark sweep, a validator suite, any
+                # multi-turn server) accumulates dead-but-"occupied" slots until
+                # occupancy crosses the threshold permanently -- at which point
+                # eviction starts firing on LIVE blocks mid-decode, forever,
+                # driven entirely by slots that no longer hold anything.
+                #
+                # Zeroing here is also what makes reuse safe: write_block sets
+                # seq_lens on the next write, so a slot is only ever "occupied"
+                # between its write and its free, which is what every consumer
+                # already assumes.
+                self.seq_lens[pool_idx] = 0
                 if pool_idx not in self._free_indices_set:
                     self._free_indices.append(pool_idx)
                     self._free_indices_set.add(pool_idx)
+                # A freed slot's bytes are dead. If the tiering layer still
+                # believes this slot lives on CPU, its restore path will copy a
+                # DIFFERENT block's U/V/anchors -- and seq_len -- over whatever
+                # gets written here next (tiered_block_store.restore_slot does
+                # an unconditional copy_ keyed only on slot id). Nothing else
+                # resets that bookkeeping: allocate_block and write_block do not
+                # know the store exists, so without this a recycled slot stays
+                # marked 'CPU' with a stale _cpu_store entry attached to it.
+                _store = getattr(getattr(self, "_manager", None),
+                                 "_kt_tiered_store", None)
+                if _store is not None:
+                    try:
+                        _store.invalidate_slot(pool_idx)
+                    except Exception:                            # noqa: BLE001
+                        pass
 
     def touch_block(self, pool_idx: int):
         import time as _time
