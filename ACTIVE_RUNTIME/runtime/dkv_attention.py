@@ -1331,16 +1331,76 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     # Default N=1 = every token (original behaviour).
                                     # DKV_SRL_ROUTE_EVERY=4 routes every 4 tokens (~3-4×
                                     # less D2H traffic during long decodes).
+                                    # MLX PARITY — ROUTE ON AN INTERVAL AND HOLD.
+                                    #
+                                    # MLX routes once per DKV_DECODE_CACHE_INTERVAL (16) tokens
+                                    # and holds that selection for the whole answer:
+                                    #     need_route = (ent is None)
+                                    #                  or (ent["steps"] >= self._decode_cache_interval)
+                                    #                  or (ent.get("nb") != nb)
+                                    #                                 (mlx_dkv_wrapper.py:4002)
+                                    # This side re-routed EVERY TOKEN, and the route trace shows
+                                    # exactly what that costs. At 32k@depth0.9 the needle's block
+                                    # is ranked 0-1 of 122 at the FIRST decode token (res_max
+                                    # 11.5-15.0, matching MLX's rank 0 / 15.1-19.1) and then
+                                    # collapses to rank 13-111 / res_max 2-7 on later tokens --
+                                    # because the query by then is '<think>', '\n\n', '</think>',
+                                    # i.e. content-free, and a content-free query cannot rank the
+                                    # block holding a buried code. The answer is emitted around
+                                    # step 5, so the routing that mattered had already been
+                                    # thrown away and re-derived from a token that knows nothing.
+                                    #
+                                    # It also explains the partial codes. Recall tracks exactly
+                                    # how long good routing survives: 32k@0.0 and @0.5 hold it
+                                    # ~10 tokens -> 2/3, and their failures are 'ZEBRA-447' /
+                                    # 'ZEBRA-4471' -- the code starts right and degrades mid-
+                                    # emission as the block drops out. 32k@0.9 holds it ONE token
+                                    # -> 0/3 and 'None'.
+                                    #
+                                    # THE COUNTER NEVER ADVANCED, so this gate was dead and the
+                                    # cadence knob did nothing: current_step_count is incremented
+                                    # only in query_router.route_query (:894), the LEGACY srl
+                                    # router, which the default DKV_ROUTER=residual never calls.
+                                    # `_should_route` was therefore `0 % N == 0` -> always True.
+                                    # It is advanced here instead, once per TOKEN at the first
+                                    # DKV layer (not once per layer, which would multiply the
+                                    # rate by the layer count and re-route every token again).
                                     _route_every = getattr(srl_state, "_route_cadence", None)
                                     if _route_every is None:
+                                        # Default to MLX's own interval, read from MLX's own
+                                        # variable so the two cannot drift; DKV_SRL_ROUTE_EVERY
+                                        # still overrides for A/B.
                                         try:
-                                            _route_every = int(os.environ.get("DKV_SRL_ROUTE_EVERY", "1"))
+                                            _mlx_iv = int(os.environ.get("DKV_DECODE_CACHE_INTERVAL", "16"))
                                         except (ValueError, TypeError):
-                                            _route_every = 1
+                                            _mlx_iv = 16
+                                        try:
+                                            _route_every = int(os.environ.get("DKV_SRL_ROUTE_EVERY", str(_mlx_iv)))
+                                        except (ValueError, TypeError):
+                                            _route_every = _mlx_iv
                                         srl_state._route_cadence = max(1, _route_every)
 
+                                    if captured_layer_idx == _first_dkv_layer:
+                                        srl_state.current_step_count = getattr(
+                                            srl_state, "current_step_count", 0) + 1
                                     _step_ctr = getattr(srl_state, "current_step_count", 0)
-                                    _should_route = (_step_ctr % srl_state._route_cadence == 0)
+                                    # Per-LAYER cache, as MLX keys its entry on layer_idx. A
+                                    # single shared slot would hold whatever the LAST layer chose
+                                    # and hand it to all the others.
+                                    _rt_cache = getattr(srl_state, "_route_layer_cache", None)
+                                    if _rt_cache is None:
+                                        _rt_cache = srl_state._route_layer_cache = {}
+                                    _rt_ent = _rt_cache.get(captured_layer_idx)
+                                    _n_cand = int(block_indices.numel()) if block_indices is not None else 0
+                                    # Same three conditions as MLX: never routed, interval
+                                    # elapsed, or the candidate count changed (a block was
+                                    # flushed into the pool since the last route, so its content
+                                    # is currently attended nowhere).
+                                    _should_route = (
+                                        _rt_ent is None
+                                        or (_step_ctr - _rt_ent[0]) >= srl_state._route_cadence
+                                        or _rt_ent[1] != _n_cand
+                                    )
 
                                     if _should_route:
                                         # Route at layer 0 — cache result for all 28 layers.
@@ -1404,6 +1464,12 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         selected_anchors = anchor_indices[block_idx_in_full]
                                         srl_state.current_step_slots = selected_slots[_keep0]
                                         srl_state.current_step_anchors = selected_anchors
+                                        # Publish to the PER-LAYER cache so the hold branch
+                                        # below replays THIS layer's decision, not whichever
+                                        # layer happened to route last.
+                                        _rt_cache[captured_layer_idx] = (
+                                            _step_ctr, _n_cand,
+                                            selected_slots[_keep0], selected_anchors)
 
                                         # DKV_ROUTE_PROBE=2: report WHICH blocks
                                         # were kept, once per (layer, candidate
@@ -1435,9 +1501,12 @@ def apply_dkv_attention_patch(model, kv_manager):
                                                       f"kept={sorted(_sa)}", flush=True)
                                         selected_slots = srl_state.current_step_slots
                                     else:
-                                        # Reuse cached routing from the previous cadence step
-                                        selected_slots = getattr(srl_state, "current_step_slots", None)
-                                        selected_anchors = getattr(srl_state, "current_step_anchors", None)
+                                        # HOLD this layer's own last decision, as MLX holds its
+                                        # per-layer cache entry for the whole interval. Reading
+                                        # the shared current_step_* here would replay whichever
+                                        # layer routed most recently.
+                                        selected_slots = _rt_ent[2]
+                                        selected_anchors = _rt_ent[3]
 
                                 else:
                                     # Other layers: reuse the layer-0 slot selection (default;
