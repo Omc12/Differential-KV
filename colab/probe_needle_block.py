@@ -123,7 +123,10 @@ def probe(w, ctx, label):
           f"({100.0 * n_lo / n_tok:.1f}% through) ───")
 
     # one short generation forces the full prefill + compression
-    out = w.generate(prompt=prompt, max_new_tokens=8, temperature=0.0,
+    # 24, matching the validator: 8 cannot hold "<think></think>\n\n" plus
+    # ZEBRA-4471-QUARTZ, so a correct answer comes back truncated and
+    # scores as a miss -- the exact artifact this file exists to avoid.
+    out = w.generate(prompt=prompt, max_new_tokens=24, temperature=0.0,
                      top_p=1.0, repetition_penalty=1.0)
     answer = out.rsplit("assistant", 1)[-1].strip().replace("\n", " ")
     got = "".join(c for c in answer.upper() if c.isalnum())
@@ -211,7 +214,9 @@ def main():
                             device="cuda")
     w.ensure_loaded()
 
-    n_filler = 800 if a.ctx == "8k" else 3200
+    # MUST match validate_cuda_dkv.py's cases exactly, or this probes a
+    # DIFFERENT context length than the failure being investigated.
+    n_filler = 800 if a.ctx == "8k" else 2400
     for depth in (0.0, 0.5, 0.9):
         random.seed(5)                      # validator's seed, identical filler
         probe(w, build(n_filler, depth), f"{a.ctx}@depth{depth:.1f}")
