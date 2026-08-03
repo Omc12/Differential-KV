@@ -310,6 +310,8 @@ def attend_with_remat(
     dense_v: Optional[torch.Tensor],
     dense_len: int,
     num_key_value_groups: int,
+    trace_row: Optional[int] = None,   # flat row index to report mass for
+    trace_tok: int = -1,               # its absolute token index, for the log
 ) -> torch.Tensor:
     """One plain attention over [materialised routed blocks | dense window].
 
@@ -352,6 +354,41 @@ def attend_with_remat(
 
     attn_mask = torch.zeros(1, 1, 1, keep.shape[0], device=dev, dtype=dt)
     attn_mask.masked_fill_(~keep.view(1, 1, 1, -1), float("-inf"))
+
+    # ── DKV_MASS_TRACE: how much softmax mass reaches the NEEDLE'S ROW? ───────
+    # Every other observable has been exhausted for 32k@depth0.9: the block is
+    # stored correctly, routed at rank 0-1, held all generation, still fails with
+    # ALL 122 blocks attended, and fails identically under project-then-attend
+    # and under MLX's materialise-then-SDPA. Per-layer output similarity to dense
+    # does not discriminate either -- the PASSING case measures a worse cosine
+    # than the failing one.
+    #
+    # What has never been measured is the quantity that actually decides recall:
+    # the attention WEIGHT on the needle's own row. Computed here from the SAME
+    # K_all/attn_mask the SDPA below consumes, so it cannot describe a different
+    # attention than the one that ran.
+    #
+    # trace_row is a flat index into K_all's first T rows, supplied by the caller
+    # (only it knows the block layout). Reports the row's share, its rank among
+    # all attended rows, and the top row for scale -- a share that is merely
+    # SMALL is very different from one that is last.
+    if trace_row is not None and 0 <= trace_row < keep.shape[0]:
+        with torch.no_grad():
+            _sc = 1.0 / (D ** 0.5)
+            _s = (q.float() @ K_all.float().transpose(-1, -2)) * _sc   # [1,H_q,1,T]
+            _s = _s + attn_mask.float()
+            _w = torch.softmax(_s, dim=-1)[0, :, 0, :]                 # [H_q, T]
+            _mine = _w[:, trace_row]
+            _best_h = int(torch.argmax(_mine).item())
+            _row_w = _w[_best_h]
+            _rank = int((_row_w > _row_w[trace_row]).sum().item())
+            _top = int(torch.argmax(_row_w).item())
+            print(f"[DKV] MASS TRACE row={trace_row} tok={trace_tok} "
+                  f"share={float(_mine[_best_h]):.3e} (head {_best_h}) "
+                  f"rank={_rank}/{keep.shape[0]} "
+                  f"top_row={_top} top_share={float(_row_w[_top]):.3e} "
+                  f"dense_rows={dense_len}", flush=True)
+
     return torch.nn.functional.scaled_dot_product_attention(
         q, K_all, V_all, attn_mask=attn_mask)                    # [1, H_q, 1, D]
 

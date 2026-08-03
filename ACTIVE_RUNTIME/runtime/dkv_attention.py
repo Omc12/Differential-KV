@@ -259,8 +259,28 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
     else:
         _Km, _Vm = _hit
         _seq_cached = _ws[("_remat_seq", captured_layer_idx)]
+    # ── Locate the traced token's ROW, if asked ──────────────────────────────
+    # _Km is [N, 1+S, H, D] flattened to N*(1+S) rows, so the token at absolute
+    # position p inside routed block n sits at row n*(1+S) + (p - anchor[n]);
+    # row 0 of each block is its anchor, at position anchor[n] exactly. Only this
+    # function knows both the routed order and the anchors, which is why the row
+    # is resolved here and passed down rather than recomputed inside the attend.
+    _trace_row, _trace_tok = None, -1
+    _tt = os.environ.get("DKV_ROUTE_TRACE_TOKEN")
+    if _tt and anchor_indices is not None and anchor_indices.numel() > 0:
+        try:
+            _trace_tok = int(_tt)
+            _anc = anchor_indices.long()
+            _off = _trace_tok - _anc
+            _S1 = _Km.shape[1]
+            _ok = (_off >= 0) & (_off < _S1)
+            if bool(_ok.any().item()):
+                _n = int(torch.nonzero(_ok, as_tuple=True)[0][-1].item())
+                _trace_row = _n * _S1 + int(_off[_n].item())
+        except Exception:                                        # noqa: BLE001
+            _trace_row = None
     out = _awr(q, _Km, _Vm, _seq_cached, dense_k, dense_v, dense_len,
-               num_key_value_groups)
+               num_key_value_groups, trace_row=_trace_row, trace_tok=_trace_tok)
     # Advance once per token, on the LAST DKV layer. _LAST_DKV_LAYER learns the
     # max layer index by watching layers go by, so on the FIRST token it equals
     # the current layer at every layer; only advance once it has stopped growing.
