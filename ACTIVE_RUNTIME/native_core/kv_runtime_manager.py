@@ -1712,7 +1712,43 @@ class KVRuntimeManager:
         if hasattr(self, 'decode_workspace'):
             self.decode_workspace.pop(session_id, None)
 
-        self._decode_block_cache.pop(session_id, None)
+        # KEY-SHAPE MISMATCH: the cache is keyed (session_id, layer_idx) at
+        # :2311, so pop(session_id) could never match anything and this cache was
+        # NEVER CLEARED. rollback_session (:1086) already does it correctly, 600
+        # lines up in this same file.
+        #
+        # What that cost: the entry holds block_indices -- the POOL SLOTS a
+        # layer's blocks live in. Re-prefilling the same session recycles slots,
+        # so generation 2 writes the same logical block to a DIFFERENT slot,
+        # while decode kept resolving it to generation 1's slot. Measured at
+        # 32k@depth0.9, layer 3, anchor 29041:
+        #
+        #     gen 1  writer -> slot 637   reader -> slot 637   |anc| 35.4794  OK
+        #     gen 2  writer -> slot 76    reader -> slot 637   |anc| 34.9666  STALE
+        #     gen 3  writer -> slot 527   reader -> slot 637   |anc| 35.2398  STALE
+        #
+        # The reader's slot never moves while the writer's moves every
+        # generation, and the |anc| WRITTEN is bit-identical each time -- prefill
+        # and compression are deterministic, and the pool stores faithfully
+        # (tests/test_pool_recycle_aliasing.py). Decode was simply reading
+        # another block's bytes out of a recycled slot.
+        #
+        # The metadata_version guard cannot catch it: _metadata_versions IS
+        # cleared per session (streaming_sparse_ingest.clear_session), so the
+        # counter restarts at 0 and climbs back through the very values the stale
+        # entry recorded -- the guard then reports a match on dead data. A
+        # version counter only detects staleness while it is monotonic across the
+        # cache's lifetime, and clearing one side of that pair broke the
+        # invariant.
+        #
+        # This is why repeat 1 of every case is correct and repeats 2-3 are not,
+        # which is 6 of the 7 remaining failures. MLX has no equivalent: its
+        # blocks are per-session arrays dropped with the session, so there is no
+        # cross-generation mapping to go stale.
+        self._decode_block_cache = {
+            key: value for key, value in self._decode_block_cache.items()
+            if not (isinstance(key, tuple) and key and key[0] == session_id)
+        }
 
         # Free blocks from NativeBlockPool before deleting references
         if hasattr(self, 'native_pool') and self.native_pool is not None:
