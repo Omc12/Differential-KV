@@ -130,8 +130,16 @@ def main():
     from ACTIVE_RUNTIME.native_core.sparse_decode.triton_fused_decode import (
         _partial_rope_apply,
     )
-    print(f"{'layer':>5} {'slots':>7} {'cos(K_pool,K_true)':>20} {'rel_err':>10} "
-          f"{'|K_pool|':>10} {'|K_true|':>10}")
+    try:
+        from ACTIVE_RUNTIME.native_core.sparse_decode.triton_fused_decode import (
+            pool_stores_rotated_k,
+        )
+        print(f"pool_stores_rotated_k() = {pool_stores_rotated_k()}  "
+              f"(True -> compare against cos_ROT; False -> against cos_RAW)")
+    except Exception:
+        pass
+    print(f"{'layer':>5} {'slots':>7} {'cos_ROT':>12} {'cos_RAW':>12} "
+          f"{'rel_err':>9} {'|K_pool|':>9} {'|K_true|':>9}")
 
     for li in attn_layers:
         blocks = manager.get_streaming_blocks("default", li)
@@ -157,7 +165,7 @@ def main():
         anchors_K = pool.anchors_KV[pidx, 0].float().cpu()     # [H_kv, D]
 
         attn = layers[li].self_attn
-        cos_l, sin_l, np_l, nt_l = [], [], [], []
+        cos_l, sin_l, np_l, nt_l, raw_l = [], [], [], [], []
         n_ok, n_used, n_fail = 0, 0, 0
         for p in range(n_lo, n_hi + 1):
             off = p - anc - 1
@@ -187,6 +195,12 @@ def main():
                 k_rot = _partial_rope_apply(kt.float(), c.float().unsqueeze(1),
                                             s.float().unsqueeze(1))
                 K_true = k_rot.reshape(-1).cpu()
+                # RoPE is ORTHOGONAL, so |rotated| == |unrotated| exactly. If the
+                # pool turns out to hold PRE-RoPE keys, comparing against the
+                # rotated truth yields precisely what the first run showed --
+                # identical norms with a depressed cosine -- and that would be a
+                # probe bug, not a runtime one. Score both and let the data say.
+                K_true_raw = kt.float().reshape(-1).cpu()
             except Exception as e:                              # noqa: BLE001
                 if n_fail == 0:
                     print(f"  [layer {li}] ground truth failed: "
@@ -200,8 +214,11 @@ def main():
                 n_fail += 1
                 continue
 
-            a_, b_ = K_pool / (K_pool.norm() + 1e-9), K_true / (K_true.norm() + 1e-9)
+            a_ = K_pool / (K_pool.norm() + 1e-9)
+            b_ = K_true / (K_true.norm() + 1e-9)
+            r_ = K_true_raw / (K_true_raw.norm() + 1e-9)
             cos_l.append(float((a_ * b_).sum()))
+            raw_l.append(float((a_ * r_).sum()))
             sin_l.append(float((K_pool - K_true).norm() / (K_true.norm() + 1e-9)))
             np_l.append(float(K_pool.norm()))
             nt_l.append(float(K_true.norm()))
@@ -212,12 +229,22 @@ def main():
                   f"(captured={len(cap[li])}, failed={n_fail})")
             continue
         import statistics as st
-        print(f"{li:>5} {n_used:>7} {st.mean(cos_l):>20.4f} {st.mean(sin_l):>10.4f} "
-              f"{st.mean(np_l):>10.2f} {st.mean(nt_l):>10.2f}")
+        print(f"{li:>5} {n_used:>7} {st.mean(cos_l):>12.4f} "
+              f"{st.mean(raw_l):>12.4f} {st.mean(sin_l):>9.4f} "
+              f"{st.mean(np_l):>9.2f} {st.mean(nt_l):>9.2f}")
 
-    print("\ncos ~1.0 -> stored residuals are CORRECT; loss is downstream of the pool.")
-    print("cos <<1  -> the residual VALUES are wrong; membership was a red herring.")
-    print("Run --depth 0.5 (passes) as the control before concluding either way.")
+    print("\nREAD THIS AS:")
+    print("  Compare the column that MATCHES pool_stores_rotated_k() above.")
+    print("  that column ~1.0  -> stored residuals are CORRECT; the loss is")
+    print("     downstream of the pool (kernel read or sparse/dense merge).")
+    print("  that column <<1   -> the residual VALUES are wrong.")
+    print("  the OTHER column ~1.0 instead -> the pool's RoPE convention and the")
+    print("     decoder's disagree: content is intact but stored in the wrong")
+    print("     frame, which is a real runtime bug (identical norms, depressed")
+    print("     cosine, worst in layers with the most rotary-range energy).")
+    print("  BOTH well below 1.0 -> neither convention explains it; look further.")
+    print("Compare --depth 0.9 (fails) against --depth 0.5 (passes): a number that")
+    print("is the same in both does NOT explain why only one of them fails.")
 
 
 if __name__ == "__main__":
