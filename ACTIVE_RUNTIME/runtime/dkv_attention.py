@@ -527,6 +527,40 @@ def apply_dkv_attention_patch(model, kv_manager):
     except Exception:
         pass  # introspection failed — proceed and let the patch run
 
+    # THE FIRST LAYER DKV ACTUALLY ATTENDS -- not model layer 0.
+    #
+    # Thirteen places in dkv_forward gate once-per-token work on
+    # `captured_layer_idx == 0`: finalize_compressed_blocks (which PUBLISHES
+    # background-compressed blocks to the pool), the DKV bypass decision, the
+    # SRL router pre-warm, contiguous-prefill buffer cleanup, and more. Every
+    # one of them assumes model layer 0 is a layer DKV sees.
+    #
+    # On a hybrid it is not. The loop below skips layers with no self_attn, so
+    # on Qwen3.5-2B DKV attends 3, 7, 11, 15, 19, 23 and captured_layer_idx is
+    # NEVER 0 -- confirmed by the route probe, which prints exactly those and no
+    # layer 0. So on every hybrid model all thirteen gates are dead code.
+    #
+    # finalize_compressed_blocks being dead is the one with teeth: it is what
+    # uploads a background-compressed block and writes it into the pool, i.e.
+    # what moves a block from SUBMITTED to COMPRESSED. Without it a block is
+    # compressed and then never published, which is precisely the stranded block
+    # the coverage check keeps reporting:
+    #     BLOCK COVERAGE: ... states=['SUBMITTED'] anchors=[1542]
+    # and it explains why three separate producer-side fixes did not clear it --
+    # the compression was fine, the publish step never ran.
+    #
+    # The block right above already applies this exact reasoning to find an
+    # attention layer for signature introspection ("layer 0 may be one of those,
+    # so find the first layer that actually has self_attn instead of assuming
+    # index 0"). It just was not applied to the gates. Defining it once here
+    # fixes all of them together and stays correct for any architecture, rather
+    # than special-casing hybrids at thirteen call sites.
+    try:
+        _first_dkv_layer = next(i for i, l in enumerate(model.model.layers)
+                                if hasattr(l, "self_attn"))
+    except StopIteration:
+        _first_dkv_layer = 0
+
     for i, layer in enumerate(model.model.layers):
         if not hasattr(layer, "self_attn"):
             # Non-attention layer (linear/gated-delta-net) in a hybrid
@@ -907,11 +941,11 @@ def apply_dkv_attention_patch(model, kv_manager):
                 # Calling it on all 28 layers = 27 wasted lock acquisitions per token.
                 # At 1024-token generation that is 27x1024 = 27,648 unnecessary mutex ops —
                 # the root cause of the -49% TPS regression at 1024 tokens.
-                if use_cache and captured_layer_idx == 0 and hasattr(kv_manager, "finalize_compressed_blocks"):
+                if use_cache and captured_layer_idx == _first_dkv_layer and hasattr(kv_manager, "finalize_compressed_blocks"):
                     kv_manager.finalize_compressed_blocks()
 
                 # Track last prefill token query for SRL router pre-warming
-                if captured_layer_idx == 0 and q_len > 1:
+                if captured_layer_idx == _first_dkv_layer and q_len > 1:
                     if not hasattr(kv_manager, "_last_prefill_q"):
                         kv_manager._last_prefill_q = {}
                     for b_idx, sid in enumerate(session_ids):
@@ -933,7 +967,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                 # has_dense-only SDPA branch (short context, no compressed blocks).
                 if (not is_decode                           # prefill path only
                         and use_cache                       # single-request serving path
-                        and captured_layer_idx == 0):       # compute check once at layer 0
+                        and captured_layer_idx == _first_dkv_layer):       # compute check once at layer 0
                     _engage_threshold = _get_engage_threshold()
                     _total_ctx = q_len
                     _primary_sid = session_ids[0] if session_ids else None
@@ -1002,7 +1036,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                     # now that prefill is over — it is only used by the prefill forward.
                     # Layer 0 clears every session's buffers; the compressed pool is the
                     # decode-time store from here on.
-                    if captured_layer_idx == 0 and getattr(kv_manager, "_contig_prefill", None):
+                    if captured_layer_idx == _first_dkv_layer and getattr(kv_manager, "_contig_prefill", None):
                         for _sid in session_ids:
                             kv_manager._contig_prefill.pop(_sid, None)
 
@@ -1022,7 +1056,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                   else unrot_key_states[b_idx:b_idx+1])
                         curr_v = value_states[b_idx:b_idx+1]
                         kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
-                        if captured_layer_idx == 0:
+                        if captured_layer_idx == _first_dkv_layer:
                             srl_state = kv_manager.get_srl_state(sid)
                             if srl_state is not None:
                                 # Accumulate every 8 tokens to amortize the D2H copy cost.
@@ -1085,7 +1119,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                         if pool is not None and pool.W_proj is not None:
                             srl_state = kv_manager.get_srl_state(sid)
                             if srl_state is not None:
-                                if captured_layer_idx == 0:
+                                if captured_layer_idx == _first_dkv_layer:
                                     srl_state.current_step_factual_tokens = set()
                                     srl_state.current_step_factual_sequences = []
                                     srl_state.current_step_max_similarity = 0.0
@@ -1245,7 +1279,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 _route_per_layer = (
                                     os.environ.get("DKV_ROUTE_PER_LAYER", "1") == "1"
                                     and os.environ.get("DKV_ROUTE_ONCE", "0") != "1")
-                                if captured_layer_idx == 0 or _route_per_layer:
+                                if captured_layer_idx == _first_dkv_layer or _route_per_layer:
                                     # SRL routing cadence: route every N tokens to amortise
                                     # the D2H cost of entropy/.item(), centroid/.tolist(),
                                     # and semantic score vector .cpu() in route_query_fixed_k.
@@ -1399,7 +1433,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         _srl_rerouted = True
 
                                     # Log routing decision if verbose or telemetry is enabled
-                                    if captured_layer_idx == 0 and (os.environ.get("DKV_SRL_VERBOSE", "0") == "1" or os.environ.get("DKV_TELEMETRY", "0") == "1"):
+                                    if captured_layer_idx == _first_dkv_layer and (os.environ.get("DKV_SRL_VERBOSE", "0") == "1" or os.environ.get("DKV_TELEMETRY", "0") == "1"):
                                         n_sel = selected_slots.numel()
                                         n_tot = srl_state.n_active_blocks()
                                         print(f"[SRL Decode Step] session={sid} step={srl_state.current_step_count} "
@@ -1435,7 +1469,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 and block_indices.numel() > _prune_k):
                             _ws = kv_manager.decode_workspace.setdefault(sid, {})
                             _pr = _ws.setdefault("_mlx_prune", {})
-                            if captured_layer_idx == 0:
+                            if captured_layer_idx == _first_dkv_layer:
                                 try:
                                     from native_core.srl.query_router import route_blocks_relevance
                                     _q_prune = unrot_query_states[b_idx, :, 0, :]   # [H, D]
@@ -1455,7 +1489,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     anchor_indices = anchor_indices[_keep]
 
                         # ── Increment routing version at layer 0 ──
-                        if captured_layer_idx == 0:
+                        if captured_layer_idx == _first_dkv_layer:
                             session_dict = kv_manager.decode_workspace.setdefault(sid, {})
                             last_slots = session_dict.get("last_slots")
                             if block_indices is None:
@@ -1485,7 +1519,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                         _validate_this_step = (
                             _SRL_VALIDATE
                             and _srl_rerouted
-                            and captured_layer_idx == 0
+                            and captured_layer_idx == _first_dkv_layer
                             and srl_state is not None
                             and (srl_state.current_step_count % _SRL_VALIDATE_EVERY) == 0
                         )
@@ -1613,7 +1647,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                         matching_entries = []
                         if factual_store is not None and pool is not None and pool.W_proj is not None:
                             try:
-                                if captured_layer_idx == 0:
+                                if captured_layer_idx == _first_dkv_layer:
                                     # ── Layer 0: run query and update all logit-bias state ──────
                                     active_slots = set(block_indices.tolist()) if block_indices is not None else None
                                     # Query Anchor Blending (layer-0 Q space only — blending a
@@ -3433,7 +3467,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 if _unrotate:
                                     # Record this chunk's length once (layer 0) so the
                                     # boundary rebuild replays the exact block layout.
-                                    if captured_layer_idx == 0:
+                                    if captured_layer_idx == _first_dkv_layer:
                                         kv_manager._contig_chunk_lens.setdefault(sid, []).append(q_len)
                                 else:
                                     # 2x variant: capture unrotated KV into blocks now.
