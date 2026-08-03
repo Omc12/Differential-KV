@@ -1356,6 +1356,53 @@ def route_blocks_relevance(
                         _rw = int(rvalid.shape[1])
                     except Exception:                            # noqa: BLE001
                         _nv, _rw = -1, -1
+
+                    # ── SLOT FINGERPRINT — does the METADATA's slot actually hold
+                    # this block? ────────────────────────────────────────────────
+                    #
+                    # Across repeats of the SAME prompt, s_anc AND res_max both
+                    # change for this block (32k@0.9: repeat 1 s_anc 0.57/1.63/
+                    # 0.07/0.52/-1.13/-0.24 and res_max 11.5-15.0; repeats 2-3
+                    # s_anc up to 5.03 and res_max 2.6-7.7). Same prompt, same
+                    # query, same layer, first decode token -- so the query cannot
+                    # be the variable. s_anc is q.pool.anchors_K[slot], therefore
+                    # THE SLOT HOLDS DIFFERENT BYTES, while this line still prints
+                    # anchor=29041 out of the METADATA. Metadata and slot contents
+                    # disagree after clear_session -> free_block -> LIFO
+                    # _free_indices.pop() recycling.
+                    #
+                    # MLX cannot reach this state: its blocks are per-session
+                    # arrays freed with the session, with no global slot pool and
+                    # no reuse, so a block's storage is never aliased.
+                    #
+                    # These three numbers separate the three candidate producers,
+                    # which need DIFFERENT fixes -- hence measuring rather than
+                    # picking one:
+                    #
+                    #   slot differs between repeats
+                    #       -> MAPPING bug: metadata resolves the block to another
+                    #          slot (pool_idx written/kept wrong on re-prefill).
+                    #   slot same, |anc| differs
+                    #       -> WRITE/RECYCLE bug: the slot was reused and the new
+                    #          block's write did not land (or landed elsewhere).
+                    #   slot same, |anc| same, scores still differ
+                    #       -> STALE TENSOR between pool and router (a cached
+                    #          gather/proxy handed back last generation's rows).
+                    #
+                    # n_res is the block's TOTAL stored residual count, not the
+                    # routed prefix n_valid: a changed count points at compression
+                    # re-running differently, an unchanged count with changed
+                    # norms points at storage.
+                    try:
+                        _slot = int(block_indices[_p].item())
+                        _an = float(anc[_p].float().norm().item())
+                        if res_pos is not None:
+                            _nres = int((res_pos[_slot] >= 0).sum().item())
+                        else:
+                            _nres = -1
+                        _fp = f" | slot={_slot} |anc|={_an:.4f} n_res={_nres}"
+                    except Exception as _fe:                     # noqa: BLE001
+                        _fp = f" | fingerprint failed: {_fe}"
                     print(f"[DKV] ROUTE TRACE step={_st} tok={_tgt} "
                           f"anchor={int(_anc[_p].item())} rank={_rank}/{N} k={k_eff} "
                           f"kept={_kept} "
@@ -1363,7 +1410,7 @@ def route_blocks_relevance(
                           f"top={float(relevance[int(_order[0].item())].item()):.5f} "
                           f"cut={float(relevance[_cut_i].item()):.5f} | "
                           f"s_anc={float(s_anc.reshape(-1, N)[:, _p].max().item()):.5f} "
-                          f"{_rs} n_valid={_nv}/{_rw}", flush=True)
+                          f"{_rs} n_valid={_nv}/{_rw}{_fp}", flush=True)
             else:
                 print(f"[DKV] ROUTE TRACE tok={_tgt}: no anchor <= token "
                       f"(min anchor={int(_anc.min().item())}) -- token is before "
