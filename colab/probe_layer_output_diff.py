@@ -145,12 +145,15 @@ class Capture:
         self.handles = []
 
 
-def _stem(mode):
+def _stem(mode, label="32k", depth=0.9):
+    # Case goes IN THE FILENAME. Without it, running the passing control
+    # (32k@0.5) overwrites the failing capture and the comparison silently
+    # becomes case-vs-itself.
     return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        f"_layerdiff_{mode}.pt")
+                        f"_layerdiff_{mode}_{label}_{depth}.pt")
 
 
-def run_dense(model_id, prompt, chunk):
+def run_dense(model_id, prompt, chunk, label, depth):
     from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
     tok = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(
@@ -178,12 +181,12 @@ def run_dense(model_id, prompt, chunk):
         nxt = int(out.logits[0, -1].argmax())
     cap.remove()
     torch.save({"out": cap.out, "first_token": nxt,
-                "decoded": tok.decode([nxt])}, _stem("dense"))
+                "decoded": tok.decode([nxt])}, _stem("dense", label, depth))
     print(f"[probe] dense first generated token: {nxt} {tok.decode([nxt])!r}")
-    print(f"[probe] saved {len(cap.out)} layer vectors -> {_stem('dense')}")
+    print(f"[probe] saved {len(cap.out)} layer vectors -> {_stem('dense', label, depth)}")
 
 
-def run_dkv(model_id, prompt):
+def run_dkv(model_id, prompt, label, depth):
     from serving.decode_config import BEST_DECODE_DEFAULTS
     os.environ.setdefault("DKV_ENGAGE_THRESHOLD", "1024")
     for k, v in BEST_DECODE_DEFAULTS.items():
@@ -200,21 +203,21 @@ def run_dkv(model_id, prompt):
     out = w.generate(prompt=prompt, max_new_tokens=1, temperature=0.0,
                      top_p=1.0, repetition_penalty=1.0)
     cap.remove()
-    torch.save({"out": cap.out, "text": out[-80:]}, _stem("dkv"))
+    torch.save({"out": cap.out, "text": out[-80:]}, _stem("dkv", label, depth))
     print(f"[probe] dkv tail: {out[-60:]!r}")
-    print(f"[probe] saved {len(cap.out)} layer vectors -> {_stem('dkv')}")
+    print(f"[probe] saved {len(cap.out)} layer vectors -> {_stem('dkv', label, depth)}")
 
 
-def compare():
-    missing = [m for m in ("dense", "dkv") if not os.path.exists(_stem(m))]
+def compare(label="32k", depth=0.9):
+    missing = [m for m in ("dense", "dkv") if not os.path.exists(_stem(m, label, depth))]
     if missing:
         print(f"[probe] missing capture(s): {', '.join(missing)} — run "
               + " and ".join(f"--mode {m}" for m in missing) + " first.")
         print("[probe] (the .pt files are untracked, so a fresh checkout or a "
               "reset container loses them; re-running the side is cheap.)")
         return
-    d = torch.load(_stem("dense"), weights_only=False)
-    k = torch.load(_stem("dkv"), weights_only=False)
+    d = torch.load(_stem("dense", label, depth), weights_only=False)
+    k = torch.load(_stem("dkv", label, depth), weights_only=False)
     da, ka = d["out"], k["out"]
     common = sorted(set(da) & set(ka))
     if not common:
@@ -222,7 +225,7 @@ def compare():
               "That is a coverage failure, not a result.")
         return
     print(f"[probe] dense first token: {d.get('decoded')!r}")
-    print(f"[probe] {len(common)} common layers\n")
+    print(f"[probe] {label}@depth{depth} — {len(common)} common layers\n")
     print(f"{'layer':>6}  {'cos':>9}  {'rel_err':>9}  {'|dense|':>9}  {'|dkv|':>9}")
     worst = None
     worst_rel = None
@@ -261,7 +264,7 @@ def main():
     args = ap.parse_args()
 
     if args.mode == "compare":
-        compare()
+        compare(args.label, args.depth)
         return
 
     from transformers import AutoTokenizer
@@ -273,9 +276,9 @@ def main():
           f"token ~{len(tok(prompt[:nc]).input_ids)}")
 
     if args.mode == "dense":
-        run_dense(args.model, prompt, args.chunk)
+        run_dense(args.model, prompt, args.chunk, args.label, args.depth)
     else:
-        run_dkv(args.model, prompt)
+        run_dkv(args.model, prompt, args.label, args.depth)
 
 
 if __name__ == "__main__":
