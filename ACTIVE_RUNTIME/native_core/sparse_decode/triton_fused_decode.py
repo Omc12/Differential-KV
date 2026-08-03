@@ -319,14 +319,37 @@ def pool_stores_rotated_k() -> bool:
     # with |K_pool| == |K_true| at every layer -- the exact signature of a pure
     # rotation, since RoPE is orthogonal.
     #
-    # 0 is also the VALIDATED configuration: the unrotated pool re-rotates
-    # residual keys at their true absolute position on read
-    # (DIFFKV_RESIDUAL_EXACT_ROPE, A100-validated 75%->88% random-code recall).
-    # Ingest now honours this flag, so =1 is a real MLX-parity option rather than
-    # a claim nothing implemented -- but it needs its own validation before it
-    # can be the default, because it makes the SVD model post-RoPE deltas whose
-    # phase wraps many times within a 256-token block.
-    return os.environ.get("DKV_ROTATED_POOL", "0") == "1"
+    # DEFAULT 1, because the EXACT/SUBSTITUTION residual form is only coherent
+    # with a rotated pool. Work the algebra for `s = s_anchor + q·rk`:
+    #
+    #   ROTATED (MLX):   anchor_stored = RoPE(anchor, p_a)
+    #                    residual      = RoPE(k_t, p_t) - RoPE(anchor, p_a)
+    #                    sum           = RoPE(k_t, p_t)          EXACT.
+    #     The anchor/token position difference cancels itself, which is exactly
+    #     why MLX captures keys POST-RoPE (mlx_dkv_wrapper.py:4565).
+    #
+    #   UNROTATED:       s_anchor      = q·RoPE(anchor, p_a)
+    #                    rk rotated at p_t (DIFFKV_RESIDUAL_EXACT_ROPE)
+    #     The residual term is right but the ANCHOR term is rotated at the wrong
+    #     position -- off by up to a full block (256 tokens) of phase. The anchor
+    #     is a full key vector while the residual is a small delta, so that error
+    #     DOMINATES the score. Reconstructing correctly would need the anchor
+    #     re-rotated per token, which defeats the point of sharing one anchor
+    #     across the block.
+    #
+    # The same argument applies to the low-rank half: under a rotated pool
+    # anchor + U@V approximates RoPE(k_t, p_t) directly with no rotation at read,
+    # whereas the unrotated pool rotates V_K at the ANCHOR's position for every
+    # token in the block (the Project-Then-Attend approximation).
+    #
+    # This shipped as "1" while every prefill capture stored `unrot_key_states`
+    # unconditionally, so the pool held PRE-RoPE keys and this predicate told the
+    # gather to skip the rotation they needed. probe_residual_values measured it:
+    # anchor+residual scored cos = 1.0000 against UNROTATED truth vs 0.84-0.98
+    # rotated, with |K_pool| == |K_true| at every layer (RoPE is orthogonal, so a
+    # pure rotation preserves norm). _ingest_k now routes every capture through
+    # this same predicate, so the two sides cannot disagree.
+    return os.environ.get("DKV_ROTATED_POOL", "1") == "1"
 
 
 def resolve_sparse_bias(lse_sparse=None, lse_dense=None):
