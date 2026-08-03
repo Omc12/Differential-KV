@@ -901,6 +901,7 @@ K_FIXED = int(os.environ.get("DKV_SRL_K_FIXED", "64"))
 
 # ROUTE TRACE budget: kept=True lines are capped (drops always print).
 _ROUTE_TRACE_KEPT_SHOWN = 0
+_ROUTE_TRACE_TOK = None
 try:
     _ROUTE_TRACE_MAX = int(os.environ.get("DKV_ROUTE_TRACE_MAX", "60"))
 except ValueError:
@@ -1323,7 +1324,16 @@ def route_blocks_relevance(
                 # A DROP is the signal and is never suppressed; kept=True lines
                 # are capped so a 9-case sweep cannot bury it under thousands of
                 # confirmations (6 layers x 24 tokens x 3 repeats x 9 cases).
-                global _ROUTE_TRACE_KEPT_SHOWN
+                # Budget is PER TRACED TOKEN, not global. A global counter was
+                # exhausted by the first case that kept the block (8k@depth0.0
+                # burned all 60 on its sink block), after which no later case
+                # could show a kept=True line at all -- so "is it kept?" became
+                # unanswerable for exactly the cases under investigation, while
+                # looking like clean output.
+                global _ROUTE_TRACE_KEPT_SHOWN, _ROUTE_TRACE_TOK
+                if _ROUTE_TRACE_TOK != _tgt:
+                    _ROUTE_TRACE_TOK = _tgt
+                    _ROUTE_TRACE_KEPT_SHOWN = 0
                 if not _kept or _ROUTE_TRACE_KEPT_SHOWN < _ROUTE_TRACE_MAX:
                     if _kept:
                         _ROUTE_TRACE_KEPT_SHOWN += 1
