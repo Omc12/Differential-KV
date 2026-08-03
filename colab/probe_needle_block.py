@@ -216,10 +216,24 @@ def main():
 
     # MUST match validate_cuda_dkv.py's cases exactly, or this probes a
     # DIFFERENT context length than the failure being investigated.
-    n_filler = 800 if a.ctx == "8k" else 2400
-    for depth in (0.0, 0.5, 0.9):
-        random.seed(5)                      # validator's seed, identical filler
-        probe(w, build(n_filler, depth), f"{a.ctx}@depth{depth:.1f}")
+    # REPRODUCE THE VALIDATOR'S PROMPTS EXACTLY.
+    #
+    # validate_cuda_dkv seeds ONCE and then builds all nine cases in order, so the
+    # RNG advances and every case draws different filler. Re-seeding per depth (as
+    # this probe first did) produces DIFFERENT PROMPTS -- which is how the first
+    # run "proved" the needle survives compression on prompts that mostly pass,
+    # while saying nothing about the one that actually fails. Build the whole
+    # sequence to consume the RNG identically, then probe only what was asked for.
+    random.seed(5)
+    all_cases = [("2k", 200, d) for d in (0.0, 0.5, 0.9)]
+    all_cases += [("8k", 800, d) for d in (0.0, 0.5, 0.9)]
+    all_cases += [("32k", 2400, d) for d in (0.0, 0.5, 0.9)]
+    built = [(lbl, depth, build(n, depth)) for lbl, n, depth in all_cases]
+
+    for lbl, depth, ctx in built:
+        if lbl != a.ctx:
+            continue                        # RNG already advanced correctly above
+        probe(w, ctx, f"{lbl}@depth{depth:.1f}")
 
     print("\nREAD THIS AS:")
     print("  needle in residual set K=0/N  -> the COMPRESSOR dropped the needle;")
