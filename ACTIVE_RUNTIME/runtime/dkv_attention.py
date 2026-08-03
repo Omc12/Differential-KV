@@ -156,6 +156,36 @@ except Exception:                                              # noqa: BLE001
     _REMAT_ENABLED = False
 _LAST_DKV_LAYER: dict = {}
 _REMAT_UNROTATED_WARNED = False
+# Bounded budget for the "traced token is in no routed block" diagnostic, keyed
+# per traced token so one case can never spend another case's lines -- the exact
+# failure that made an earlier route trace unreadable.
+_REMAT_NOMATCH_BUDGET: dict = {}
+
+
+def _resolve_trace_row(anchor_indices, seq_lens, S1: int, tok: int):
+    """Which materialised ROW holds absolute token `tok`? None if no routed block.
+
+    Block layout (streaming_sparse_ingest.py:1206, mirrored by reconstruct_blocks):
+    row 0 of block n is its ANCHOR, at absolute position anchor[n]; active token j
+    is at anchor[n]+1+j and lives in row 1+j. So `off = tok - anchor[n]` is the
+    row directly, and block n owns `tok` exactly when `0 <= off <= seq_len[n]`.
+
+    Bounding by S1 (the PADDED width) instead is the trap: anchor_indices holds
+    only the ROUTED blocks, so an earlier routed block whose anchor lands within
+    S1 tokens before `tok` would claim it and the caller would report a
+    real-but-wrong row. That is indistinguishable from the true row scoring
+    badly, which is the exact question the trace is asked to answer.
+
+    Returns (block_n, off, flat_row) or None.
+    """
+    off = int(tok) - anchor_indices.long()
+    sl = seq_lens.to(off.device).long()
+    ok = (off >= 0) & (off <= sl)
+    if not bool(ok.any().item()):
+        return None
+    n = int(torch.nonzero(ok, as_tuple=True)[0][-1].item())
+    o = int(off[n].item())
+    return n, o, n * int(S1) + o
 
 
 def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
@@ -256,6 +286,11 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
         # tokens. _Km/_Vm are fresh bmm outputs, so only this needs it.
         _seq_cached = _g["seq_lens"].clone()
         _ws[("_remat_seq", captured_layer_idx)] = _seq_cached
+        # Kept for the trace only: on a cache HIT `_g` does not exist, so without
+        # this the residual report would be silently unavailable exactly on the
+        # steps the cache is doing its job.
+        _ws[("_remat_respos", captured_layer_idx)] = (
+            (_g["res_pos"].clone(), _g["res_pos_v"].clone()) if _has_res else None)
     else:
         _Km, _Vm = _hit
         _seq_cached = _ws[("_remat_seq", captured_layer_idx)]
@@ -271,12 +306,49 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
         try:
             _trace_tok = int(_tt)
             _anc = anchor_indices.long()
-            _off = _trace_tok - _anc
             _S1 = _Km.shape[1]
-            _ok = (_off >= 0) & (_off < _S1)
-            if bool(_ok.any().item()):
-                _n = int(torch.nonzero(_ok, as_tuple=True)[0][-1].item())
-                _trace_row = _n * _S1 + int(_off[_n].item())
+            _sl = _seq_cached.to(_anc.device).long()
+            _res = _resolve_trace_row(_anc, _sl, _S1, _trace_tok)
+            if _res is not None:
+                _n, _o, _trace_row = _res
+                _bk = ("hit", _trace_tok, captured_layer_idx)
+                _left = _REMAT_NOMATCH_BUDGET.get(_bk, 2)
+                if _left > 0:
+                    _REMAT_NOMATCH_BUDGET[_bk] = _left - 1
+                    # Does this position carry an EXACT residual, or is its key
+                    # the pure rank-32 reconstruction? Residuals are scattered
+                    # BEFORE the anchor row is prepended, so within-block residual
+                    # index j maps to row 1+j: j == _o - 1. The anchor row itself
+                    # (_o == 0) is exact by construction, with no residual slot.
+                    _rp = _ws.get(("_remat_respos", captured_layer_idx))
+                    _rk = _rv = "none"
+                    if _rp is not None and _o > 0:
+                        _pk, _pv = _rp
+                        _rk = bool((_pk[_n].long() == _o - 1).any().item())
+                        _rv = bool((_pv[_n].long() == _o - 1).any().item())
+                    elif _o == 0:
+                        _rk = _rv = "anchor"
+                    print(f"[DKV] ROW RESOLVE tok={_trace_tok} "
+                          f"layer={captured_layer_idx} block={_n}/{_anc.numel()} "
+                          f"anchor={int(_anc[_n].item())} off={_o} "
+                          f"seq_len={int(_sl[_n].item())} row={_trace_row} "
+                          f"res_K={_rk} res_V={_rv}", flush=True)
+            else:
+                # SILENCE IS NOT A RESULT. Without this line, "no MASS TRACE for
+                # this case" is equally consistent with the block having dropped
+                # out of routing and with the probe simply declining to resolve --
+                # opposite conclusions, opposite fixes.
+                _bk = ("miss", _trace_tok, captured_layer_idx)
+                _left = _REMAT_NOMATCH_BUDGET.get(_bk, 4)
+                if _left > 0:
+                    _REMAT_NOMATCH_BUDGET[_bk] = _left - 1
+                    _near = int(_anc[_anc <= _trace_tok].max().item()) \
+                        if bool((_anc <= _trace_tok).any().item()) else -1
+                    print(f"[DKV] ROW RESOLVE tok={_trace_tok} "
+                          f"layer={captured_layer_idx} NOT IN ANY ROUTED BLOCK "
+                          f"(n_routed={_anc.numel()}, nearest_anchor_at_or_before="
+                          f"{_near}) — the traced token is not attended here",
+                          flush=True)
         except Exception:                                        # noqa: BLE001
             _trace_row = None
     out = _awr(q, _Km, _Vm, _seq_cached, dense_k, dense_v, dense_len,
