@@ -206,6 +206,13 @@ def run_dkv(model_id, prompt):
 
 
 def compare():
+    missing = [m for m in ("dense", "dkv") if not os.path.exists(_stem(m))]
+    if missing:
+        print(f"[probe] missing capture(s): {', '.join(missing)} — run "
+              + " and ".join(f"--mode {m}" for m in missing) + " first.")
+        print("[probe] (the .pt files are untracked, so a fresh checkout or a "
+              "reset container loses them; re-running the side is cheap.)")
+        return
     d = torch.load(_stem("dense"), weights_only=False)
     k = torch.load(_stem("dkv"), weights_only=False)
     da, ka = d["out"], k["out"]
