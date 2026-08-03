@@ -23,6 +23,29 @@ from typing import Optional, List, Union, Tuple
 
 # SRL descriptor dimension — must match native_core/srl/chunk_descriptor.py
 _SRL_DESC_DIM = 64
+
+_BLOCK_TRUNCATION_WARNED = False
+
+
+def _warn_block_truncation(seq_len: int, pool_max_seq: int) -> None:
+    """Block content dropped on write because it exceeded pool capacity.
+
+    Both write paths clamp to `min(seq_len, pool_max_seq)` and zero the slot
+    first, so tokens past capacity are not merely lost -- they reconstruct as
+    delta=0, i.e. exact copies of the anchor, and the decoders admit them to the
+    softmax as genuine tokens. This used to happen with NO signal at all because
+    seq_lens recorded the untruncated length. It is a data-loss event, so it says
+    so once, loudly, rather than being inferred later from bad recall.
+    """
+    global _BLOCK_TRUNCATION_WARNED
+    if seq_len <= pool_max_seq or _BLOCK_TRUNCATION_WARNED:
+        return
+    _BLOCK_TRUNCATION_WARNED = True
+    print(f"[DKV WARNING] block truncated on write: seq_len={seq_len} > pool "
+          f"capacity={pool_max_seq}; {seq_len - pool_max_seq} token(s) DROPPED. "
+          f"seq_lens now records {pool_max_seq} so the decoder does not attend "
+          f"phantom anchor copies, but that content is gone -- raise "
+          f"micro_block_size/max_seq_len to hold a full block.")
 import gc
 try:
     from native_core.mac_utils import empty_cache as _empty_cache
@@ -497,7 +520,15 @@ class NativeBlockPool:
         self.anchors_KV[pool_idx, 0] = anchor_K.to(self.dtype)
         self.anchors_KV[pool_idx, 1] = anchor_V.to(self.dtype)
         self.scales[pool_idx] = scale
-        self.seq_lens[pool_idx] = seq_len
+        # seq_lens must describe what was ACTUALLY STORED, not what was offered.
+        # U above is written only up to write_seq and the slot was zeroed first, so
+        # any slot past it reconstructs as delta=0 -> exactly the anchor. Recording
+        # the untruncated seq_len told every decoder those slots were real tokens,
+        # so overflow tokens silently vanished and were replaced by PHANTOM COPIES
+        # OF THE ANCHOR inside the softmax. MLX cannot hit this (fixed
+        # block_size=256); this side blocks adaptively, so it can.
+        _warn_block_truncation(seq_len, pool_max_seq)
+        self.seq_lens[pool_idx] = write_seq
         self.version[pool_idx] += 1
 
         # Copy residuals
@@ -656,7 +687,10 @@ class NativeBlockPool:
         sc = scales.to(device=dev).float()
         sc = torch.where(torch.isfinite(sc), sc, torch.ones_like(sc))
         self.scales[pidx] = sc.to(self.dtype)
-        self.seq_lens[pidx] = int(seq_len)
+        # Same contract as write_block: record what was stored, not what was
+        # offered, or slots past capacity become phantom anchor copies.
+        _warn_block_truncation(int(seq_len), pool_max_seq)
+        self.seq_lens[pidx] = write_seq
         # Record the ACTUAL span of a routing block, host-side and free (seq_len is
         # already a Python int here, so no device read). The router needs it: K is
         # meaningless on its own, the quantity that has to match MLX is the routed
@@ -665,7 +699,7 @@ class NativeBlockPool:
         # contexts, ~256 for long — see the avg_block_sz note in
         # kv_runtime_manager), so a K derived from an assumed 257 routes 4x too
         # few tokens whenever the real blocks are 64 wide.
-        _span = int(seq_len)
+        _span = write_seq
         if _span > 0:
             self.observed_block_span = max(getattr(self, "observed_block_span", 0), _span)
         # One transfer, not one per block: int(pidx[i]) on a device tensor is a
