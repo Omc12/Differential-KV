@@ -99,16 +99,16 @@ def test_2_exact_keys_default():
             os.environ.pop(k, None)
         from native_core.compression.lowrank import _exact_keys_enabled
 
-        # The two Triton decode kernels now SUBSTITUTE (EXACT_RESIDUAL), matching
-        # Metal and MLX. The default is still correction form because three other
-        # readers only ADD -- prefill's _prefill_fused_history_attend_compiled,
-        # fused_decode_mps, and the PyTorch vectorized decoder -- and the storage
-        # format has to satisfy all of them. See _exact_keys_enabled for the list.
+        # Every reader now SUBSTITUTES, matching Metal and MLX: the two Triton
+        # kernels via EXACT_RESIDUAL, plus the three that used to only ADD
+        # (prefill's _prefill_fused_history_attend_compiled, fused_decode_mps,
+        # and the PyTorch vectorized decoder). The storage format is satisfied by
+        # all of them, so CUDA defaults to exact form like every other device.
         cuda_default = _exact_keys_enabled(torch.device("cuda:0"))
-        check("CUDA defaults to CORRECTION form (3 readers still ADD-only)",
-              cuda_default is False,
-              "Triton kernels substitute now; prefill + MPS fallback + PyTorch "
-              "decoder do not, and exact-form values would double-count there")
+        check("CUDA defaults to EXACT form (all readers substitute)",
+              cuda_default is True,
+              "a reader that only ADDs would double-count exact-form residuals; "
+              "see _exact_keys_enabled for the full reader list")
 
         os.environ["DKV_RESIDUAL_EXACT_KEYS"] = "1"
         forced_on = _exact_keys_enabled(torch.device("cuda:0"))

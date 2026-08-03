@@ -25,6 +25,7 @@ from native_core.sparse_decode.triton_fused_decode import (
     HAS_TRITON,
     resolve_sparse_bias as _resolve_sparse_bias,
     pool_stores_rotated_k as _pool_rotated_k,
+    _exact_residual_semantics,
 )
 from native_core.compression.lowrank import reconstruct_batch_U
 
@@ -851,6 +852,9 @@ def apply_dkv_attention_patch(model, kv_manager):
                         residual_K_values    = res_K_val,
                         residual_V_positions = res_V_pos,
                         residual_V_values    = res_V_val,
+                        # Resolved HERE, not inside the callee: that function is
+                        # torch.jit.script'ed and TorchScript cannot read os.environ.
+                        exact_residual = _exact_residual_semantics(q.device),
                     )
                     out_hist  = result[0]                     # [1, H, q_len, D]
                     lse_hist  = result[1, 0, :, :, 0]        # [H, q_len]

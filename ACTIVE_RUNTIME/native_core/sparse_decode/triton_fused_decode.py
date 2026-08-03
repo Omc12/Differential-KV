@@ -185,15 +185,52 @@ def _exact_residual_semantics(device=None) -> bool:
       OFF -> they are a correction to the low-rank reconstruction; the kernel adds
              them and the twin stays. Approximate.
 
-    Substitution is implemented in the Triton kernels as of this change; before
-    it, CUDA had no choice but OFF, which is why _exact_keys_enabled defaults CUDA
-    to correction form. Flipping that default is a separate, GPU-gated decision.
+    Substitution is now implemented in every reader -- both Triton kernels, the
+    scripted prefill history-attend, fused_decode_mps and the PyTorch vectorized
+    decoder -- so _exact_keys_enabled defaults to exact form on every device.
     """
     try:
         from native_core.compression.lowrank import _exact_keys_enabled
         return bool(_exact_keys_enabled(device))
     except Exception:                                            # noqa: BLE001
         return False
+
+
+def _lowrank_delta_v_at(U, V_V_nrhd, scales_n, positions):
+    """The lossy low-rank twin delta_V = scale·(U[pos] @ V_V) at `positions`.
+
+    EXACT-form residuals hold the anchor-relative TRUE value, so a decoder must
+    REMOVE this twin rather than add on top of it. Every call site sits a few
+    lines above a fact-anchor override that already does the same subtraction —
+    the residual path simply never adopted it, which is the double-count.
+
+    Mirrors the Triton kernels' `dv_recon` (EXACT_RESIDUAL branch): the anchor
+    term is NOT included, because `rv` is anchor-relative (exact = anchor + rv),
+    unlike fact anchors which store the full exact V.
+
+      U          [N, S, R]
+      V_V_nrhd   [N, R, H, D]      (permute callers whose V is [N, H, R, D])
+      scales_n   [N]
+      positions  [N, P]            (already clamped to >= 0)
+    returns      [N, P, H, D]
+    """
+    R = U.shape[2]
+    u_at = torch.gather(U, dim=1,
+                        index=positions.unsqueeze(-1).expand(-1, -1, R))   # [N,P,R]
+    dv = torch.einsum('npr,nrhd->nphd', u_at.float(), V_V_nrhd.float())
+    return dv * scales_n.float().reshape(-1, 1, 1, 1)
+
+
+def _substitute_scores_(scores, index, exact_scores, valid_mask):
+    """In-place SUBSTITUTION of `exact_scores` at `index` along dim 2.
+
+    Written as scatter_add_ of (target − current) rather than scatter_ + where
+    so the masking stays identical to the correction path it replaces (invalid
+    slots contribute exactly 0) and no caller has to re-bind `scores`.
+    """
+    cur = torch.gather(scores, dim=2, index=index)
+    src = (exact_scores - cur).masked_fill(~valid_mask, 0.0)
+    scores.scatter_add_(dim=2, index=index, src=src.to(scores.dtype))
 
 
 def pool_stores_rotated_k() -> bool:
@@ -1062,7 +1099,12 @@ def _prefill_fused_history_attend_compiled(
     residual_K_values: torch.Tensor,
     residual_V_positions: torch.Tensor,
     residual_V_values: torch.Tensor,
+    exact_residual: bool = False,
 ) -> torch.Tensor:
+    # `exact_residual` is a plain bool argument, not an os.environ read, because
+    # this function is torch.jit.script'ed on the no-compile path and TorchScript
+    # cannot compile os.environ -- reading the flag inside would drop the whole
+    # function to eager through the try/except below without saying so.
     N = U.shape[0]
     S = U.shape[1]
     R = U.shape[2]
@@ -1082,7 +1124,16 @@ def _prefill_fused_history_attend_compiled(
     if residual_K_positions.numel() > 0:
         res_pos_K_clamped = residual_K_positions.clamp(min=0).long()
         mask_K = (residual_K_positions >= 0).unsqueeze(-1).unsqueeze(-1)
-        res_vals_K_masked = residual_K_values.to(K_unrot_full.dtype) * mask_K
+        res_vals_K = residual_K_values.to(K_unrot_full.dtype)
+        if exact_residual:
+            # SUBSTITUTION: rk is the anchor-relative EXACT key, so this slot must
+            # become anchor + rk -- the low-rank twin deltas_k[p] has to come OUT.
+            # Expressed as an additive (rk - twin) so the mask below still zeroes
+            # invalid slots exactly as it did for the correction form.
+            idx_twin = res_pos_K_clamped.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, H, D)
+            twin_K = torch.gather(deltas_k, 1, idx_twin)
+            res_vals_K = res_vals_K - twin_K.to(res_vals_K.dtype)
+        res_vals_K_masked = res_vals_K * mask_K
         index_K = (res_pos_K_clamped + 1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, H, D)
         K_unrot_full.scatter_add_(dim=1, index=index_K, src=res_vals_K_masked)
 
@@ -1142,6 +1193,16 @@ def _prefill_fused_history_attend_compiled(
         w_res_V = w_res_V.masked_fill(~mask_V, 0.0)
 
         res_val_V_perm = residual_V_values.to(w_res_V.dtype).permute(0, 2, 1, 3)
+        if exact_residual:
+            # Remove the lossy twin on the V side too: w·(rv − delta_V[pos]).
+            # Inlined rather than routed through _lowrank_delta_v_at so this stays
+            # TorchScript-compilable. V_V is [N, R, H, D] here.
+            R_u = U.shape[2]
+            u_at = torch.gather(U, 1,
+                                res_pos_V_clamped.unsqueeze(-1).expand(-1, -1, R_u))
+            dv = torch.einsum('npr,nrhd->nphd', u_at.float(), V_V.float())
+            dv = dv * scales.reshape(-1, 1, 1, 1).float()
+            res_val_V_perm = res_val_V_perm - dv.permute(0, 2, 1, 3).to(res_val_V_perm.dtype)
         O_res = torch.sum(w_res_V.unsqueeze(-1) * res_val_V_perm.unsqueeze(2), dim=(0, 3))
         out_hist = out_hist + O_res.unsqueeze(0).to(out_hist.dtype)
 
@@ -1796,10 +1857,18 @@ def fused_decode_mps(
 
             corr_K_perm = corr_K.permute(2, 0, 1)
             mask_K = (res_pos_K_idx >= 0).unsqueeze(0).expand(H_q, -1, -1)
-            corr_K_perm = corr_K_perm.masked_fill(~mask_K, 0.0)
 
             res_pos_K_clamped_expanded = res_pos_K_idx.clamp(min=0).long().unsqueeze(0).expand(H_q, -1, -1)
-            delta_s.scatter_add_(dim=2, index=res_pos_K_clamped_expanded, src=corr_K_perm)
+            if _exact_residual_semantics(Q.device):
+                # SUBSTITUTION (see _exact_residual_semantics). delta_s already
+                # carries s_anc, so the exact score at this position is
+                # s_anc + q·rk and writing it drops the lossy twin.
+                exact_s = s_anc.unsqueeze(-1).expand_as(corr_K_perm) + corr_K_perm
+                _substitute_scores_(delta_s, res_pos_K_clamped_expanded,
+                                    exact_s, mask_K)
+            else:
+                delta_s.scatter_add_(dim=2, index=res_pos_K_clamped_expanded,
+                                     src=corr_K_perm.masked_fill(~mask_K, 0.0))
 
     # ── Solution 3: Fact Anchor overrides for Key ──
     fact_pos = getattr(pool, "fact_anchor_positions", None)
@@ -1875,6 +1944,13 @@ def fused_decode_mps(
             w_res_V = w_res_V.masked_fill(~mask_V, 0.0)
 
             res_val_V_e_perm = res_val_V_e.permute(0, 2, 1, 3)
+            if _exact_residual_semantics(Q.device):
+                # Remove the lossy twin's value: correction is w·(rv − delta_V[pos]).
+                # VV_e is [N,H_q,R,D]; the helper wants [N,R,H_q,D].
+                dv = _lowrank_delta_v_at(U_a, VV_e.permute(0, 2, 1, 3),
+                                         pool.scales[idx], res_pos_V_clamped)
+                res_val_V_e_perm = res_val_V_e_perm - dv.permute(0, 2, 1, 3).to(
+                    res_val_V_e_perm.dtype)
             O_res = torch.sum(w_res_V.unsqueeze(-1) * res_val_V_e_perm, dim=(0, 2))
             O = O + O_res
 
@@ -2193,10 +2269,21 @@ def _pytorch_vectorized_sparse_attn_decode(
 
                 corr_K_perm = corr_K.permute(2, 0, 1)
                 mask_K = (res_pos_K_idx >= 0).unsqueeze(0).expand(H_q, -1, -1)
-                corr_K_perm = corr_K_perm.masked_fill(~mask_K, 0.0)
 
                 res_pos_K_clamped_expanded = res_pos_K_idx.clamp(min=0).long().unsqueeze(0).expand(H_q, -1, -1)
-                scores_block.scatter_add_(dim=2, index=res_pos_K_clamped_expanded, src=corr_K_perm)
+                if _exact_residual_semantics(q.device):
+                    # SUBSTITUTION, as MLX / dkv_decode.metal / both Triton kernels
+                    # do: rk is the anchor-relative EXACT key, so this token's true
+                    # score is s_anchor + q·rk. Writing that REPLACES the score,
+                    # dropping the lossy low-rank twin instead of stacking the
+                    # exact key on top of it.
+                    exact_s = scores_anchor.unsqueeze(-1).expand_as(corr_K_perm) + corr_K_perm
+                    _substitute_scores_(scores_block, res_pos_K_clamped_expanded,
+                                        exact_s, mask_K)
+                else:
+                    scores_block.scatter_add_(
+                        dim=2, index=res_pos_K_clamped_expanded,
+                        src=corr_K_perm.masked_fill(~mask_K, 0.0))
 
         # ── Solution 3: Fact Anchor overrides for Key ──
         fact_pos = getattr(pool, "fact_anchor_positions", None)
@@ -2357,6 +2444,17 @@ def _pytorch_vectorized_sparse_attn_decode(
             w_res_V = w_res_V.masked_fill(~mask_V, 0.0)
 
             res_val_V_e_perm = res_val_V_e.permute(0, 2, 1, 3)
+            if _exact_residual_semantics(q.device):
+                # Substitute on the V side too, or the score would be exact while
+                # the value stayed lossy. The row already contributes
+                # w·(anchor_V + delta_V[pos]); the exact value is anchor_V + rv,
+                # so the correction is w·(rv − delta_V[pos]).
+                # V_V was already repeat_kv'd to H_q above, so dv comes back at
+                # H_q directly -- do NOT expand it a second time.
+                dv = _lowrank_delta_v_at(U, V_V, scales.reshape(-1),
+                                         res_pos_V_clamped)              # [N,P,H_q,D]
+                dv = dv.permute(0, 2, 1, 3)                              # [N,H_q,P,D]
+                res_val_V_e_perm = res_val_V_e_perm - dv.to(res_val_V_e_perm.dtype)
             O_res = torch.sum(w_res_V.unsqueeze(-1) * res_val_V_e_perm, dim=(0, 2))
             O_final = O_final + O_res.to(O_final.dtype)
 
