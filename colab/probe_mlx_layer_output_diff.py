@@ -132,6 +132,10 @@ def main():
     ap.add_argument("--model", default="mlx-community/Qwen3.5-2B-4bit")
     ap.add_argument("--label", default="32k")
     ap.add_argument("--depth", type=float, default=0.9)
+    ap.add_argument("--chunk", type=int, default=512,
+                    help="dense prefill chunk; a single 32k forward needs a "
+                         "32k x 32k attention matrix (17 GB) and blows Metal's "
+                         "4 GB buffer limit")
     args = ap.parse_args()
 
     os.environ.setdefault("DKV_ENGAGE_THRESHOLD", "1024")
@@ -154,8 +158,17 @@ def main():
     dense = {}
     layers = model.model.layers if hasattr(model, "model") else model.layers
     print(f"[probe] dense: wrapped {_wrap(layers, dense)} attention layers")
-    out = model(mx.array([ids]))
-    mx.eval(out)
+    # CHUNKED, with a KV cache. A single forward over 32k builds a 32k x 32k
+    # attention matrix -- 17 GB, past Metal's 4 GB buffer ceiling. The CUDA half
+    # of this probe already chunks for the same reason; MLX needs it just as
+    # much. The recording proxy only has to see the FINAL chunk, since the last
+    # position is the one whose attention decides the answer.
+    from mlx_lm.models.cache import make_prompt_cache
+    cache = make_prompt_cache(model)
+    for i in range(0, len(ids), args.chunk):
+        ch = ids[i:i + args.chunk]
+        out = model(mx.array([ch]), cache=cache)
+        mx.eval(out)
     print(f"[probe] dense next token: {tok.decode([int(mx.argmax(out[0, -1]).item())])!r}")
     _unwrap(layers)
     del model
