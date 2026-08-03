@@ -371,6 +371,23 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
             [{"role": "user", "content": ctx}], tokenize=False,
             add_generation_prompt=True)
         ntok = len(w.tokenizer(prompt).input_ids)
+        # DKV_ROUTE_TRACE=1 — hand the router the needle's ABSOLUTE token index
+        # so it can report, at EVERY routing call, whether the block holding the
+        # needle survived top-K and by what margin.
+        #
+        # This has to be computed here because only the harness knows where the
+        # needle went. Doing it by hand invites the usual failure: the depth
+        # arithmetic differs per case, so one hardcoded index is wrong for eight
+        # of the nine and traces an innocent block instead.
+        if os.environ.get("DKV_ROUTE_TRACE", "0") == "1":
+            _nc = prompt.find(NEEDLE)
+            if _nc < 0:
+                os.environ.pop("DKV_ROUTE_TRACE_TOKEN", None)
+                print(f"  [trace] {label}: needle not found in prompt — trace disabled")
+            else:
+                _ntok_prefix = len(w.tokenizer(prompt[:_nc]).input_ids)
+                os.environ["DKV_ROUTE_TRACE_TOKEN"] = str(_ntok_prefix)
+                print(f"  [trace] {label}: needle at token ~{_ntok_prefix} of {ntok}")
         outs = []
         for _ in range(3):
             # 24 tokens: 12 truncates "ZEBRA-4471-QUARTZ" mid-word once the

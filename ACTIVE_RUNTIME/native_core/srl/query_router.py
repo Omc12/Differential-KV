@@ -899,6 +899,14 @@ def route_query(
 K_FIXED = int(os.environ.get("DKV_SRL_K_FIXED", "64"))
 
 
+# ROUTE TRACE budget: kept=True lines are capped (drops always print).
+_ROUTE_TRACE_KEPT_SHOWN = 0
+try:
+    _ROUTE_TRACE_MAX = int(os.environ.get("DKV_ROUTE_TRACE_MAX", "60"))
+except ValueError:
+    _ROUTE_TRACE_MAX = 60
+
+
 def route_blocks_relevance(
     Q:              torch.Tensor,   # [H, D] current ROTATED query (all query heads)
     pool,                           # NativeBlockPool
@@ -1274,6 +1282,64 @@ def route_blocks_relevance(
     # forced non-relevance slot is a plausible contributor to. Removed to match
     # the documented "direct port" contract.
     sel = torch.topk(relevance, k=k_eff).indices
+
+    # ── DKV_ROUTE_TRACE_TOKEN — does the needle's block survive routing AT THE
+    # TOKEN THAT PRODUCES THE ANSWER? ────────────────────────────────────────
+    #
+    # Every "the block is selected" result so far came from DKV_ROUTE_PROBE=2,
+    # which is keyed on (session, layer, candidate_count) and therefore prints
+    # ONCE -- effectively the first decode token. That is not the token under
+    # test: the model emits '<think>\n\n</think>\n\n' first, so the answer is
+    # produced around step 5, and THIS function re-runs for every layer of every
+    # token (DKV_SRL_ROUTE_EVERY defaults to 1). MLX does not: it routes once per
+    # DKV_DECODE_CACHE_INTERVAL (16) tokens and holds that selection across the
+    # whole answer, so on MLX the token-0 decision IS the answer-token decision.
+    # On CUDA the two are different decisions and only the first was ever
+    # measured.
+    #
+    # Set to the needle's ABSOLUTE TOKEN INDEX, not an anchor id: block
+    # boundaries move between builds, and a trace keyed on an anchor that no
+    # longer exists prints nothing -- silently, which is the failure mode this
+    # codebase keeps paying for. Resolving "largest anchor <= token" always names
+    # a real block, and the line reports which one it resolved to.
+    #
+    # Reports RANK and MARGIN, not just membership: "kept" alone cannot
+    # distinguish a comfortable selection from one that survives by 1e-4 and
+    # flips on the next token.
+    _trace_tok = os.environ.get("DKV_ROUTE_TRACE_TOKEN")
+    if _trace_tok and anchor_indices is not None and anchor_indices.numel() > 0:
+        try:
+            _tgt = int(_trace_tok)
+            _anc = anchor_indices.long()
+            _le = (_anc <= _tgt)
+            if bool(_le.any().item()):
+                _cand = torch.where(_le, _anc, torch.full_like(_anc, -1))
+                _p = int(torch.argmax(_cand).item())
+                _order = torch.argsort(relevance, descending=True)
+                _rank = int((_order == _p).nonzero(as_tuple=True)[0].item())
+                _cut_i = int(_order[min(k_eff, N) - 1].item())
+                _st = getattr(srl_state, "current_step_count", -1) if srl_state is not None else -1
+                _kept = bool((sel == _p).any().item())
+                # A DROP is the signal and is never suppressed; kept=True lines
+                # are capped so a 9-case sweep cannot bury it under thousands of
+                # confirmations (6 layers x 24 tokens x 3 repeats x 9 cases).
+                global _ROUTE_TRACE_KEPT_SHOWN
+                if not _kept or _ROUTE_TRACE_KEPT_SHOWN < _ROUTE_TRACE_MAX:
+                    if _kept:
+                        _ROUTE_TRACE_KEPT_SHOWN += 1
+                    print(f"[DKV] ROUTE TRACE step={_st} tok={_tgt} "
+                          f"anchor={int(_anc[_p].item())} rank={_rank}/{N} k={k_eff} "
+                          f"kept={_kept} "
+                          f"rel={float(relevance[_p].item()):.5f} "
+                          f"top={float(relevance[int(_order[0].item())].item()):.5f} "
+                          f"cut={float(relevance[_cut_i].item()):.5f}", flush=True)
+            else:
+                print(f"[DKV] ROUTE TRACE tok={_tgt}: no anchor <= token "
+                      f"(min anchor={int(_anc.min().item())}) -- token is before "
+                      f"the first compressed block", flush=True)
+        except Exception as _e:                                  # noqa: BLE001
+            print(f"[DKV] ROUTE TRACE failed: {_e}", flush=True)
+
     return block_indices[sel].to(torch.int32)
 
 def route_query_fixed_k(
