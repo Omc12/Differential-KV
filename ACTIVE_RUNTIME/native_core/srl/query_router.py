@@ -1154,6 +1154,55 @@ def route_blocks_relevance(
         s_res = torch.bmm(q_reshaped.float(), rk_permuted.float()) * scale
         s_res = s_res.reshape(H_kv, gpk, L, N, R)
 
+        # ADD THE ANCHOR TERM BACK. This is the whole residual router.
+        #
+        # The two runtimes store a residual in DIFFERENT FRAMES, and only one of
+        # them can be scored directly:
+        #
+        #   MLX   res_k_active = mx.take(block_k_t, top_k_indices + 1, axis=0)
+        #         (mlx_dkv_wrapper.py:3875) -- the token's ABSOLUTE rotated key.
+        #         _block_relevance_residual then scores q . comp_res_k, which IS
+        #         that token's true attention score.
+        #
+        #   CUDA  res_K_vals = delta_K[fact_positions_K]
+        #         (compression/lowrank.py:673, and the batched path at :1645)
+        #         -- ANCHOR-RELATIVE, i.e. (k_exact - k_anchor). The decode
+        #         kernels know this and reconstruct with s_anchor + q.rk
+        #         (triton_fused_decode.py:725). This function did not: it scored
+        #         the bare delta.
+        #
+        # So CUDA's residual term was the true score MINUS s_anc. Because an
+        # anchor is a full key vector and a residual is a small delta, |q.rk| is
+        # normally far below |q.anc|, so
+        #
+        #     torch.maximum(s_anc, q.rk)  ->  s_anc,  for essentially every block
+        #
+        # and the router collapsed into an ANCHOR-ONLY router. That silently
+        # deletes the entire reason the residual router exists -- MLX's own
+        # docstring: "Unlike a min/max box or an SVD low-rank score -- both cheap
+        # summaries that by construction miss low-energy outliers -- the
+        # residuals ARE the block's outlier tokens (a buried passcode is exactly
+        # such a token)." A buried code contributes nothing to its block's anchor,
+        # so an anchor-only router ranks the needle's block by its PROSE, which is
+        # indistinguishable from every other filler block.
+        #
+        # It also explains the depth asymmetry directly: at depth 0.0 the needle
+        # sits in the sink/system-prompt block, which top-K keeps on anchor score
+        # alone; deeper needles have nothing keeping them in.
+        #
+        # Under the correction form (DKV_RESIDUAL_EXACT_KEYS=0) rk is
+        # (exact - recon), and the true key is anchor + recon + rk -- recon is a
+        # rank-R product this function deliberately never builds, so no exact
+        # score is available there. Left as-is rather than made "less wrong" on a
+        # non-default path with no measurement behind it.
+        try:
+            from native_core.compression.lowrank import _exact_keys_enabled
+            _res_is_anchor_relative = bool(_exact_keys_enabled(rk.device))
+        except Exception:                                        # noqa: BLE001
+            _res_is_anchor_relative = False
+        if _res_is_anchor_relative:
+            s_res = s_res + s_anc.unsqueeze(-1)
+
         # Apply validity mask
         s_res = s_res.masked_fill(~rvalid.view(1, 1, 1, N, R), float("-inf"))
         res_scores = s_res.max(dim=-1).values           # [H_kv, gpk, L, N]
