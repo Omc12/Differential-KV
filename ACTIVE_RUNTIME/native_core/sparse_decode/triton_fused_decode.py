@@ -637,7 +637,7 @@ if HAS_TRITON:
         R: tl.constexpr, R_REAL: tl.constexpr, S_MAX: tl.constexpr, INV_SCALE: tl.constexpr, BLOCKS_PER_CHUNK: tl.constexpr, NUM_CHUNKS: tl.constexpr,
         MAX_RESIDUAL: tl.constexpr, MAX_FACT: tl.constexpr,
         HAS_RESIDUAL: tl.constexpr, HAS_FACT: tl.constexpr,
-        EXACT_RESIDUAL: tl.constexpr,
+        EXACT_RESIDUAL: tl.constexpr, RESIDUAL_IN_DENSE: tl.constexpr,
     ):
         h_q = tl.program_id(0)
         chunk_id = tl.program_id(1)
@@ -709,26 +709,55 @@ if HAS_TRITON:
                 for ri in range(MAX_RESIDUAL):
                     r_pos_k = tl.load(pool_res_pos_ptr + pool_idx * stride_res_pos_n + ri)
                     if r_pos_k >= 0:
-                        rk = tl.load(pool_res_k_ptr + pool_idx * stride_res_k_n +
-                                     ri * stride_res_k_s + h_kv * stride_res_k_h +
-                                     offs_d * stride_res_k_d).to(tl.float32)
-                        r_corr = tl.sum(q * rk) * INV_SCALE
-                        if EXACT_RESIDUAL:
-                            # MLX / Metal SUBSTITUTION. rk is the anchor-relative
-                            # EXACT key, so exact_K = ak + rk and this token's true
-                            # score is s_anchor + q·rk. Writing that REPLACES the
-                            # score, dropping delta_scores[p] — the lossy low-rank
-                            # twin — which is exactly what MLX means by "exact
-                            # residual rows appended and their lossy low-rank twins
-                            # masked", and what dkv_decode.metal already does. Same
-                            # shape as the C2 fact-anchor override below.
-                            s = tl.where(offs_s == r_pos_k, s_anchor + r_corr, s)
+                        if RESIDUAL_IN_DENSE:
+                            # MLX PARTITION (mlx_dkv_wrapper.py:771 + :1031). MLX does
+                            # NOT score the exact row here. It masks the lossy twin to
+                            # -inf in the SPARSE half
+                            #     delta_s = where(res_mask, -inf, delta_s)
+                            # and carries the exact row in the DENSE half
+                            #     dense_k_for_attn = concat([res_k_all, dense_k])
+                            # The dispatcher appends those rows to dense_k/dense_v, so
+                            # scoring them here too would DOUBLE-COUNT the token -- the
+                            # very bug F1 above records.
+                            #
+                            # WHY THE SIDE MATTERS, and it is not cosmetic: the merge
+                            # bias is
+                            #   bias = max(0, base - 0.5*max(0, (lse_dense-lse_sparse)-4))
+                            # and its NIAH safety rests on "the exact needle residual
+                            # makes lse_dense dominate -> bias->0" (mlx_dkv_wrapper.py
+                            # :26-28). That holds only while the exact rows sit in the
+                            # DENSE half. With them in the SPARSE half the gap moves the
+                            # wrong way and `auto` stays pinned near its +2.0 maximum
+                            # instead of decaying -- on a knob whose own note records
+                            # that +4.0 breaks NIAH by needle corruption. The control
+                            # meant to detect "an exact needle is present, back off" is
+                            # reading the wrong side of the merge.
+                            #
+                            # MASKING, not merely skipping: leaving the twin live would
+                            # keep a 20-35% rel-error key (measured by
+                            # probe_residual_values) competing against the token's own
+                            # exact copy.
+                            s = tl.where(offs_s == r_pos_k, -float("inf"), s)
                         else:
-                            # Correction form: rk is (exact - recon), so ADD and keep
-                            # the twin. Approximate: the twin's delta stays in, and
-                            # the two terms are rotated in different frames (base at
-                            # the block anchor, rk at the token's true position).
-                            s = tl.where(offs_s == r_pos_k, s + r_corr, s)
+                            rk = tl.load(pool_res_k_ptr + pool_idx * stride_res_k_n +
+                                         ri * stride_res_k_s + h_kv * stride_res_k_h +
+                                         offs_d * stride_res_k_d).to(tl.float32)
+                            r_corr = tl.sum(q * rk) * INV_SCALE
+                            if EXACT_RESIDUAL:
+                                # MLX / Metal SUBSTITUTION. rk is the anchor-relative
+                                # EXACT key, so exact_K = ak + rk and this token's true
+                                # score is s_anchor + q·rk. Writing that REPLACES the
+                                # score, dropping delta_scores[p] — the lossy low-rank
+                                # twin. Same shape as the C2 fact-anchor override below.
+                                # NOTE this keeps the exact row in the SPARSE half,
+                                # which is the MLX divergence RESIDUAL_IN_DENSE fixes.
+                                s = tl.where(offs_s == r_pos_k, s_anchor + r_corr, s)
+                            else:
+                                # Correction form: rk is (exact - recon), so ADD and keep
+                                # the twin. Approximate: the twin's delta stays in, and
+                                # the two terms are rotated in different frames (base at
+                                # the block anchor, rk at the token's true position).
+                                s = tl.where(offs_s == r_pos_k, s + r_corr, s)
 
             # ── C2: Fact Anchor Override — replace scores at flagged positions ──
             if HAS_FACT:
@@ -2564,6 +2593,86 @@ def _pytorch_vectorized_sparse_attn_decode(
     return O_final.to(q.dtype).unsqueeze(0).unsqueeze(2)
 
 
+def residuals_in_dense() -> bool:
+    """DKV_RESIDUALS_IN_DENSE — put exact residual rows in the DENSE half, as MLX does.
+
+    MLX carries a block's exact residual rows in the DENSE partition
+    (`mlx_dkv_wrapper.py:1031  dense_k_for_attn = concat([res_k_all, dense_k])`) and
+    masks their lossy low-rank twins out of the SPARSE half
+    (`:771  delta_s = where(res_mask, -inf, delta_s)`). CUDA keeps them in the SPARSE
+    half instead.
+
+    That is not a cosmetic difference. The merge bias is
+
+        bias = max(0, base - 0.5 * max(0, (lse_dense - lse_sparse) - 4))
+
+    and the whole reason it is NIAH-safe is "the exact needle residual makes
+    lse_dense dominate -> bias -> 0" (mlx_dkv_wrapper.py:26-28). That holds only
+    while the exact rows are on the DENSE side. With them on the SPARSE side the gap
+    moves the wrong way and `auto` stays pinned near its +2.0 maximum instead of
+    decaying to 0 -- and the same note records that +4.0 breaks NIAH outright by
+    needle corruption. So the control meant to detect "an exact needle is present,
+    back off" is reading the wrong side of the merge.
+
+    MLX's own comment describes the failure this produces exactly:
+    "when the answer lives in OLD (compressed) context that is out-competed by the
+    recent exact dense window, the model reads the wrong region ... the sparse half
+    attended the correct tokens but LOST the merge."
+
+    DEFAULT OFF. Turning it on requires BOTH halves of the change:
+      (1) this kernel flag, which masks the twin instead of substituting, and
+      (2) the dispatcher appending the exact rows to active_k/active_v and
+          extending active_len.
+    Enabling (1) alone DROPS those tokens from attention entirely. The pairing is
+    asserted by tests/test_residual_partition.py.
+    """
+    return os.environ.get("DKV_RESIDUALS_IN_DENSE", "0") == "1"
+
+
+def build_dense_residual_rows(g, dtype=None):
+    """The exact residual rows MLX puts in the dense half: `[n_rows, H_kv, D]` K and V.
+
+    Mirrors `mlx_dkv_wrapper.py:1002-1006` (`rk = take(comp_res_k, sel)`) except for
+    the storage format: MLX stores `comp_res_k` as the ABSOLUTE rotated key, CUDA
+    stores `residual_K_values` ANCHOR-RELATIVE, so the exact key here is
+    `anchors + res_val` -- the same reconstruction `_scatter_residuals` performs and
+    the one `probe_residual_values.py` verified against ground truth at cos 1.0000.
+
+    Validity comes from `res_pos >= 0` (the -1 padding), matching MLX's
+    `res_valid = arange(R) < res_n`. Padded slots are dropped rather than emitted
+    with a mask, so the caller can simply concatenate and extend its length.
+
+    K and V take their own position arrays: `residual_V_positions` are selected
+    independently of `residual_K_positions`, so a row can be exact in one and not
+    the other. Rows are emitted on the UNION -- a token exact in K but not V keeps
+    its true K and falls back to `anchors_V` for V, which is what the sparse-half
+    substitution did too. Returns (K, V, n_rows); n_rows == 0 when nothing is valid.
+    """
+    import torch as _t
+    if not g.get("has_res"):
+        return None, None, 0
+    res_pos, res_pos_v = g["res_pos"], g["res_pos_v"]
+    res_k, res_v = g["res_k"], g["res_v"]
+    aK, aV = g["anchors_K"], g["anchors_V"]          # [N, H_kv, D]
+    keep = (res_pos.long() >= 0) | (res_pos_v.long() >= 0)   # [N, MAX_RES]
+    n_rows = int(keep.sum().item())
+    if n_rows == 0:
+        return None, None, 0
+    # anchor + residual, per slot, in fp32 before the cast: the corrections are small
+    # deltas on a much larger anchor, exactly where fp16 rounding eats them.
+    exact_k = aK.unsqueeze(1).float() + res_k.float()          # [N, MAX_RES, H_kv, D]
+    exact_v = aV.unsqueeze(1).float() + res_v.float()
+    # A slot valid only in V has no true K (and vice versa): fall back to the anchor.
+    kv = (res_pos.long() >= 0).unsqueeze(-1).unsqueeze(-1)
+    vv = (res_pos_v.long() >= 0).unsqueeze(-1).unsqueeze(-1)
+    exact_k = _t.where(kv, exact_k, aK.unsqueeze(1).float())
+    exact_v = _t.where(vv, exact_v, aV.unsqueeze(1).float())
+    out_k = exact_k[keep]                                      # [n_rows, H_kv, D]
+    out_v = exact_v[keep]
+    dt = dtype if dtype is not None else res_k.dtype
+    return out_k.to(dt), out_v.to(dt), n_rows
+
+
 def native_triton_sparse_attn_decode(
     q:                    torch.Tensor,
     block_indices:        torch.Tensor,
@@ -2713,6 +2822,12 @@ def native_triton_sparse_attn_decode(
                 MAX_RESIDUAL=g["max_res_pad"], MAX_FACT=g["max_fact"],
                 HAS_RESIDUAL=g["has_res"], HAS_FACT=g["has_fact"],
                 EXACT_RESIDUAL=_exact_residual_semantics(q.device),
+                # MUST be passed. A tl.constexpr declared on the kernel but omitted
+                # here is the `S_MAX` failure mode this file already paid for: the
+                # launch raises TypeError and the try/except drops to the PyTorch
+                # fallback SILENTLY, so production runs a different implementation
+                # than the one under test.
+                RESIDUAL_IN_DENSE=residuals_in_dense(),
             )
             
             if num_chunks > 1:
