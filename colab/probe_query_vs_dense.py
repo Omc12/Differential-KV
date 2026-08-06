@@ -132,6 +132,29 @@ def main():
     cap_q = {i: [] for i in attn_layers}      # layer -> [h] per decode step
     seen = {i: 0 for i in attn_layers}
 
+    # INPUT hidden state to EVERY decoder layer (not just the attention ones) at
+    # each decode step. Layer 3 is the first DKV layer and its input comes from
+    # layers 0-2, which are linear-attention and never touch the compressed KV --
+    # so at depth 0.5 DKV and dense agree there to 1.0000, as they must. At 0.9
+    # they do not, which puts the divergence UPSTREAM of everything this
+    # investigation has been looking at. This finds the first layer that differs.
+    cap_h = {i: [] for i in range(len(layers))}
+    seen_h = {i: 0 for i in range(len(layers))}
+
+    def mk_hook_h(li):
+        def hook(mod, args, kwargs):
+            hs = kwargs.get("hidden_states")
+            if hs is None and args:
+                hs = args[0]
+            if hs is None or not hasattr(hs, "dim") or hs.dim() != 3:
+                return
+            start = seen_h[li]
+            T = hs.shape[1]
+            seen_h[li] = start + T
+            if T == 1 and start >= n_tok:
+                cap_h[li].append(hs[0, 0].detach().float().cpu())
+        return hook
+
     def mk_hook(li):
         def hook(mod, args, kwargs):
             hs = kwargs.get("hidden_states")
@@ -153,6 +176,8 @@ def main():
     handles = [layers[i].self_attn.register_forward_pre_hook(mk_hook(i),
                                                              with_kwargs=True)
                for i in attn_layers]
+    handles += [layers[i].register_forward_pre_hook(mk_hook_h(i), with_kwargs=True)
+                for i in range(len(layers))]
     try:
         out = w.generate(prompt=prompt, max_new_tokens=a.max_new, temperature=0.0,
                          top_p=1.0, repetition_penalty=1.0)
@@ -217,7 +242,8 @@ def main():
         rows[li] = {"k": ks, "q": qs, "Dh": Dh}
 
     payload = {"rows": rows, "recalled": recalled, "depth": a.depth,
-               "n_lo": n_lo, "n_hi": n_hi, "answer": ans[:60]}
+               "n_lo": n_lo, "n_hi": n_hi, "answer": ans[:60],
+               "hidden": {i: (v[0] if v else None) for i, v in cap_h.items()}}
     path = CACHE.format(mode=a.mode, depth=a.depth)
     torch.save(payload, path)
     print(f"[saved] {path}")
@@ -273,6 +299,31 @@ def _report(dkv, dense, depth):
             ratio = best_d / best_n if abs(best_n) > 1e-9 else float("nan")
             print(f"  {si:>5} {best_d:>12.4f} {best_n:>12.4f} {ratio:>8.3f} "
                   f"{cq:>20.4f}")
+    # ── Where does the hidden state FIRST diverge? ───────────────────────────
+    hd, hn = dkv.get("hidden"), dense.get("hidden")
+    if hd and hn:
+        print("\n=== INPUT hidden state per DECODER layer, decode step 0 ===")
+        print("Layer 0's input is the embedding: it MUST be 1.0 (same prompt, same")
+        print("tokens). The first layer below 1.0 is where DKV starts to differ --")
+        print("and anything before layer 3 is upstream of the compressed-KV path")
+        print("entirely, since layers 0-2 are linear-attention and never touch it.\n")
+        print(f"  {'layer':>5} {'cos':>10} {'rel_err':>10}")
+        first_bad = None
+        for li in sorted(hd):
+            x, y = hd.get(li), hn.get(li)
+            if x is None or y is None:
+                continue
+            c = torch.nn.functional.cosine_similarity(
+                x.flatten(), y.flatten(), dim=0).item()
+            rel = (torch.norm(x - y) / torch.clamp(torch.norm(y), min=1e-9)).item()
+            if first_bad is None and c < 0.9999:
+                first_bad = li
+            print(f"  {li:>5} {c:>10.4f} {rel:>10.4f}"
+                  f"{'   <-- FIRST DIVERGENCE' if first_bad == li else ''}")
+        if first_bad is not None:
+            print(f"\nFirst divergence at decoder layer {first_bad}. "
+                  f"{'That is a LINEAR-ATTENTION layer -- upstream of the compressed KV.' if first_bad < 3 else 'That is at/after the first full-attention layer.'}")
+
     print("\nSTEP 0 IS THE ONE THAT MATTERS: identical history in both runs, so a")
     print("low cos THERE is causal. A cos that starts ~1.0 and only falls at later")
     print("steps is the answers having diverged -- an effect, not the cause.")
