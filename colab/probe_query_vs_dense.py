@@ -83,10 +83,18 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--depth", type=float, default=0.9)
-    ap.add_argument("--mode", choices=("dkv", "dense"), default="dkv")
+    ap.add_argument("--mode", choices=("dkv", "dense", "compare"), default="dkv")
     ap.add_argument("--model", default="Qwen/Qwen3.5-2B")
     ap.add_argument("--max-new", type=int, default=24)
     a = ap.parse_args()
+
+    if a.mode == "compare":
+        # Re-analyse cached runs. No model load, no GPU -- the caches already hold
+        # EVERY decode step, and the first report read the wrong one.
+        _report(torch.load(CACHE.format(mode="dkv", depth=a.depth), weights_only=False),
+                torch.load(CACHE.format(mode="dense", depth=a.depth), weights_only=False),
+                a.depth)
+        return
 
     try:
         from ACTIVE_RUNTIME.serving import decode_config
@@ -234,27 +242,40 @@ def _report(dkv, dense, depth):
     print("\nBest needle score over its tokens, at the LAST decode step, per layer.")
     print("k_true is DENSE's (the query that provably retrieves it), so both q's")
     print("are scored against the SAME key -- that is what isolates q.\n")
-    print(f"{'layer':>5} {'score_DKV':>12} {'score_dense':>12} {'ratio':>8} "
-          f"{'cos(q_dkv,q_dense)':>20}")
+    # PER STEP, not just the last. The two runs share the '<think>\n\n</think>\n\n'
+    # prefix, so the EARLY steps have IDENTICAL token history and the comparison
+    # there is clean. By the last step DKV has emitted 'None' and dense the code,
+    # so their hidden states differ BECAUSE the answers differ -- reading that step
+    # cannot separate "q degraded -> wrong answer" from "wrong answer -> different
+    # history -> different q". Step 0 can.
     for li in sorted(dkv["rows"]):
         d_, n_ = dkv["rows"][li], dense["rows"][li]
         if not d_["q"] or not n_["q"] or not n_["k"]:
             continue
         Dh = n_["Dh"]
         sc = 1.0 / (Dh ** 0.5)
-        qd, qn = d_["q"][-1][1], n_["q"][-1][1]          # last decode step
-        H_q = qd.shape[1]
-        best_d = best_n = -1e30
-        for (_, kt) in n_["k"]:                          # dense's k_true
-            H_kv = kt.shape[1]
-            rep = max(1, H_q // H_kv)
-            k = kt.repeat_interleave(rep, dim=1)
-            best_d = max(best_d, float((qd * k).sum(-1).max()) * sc)
-            best_n = max(best_n, float((qn * k).sum(-1).max()) * sc)
-        cq = torch.nn.functional.cosine_similarity(
-            qd.flatten(), qn.flatten(), dim=0).item()
-        ratio = best_d / best_n if abs(best_n) > 1e-9 else float("nan")
-        print(f"{li:>5} {best_d:>12.4f} {best_n:>12.4f} {ratio:>8.3f} {cq:>20.4f}")
+        print(f"\n  layer {li}")
+        print(f"  {'step':>5} {'score_DKV':>12} {'score_dense':>12} {'ratio':>8} "
+              f"{'cos(q_dkv,q_dense)':>20}")
+        n_steps = min(len(d_["q"]), len(n_["q"]))
+        for si in range(n_steps):
+            qd, qn = d_["q"][si][1], n_["q"][si][1]
+            H_q = qd.shape[1]
+            best_d = best_n = -1e30
+            for (_, kt) in n_["k"]:                      # dense's k_true, both times
+                H_kv = kt.shape[1]
+                rep = max(1, H_q // H_kv)
+                k = kt.repeat_interleave(rep, dim=1)
+                best_d = max(best_d, float((qd * k).sum(-1).max()) * sc)
+                best_n = max(best_n, float((qn * k).sum(-1).max()) * sc)
+            cq = torch.nn.functional.cosine_similarity(
+                qd.flatten(), qn.flatten(), dim=0).item()
+            ratio = best_d / best_n if abs(best_n) > 1e-9 else float("nan")
+            print(f"  {si:>5} {best_d:>12.4f} {best_n:>12.4f} {ratio:>8.3f} "
+                  f"{cq:>20.4f}")
+    print("\nSTEP 0 IS THE ONE THAT MATTERS: identical history in both runs, so a")
+    print("low cos THERE is causal. A cos that starts ~1.0 and only falls at later")
+    print("steps is the answers having diverged -- an effect, not the cause.")
     print("\nDKV far below dense here, and only at 0.9 -> the QUERY is degraded;")
     print("the KV path is exonerated and the defect is upstream in the hidden states.")
     print("The two agreeing at BOTH depths -> q is fine and the key is exact, so")
