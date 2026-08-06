@@ -18,6 +18,8 @@ length it is skipped at larger ones).
 ## Files
 - `bench_common.py` — builds the per-length NIAH chat prompt (exact token count).
 - `bench_worker.py` — runs ONE (engine, ctx) measurement in isolation; prints JSON.
+- `prose_fact_recall.py` — proper-noun prose recall evaluation benchmark (non-digit entity retrieval across 8k–64k).
+- `tool_calling_agent_eval.py` — multi-turn tool-calling & jagged agent state recall benchmark (JSON schemas, SQL queries, tool outputs).
 - `run_bench.py` — orchestrator: sweep, 20 Hz process-tree memory sampler
   (`max(phys_footprint, RSS)`; ollama also reads `/api/ps size_vram`), per-test
   timeout + RAM kill-cap, OOM/skip logic, incremental JSON + `summary.md`.

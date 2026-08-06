@@ -73,7 +73,7 @@ def run_prose_fact_eval(model_id, ctx_list, compressed=True):
     else:
         os.environ["DKV_COMPRESSED_DECODE"] = "1"
         
-    wrapper = MLXDKVWrapper(model_id, preset="mid")
+    wrapper = MLXDKVWrapper(model_id, config={"rank": 32})
     tok = wrapper.tokenizer
     is_llama = "llama" in model_id.lower()
     
