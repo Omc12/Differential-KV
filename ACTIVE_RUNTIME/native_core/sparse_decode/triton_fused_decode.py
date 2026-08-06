@@ -398,6 +398,24 @@ def resolve_sparse_bias(lse_sparse=None, lse_dense=None):
     """
     env = os.environ.get("DKV_SPARSE_BIAS", "0.0").strip().lower()
     if env.startswith("auto"):
+        # Neutered to 0.0 ONLY because the exact residuals sit in the sparse half.
+        # With DKV_RESIDUALS_IN_DENSE the partition matches MLX's -- exact rows in
+        # the DENSE half, twins masked out of sparse -- so `diff` regains the sign
+        # the formula was written against ("decays to 0 as the dense half, e.g. an
+        # exact needle residual, pulls ahead") and `auto` becomes genuinely
+        # adaptive instead of a constant. Same formula and same 2.0 default as
+        # mlx_dkv_wrapper.py:26-28; falling through to the shared branch below
+        # keeps the two from drifting apart.
+        if residuals_in_dense() and lse_sparse is not None and lse_dense is not None:
+            parts = env.split(",")
+            try:
+                base = float(parts[1]) if len(parts) > 1 and parts[1] else 2.0
+            except ValueError:
+                base = 2.0
+            diff = lse_dense - lse_sparse
+            if torch.is_tensor(diff):
+                return torch.clamp(base - 0.5 * torch.clamp(diff - 4.0, min=0.0), min=0.0)
+            return max(0.0, base - 0.5 * max(0.0, diff - 4.0))
         return 0.0
     if env.startswith("adaptive"):
         if lse_sparse is None or lse_dense is None:
@@ -2913,6 +2931,33 @@ def native_triton_sparse_attn_decode(
                             k_kv = _partial_rope_apply(k_kv,
                                                        _cos_d.to(k_kv.dtype),
                                                        _sin_d.to(k_kv.dtype))
+
+                    # ── MLX partition: exact residual rows join the DENSE half ──
+                    # mlx_dkv_wrapper.py:1031  dense_k_for_attn = concat([res_k_all,
+                    # dense_k]). The kernel above has masked their lossy twins to
+                    # -inf (RESIDUAL_IN_DENSE), so each such token is represented
+                    # HERE and only here -- appending without that mask, or masking
+                    # without appending, breaks the exactly-once invariant that
+                    # tests/test_residual_partition.py pins.
+                    #
+                    # APPENDED AFTER THE ROPE BLOCK ABOVE, DELIBERATELY. These rows
+                    # come out of the pool already POST-RoPE (DKV_ROTATED_POOL, which
+                    # is why the gather's do_rot is False), so routing them through
+                    # the rotation that k_kv may take would rotate them TWICE --
+                    # the same class of corruption as the unrotated-dense-window bug
+                    # documented at the slice above, and it would land on precisely
+                    # the rows this change exists to protect.
+                    if residuals_in_dense():
+                        _g_res = locals().get("g")
+                        if _g_res is not None:
+                            _rk, _rv, _nres = build_dense_residual_rows(
+                                _g_res, dtype=k_kv.dtype)
+                            if _nres > 0:
+                                # [n, H_kv, D] -> [1, H_kv, n, D] to match k_kv
+                                _rk = _rk.permute(1, 0, 2).unsqueeze(0).to(k_kv.device)
+                                _rv = _rv.permute(1, 0, 2).unsqueeze(0).to(v_kv.device)
+                                k_kv = torch.cat([_rk.float(), k_kv], dim=2)
+                                v_kv = torch.cat([_rv.float(), v_kv], dim=2)
 
                     H_q, D = q_sq.shape
                     H_kv = k_kv.shape[1]
