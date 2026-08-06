@@ -152,7 +152,14 @@ def main():
             T = hs.shape[1]
             seen_h[li] = start + T
             if T == 1 and start >= n_tok:
-                cap_h[li].append(hs[0, 0].detach().float().cpu())
+                # `start` is recorded so the comparison can VERIFY the two runs are
+                # at the same absolute position instead of assuming index k means
+                # the same step in both. It does not: the runs emit different token
+                # counts once they diverge, and one may feed the final prompt token
+                # as a T==1 forward where the other does not. Layer 0's input is the
+                # token embedding, so a mismatched pair there reads as cos~0.03 --
+                # which looks like a spectacular finding and is only misalignment.
+                cap_h[li].append((start, hs[0, 0].detach().float().cpu()))
         return hook
 
     def mk_hook(li):
@@ -243,7 +250,7 @@ def main():
 
     payload = {"rows": rows, "recalled": recalled, "depth": a.depth,
                "n_lo": n_lo, "n_hi": n_hi, "answer": ans[:60],
-               "hidden": {i: (v[0] if v else None) for i, v in cap_h.items()}}
+               "hidden": {i: v for i, v in cap_h.items()}}   # [(abs_pos, h), ...]
     path = CACHE.format(mode=a.mode, depth=a.depth)
     torch.save(payload, path)
     print(f"[saved] {path}")
@@ -307,10 +314,23 @@ def _report(dkv, dense, depth):
         print("tokens). The first layer below 1.0 is where DKV starts to differ --")
         print("and anything before layer 3 is upstream of the compressed-KV path")
         print("entirely, since layers 0-2 are linear-attention and never touch it.\n")
+        # Align on ABSOLUTE POSITION, never on list index. Layer 0 must come out
+        # 1.0000 (same token, same embedding table); if it does not, the pair is
+        # misaligned and NOTHING below it can be read.
+        pos_d = {p for (p, _) in hd.get(0, [])}
+        pos_n = {p for (p, _) in hn.get(0, [])}
+        common = sorted(pos_d & pos_n)
+        if not common:
+            print("  NO COMMON DECODE POSITION between the runs — cannot compare.")
+            return
+        at = common[0]
+        print(f"  comparing at absolute position {at} "
+              f"(DKV has {len(pos_d)} decode steps, dense {len(pos_n)})")
         print(f"  {'layer':>5} {'cos':>10} {'rel_err':>10}")
         first_bad = None
         for li in sorted(hd):
-            x, y = hd.get(li), hn.get(li)
+            x = dict(hd.get(li, [])).get(at)
+            y = dict(hn.get(li, [])).get(at)
             if x is None or y is None:
                 continue
             c = torch.nn.functional.cosine_similarity(
@@ -320,9 +340,14 @@ def _report(dkv, dense, depth):
                 first_bad = li
             print(f"  {li:>5} {c:>10.4f} {rel:>10.4f}"
                   f"{'   <-- FIRST DIVERGENCE' if first_bad == li else ''}")
-        if first_bad is not None:
+        if first_bad == 0:
+            print("\n  ⚠ LAYER 0 DIVERGED. Its input is the token embedding, so with")
+            print("  the same token this is IMPOSSIBLE -- the two runs are still")
+            print("  misaligned (different token fed at this position). Treat every")
+            print("  row above as INVALID rather than as a result.")
+        elif first_bad is not None:
             print(f"\nFirst divergence at decoder layer {first_bad}. "
-                  f"{'That is a LINEAR-ATTENTION layer -- upstream of the compressed KV.' if first_bad < 3 else 'That is at/after the first full-attention layer.'}")
+                  f"{'A LINEAR-ATTENTION layer -- upstream of the compressed KV entirely.' if first_bad < 3 else 'At/after the first full-attention layer, i.e. the KV path.'}")
 
     print("\nSTEP 0 IS THE ONE THAT MATTERS: identical history in both runs, so a")
     print("low cos THERE is causal. A cos that starts ~1.0 and only falls at later")
