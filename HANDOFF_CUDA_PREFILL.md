@@ -27,6 +27,107 @@ something is a hypothesis it says so.
 
 ---
 
+## 0.5 UPDATE — TWO prefill defects, and §2's prescription was incomplete
+
+Everything below §1 was written before the RTX 4070 session. It remains accurate
+about the router, but it named ONE defect where there are TWO, and it pointed at
+the wrong MLX reference. Corrections, all measured:
+
+**(1) There is a second, independent prefill defect: DOUBLE RoPE on history.**
+`DKV_ROTATED_POOL` defaults to `"1"`, so `_ingest_k` writes POST-RoPE keys and a
+block's `anchor_kv` / `active_k` are already in their true rotational frame. The
+decode gather knows this (`do_rot = ... and not pool_stores_rotated_k()`,
+`triton_fused_decode.py:1695`). **Every prefill history reader rotated anyway** —
+`_apply_rope_single` at `dkv_attention.py:3602` and `:3862`, and
+`_prefill_fused_history_attend`, which rotates unconditionally at
+`triton_fused_decode.py:1234`. So every key the prompt was read against carried a
+second full rotation. Same omission as the router, same cause: the decode-side fix
+never reached prefill.
+
+**(2) MLX's PREFILL router is `_block_relevance_minmax` (`:1098`), not
+`_block_relevance_residual`.** §2 says to make prefill call
+`route_blocks_relevance` (the decode router). That is the wrong reference and it
+is also infeasible: `_sparse_prefill_attend` (`:1265`) scores a Quest-style
+min/max box over each block's REAL keys — "Blocks are not yet compressed during
+prefill", its own docstring — and MLX uses the residual router only at decode.
+The residual form for a 3D query materialises `[H_kv, gpk, L, nb, R]` (~1 GB at
+L=1024), which is exactly why `route_blocks_relevance` gates residuals off for 3D
+q behind the undocumented, never-set `DKV_ROUTE_PREFILL_RESID`. Calling it from
+prefill would have given you anchor-only scoring again, or an OOM.
+
+CUDA can use the min/max box directly, because during a FRESH prefill NO block is
+compressed: `DKV_STREAMING_COMPRESS` defaults to `"0"` and SVD publication is
+deferred to the prefill boundary, so every history block still holds exact
+`active_k`. Same inputs MLX has.
+
+### CONFIRMED ON THE REAL TARGET — `validate_cuda_dkv.py --long`, Qwen3.5-2B
+
+Run on an RTX 4070 SUPER, clean GPU, `transformers 5.14.1`, `DKV_ROUTE_TRACE=1`:
+
+| config | result |
+|---|---|
+| HEAD | **8/9** — `32k@depth0.9` emits `'None'`, deterministic at temp 0 |
+| both §0.5 fixes | **9/9**, every case deterministic, `fallback_count=0` |
+
+HEAD reproduces §1's table exactly, down to the literal `'None'`, so this box is
+measuring the same defect the table describes. §3's verification plan is
+satisfied in full: baseline reproduced (1), fix passes (3), and prefill is STILL
+SPARSE — `DKV_SP_TRACE_TOKEN` reports `k_eff=30` of `120` candidates with the
+needle's block at rank 0-1 (516 kept vs 60 dropped over all layers/chunks/cases),
+so this is not §3's "accidentally reproduced `DKV_SPARSE_PREFILL=0`" trap.
+
+**`transformers` matters.** `qwen3_5` does not exist before v5; on 4.57.6
+`AutoConfig` raises "Transformers does not recognize this architecture" and the
+model cannot load at all. `requirements.txt` already says `>=5.14.1`. If a box
+has 4.x, nothing about Qwen3.5-2B measured on it means anything.
+
+### Qwen2.5-1.5B-Instruct is NOT a working configuration — and the defect is a RACE
+
+`--long` on Qwen2.5-1.5B-Instruct is **0/9 at HEAD and 0/9 with both fixes**, with
+3 DISTINCT OUTPUTS AT TEMPERATURE 0 in 8 of 9 cases and degenerating text
+(`'ZE{[]) [Z [Z [   [Z []));'`). The prefill router is not the cause: SP-TRACE
+shows the needle's block kept at rank 0-2 of 120 in every layer of `32k@0.9`.
+
+The dense control settles who owns it. Same model, same harness, DKV disengaged:
+**4/6 recall and EVERY case deterministic** (1 distinct output across 3 runs), and
+its two misses are near-miss spellings — `'ZEBA-4471-QUARTZ'`, one letter — i.e.
+the model's own limit, not corruption. So:
+
+* the **nondeterminism is DKV's** (dense is deterministic, DKV is not),
+* it is **pre-existing** (identical at HEAD), and
+* it is a **different defect class** from the prefill routing fixed above —
+  fixing routing cannot fix a race, which is why 0/9 did not move.
+
+Do not chase this with the prefill tools. It reproduces in ~10 min and
+`DKV_SYNC_COMPRESS=1` is already on, so background SVD is NOT the explanation;
+start by finding what else mutates between the three generate() calls.
+
+**Measured 2x2** (Qwen2.5-0.5B-Instruct, `ACTIVE_RUNTIME/tests/test_niah.py`,
+8k NIAH, deterministic; all 4k cases pass in every cell):
+
+| config | 8k@0.1 | 8k@0.5 | 8k@0.9 |
+|---|---|---|---|
+| HEAD (neither fix) | pass | **FAIL** | **FAIL** |
+| router fix only | pass | **FAIL** | **FAIL** |
+| RoPE fix only | **FAIL** | **FAIL** | pass |
+| **both** | pass | pass | pass |
+
+Read this carefully: **neither fix alone recovers anything**, and the RoPE fix
+alone MOVES the failure rather than removing it. They are complementary — the
+router decides which blocks the prompt is read against, the rotation decides
+whether those blocks' keys mean anything. Fixing one while the other still
+corrupts prefill is indistinguishable from fixing nothing, which is the same
+shape as the "8 rounds of byte-identical decode fixes" this document opens with.
+
+COVERAGE, stated plainly: this is Qwen2.5-0.5B at 8k on an RTX 4070, the same
+failure class (deep needle, sparse-prefill regime, temp 0) but NOT the
+Qwen3.5-2B/32k configuration §1 describes. `validate_cuda_dkv.py --long` has not
+been re-run — that model is not on this box. Sparsity was confirmed live, not
+assumed: `DKV_SP_TRACE_TOKEN` reports `k_eff=8` of `12` routable, so this is not
+§3's "accidentally reproduced `DKV_SPARSE_PREFILL=0`" trap.
+
+---
+
 ## 1. WHERE THINGS STAND
 
 `python colab/validate_cuda_dkv.py --long` (Qwen3.5-2B, 9 NIAH cases):
@@ -86,18 +187,27 @@ to 1024 chunk tokens into one `[D]` vector. Retrieval is head-specialised;
 averaging a retrieval head with seven others erases exactly the signal that finds
 a needle. MLX scores per-head and reduces with max.
 
-### The fix
+### The fix — SUPERSEDED BY §0.5, kept for the reasoning
 
-CUDA already has the MLX-aligned router: `route_blocks_relevance` in
-`ACTIVE_RUNTIME/native_core/srl/query_router.py` (the DECODE router, MLX-matched
-and fixed). **Make prefill call it instead of the ad-hoc scoring above.**
+This section said: make prefill call `route_blocks_relevance` (the decode
+router). **Do not do that** — see §0.5(2). MLX's prefill router is
+`_block_relevance_minmax`, the decode router's residual term is gated off for 3D
+queries and would blow up memory if it were not, and during a fresh prefill there
+are no compressed blocks to score residuals from in the first place.
 
-Watch for: the decode router takes per-head `q` and pool-resident blocks; prefill
-has `chunk_q` `[1, H, T, D]` and `history_blocks` objects. You will need a small
-adapter (per-head q, probably `max` over the chunk's tokens rather than `mean` —
-a needle-matching token must not be averaged away). Verify the residual keys are
-read in the same anchor-relative EXACT form the decode path uses
-(`_exact_keys_enabled`), or the scores will be silently wrong.
+What shipped instead (`_prefill_block_key_boxes` + `_sparse_prefill_relevance` in
+`dkv_attention.py`): per-block min/max over the block's exact keys, scored
+per-head against every chunk token, max-reduced over both axes — MLX `:1098`
+transcribed. Compressed blocks (2nd-turn prefill only) fall back to anchor + the
+anchor-relative EXACT residuals, which is where the `_exact_keys_enabled` warning
+below still applies and is honoured.
+
+One deliberate departure, and it is an identity rather than an approximation:
+MLX's elementwise `sum_d max(q_d·min_d, q_d·max_d)` materialises `[H_q, L, nb, D]`
+(~4 GB at 32k). Since `max(a,b) == (a+b)/2 + |a-b|/2` and `max_d >= min_d`, the
+same bound is `q·mid + |q|·half` — two GEMMs, largest tensor `[H_kv, gpk·L, nb]`.
+Same numbers, same selection; `tests/test_sparse_prefill_router.py` pins it
+against the literal MLX form.
 
 ### Parameters are NOT the divergence — don't waste a run there
 
@@ -196,6 +306,13 @@ how you lose a day.
 | `colab/probe_needle_block.py` | is the needle selected into its block's residual set? |
 | `colab/mlx_cuda_parity.py` | side-by-side MLX/CUDA harness — this found the dead router that reading missed 7 times |
 | `ACTIVE_RUNTIME/tests/` | CPU tests; run before any GPU turn |
+| `ACTIVE_RUNTIME/tests/test_niah.py` | 6 NIAH cases on Qwen2.5-0.5B (cached locally, no download) — the cheapest end-to-end signal that exists, ~80s |
+| `ACTIVE_RUNTIME/tests/test_sparse_prefill_router.py` | prefill router vs the literal MLX formula; the buried-needle regression also asserts the OLD router FAILS it, so it cannot silently pass on both sides |
+| `DKV_SP_TRACE_TOKEN=<abs token idx>` | prefill counterpart of `DKV_ROUTE_TRACE_TOKEN`: per layer, does that token's block survive routing, at what RANK, against what CUTOFF, and out of how many candidates. Says so explicitly when the token is not yet ingested at that chunk, instead of resolving to the last block and reading like an answer |
+
+Windows note: `pytest -s` writes through a cp1252 console and dies on the `→` in
+`hf_dkv_wrapper._trim_python_heap`'s print. `PYTHONIOENCODING=utf-8` fixes it;
+the traceback is not about your change.
 
 Known rough edge: `probe_query_vs_dense.py --mode compare` throws
 `TypeError: iteration over a 0-d tensor` on caches written before the
@@ -205,7 +322,46 @@ position-alignment change. Delete `/tmp/dkv_qprobe_*.pt` and re-run both passes.
 
 ## 8. OPEN ITEMS
 
-* **Prefill router alignment** — section 2. The main task.
+* **Re-run `validate_cuda_dkv.py --long` on Qwen3.5-2B/32k.** Both §0.5 fixes are
+  in, and 8k NIAH went 4/6 -> 6/6 on Qwen2.5-0.5B, but the model in §1's table has
+  not been touched since. Pre-decided reading: 9/9 with `fallback_count=0` and
+  `DKV_SP_TRACE_TOKEN` still showing `k_eff < nb` means both defects were the
+  whole story; 8/9 with the needle's block RANKED but dropped means K is too small
+  (a parameter, `DKV_SPARSE_PREFILL_FRAC`); 8/9 with it kept means a third defect
+  downstream of routing.
+* **Controlled prefill-throughput measurement.** Wall clock on the 3 8k cases was
+  47.0s (HEAD) vs 48.7s (fixed), but the two runs emit different text once one of
+  them starts answering correctly, so that number is not a throughput result. The
+  RoPE fix strictly REMOVES work (no gather + rotate of dense history per chunk
+  per layer); the router adds a cached min/max plus two GEMMs in place of one
+  einsum. Measure it properly before quoting a number.
+* **`_apply_rope_single` at `dkv_attention.py:3344`** — same double-rotation
+  shape, but it is inside the MPS `_validate_this_step` branch, not production
+  CUDA, so it was left alone. Fix it if that validation path is ever trusted.
+* **`ingest_streaming` frame is inconsistent across prefill paths.** The
+  chunked-sparse path (the one that fails --long) captures via `_ingest_k`, but
+  INCREMENTAL prefill (`dkv_attention.py:3526`) passes raw `unrot_key_states` and
+  `finalize_contiguous_prefill` inverse-RoPEs before calling `capture_prefill_kv`.
+  Under the rotated-pool default those two write the pool in the OPPOSITE frame
+  from the first. Not exercised by 1st-turn NIAH; a 2nd-turn session is where it
+  would show. Route every capture site through `_ingest_k`.
+* **`tests/test_niah.py` is only meaningful RUN ALONE.** Run as part of the full
+  suite it fails all three 8k cases — *identically at HEAD and with both §0.5
+  fixes in*, so it is cross-test state contamination, not a regression, and the
+  full-suite NIAH result cannot discriminate anything. Ruled out by measurement:
+  `DKV_SRL_THRESHOLD=5` (leaked by `test_failure_cases.py`, and named in
+  `test_niah`'s own docstring as having broken 8000/0.1 before) and
+  `DKV_MLA_LATENT=1` (leaked by `test_ktransformers_features.py`) — 6/6 with each
+  forced. Leading unverified hypothesis: the pool budget is computed from FREE
+  VRAM at init (`ceiling: 50% of 8.6 GB free VRAM` in the logs), so earlier tests
+  holding memory change `max_blocks`, block sizing and therefore routing. Same
+  full-suite-only pattern hits `test_triton_combined`. Whoever needs the suite
+  green should fix the isolation, and until then A/B the FILE, never the suite.
+* `tests/test_facter_retention.py::test_localized_vertical_factual_retrieval` is
+  FLAKY, unrelated to any of this: unseeded `torch.randn`, ~1-in-5 failures on the
+  relaxed-threshold fallback assertion. Seed it before it costs someone a
+  bisect.
+* **Prefill router alignment** — section 2. Done; see §0.5.
 * **64k** — untested. Depth 0.9 there puts the needle in the same relative
   position, so the same failure is *expected* but unverified. Re-check after the
   fix. Note the routed-row count does not grow with context (K=16 regardless), so

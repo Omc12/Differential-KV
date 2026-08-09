@@ -407,6 +407,158 @@ def _get_engage_threshold():
     return int(os.environ.get("DKV_ENGAGE_THRESHOLD", "4096"))
 
 
+def _prefill_block_key_boxes(blocks, device):
+    """Elementwise (min, max) of each block's EXACT keys -> two [nb, H_kv, D].
+
+    MLX's prefill router scores blocks from a per-block key min/max computed over
+    the block's REAL keys (`mid_k.reshape(H_kv, nb, block_size, D)` then
+    `mx.min/mx.max(axis=2)`, mlx_dkv_wrapper.py:1310-1312). It can do that in one
+    shot because its prefill history is one contiguous `all_k`; this side keeps
+    block OBJECTS, so the box is built per block and cached on the block.
+
+    What "exact keys" means per block state:
+      ACCUMULATING/SUBMITTED — anchor + active_k, i.e. every token verbatim.
+        During a FRESH prefill this is EVERY history block: DKV_STREAMING_COMPRESS
+        defaults to "0", so SVD publication is deferred to the prefill boundary
+        and "every chunk attends EXACT raw KV history" (kv_runtime_manager.py's
+        own comment on compress_prefill_kv). So on the path that actually fails
+        --long, this router sees the same exact keys MLX does.
+      COMPRESSED — anchor + its top-R exact residual keys (2nd-turn incremental
+        prefill only). The low-rank half cannot be reconstructed per token here
+        without defeating the point, and the residuals are precisely the block's
+        most distinctive tokens, which is the signal a buried code lives in.
+
+    The box is cached on the block keyed by its active length, so a block that
+    has stopped growing is measured once and re-used by every later chunk of
+    every layer; a block still accumulating is re-measured when it grows.
+    """
+    from collections import defaultdict
+
+    try:
+        from native_core.compression.lowrank import _exact_keys_enabled
+        _res_is_anchor_relative = bool(_exact_keys_enabled(device))
+    except Exception:                                              # noqa: BLE001
+        _res_is_anchor_relative = False
+
+    mins = [None] * len(blocks)
+    maxs = [None] * len(blocks)
+    # Group the uncached blocks by key-count so the min/max reduction runs as a
+    # couple of batched kernels rather than one launch pair per block (a 32k
+    # prompt has ~128 blocks per layer x 28 layers per chunk).
+    pending = defaultdict(list)                        # n_keys -> [(i, keys[H_kv,n,D])]
+
+    for i, b in enumerate(blocks):
+        # Cheap cache probe FIRST. Gathering the keys before checking would re-run
+        # the residual gather for every compressed block on every chunk of every
+        # layer, which is most of this function's cost.
+        #
+        # The probe identifies WHAT the box was measured from, not just how much:
+        # an accumulating block grows, so its length must invalidate; a compressed
+        # block's residual set is fixed once published, but it lives in a POOL SLOT
+        # that can be recycled to a different block (tests/test_pool_recycle_
+        # aliasing.py), so the slot id has to be part of the key or a stale box
+        # could outlive the content it describes.
+        if getattr(b, "active_k", None) is not None:
+            probe = ("act", int(b.active_k.shape[2]))
+        elif getattr(b, "active_k_cpu", None) is not None:
+            probe = ("cpu", int(b.active_k_cpu.shape[2]))
+        elif getattr(b, "state", None) == "COMPRESSED":
+            probe = ("cmp", getattr(b, "pool_idx", None))
+        else:
+            probe = ("anc", 0)
+        cached = getattr(b, "_sp_key_box", None)
+        if cached is not None and cached[0] == probe and cached[1].device == device:
+            mins[i], maxs[i] = cached[1], cached[2]
+            continue
+
+        ak = b.anchor_kv[0, 0].to(device)                          # [H_kv, D]
+        k_blk = None
+        if getattr(b, "active_k", None) is not None:
+            k_blk = b.active_k[0].to(device)
+        elif getattr(b, "active_k_cpu", None) is not None:
+            k_blk = b.active_k_cpu[0].to(device, non_blocking=True)
+        elif probe[0] == "cmp":
+            rk = getattr(b, "residual_K_values", None)             # [R, H_kv, D]
+            rp = getattr(b, "residual_K_positions", None)          # [R]
+            if rk is not None and rp is not None and rk.numel() > 0:
+                rk = rk.to(device)
+                valid_r = (rp.to(device) >= 0)
+                if bool(valid_r.any()):
+                    rk = rk[valid_r]                               # [r, H_kv, D]
+                    # Residuals are stored ANCHOR-RELATIVE under the exact-keys
+                    # default (compression/lowrank.py:673) -- the true key is
+                    # anchor + residual. This is the same reconstruction the
+                    # decode router does with `s_res + s_anc`
+                    # (query_router.py:1207); scoring the bare delta is what made
+                    # that router anchor-only before e48cc31.
+                    if _res_is_anchor_relative:
+                        rk = rk + ak.unsqueeze(0)
+                    k_blk = rk.permute(1, 0, 2)                    # [H_kv, r, D]
+
+        keys = ak.unsqueeze(1) if k_blk is None else torch.cat(
+            [ak.unsqueeze(1), k_blk.to(ak.dtype)], dim=1)          # [H_kv, 1+act, D]
+        pending[keys.shape[1]].append((i, keys, probe))
+
+    for _n, group in pending.items():
+        stacked = torch.stack([g[1] for g in group], dim=0)        # [g, H_kv, n, D]
+        g_min = stacked.amin(dim=2)                                # [g, H_kv, D]
+        g_max = stacked.amax(dim=2)
+        for j, (i, _keys, probe) in enumerate(group):
+            mins[i], maxs[i] = g_min[j], g_max[j]
+            # Cache on the block: identical boxes are re-scored by every later
+            # chunk, and blocks stop changing once they are full.
+            try:
+                blocks[i]._sp_key_box = (probe, mins[i], maxs[i])
+            except Exception:                                      # noqa: BLE001
+                pass                                               # slotted/frozen block: skip the cache
+
+    return torch.stack(mins, dim=0), torch.stack(maxs, dim=0)
+
+
+def _sparse_prefill_relevance(chunk_q, k_min, k_max, scale: float,
+                              tok_tile: int = 256):
+    """MLX `_block_relevance_minmax` (mlx_dkv_wrapper.py:1098), per-head.
+
+        bound(block) = max over (head, chunk token) of
+                       sum_d max(q_d * min_d, q_d * max_d) * scale
+
+    Computed here as two GEMMs instead of MLX's elementwise form, using
+    max(a, b) == (a + b) / 2 + |a - b| / 2 with a = q_d*min_d, b = q_d*max_d and
+    max_d >= min_d:
+
+        sum_d max(q_d*min_d, q_d*max_d) == q . mid + |q| . half
+        mid = (max + min) / 2      half = (max - min) / 2 >= 0
+
+    This is an ALGEBRAIC IDENTITY, not an approximation -- same bound, same
+    selection. It matters because MLX's literal form materialises
+    [H_q, L, nb, D]; at 32k that is 32 x 1024 x 128 x 256 floats (~4 GB) on a
+    path whose entire purpose is to be cheap. The GEMM form's largest tensor is
+    [H_kv, gpk*L, nb] and the token axis is tiled on top of that.
+
+    Reduction is max over heads AND over the chunk's tokens, matching MLX's
+    `mx.max(bound, axis=(0, 1))` with DKV_SP_NO_POOL="1" (its default). The
+    router this replaces mean-pooled q over both axes, which is what erased a
+    single needle-matching token in a 1024-token chunk and averaged the
+    retrieval head together with every other head.
+    """
+    q = chunk_q[0]                                                 # [H_q, T, D]
+    H_q, T, D = q.shape
+    H_kv = k_min.shape[1]
+    gpk = max(1, H_q // H_kv)
+
+    mid_p = ((k_max + k_min).float() * 0.5).permute(1, 2, 0).contiguous()   # [H_kv, D, nb]
+    half_p = ((k_max - k_min).float() * 0.5).permute(1, 2, 0).contiguous()  # [H_kv, D, nb]
+
+    rel = None
+    for t0 in range(0, T, tok_tile):
+        t1 = min(t0 + tok_tile, T)
+        qt = q[:, t0:t1, :].reshape(H_kv, gpk * (t1 - t0), D).float()
+        bound = torch.bmm(qt, mid_p) + torch.bmm(qt.abs(), half_p)  # [H_kv, gpk*t, nb]
+        tile_rel = bound.amax(dim=1).amax(dim=0)                    # [nb]
+        rel = tile_rel if rel is None else torch.maximum(rel, tile_rel)
+    return rel * scale
+
+
 def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
                                   chunk_start: int = None):
     """DSA/NSA-style block-sparse PREFILL (MLX parity: DKV_SPARSE_PREFILL).
@@ -415,14 +567,37 @@ def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
     for every new chunk -- O(N^2) work that grows with total prompt length,
     despite the section's name. MLX's _sparse_prefill_attend avoids this by
     keeping a few leading "sink" blocks plus only the top-K most
-    query-relevant blocks (cheap Quest-style key-bound scoring), dropping
-    everything else from that chunk's cross-attention. This mirrors that
-    algorithm, adapted for this file's block-OBJECT model (vs MLX's flat
-    pool-tensor indexing): score each candidate block by its anchor key's
-    dot product with this chunk's (mean-pooled) query -- the same anchor-based
-    relevance signal the decode-time router already uses -- and keep only
-    sinks + top-K. Vectorized (one stack + one topk), not a per-block .item()
-    loop, matching this codebase's stated sync-avoidance discipline elsewhere.
+    query-relevant blocks, dropping everything else from that chunk's
+    cross-attention. This mirrors that algorithm, adapted for this file's
+    block-OBJECT model (vs MLX's flat pool-tensor indexing).
+
+    ROUTING IS THE WHOLE CORRECTNESS SURFACE HERE, because CUDA runs block-sparse
+    attention DURING PREFILL. A block dropped at decode costs one token's
+    attention; a block dropped at prefill means the model's own hidden states
+    never absorbed those tokens, so the decode-time query is the query of a model
+    that never read them. That is why decode-side fixes were byte-identical for
+    ~8 rounds: they were all downstream of a defect that had already happened.
+
+    What this scores (MLX `_block_relevance_minmax`, :1098), and what it replaced:
+
+      NOW  per-block key min/max over the block's EXACT keys, scored per query
+           head against every token of the chunk, max-reduced over both axes.
+      WAS  `anchor_ks . chunk_q.mean(dim=(0,1))` -- two independent departures:
+
+        (a) ANCHOR-ONLY. An anchor is ONE token, the block's first. A needle at
+            within-block offset 232 of 257 contributes nothing to it, so that
+            router was structurally blind to content buried in a block and ranked
+            the needle's block by its PROSE. This is the same defect fixed on the
+            decode side in e48cc31 (`maximum(s_anc, q.rk) -> s_anc` always);
+            prefill never received that fix.
+        (b) MEAN-POOLED QUERY over all heads AND up to 1024 chunk tokens.
+            Retrieval is head-specialised, and a needle matches on ONE token;
+            averaging destroys exactly the signal that finds it. MLX scores
+            per-head, per-token and reduces with max (DKV_SP_NO_POOL default 1).
+
+    Parameters were never the divergence: MIN/WINDOW/KMIN already claim MLX
+    parity and FRAC is 0.25 vs MLX's 0.05, i.e. this side attends strictly MORE
+    blocks. The block COUNT was never the problem; the block SCORING was.
 
     Gates:
       DKV_SPARSE_PREFILL       default "1" -- set "0" to disable (attend all
@@ -448,6 +623,24 @@ def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
     if os.environ.get("DKV_SPARSE_PREFILL", "1") == "0":
         return history_blocks
     if len(history_blocks) <= sink_blocks:
+        return history_blocks
+
+    # The router scores q.k, so q and the stored keys must be in the SAME
+    # rotational frame. Under DKV_ROTATED_POOL (default) the pool holds POST-RoPE
+    # keys, exactly like MLX's `all_k = keys_rot`, and chunk_q is post-RoPE too --
+    # they match, and no rotation happens here (MLX's own router does none either,
+    # for the same reason).
+    #
+    # With DKV_ROTATED_POOL=0 the pool holds PRE-RoPE keys and the frames DISAGREE.
+    # The keys cannot be rotated to fix it without their true per-token positions,
+    # and q cannot be un-rotated because prefill only clones the LAST token's
+    # pre-RoPE query (unrot_query_states, the q_len>1 branch). Scoring across
+    # frames is what the anchor router did; rather than rank on numbers with no
+    # defined relationship to the query, decline and attend every block --
+    # correct, just without the speedup. DKV_ROTATED_POOL=0 is a non-default
+    # diagnostic path, and this is checked FIRST so the fallback cannot be
+    # confused with the recency-window pass-through below.
+    if not _pool_rotated_k():
         return history_blocks
 
     # MLX: `if manager._sparse_prefill and _cur_start >= manager._sp_min_ctx`.
@@ -496,12 +689,61 @@ def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
         return history_blocks
 
     device = chunk_q.device
-    anchor_ks = torch.stack([b.anchor_kv[0, 0] for _, b in valid], dim=0).float().to(device)  # [nb, H_kv, D]
-    q_repr = chunk_q[0].mean(dim=(0, 1)).float()  # [D] -- mean over heads and chunk tokens
-    scores = torch.einsum("nhd,d->nh", anchor_ks, q_repr).mean(dim=1)  # [nb], stays on-device
+    k_min, k_max = _prefill_block_key_boxes([b for _, b in valid], device)
+    scale = 1.0 / math.sqrt(chunk_q.shape[-1])
+    scores = _sparse_prefill_relevance(chunk_q, k_min, k_max, scale)   # [nb]
     top_idx = torch.topk(scores, k=k_eff).indices.tolist()  # single sync, not per-block
     keep_positions = sorted(valid[i][0] for i in top_idx)
     kept = sinks + [routable[i] for i in keep_positions] + recent
+
+    # ── DKV_SP_TRACE_TOKEN — did the block holding token N survive PREFILL
+    # routing, at which rank, and by what margin? ────────────────────────────
+    #
+    # The decode router has DKV_ROUTE_TRACE_TOKEN for exactly this question;
+    # prefill had no instrument at all, which is why "the block is routed" kept
+    # being asserted from decode-side probes about a decision made earlier and
+    # elsewhere. Set it to the needle's ABSOLUTE token index. Resolving "largest
+    # anchor <= token" always names a real block, so a trace keyed on a boundary
+    # that moved between builds still prints instead of silently vanishing.
+    # Falls back to DKV_ROUTE_TRACE_TOKEN, which validate_cuda_dkv.py computes per
+    # case from where it actually put the needle. Only the harness knows that (the
+    # depth arithmetic differs per case, so one hand-picked index traces an
+    # innocent block in eight of the nine), and prefill and decode want the SAME
+    # token -- the whole point is to see the two routers' decisions about it
+    # side by side.
+    _sp_trace = os.environ.get("DKV_SP_TRACE_TOKEN") or os.environ.get("DKV_ROUTE_TRACE_TOKEN")
+    if _sp_trace:
+        try:
+            _tgt = int(_sp_trace)
+            _pos = None
+            for _j, (_ri, _b) in enumerate(valid):
+                if getattr(_b, "anchor_idx", -1) <= _tgt and (
+                        _pos is None or _b.anchor_idx > valid[_pos][1].anchor_idx):
+                    _pos = _j
+            # "Largest anchor <= tok" always names SOME block, including when the
+            # target is nowhere near it -- a token still in the recency window, or
+            # not yet ingested at this chunk, resolves to the last routable block
+            # and the line then reads as a statement about the needle when it is
+            # not one. Say which case this is instead of printing a number whose
+            # coverage the reader has to reconstruct.
+            if _pos is not None and chunk_start is not None and _tgt >= int(chunk_start):
+                print(f"[SP-TRACE] chunk_start={chunk_start} tok={_tgt} NOT YET INGESTED "
+                      f"at this chunk (routable candidates end at anchor "
+                      f"{valid[_pos][1].anchor_idx}); nothing to report", flush=True)
+            elif _pos is not None:
+                _order = torch.argsort(scores, descending=True)
+                _rank = int((_order == _pos).nonzero(as_tuple=True)[0].item())
+                _cut = float(scores[_order[k_eff - 1]].item())
+                print(f"[SP-TRACE] chunk_start={chunk_start} tok={_tgt} "
+                      f"blk_anchor={valid[_pos][1].anchor_idx} rank={_rank}/{len(valid)} "
+                      f"k_eff={k_eff} kept={_rank < k_eff} "
+                      f"score={float(scores[_pos].item()):.4f} cutoff={_cut:.4f}",
+                      flush=True)
+            else:
+                print(f"[SP-TRACE] chunk_start={chunk_start} tok={_tgt} "
+                      f"not in any routable block (sink or recency window)", flush=True)
+        except Exception as _e:                                    # noqa: BLE001
+            print(f"[SP-TRACE] failed: {_e}", flush=True)
     # Preserve absolute order: downstream builds positions from anchor_idx and
     # assumes the block list is monotonically ordered.
     kept.sort(key=lambda b: getattr(b, "anchor_idx", 0))
@@ -590,6 +832,27 @@ def _apply_rope_single(x, cos, sin):
     x_rot, x_pass = x[..., :rotary_dim], x[..., rotary_dim:]
     x_embed = (x_rot * cos) + (rotate_half(x_rot) * sin)
     return torch.cat([x_embed, x_pass], dim=-1)
+
+
+def _rope_history_k(k, cos, sin):
+    """Rotate history K read back out of the pool -- ONLY if the pool stores it
+    unrotated. The prefill counterpart of the decode gather's `do_rot` guard
+    (triton_fused_decode.py:1695).
+
+    DKV_ROTATED_POOL defaults to "1", so `_ingest_k` writes POST-RoPE keys and a
+    block's anchor_kv/active_k are ALREADY in their true rotational frame. These
+    prefill reconstruction sites rotated unconditionally, which under the default
+    is a SECOND rotation of every history key the prompt is read against -- the
+    decode side took this same guard when the default flipped, prefill did not.
+    (Same omission, same place, as the router fix above: the two prefill defects
+    are both "the decode-side fix never reached prefill".)
+
+    Cheaper as well as correct: under the default this skips a gather and a
+    rotate over the whole dense history on every chunk of every layer.
+    """
+    if _pool_rotated_k():
+        return k
+    return _apply_rope_single(k, cos, sin)
 
 
 def _resolve_rotary_emb(model):
@@ -1032,7 +1295,29 @@ def apply_dkv_attention_patch(model, kv_manager):
                     sin_sliced = prefill_sin_cache.get(anchors_tuple)
 
                     if cos_sliced is None or sin_sliced is None:
-                        block_anchors   = torch.tensor(anchors_tuple, device=q.device, dtype=torch.long)
+                        if _pool_rotated_k():
+                            # Compressed half of the same double-rotation guarded by
+                            # _rope_history_k on the dense half. _prefill_fused_history_attend
+                            # rotates unconditionally (triton_fused_decode.py:1234) and is
+                            # torch.jit.script'ed, so the no-op is expressed in its INPUTS:
+                            # cos=1, sin=0 leaves K_unrot_full untouched. Under
+                            # DKV_ROTATED_POOL (default) anchors, low-rank deltas and exact
+                            # residuals all come out of the pool already POST-RoPE, so any
+                            # rotation here is a second one. The decode gather states the
+                            # same rule at triton_fused_decode.py:1691-1695.
+                            cos_sliced = torch.ones(
+                                (N_blocks, 1 + max_seq_len, 1, head_dim),
+                                device=q.device, dtype=q.dtype)
+                            sin_sliced = torch.zeros_like(cos_sliced)
+                            prefill_cos_cache[anchors_tuple] = cos_sliced
+                            prefill_sin_cache[anchors_tuple] = sin_sliced
+                            block_anchors = None
+                        else:
+                            block_anchors = torch.tensor(anchors_tuple, device=q.device, dtype=torch.long)
+                    else:
+                        block_anchors = None
+
+                    if block_anchors is not None:
                         positions       = block_anchors.view(N_blocks, 1) + torch.arange(1 + max_seq_len, device=q.device).view(1, 1 + max_seq_len)
                         positions_flat  = positions.reshape(-1)
                         cos_ref = cos_all if cos_all is not None else cos
@@ -1057,11 +1342,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                         prefill_cos_cache[anchors_tuple] = cos_sliced
                         prefill_sin_cache[anchors_tuple] = sin_sliced
 
-                        # Evict stale prefill sliced RoPE cache entries in O(1) without scanning other keys
-                        stale_keys = [k for k in list(prefill_cos_cache.keys()) if k != anchors_tuple]
-                        for k in stale_keys:
-                            prefill_cos_cache.pop(k, None)
-                            prefill_sin_cache.pop(k, None)
+                    # Evict stale prefill sliced RoPE cache entries in O(1) without scanning other keys.
+                    # Outside the build branch: both branches above write the cache, and a block
+                    # set that changes every chunk would otherwise grow it without bound.
+                    stale_keys = [k for k in list(prefill_cos_cache.keys()) if k != anchors_tuple]
+                    for k in stale_keys:
+                        prefill_cos_cache.pop(k, None)
+                        prefill_sin_cache.pop(k, None)
 
                     inv_scale_val = 1.0 / math.sqrt(head_dim)
 
@@ -3599,7 +3886,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         dense_positions_tensor = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
                                         cos_dense = cos_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1)
                                         sin_dense = sin_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1)
-                                        k_dense_rot = _apply_rope_single(k_dense, cos_dense, sin_dense)
+                                        k_dense_rot = _rope_history_k(k_dense, cos_dense, sin_dense)
 
                                         k_dense_rep = repeat_kv(k_dense_rot, num_key_value_groups).to(chunk_q.dtype)
                                         v_dense_rep = repeat_kv(v_dense, num_key_value_groups).to(chunk_q.dtype)
@@ -3859,7 +4146,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             dense_positions_tensor = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
                                             cos_dense = cos_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1)
                                             sin_dense = sin_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1)
-                                            k_dense_rot = _apply_rope_single(k_dense, cos_dense, sin_dense)
+                                            k_dense_rot = _rope_history_k(k_dense, cos_dense, sin_dense)
 
                                             k_dense_rep = repeat_kv(k_dense_rot, num_key_value_groups)
                                             v_dense_rep = repeat_kv(v_dense, num_key_value_groups)
