@@ -219,6 +219,47 @@ prewarm fails with `Compiler: cl is not found` on every run and the first decode
 pays JIT. Plain `torch.compile` on GPU-only graphs still works (verified), so
 this blocks the prewarm path specifically, not Inductor as a whole.
 
+### "MLX gets 9/9" — SO DOES CUDA. The difference is the BENCH, not the engine.
+
+Held the engine fixed (CUDA DKV), the model fixed (Qwen2.5-1.5B-Instruct), the
+nine (context, depth) points fixed, and swapped ONLY the bench, in one process:
+
+| bench | result |
+|---|---|
+| MLX's own (`tests/test_mlx_niah.py`) | **9/9**, every case deterministic |
+| `validate_cuda_dkv.py`'s | **1/9** |
+
+So the CUDA engine reproduces MLX's 9/9 exactly when it is given MLX's test. Any
+comparison that reads "MLX 9/9 vs CUDA 1/9" as an engine gap is comparing two
+different tests. They differ in three ways that all point the same direction:
+
+* **Needle.** `OMEGA-7741-DELTA` vs `ZEBRA-4471-QUARTZ`. Qwen splits the latter
+  as `ZEBR|A|-|447|1|-|QU|ART|Z`, so recall requires preserving a LONE `A`.
+* **Filler.** MLX repeats ONE 4-sentence paragraph to length; the validator
+  samples randomly from an 8-sentence pool. Repetitive filler is far easier for a
+  compressed cache -- near-duplicate blocks reconstruct almost perfectly, so the
+  needle's reconstruction error towers over everything and wins residual slots
+  uncontested. Randomised filler makes it compete.
+* **Scoring.** Substring anywhere in the output vs normalised-alnum match inside
+  24 tokens.
+
+**This does NOT mean CUDA is fine.** On the harder bench, the like-for-like
+comparison against dense is damning, and dense is the ceiling:
+
+| Qwen2.5-1.5B, validator bench | 2k+8k (6 cases) | 32k |
+|---|---|---|
+| dense (no compression) | **4/6** | OOM — cannot run |
+| DKV | **0/6** | 1/3 |
+
+DKV loses four cases the model demonstrably CAN answer. The failure is always the
+same single dropped token: dense emits `ZEBR-A-4471-QUARTZ` (a hit), DKV emits
+`ZEBR4471QUARTZ` -- digits and tail intact, the lone `A` gone. Closing 0/6 -> 4/6
+is the real recall target, and MLX's bench cannot see it at all.
+
+Reproduce both arms with `scratchpad/mlx_bench_on_cuda.py` (`BENCH=mlx|dkv`); the
+`dkv` arm reproduces the real validator's 1/9 exactly, which is what makes the
+comparison trustworthy.
+
 ### Qwen2.5-1.5B-Instruct is NOT a working configuration — and the defect is a RACE
 
 `--long` on Qwen2.5-1.5B-Instruct is **0/9 at HEAD and 0/9 with both fixes**, with
