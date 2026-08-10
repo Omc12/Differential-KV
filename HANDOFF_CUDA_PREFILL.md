@@ -177,10 +177,35 @@ where this side blocks adaptively (32-256) and loops per block in Python.
    output**. Re-enabling is not a flag flip — it needs the static,
    device-resident state ABI that file describes. This is the standard fix for
    exactly this profile and it is the one worth designing for.
-2. **Batch the remaining per-block loops.** This project already proved the
-   technique: `write_blocks_batched` collapsed ~2,352 `write_block` calls per 13k
-   prefill into one batched call. 17,785 `bmm` and 57,278 `copy_` say more loops
-   remain. Lowest risk, no ABI redesign, incremental and measurable.
+2. ~~**Batch the remaining per-block loops.**~~ **ATTEMPTED AND EXHAUSTED — this
+   work is already done, do not re-open it.** cProfile over the same prefill puts
+   *all* DKV Python `tottime` at ~0.2 s of 5.4 s, and the per-block loops that do
+   remain (`_gather_block_token_ids` 228 calls, `_should_skip_compression` 258)
+   total ~0.14 s — about 2.5% of prefill, so there is no headroom here even in
+   principle. The paths that matter are already batched:
+   `write_blocks_batched` collapsed ~2,352 `write_block` calls, and
+   `_submit_blocks_batched` groups blocks by `T_active` and compresses in
+   sub-batches of 64.
+
+   Measured, not assumed: caching `_gather_block_token_ids` per (session, block)
+   instead of recomputing it per layer -- which removes 190 of 228 calls, each
+   costing an H2D upload plus a full D2H sync -- changed nothing. Back-to-back
+   A/B, production async config:
+
+   | | baseline | with cache |
+   |---|---|---|
+   | 8k TTFT | 5.114 s | 5.036 s |
+   | 32k TTFT | 14.580 s | 14.672 s |
+
+   Both inside run-to-run spread. The change was REVERTED: it adds a
+   (session, anchor)-keyed cache to a subsystem that had just produced a
+   stale-cache bug, and buying that risk for zero measured gain is a bad trade.
+
+   The conclusion that matters: **the launch storm does not come from
+   Python-level per-block loops.** It comes from the many tensor ops issued
+   INSIDE the already-batched compression (the `[n, T, feat]` fp32 intermediates
+   -- deltas, recon, U_masked) and the attention patch. That is option 3's
+   territory, not this one's.
 3. **Hand-fuse the low-rank reconstruction into one Triton kernel.** The
    `mul`/`add`/`sum` storm is `U@V + anchor` executed as separate ATen ops.
 4. **torch.compile — MEASURED, DOES NOT HELP.** `DKV_USE_TORCH_COMPILE=1` compiles
