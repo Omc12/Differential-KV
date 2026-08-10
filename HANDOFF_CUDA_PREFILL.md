@@ -260,6 +260,41 @@ Reproduce both arms with `colab/bench_mlx_vs_validator.py` (`BENCH=mlx|dkv`); th
 `dkv` arm reproduces the real validator's 1/9 exactly, which is what makes the
 comparison trustworthy.
 
+**The 2k drop is NOT residual capture — proven, not inferred.** `DKV_DBG_RESIDUAL_TOKEN=<abs
+token index>` (new, diagnostic-only, `lowrank.py`) reports, for the block that
+actually owns that token, whether it won a residual slot. On 1.5B 2k@0.0 the
+needle tokenises as `Z|EB|RA|-|4|4|7|1|-|QU|ART|Z`, so the missing `A` lives
+inside token `RA` at abs 32. That token's block reports:
+
+    anchor=0 tok=32 row=31 T_active=256 len(token_indices)=257
+    n_sel=128 row_selected=True neighbours_selected=[27..35]
+    rows[-3:+5]=[' Z','EB','RA','-','4','4','7','1']
+
+The ENTIRE needle run wins exact slots, the budget is not truncating (n_sel=128 ==
+max_residual), and the anchor `+1` offset arithmetic checks out. Both halves are
+exact and share one index set (`lowrank.py:1686-1703`). The compressed half's RoPE
+is also correct — under `DKV_ROTATED_POOL` the prefill reader passes `cos=1, sin=0`
+so the JIT'd kernel's unconditional rotation is a no-op. So the `A` is stored
+exactly and still does not survive: **the fault is downstream of compression, in
+how prefill CONSUMES these blocks.**
+
+*Per-layer divergence, and an honest caveat.* `probe_layer_output_diff.py`
+(1.5B, 2k@0.0) puts the first big drop at **layer 0** — `cos=0.268`,
+`rel_err=1.43` — not a gradual compounding. Treat that as a lead, NOT a
+conclusion: both engines emit the SAME first token (`'ZE'`), which is hard to
+reconcile with a near-uncorrelated layer-0 attention output, and that probe was
+written for Qwen3.5-2B at 32k@0.9, so its capture alignment on this
+model/context is unverified. Confirm the two runs capture the same position
+before building on it.
+
+*Hardcodes found while looking (the user asked; both are real):*
+* `native_block_pool.py:121` — `self._needs_legacy_slots = True`, with the real
+  form `not (_is_cuda_dev and _gpu_compress)` sitting COMMENTED OUT on the line
+  directly above. This is what made the stratified-slot race live on CUDA.
+* `kv_runtime_manager.py:589` and `:1002` — `max(pool_block_size, 257)` and
+  `max(block_size, 257)`, a magic 257 in two places that the routing-K formula
+  (`4096 // 257 -> 15 -> clamped to 16`) then depends on.
+
 **Closing 0/6 -> 4/6: what it is NOT.** Four knobs tested on the 1.5B validator
 bench, none of them the cause — do not re-run these:
 

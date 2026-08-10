@@ -1637,6 +1637,41 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                 fact_positions_K = _idx[mask_J]
                 fact_positions_V = fact_positions_K
 
+            # ── DKV_DBG_RESIDUAL_TOKEN=<absolute token index> ────────────────
+            # Diagnostic only. For the block that actually CONTAINS that token,
+            # report whether it won a residual slot and what the surrounding rows
+            # decode to. "Recall failed" cannot distinguish a token that was never
+            # selected from one selected at the wrong OFFSET, and those have
+            # different fixes; this prints the offset arithmetic directly.
+            #
+            # The row index is the arithmetic under suspicion: residual positions
+            # index DELTA rows, where row j is token_indices[1 + j] because the
+            # anchor occupies block-local slot 0 and active_k is k[..., 1:]. A
+            # consumer that forgets that +1 loses exactly one token at the edge.
+            _dbg_tok = os.environ.get("DKV_DBG_RESIDUAL_TOKEN")
+            if _dbg_tok:
+                try:
+                    _t = int(_dbg_tok)
+                    _tis = list(getattr(block, "token_indices", []) or [])
+                    if _tis and _tis[0] <= _t <= _tis[-1]:
+                        _row = _t - _tis[0] - 1        # delta row for that token
+                        _sel = sorted(int(x) for x in fact_positions_K.tolist())
+                        _tokm = getattr(manager, "tokenizer", None)
+                        _dec = "?"
+                        if _tokm is not None and block_token_ids:
+                            _lo, _hi = max(0, _row - 3), min(len(block_token_ids), _row + 5)
+                            _dec = repr([_tokm.decode([block_token_ids[z]])
+                                         for z in range(_lo, _hi)])
+                        print(f"[RES-TRACE] anchor={getattr(block, 'anchor_idx', '?')} "
+                              f"tok={_t} row={_row} T_active={T_active} "
+                              f"len(token_indices)={len(_tis)} "
+                              f"n_sel={len(_sel)} row_selected={_row in _sel} "
+                              f"neighbours_selected="
+                              f"{[z for z in _sel if abs(z - _row) <= 4]} "
+                              f"rows[-3:+5]={_dec}", flush=True)
+                except Exception:                                    # noqa: BLE001
+                    pass
+
             if fact_positions_K.numel() > 0:
                 # DKV_RESIDUAL_EXACT_KEYS — must match compress_lowrank's form
                 # EXACTLY (see the long comment there). The decode kernel decides
