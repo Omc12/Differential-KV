@@ -106,6 +106,36 @@ same build, same prompt. Decode rate here is derived by subtracting a separate
 1-token call from an N-token call, so fixed per-call overhead inflates the gap at
 small N. The 32-token number is an artifact of the method; do not quote it.
 
+### DKV vs DENSE — Qwen3.5-2B, RTX 4070 SUPER (12 GB), fp16, one harness
+
+Accuracy, `validate_cuda_dkv.py --long` vs `--long --dense`:
+
+| context | dense | DKV (fixed) |
+|---|---|---|
+| 2k, 3 depths | 3/3 | 3/3 |
+| 8k, 3 depths | 3/3 | 3/3 |
+| 32k, 3 depths | **OOM — cannot run** | **3/3** |
+
+Dense dies in `sdpa_attention_forward` trying to allocate **31.77 GiB** on a 12 GB
+card. That is the whole case for DKV on this hardware: at 32k the comparison is
+not "faster or slower", it is "runs or does not". Below that, DKV matches dense
+exactly — 6/6 vs 6/6, every case deterministic, so the fixed router costs nothing
+in recall where both can run.
+
+Cost, 8k (11,007 tok), 128 new tokens, both arms measured by the SAME harness:
+
+| metric | dense | DKV (fixed) | DKV vs dense |
+|---|---|---|---|
+| TTFT (prefill) | 2.013 s | 5.128 s | **2.5x slower** |
+| decode | 309.0 tok/s | 229.4 tok/s | **26% slower** |
+| peak VRAM | 5.21 GB | 4.62 GB | 11% lower |
+| 32k | OOM | 5.06 GB | dense cannot run |
+
+Read this honestly: below the OOM cliff DKV is STRICTLY SLOWER than dense at
+equal accuracy, and prefill is where it loses most. ~3.8 GB of each peak figure
+is model weights, so the KV working set is ~1.4 GB dense vs ~0.8 GB DKV. DKV's
+win is the context ceiling, not throughput.
+
 ### Qwen2.5-1.5B-Instruct is NOT a working configuration — and the defect is a RACE
 
 `--long` on Qwen2.5-1.5B-Instruct is **0/9 at HEAD and 0/9 with both fixes**, with
@@ -123,9 +153,48 @@ the model's own limit, not corruption. So:
 * it is a **different defect class** from the prefill routing fixed above —
   fixing routing cannot fix a race, which is why 0/9 did not move.
 
-Do not chase this with the prefill tools. It reproduces in ~10 min and
-`DKV_SYNC_COMPRESS=1` is already on, so background SVD is NOT the explanation;
-start by finding what else mutates between the three generate() calls.
+**STILL OPEN. The MECHANISM is proven; the specific holder is not found.**
+
+*Reproduce in ~3 min, not ~10.* The bug needs TWO DIFFERENT prompts in ONE
+process — a single case in a fresh process is deterministic and correct on this
+model, so any one-case repro is blind to it. `validate_cuda_dkv.py` seeds `random`
+ONCE and draws all cases from that stream; reseeding per case yields byte-identical
+prompts that the caches answer trivially. Two cases (2k@0.0 then 2k@0.5) is enough
+and reproduces the validator's exact outputs. Structure: case 1 deterministic,
+case 2 rep 1 CORRECT, reps 2-3 garbage.
+
+*The mechanism, established by measurement.* `DKV_NO_SLOT_REUSE=1`
+(`native_block_pool.free_block`, diagnostic-only, leaks slots — never a fix)
+makes case 2 fully deterministic AND correct. So the corruption is a **stale
+block -> pool-slot mapping surviving slot recycling** — the same class as the
+`_decode_block_cache` bug whose fix is documented in `clear_session`, which that
+comment says left 1 of 7 failures unaccounted for. This is very likely that one.
+
+*Eliminated by measurement — do not re-test these:*
+
+| hypothesis | how it was excluded |
+|---|---|
+| background mutators / async SVD | `DKV_DETERMINISTIC=1` — race unchanged |
+| decode cache | `DKV_DECODE_CACHE=0` — race unchanged |
+| tiered eviction (LRU by wall-clock) | `DKV_TIER_ENABLED=0` — race unchanged |
+| block prefetch engine | `DKV_BLOCK_PREFETCH=0` — race unchanged |
+| pool exhaustion | 1.5B pool is BIGGER than 2B's (95k vs 88k tokens) |
+| prefix-cache reuse | "Reusing KV cache" never printed in any run |
+| prefill routing | no SP-TRACE at 2k — the router does not even engage, yet it races |
+| SRL `_route_layer_cache` step-counter reset | added the guard; race unchanged; reverted |
+
+*Where to look next.* Both manager-level caches ARE cleared correctly
+(`_decode_block_cache` filtered by `key[0]`, `decode_workspace` popped), so the
+surviving holder is elsewhere. `native_block_pool` maintains `self.version[slot]`,
+incremented on every `write_block` — and NOTHING reads it. A reader that captured
+a slot id could be validated against it. Note also that CUDA writes
+`_sp_pinned_blocks[session_id]` at `hf_dkv_wrapper.py:974` and never reads or
+clears it, while MLX reads it, resets it to `()`, AND deletes the entry
+(`mlx_dkv_wrapper.py:4995-5541) — dead state on CUDA today, but a real parity gap.
+
+The instrument that found the last one was a WRITE MAP vs ROUTE TRACE diff
+(writer slot vs reader slot per layer/anchor per generation); rebuild that rather
+than guessing at more flags, which is what the table above cost.
 
 **Measured 2x2** (Qwen2.5-0.5B-Instruct, `ACTIVE_RUNTIME/tests/test_niah.py`,
 8k NIAH, deterministic; all 4k cases pass in every cell):

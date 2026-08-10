@@ -18,6 +18,7 @@ MPS gets a smaller initial footprint (128 blocks) and finer growth increments (1
 Pre-realloc gc.collect() prevents momentary 2x VRAM spike during pool growth.
 """
 
+import os
 import torch
 from typing import Optional, List, Union, Tuple
 
@@ -432,6 +433,17 @@ class NativeBlockPool:
 
     def free_block(self, pool_idx: int):
         import time as _time
+        # DIAGNOSTIC ONLY (DKV_NO_SLOT_REUSE=1): leak the slot instead of
+        # returning it to the free list, so no slot is ever handed to a second
+        # block. If a bug disappears under this, the mechanism is a stale
+        # slot-index mapping surviving recycling; if it survives, recycling is
+        # not involved and that whole class is excluded. Leaks the pool, so it
+        # is only usable for short repros -- never a fix.
+        if os.environ.get("DKV_NO_SLOT_REUSE") == "1":
+            if pool_idx is not None and 0 <= pool_idx < self.current_blocks:
+                self._ref_counts[pool_idx] = 0
+                self.seq_lens[pool_idx] = 0
+            return
         if pool_idx is not None and 0 <= pool_idx < self.current_blocks:
             self._ref_counts[pool_idx] -= 1
             if self._ref_counts[pool_idx] <= 0:
