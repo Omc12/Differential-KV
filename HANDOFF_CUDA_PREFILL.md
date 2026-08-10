@@ -303,10 +303,53 @@ happens during DECODE — across the 24 generated tokens — even at 2k where
 there still means exact-dense attention over RECONSTRUCTED KV, not over the
 original KV, so it is not a no-op.
 
-*Next measurement, clearly defined:* compare the DECODE-step vectors, which are
-exactly the `L == 1` forwards this fix now skips. That needs `run_dense` to
-generate greedily rather than stop after one argmax, so both arms produce
-comparable decode steps. Do that before touching any kernel.
+*Decode-step diff — DONE, and it closes the question.* `run_dense` now generates
+greedily and both arms capture decode steps (`--mode compare` reports them).
+1.5B 2k@0.0:
+
+| step | min cos | @layer | max rel | mean cos |
+|---|---|---|---|---|
+| 0 | 0.99451 | **27** | 0.132 | 0.99952 |
+| 6 | 0.98980 | **27** | 0.181 | 0.99934 |
+
+Every step's worst layer is 26 or 27 — the last two — while the mean across
+layers is 0.9995. So DKV's decode is near-exact overall with a ~0.5-1% error
+concentrated at the top of the stack.
+
+**Why that is enough to fail the case, and why it is not a bug.** The probe now
+also prints the greedy top-2 margin per step. The 1.5B's very first output
+decision is a coin flip:
+
+    step 0   'BR' 18.703   runner-up 'BA' 18.516   margin 0.1875
+    step 1    '4' 20.078   runner-up  '-' 18.656   margin 1.4219
+
+Those two branches are exactly the three outputs seen all along —
+`ZEBR4471QUARTZ`, `ZEBA-4471-QUARTZ`, and the passing `ZEBR-A-4471-QUARTZ`. A
+0.19-logit margin does not survive a 0.5-1% perturbation in the final layers.
+
+The clincher is that **dense disagrees with dense**: `validate_cuda_dkv.py`'s dense
+control emits the passing `ZEBR-A-4471-QUARTZ`, while this probe's dense arm — same
+model, same prompt, same fp16, same greedy decode, chunked AND unchunked — emits
+the failing `ZEBR4471QUARTZ`. Two correct dense implementations land on opposite
+sides. A case that cannot distinguish dense from dense cannot be evidence about
+DKV.
+
+*So the `A` is never "dropped".* It is exact in the pool (residual trace), prefill
+reproduces dense to 4 significant figures, and decode is a sub-1% perturbation.
+The 1.5B validator cases fail because the model is nearly undecided and any
+approximation tips it. Qwen3.5-2B is 9/9 because it is confident; the 1.5B on
+MLX's bench is 9/9 for the same reason.
+
+*Also eliminated (byte-identical output):* `DKV_LAYER_ADAPTIVE_RANK=0`, i.e. flat
+rank with no late-layer halving. Worth recording because the drift DOES sit in
+layers 26-27, which `get_layer_rank` gives `0.5 * base_rank` — an inviting story
+that the measurement refutes. Rank cannot matter here: the needle is already
+served exactly, so its fidelity does not depend on rank at all.
+
+**Do not "fix" the 0/6.** The remaining lever is not DKV fidelity — it is that
+this bench, on a 1.5B, decides on 0.19-logit margins. If small-model recall
+matters, make the bench discriminative first (a needle the model tokenises
+unambiguously, or scoring that tolerates the `ZEBR`/`ZEBA` split), then re-measure.
 
 *Hardcodes found while looking (the user asked; both are real):*
 * `native_block_pool.py:121` — `self._needs_legacy_slots = True`, with the real

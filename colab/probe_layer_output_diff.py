@@ -117,6 +117,14 @@ class Capture:
         self.out = {}
         self.handles = []
         self.enabled = False
+        # Decode-step captures, keyed (step, layer). Steps are segmented without
+        # any caller bookkeeping: within one decode step each layer fires once,
+        # so seeing a layer twice means a new step has begun. That works for both
+        # arms even though one is a hand-written greedy loop and the other is
+        # DKV's generate(), which may run its own extra forwards.
+        self.dec = {}
+        self.step = 0
+        self._cur = set()
 
     def attach(self, model):
         layers = model.model.layers if hasattr(model, "model") else model.layers
@@ -150,6 +158,11 @@ class Capture:
             # either caller to change.
             if t.shape[1] == 1:
                 self.skipped = getattr(self, "skipped", 0) + 1
+                if idx in self._cur:          # layer repeats -> next decode step
+                    self.step += 1
+                    self._cur = set()
+                self._cur.add(idx)
+                self.dec[(self.step, idx)] = t[0, -1].detach().float().cpu().clone()
                 return
             # [B, L, H*D] -> last position, as fp32 on CPU
             self.out[idx] = t[0, -1].detach().float().cpu().clone()
@@ -196,10 +209,40 @@ def run_dense(model_id, prompt, chunk, label, depth):
                             [list(range(i, i + len(ch)))], device="cuda"),
                         past_key_values=cache, use_cache=True)
         nxt = int(out.logits[0, -1].argmax())
+
+        # Greedy decode, so the dense arm produces DECODE steps comparable to
+        # DKV's. Stopping at one argmax (what this did before) left nothing to
+        # diff on the decode side, which is where the drift actually is --
+        # prefill already matches to 4 significant figures.
+        n_dec = int(os.environ.get("PROBE_DECODE", "24"))
+        dense_toks = []
+        _gaps = []
+        pos = len(ids)
+        cur = nxt
+        for _ in range(n_dec):
+            dense_toks.append(cur)
+            out = model(input_ids=torch.tensor([[cur]], device="cuda"),
+                        position_ids=torch.tensor([[pos]], device="cuda"),
+                        past_key_values=cache, use_cache=True)
+            pos += 1
+            # Top-2 gap at every step. If the benchmark's pass/fail turns on a
+            # step where the margin is tiny, the case is a coin flip and no
+            # engine-level conclusion can rest on it.
+            _lg = out.logits[0, -1].float()
+            _v, _i = torch.topk(_lg, 2)
+            _gaps.append((int(_i[0]), float(_v[0]), int(_i[1]), float(_v[1])))
+            cur = int(_i[0])
     cap.remove()
     print(f"[probe] dense captures taken={getattr(cap,'taken',0)} "
-          f"skipped_decode={getattr(cap,'skipped',0)}")
-    torch.save({"out": cap.out, "first_token": nxt,
+          f"skipped_decode={getattr(cap,'skipped',0)} steps={cap.step + 1}")
+    print(f"[probe] dense decode: {tok.decode(dense_toks)!r}")
+    print("[probe] per-step top-2 margin (dense, greedy):")
+    for _s, (_t1, _l1, _t2, _l2) in enumerate(_gaps[:14]):
+        print(f"    step {_s:>2}  {tok.decode([_t1])!r:>12} {_l1:8.3f}   "
+              f"runner-up {tok.decode([_t2])!r:>12} {_l2:8.3f}   "
+              f"margin {_l1 - _l2:7.4f}")
+    torch.save({"out": cap.out, "dec": cap.dec, "toks": dense_toks,
+                "first_token": nxt,
                 "decoded": tok.decode([nxt])}, _stem("dense", label, depth))
     print(f"[probe] dense first generated token: {nxt} {tok.decode([nxt])!r}")
     print(f"[probe] saved {len(cap.out)} layer vectors -> {_stem('dense', label, depth)}")
@@ -219,12 +262,14 @@ def run_dkv(model_id, prompt, label, depth):
     n = cap.attach(w.model)
     print(f"[probe] dkv: hooked {n} attention layers")
     cap.enabled = True
-    out = w.generate(prompt=prompt, max_new_tokens=1, temperature=0.0,
-                     top_p=1.0, repetition_penalty=1.0)
+    out = w.generate(prompt=prompt,
+                     max_new_tokens=int(os.environ.get("PROBE_DECODE", "24")),
+                     temperature=0.0, top_p=1.0, repetition_penalty=1.0)
     cap.remove()
     print(f"[probe] dkv captures taken={getattr(cap,'taken',0)} "
-          f"skipped_decode={getattr(cap,'skipped',0)}")
-    torch.save({"out": cap.out, "text": out[-80:]}, _stem("dkv", label, depth))
+          f"skipped_decode={getattr(cap,'skipped',0)} steps={cap.step + 1}")
+    torch.save({"out": cap.out, "dec": cap.dec, "text": out[-80:]},
+               _stem("dkv", label, depth))
     print(f"[probe] dkv tail: {out[-60:]!r}")
     print(f"[probe] saved {len(cap.out)} layer vectors -> {_stem('dkv', label, depth)}")
 
@@ -271,6 +316,48 @@ def compare(label="32k", depth=0.9):
     print("[probe] READ THE FIRST BIG DROP, NOT THE WORST LAYER. Divergence")
     print("        compounds through the stack, so every layer after the first")
     print("        bad one is downstream of it and proves nothing on its own.")
+
+    # ── DECODE STEPS ─────────────────────────────────────────────────────────
+    # Prefill matches to 4sf, so the drift is here. Per step, report the WORST
+    # layer -- one bad layer is what matters, and averaging would hide it.
+    dd, kd = d.get("dec") or {}, k.get("dec") or {}
+    if not dd or not kd:
+        print("\n[probe] no decode captures on one side — re-run both arms.")
+        return
+    steps = sorted({s for s, _ in dd} & {s for s, _ in kd})
+    print(f"\n[probe] decode steps: dense={len({s for s, _ in dd})} "
+          f"dkv={len({s for s, _ in kd})} common={len(steps)}")
+    print(f"{'step':>5}  {'min cos':>9}  {'@layer':>7}  {'max rel':>9}  "
+          f"{'mean cos':>9}")
+    first_bad = None
+    for s in steps:
+        rows = []
+        for (ss, li), a in dd.items():
+            if ss != s or (s, li) not in kd:
+                continue
+            b = kd[(s, li)]
+            if a.shape != b.shape:
+                continue
+            rows.append((li,
+                         torch.nn.functional.cosine_similarity(a, b, dim=0).item(),
+                         ((a - b).norm() / a.norm().clamp(min=1e-9)).item()))
+        if not rows:
+            continue
+        li, mc, _ = min(rows, key=lambda r: r[1])
+        mr = max(r[2] for r in rows)
+        mean_c = sum(r[1] for r in rows) / len(rows)
+        print(f"{s:>5}  {mc:9.5f}  {li:>7}  {mr:9.5f}  {mean_c:9.5f}")
+        # 0.999 is far below anything prefill showed (min 0.99967) yet far above
+        # fp16 noise, so it flags a real step rather than rounding.
+        if first_bad is None and mc < 0.999:
+            first_bad = (s, li, mc)
+    if first_bad:
+        print(f"\n[probe] FIRST DRIFTING STEP {first_bad[0]} at layer "
+              f"{first_bad[1]} (cos {first_bad[2]:.5f}) — the steps after it are "
+              f"downstream and prove nothing on their own.")
+    else:
+        print("\n[probe] no decode step drifts below cos 0.999 — the divergence "
+              "is NOT in the decode attention outputs.")
 
 
 def main():
