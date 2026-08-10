@@ -256,9 +256,31 @@ same single dropped token: dense emits `ZEBR-A-4471-QUARTZ` (a hit), DKV emits
 `ZEBR4471QUARTZ` -- digits and tail intact, the lone `A` gone. Closing 0/6 -> 4/6
 is the real recall target, and MLX's bench cannot see it at all.
 
-Reproduce both arms with `scratchpad/mlx_bench_on_cuda.py` (`BENCH=mlx|dkv`); the
+Reproduce both arms with `colab/bench_mlx_vs_validator.py` (`BENCH=mlx|dkv`); the
 `dkv` arm reproduces the real validator's 1/9 exactly, which is what makes the
 comparison trustworthy.
+
+**Closing 0/6 -> 4/6: what it is NOT.** Four knobs tested on the 1.5B validator
+bench, none of them the cause — do not re-run these:
+
+| tried | result |
+|---|---|
+| `DKV_MAX_RESIDUAL=256` (2x budget) | 1/9 -> 2/9, and `8k@0.5` REGRESSED to `'ZE654'`. Noise, not a fix. |
+| `DKV_RANK_BOOST=auto` (1.5x rank) | outputs **byte-identical** to baseline — reconstruction fidelity is not binding on these tokens |
+| block-coverage stranding | the `BLOCK COVERAGE` warning never fires in any run |
+| `DKV_SPARSE_BIAS=0.0` (exact merge) | **much worse**, 0/9, outputs collapse to `'ZE'` — `auto` is helping and is the correct default |
+
+Two of those are informative beyond being negatives. Byte-identical output under a
+1.5x rank change says the needle's tokens are almost certainly already served
+EXACTLY (as residuals), so the loss is not low-rank error on the needle itself.
+And the failure reproduces at **2k**, where `DKV_COMPRESSED_MIN_CTX=8192` means
+compressed DECODE never engages — so the token is lost on the PREFILL side, in
+the smallest and cheapest case to debug. Start there, not at 32k.
+
+Residual selection is already MLX-parity (joint absolute `sqrt(eK^2+eV^2)`, one
+index set, `lowrank.py:1625`), and `compute_boost_multipliers` is a faithful port
+of MLX's `is_core`/`is_prose`/segment logic — verified line by line, so neither is
+worth re-auditing.
 
 ### Qwen2.5-1.5B-Instruct is NOT a working configuration — and the defect is a RACE
 
