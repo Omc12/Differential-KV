@@ -278,14 +278,35 @@ so the JIT'd kernel's unconditional rotation is a no-op. So the `A` is stored
 exactly and still does not survive: **the fault is downstream of compression, in
 how prefill CONSUMES these blocks.**
 
-*Per-layer divergence, and an honest caveat.* `probe_layer_output_diff.py`
-(1.5B, 2k@0.0) puts the first big drop at **layer 0** — `cos=0.268`,
-`rel_err=1.43` — not a gradual compounding. Treat that as a lead, NOT a
-conclusion: both engines emit the SAME first token (`'ZE'`), which is hard to
-reconcile with a near-uncorrelated layer-0 attention output, and that probe was
-written for Qwen3.5-2B at 32k@0.9, so its capture alignment on this
-model/context is unverified. Confirm the two runs capture the same position
-before building on it.
+*Per-layer divergence: THERE IS NONE, and the earlier "layer 0" reading was a
+PROBE BUG.* The caveat recorded here — that both engines emit the same first
+token, which cannot coexist with a near-uncorrelated layer-0 output — was the
+right thread to pull. `Capture` enabled its hook for the whole DKV `generate()`
+and every hook OVERWRITES, so the DKV vector saved was the last forward to run:
+a DECODE step. `run_dense` enables the hook only on the final PREFILL chunk. The
+comparison was therefore dense-prefill vs DKV-decode — two different queries.
+Fixed by skipping `L == 1` forwards, which aligns both arms on the last prefill
+position (accounting now printed: DKV `taken=84 skipped_decode=28`, i.e. exactly
+one decode forward per layer had been clobbering the result).
+
+Re-measured, 1.5B 2k@0.0, **every one of 28 layers**:
+
+    cos >= 0.99967  (worst, layer 2)      rel_err <= 0.026
+    |dense| 9.8415 vs |dkv| 9.8459 at layer 0
+
+**DKV's prefill is numerically near-identical to dense's.** So the earlier
+statement in this file that the token is "lost on the PREFILL side" is WRONG and
+is retracted: prefill reproduces dense to 4 significant figures, and the `A` is
+still exact in the pool (see the residual trace above). The loss therefore
+happens during DECODE — across the 24 generated tokens — even at 2k where
+`DKV_COMPRESSED_MIN_CTX=8192` means the *compressed* decode path is off. "Off"
+there still means exact-dense attention over RECONSTRUCTED KV, not over the
+original KV, so it is not a no-op.
+
+*Next measurement, clearly defined:* compare the DECODE-step vectors, which are
+exactly the `L == 1` forwards this fix now skips. That needs `run_dense` to
+generate greedily rather than stop after one argmax, so both arms produce
+comparable decode steps. Do that before touching any kernel.
 
 *Hardcodes found while looking (the user asked; both are real):*
 * `native_block_pool.py:121` — `self._needs_legacy_slots = True`, with the real

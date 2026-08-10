@@ -135,8 +135,25 @@ class Capture:
             t = output[0] if isinstance(output, (tuple, list)) else output
             if not torch.is_tensor(t) or t.dim() < 2:
                 return
+            # SKIP DECODE FORWARDS (L == 1). The two arms did not capture the
+            # same thing: run_dense enables the hook only on the final PREFILL
+            # chunk, while run_dkv left it enabled across the whole generate()
+            # and every hook OVERWRITES -- so the DKV vector saved was the last
+            # forward to run, a decode step, while dense's was the last prefill
+            # position. The comparison was dense-prefill vs DKV-decode, i.e. two
+            # different queries, which manufactured a large layer-0 "divergence"
+            # (cos 0.268 on 1.5B 2k@0.0) while both engines still emitted the
+            # SAME first token -- the contradiction that gave the artifact away.
+            #
+            # Prefill chunks have L > 1 and decode steps have L == 1, so this one
+            # test aligns both arms on the last prefill position without needing
+            # either caller to change.
+            if t.shape[1] == 1:
+                self.skipped = getattr(self, "skipped", 0) + 1
+                return
             # [B, L, H*D] -> last position, as fp32 on CPU
             self.out[idx] = t[0, -1].detach().float().cpu().clone()
+            self.taken = getattr(self, "taken", 0) + 1
         return hook
 
     def remove(self):
@@ -180,6 +197,8 @@ def run_dense(model_id, prompt, chunk, label, depth):
                         past_key_values=cache, use_cache=True)
         nxt = int(out.logits[0, -1].argmax())
     cap.remove()
+    print(f"[probe] dense captures taken={getattr(cap,'taken',0)} "
+          f"skipped_decode={getattr(cap,'skipped',0)}")
     torch.save({"out": cap.out, "first_token": nxt,
                 "decoded": tok.decode([nxt])}, _stem("dense", label, depth))
     print(f"[probe] dense first generated token: {nxt} {tok.decode([nxt])!r}")
@@ -203,6 +222,8 @@ def run_dkv(model_id, prompt, label, depth):
     out = w.generate(prompt=prompt, max_new_tokens=1, temperature=0.0,
                      top_p=1.0, repetition_penalty=1.0)
     cap.remove()
+    print(f"[probe] dkv captures taken={getattr(cap,'taken',0)} "
+          f"skipped_decode={getattr(cap,'skipped',0)}")
     torch.save({"out": cap.out, "text": out[-80:]}, _stem("dkv", label, depth))
     print(f"[probe] dkv tail: {out[-60:]!r}")
     print(f"[probe] saved {len(cap.out)} layer vectors -> {_stem('dkv', label, depth)}")
