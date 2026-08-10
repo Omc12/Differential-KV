@@ -136,6 +136,64 @@ equal accuracy, and prefill is where it loses most. ~3.8 GB of each peak figure
 is model weights, so the KV working set is ~1.4 GB dense vs ~0.8 GB DKV. DKV's
 win is the context ceiling, not throughput.
 
+### WHY DKV IS SLOWER THAN DENSE: it is LAUNCH-BOUND, not compute-bound
+
+`torch.profiler` over one 11,007-token prefill, Qwen3.5-2B, production config
+(async compress), both engines through the same script:
+
+| | DKV | dense |
+|---|---|---|
+| **self CUDA** | **2,714 ms** | **2,974 ms** |
+| **self CPU** | **3,993 ms** | **2,066 ms** |
+| `aten::mm` | 2,475 calls @ 212 us | 187 calls @ 2,202 us |
+| `aten::copy_` | **57,278** calls | 7,230 calls |
+| `aten::mul` | 31,582 calls | 13,935 calls |
+| `aten::bmm` | 17,785 calls | 15,535 calls |
+
+**DKV uses LESS GPU time than dense and still loses.** The sparse algorithm is
+doing its job — fewer FLOPs, 2,714 ms vs 2,974 ms of device time. It loses on the
+HOST: 3,993 ms of CPU against dense's 2,066 ms, and because CPU time exceeds CUDA
+time, the GPU is idle waiting for Python to hand it the next launch. The
+bookkeeping around the algorithm costs more than the algorithm saves.
+
+The `aten::mm` row is the clearest single tell: near-identical total GEMM work
+(524 ms vs 412 ms) split into **13x more launches**, 212 us of work per launch
+instead of 2.2 ms. Same for `copy_` at 8x the call count. This is a dispatch
+problem, so faster KERNELS cannot fix it — only FEWER OF THEM.
+
+**What MLX does that sidesteps this entirely.** (1) Lazy evaluation with kernel
+fusion: MLX builds a graph and fuses elementwise chains at eval, so the 31k `mul`
++ 23k `add` + 42k elementwise launches collapse into a handful; PyTorch eager
+dispatches every one. (2) Unified memory — no staging copies, which is a large
+part of the 8x `copy_` gap. (3) A FIXED `block_size=256` with whole-array ops,
+where this side blocks adaptively (32-256) and loops per block in Python.
+
+**The CUDA options, ranked, with status measured not assumed:**
+
+1. **CUDA Graphs — the biggest available win, currently disabled BY DESIGN.**
+   `graph_runtime/static_decode_graph.py:63-74`: the DKV attention patch mutates
+   Python/session state every forward (routing slots, dense-window layout, SRL,
+   session ids), so a replayed graph goes stale and **silently emits wrong
+   output**. Re-enabling is not a flag flip — it needs the static,
+   device-resident state ABI that file describes. This is the standard fix for
+   exactly this profile and it is the one worth designing for.
+2. **Batch the remaining per-block loops.** This project already proved the
+   technique: `write_blocks_batched` collapsed ~2,352 `write_block` calls per 13k
+   prefill into one batched call. 17,785 `bmm` and 57,278 `copy_` say more loops
+   remain. Lowest risk, no ABI redesign, incremental and measurable.
+3. **Hand-fuse the low-rank reconstruction into one Triton kernel.** The
+   `mul`/`add`/`sum` storm is `U@V + anchor` executed as separate ATen ops.
+4. **torch.compile — MEASURED, DOES NOT HELP.** `DKV_USE_TORCH_COMPILE=1` compiles
+   FFN-only (`inductor`, `mode='reduce-overhead'`): TTFT 5.090 s vs 5.128 s
+   (unchanged) and decode **193.7 vs 229.4 tok/s — 16% WORSE**. It compiles the
+   part that is not the bottleneck. Do not reach for this again without changing
+   WHAT is compiled.
+
+**Environment note.** `cl.exe` (MSVC) is not installed, so the DKV decode JIT
+prewarm fails with `Compiler: cl is not found` on every run and the first decode
+pays JIT. Plain `torch.compile` on GPU-only graphs still works (verified), so
+this blocks the prewarm path specifically, not Inductor as a whole.
+
 ### Qwen2.5-1.5B-Instruct is NOT a working configuration — and the defect is a RACE
 
 `--long` on Qwen2.5-1.5B-Instruct is **0/9 at HEAD and 0/9 with both fixes**, with
