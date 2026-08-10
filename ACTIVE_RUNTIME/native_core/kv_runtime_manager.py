@@ -2369,6 +2369,34 @@ class KVRuntimeManager:
             cpu_seq_lens = active_meta[compressed_mask, 2]
             max_anchor_idx = int(cpu_anchors.max().item())
             max_valid_len = int(cpu_seq_lens.max().item())
+
+            # ── DKV_SLOT_TRACE=1: WRITE MAP vs ROUTE TRACE ────────────────────
+            # The reader resolves logical blocks to POOL SLOTS through this
+            # metadata table. A stale mapping shows up here in exactly two ways,
+            # both checkable without touching any writer:
+            #
+            #   ALIASED  - two logical blocks in one layer resolve to the SAME
+            #              slot, so one of them is reading the other's bytes.
+            #   AFTER_FREE - a slot the reader is about to read is sitting on the
+            #              pool's free list, i.e. it has been handed back and may
+            #              already belong to a different block.
+            #
+            # Silent by default and only computed when the flag is set; this runs
+            # per layer per decode step.
+            if os.environ.get("DKV_SLOT_TRACE") == "1":
+                _idx = cpu_indices.tolist()
+                _seen, _dupes = set(), []
+                for _s in _idx:
+                    if _s in _seen:
+                        _dupes.append(_s)
+                    _seen.add(_s)
+                _freeset = getattr(getattr(self, "native_pool", None),
+                                   "_free_indices_set", None)
+                _uaf = [_s for _s in _idx if _freeset is not None and _s in _freeset]
+                if _dupes or _uaf:
+                    print(f"[SLOT-TRACE] layer={layer_idx} n_blocks={len(_idx)} "
+                          f"ALIASED={sorted(set(_dupes))} AFTER_FREE={sorted(set(_uaf))}",
+                          flush=True)
             session_dict = self.decode_workspace.setdefault(session_id, {})
             indices_gpu_cache = session_dict.setdefault("indices_gpu", {})
             cached_val = indices_gpu_cache.get(layer_idx)

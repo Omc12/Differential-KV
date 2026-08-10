@@ -153,7 +153,36 @@ the model's own limit, not corruption. So:
 * it is a **different defect class** from the prefill routing fixed above —
   fixing routing cannot fix a race, which is why 0/9 did not move.
 
-**STILL OPEN. The MECHANISM is proven; the specific holder is not found.**
+**FIXED.** `write_blocks_batched` did not clear a recycled slot's stratified
+group. Determinism on Qwen2.5-1.5B went **1/9 -> 9/9**; the garbage outputs are
+gone and every case now returns one stable answer. Qwen3.5-2B is unaffected
+(still 9/9 / 9/9). Details below; the history is kept because the eliminated
+hypotheses are what make the next slot bug cheap.
+
+*The bug.* `write_block` clears `U_sem`, `U_sem_scale`, `U_fact` and sets
+`n_semantic` on every write. `write_blocks_batched` -- whose docstring claims it
+"Mirrors write_block() field-for-field" -- cleared none of them, nor the fact
+anchors. So a recycled slot inherited the previous occupant's SEMANTIC SPLIT, and
+the reconstruction divided the new block at the old block's boundary, reading
+`U_sem`/`U_fact` bytes belonging to another block.
+
+It is not inert on CUDA: `_needs_legacy_slots` is HARDCODED `True`
+(`native_block_pool.py:121`, with `not (_is_cuda_dev and _gpu_compress)`
+commented out on the line directly above), so those tensors ARE allocated on
+exactly the path that uses the batched writer when `gpu_compress` is on.
+
+*Why it hid.* A FRESH slot is zeros from `torch.zeros`, so the first prompt in a
+process is always clean and every single-prompt test passes. Only a RECYCLED slot
+carries the stale split. `test_write_blocks_batched_parity` cannot catch it
+either: it writes both pools from clean, where "cleared" and "never written" are
+indistinguishable. The recycling IS the test --
+`test_write_blocks_batched_clears_slot.py` pins it and fails without the fix.
+
+*What is still wrong on 1.5B, and is NOT this bug.* Recall is 1/9 (was 0/9).
+The outputs are now clean near-misses -- `ZEBR4471QUARTZ` (drops the A),
+`ZEBA-4471-QUARTZ` (drops the R) -- not corruption. Dense on the same model is
+only 4/6 and misses the same way, so 1.5B's ceiling is well below 9/9 regardless
+of DKV. Parity for this model means matching DENSE, not matching the 2B.
 
 *Reproduce in ~3 min, not ~10.* The bug needs TWO DIFFERENT prompts in ONE
 process — a single case in a fresh process is deterministic and correct on this

@@ -773,6 +773,34 @@ class NativeBlockPool:
             self.residual_V_positions[pidx, :mr] = res_V_positions[:, :mr].to(device=dev, dtype=torch.int16)
             self.residual_V_values[pidx, :mr] = res_V_values[:, :mr].to(device=dev, dtype=self.dtype)
 
+        # ── stratified slots: CLEAR, exactly as write_block does ──────────────
+        # write_block zeroes U_sem/U_sem_scale/U_fact and SETS n_semantic on every
+        # write; this path did neither, so the docstring's "mirrors write_block
+        # field-for-field" was false for these four fields.
+        #
+        # It is not inert on CUDA. _needs_legacy_slots is HARDCODED True (:121,
+        # with the `not (_is_cuda_dev and _gpu_compress)` form commented out
+        # directly above it), so these tensors ARE allocated here, and this
+        # batched writer is the live path whenever gpu_compress is on.
+        #
+        # The consequence is only visible on a RECYCLED slot: a fresh slot is
+        # zeros from torch.zeros, so the first prompt in a process is clean, and
+        # every later one inherits whatever the slot's previous occupant left --
+        # a stale n_semantic makes the reconstruction split the block at the
+        # wrong point and read U_sem/U_fact bytes belonging to another block.
+        # That is exactly the observed signature: first prompt correct, later
+        # prompts garbage, and the whole thing disappears under
+        # DKV_NO_SLOT_REUSE=1.
+        if self.n_semantic is not None:
+            self.U_sem[pidx] = 0
+            self.U_sem_scale[pidx] = 0.0
+            self.U_fact[pidx] = 0.0
+            self.n_semantic[pidx] = 0
+        if self.fact_anchor_positions is not None:
+            self.fact_anchors_K[pidx] = 0.0
+            self.fact_anchors_V[pidx] = 0.0
+            self.fact_anchor_positions[pidx] = -1
+
         # ── SRL descriptor (batched compute_descriptor over the written slots) ──
         if self.W_proj is not None:
             try:
