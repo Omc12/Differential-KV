@@ -81,6 +81,31 @@ so this is not §3's "accidentally reproduced `DKV_SPARSE_PREFILL=0`" trap.
 model cannot load at all. `requirements.txt` already says `>=5.14.1`. If a box
 has 4.x, nothing about Qwen3.5-2B measured on it means anything.
 
+### Cost of the fix — Qwen3.5-2B, RTX 4070 SUPER, fp16, serving defaults
+
+| metric | HEAD | fixed | delta |
+|---|---|---|---|
+| TTFT 8k (11,007 tok) | 5.078 s | 5.128 s | +1.0% |
+| TTFT 32k (32,717 tok) | 14.239 s | 14.472 s | +1.6% |
+| decode, 8k, 128 new tok | 259.8 tok/s | 229.4 tok/s | **-11.7%** |
+| peak VRAM 8k / 32k | 4.62 / 5.06 GB | 4.62 / 5.06 GB | none |
+
+Prefill is FLAT despite the router now building min/max boxes over 120 candidate
+blocks — the two-GEMM form plus the RoPE work the fix REMOVES roughly cancel it.
+Both TTFT deltas are inside run-to-run spread (the 3 reps overlap), so read them
+as "no measurable prefill cost", not as a 1% regression.
+
+Decode is ~12% slower and that is NOT yet explained. A prefill-only change moving
+decode at all points at the working set: correct routing retains a different set
+of blocks, so decode gathers differently. Worth a look before this matters for
+long generations.
+
+**Measure decode with LONG generations.** The same harness reported 68.1 vs
+94.3 tok/s ("-28%") at `max_new_tokens=32` and 229.4 vs 259.8 ("-12%") at 128 --
+same build, same prompt. Decode rate here is derived by subtracting a separate
+1-token call from an N-token call, so fixed per-call overhead inflates the gap at
+small N. The 32-token number is an artifact of the method; do not quote it.
+
 ### Qwen2.5-1.5B-Instruct is NOT a working configuration — and the defect is a RACE
 
 `--long` on Qwen2.5-1.5B-Instruct is **0/9 at HEAD and 0/9 with both fixes**, with
