@@ -178,6 +178,60 @@ def test_3_rank_mask():
               f"max|diff|={(out - ref).abs().max().item():.3e}")
 
 
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein distance, used to GRADE a miss rather than just report 0/3.
+
+    b is the whole generated output, so score against the best-matching WINDOW of
+    it, not the whole string -- otherwise the surrounding words ("The code is
+    ...") dominate the distance and every miss looks equally bad, which is the
+    exact information this is meant to recover.
+    """
+    if not a:
+        return 0
+    if a in b:
+        return 0
+    best = len(a)
+    # Windows a little wider than the needle, so an insertion still aligns.
+    for w in range(max(1, len(a) - 2), len(a) + 3):
+        for i in range(0, max(1, len(b) - w + 1)):
+            sub = b[i:i + w]
+            prev = list(range(len(sub) + 1))
+            for r, ca in enumerate(a, 1):
+                cur = [r]
+                for c, cb in enumerate(sub, 1):
+                    cur.append(min(prev[c] + 1, cur[c - 1] + 1,
+                                   prev[c - 1] + (ca != cb)))
+                prev = cur
+            best = min(best, prev[-1])
+            if best == 0:
+                return 0
+    return best
+
+
+def _assert_needle_unambiguous(tokenizer, needle, check_fn):
+    """Fail loudly if the needle cannot be regenerated without guessing.
+
+    A needle whose words arrive in PARTIAL pieces (ZEBRA -> Z|EB|RA) forces the
+    model through continuations it can get wrong for reasons that have nothing to
+    do with the KV cache, and on a small model that decision can sit at a fraction
+    of a logit. That turns the whole suite into a coin flip and it is invisible
+    unless something checks. Every token must be a whole word from the needle, a
+    single digit, or a separator.
+    """
+    parts = [tokenizer.decode([i]) for i in
+             tokenizer(" " + needle, add_special_tokens=False).input_ids]
+    words = {w.lower() for w in needle.replace("-", " ").replace("_", " ").split()}
+    bad = [p for p in parts
+           if p.strip() and not p.strip().isdigit()
+           and p.strip() not in ("-", "_")
+           and p.strip().lower() not in words]
+    check_fn(f"needle {needle!r} tokenises unambiguously",
+             not bad,
+             f"partial-word pieces {bad} in {parts} — a model can miss these for "
+             f"tokenisation reasons alone, so recall would not be measuring DKV"
+             if bad else f"{len(parts)} tokens, all whole-word/digit/separator")
+
+
 def test_4_needle(quick=False, long_ctx=False, dense=False,
                   model_id="Qwen/Qwen3.5-2B", chunk=0,
                   no_serving_defaults=False):
@@ -186,7 +240,27 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
     import random
     from ACTIVE_RUNTIME.serving.hf_dkv_wrapper import PyTorchDKVHFWrapper
 
-    NEEDLE = "ZEBRA-4471-QUARTZ"
+    # ── The needle must be UNAMBIGUOUS TO REGENERATE ─────────────────────────
+    # Was "ZEBRA-4471-QUARTZ". Qwen splits that as Z|EB|RA|-|4|4|7|1|-|QU|ART|Z,
+    # so reproducing it forces the model through partial-word continuations, and
+    # on a 1.5B the very first one is a coin flip -- measured greedy top-2 margin
+    # 0.1875 logits between 'BR' and 'BA'. Every observed "failure" on that model
+    # was that flip: ZEBR4471QUARTZ, ZEBA-4471-QUARTZ, ZEBR-A-4471-QUARTZ.
+    #
+    # A 0.19-logit decision cannot survive ANY approximation, so the case graded
+    # the coin, not the engine. The proof it was not measuring DKV: the DENSE
+    # control and colab/probe_layer_output_diff.py's dense arm -- same model,
+    # prompt, fp16 and greedy decode -- land on OPPOSITE sides of it. A case that
+    # cannot separate dense from dense cannot say anything about compression.
+    #
+    # This code tokenises identically on Qwen2.5-1.5B and Qwen3.5-2B as
+    #     ' Falcon' | '-' | '9' '4' '2' '7' | '-' | '6' '1' '8' '3'
+    # i.e. one WHOLE-word token plus single digits. There is no partial-word
+    # continuation to get wrong, so a miss now means content was actually lost.
+    # _assert_needle_unambiguous below re-checks this per model at runtime, so
+    # swapping in a fragmenting needle fails loudly instead of silently
+    # reintroducing the coin flip.
+    NEEDLE = "Falcon-9427-6183"
     random.seed(5)
     pool = [
         "The morning fog rolled over the hills before the sun broke through the clouds.",
@@ -353,6 +427,11 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
                                 config={"mode": "fp16"}, device="cuda")
         w.ensure_loaded()
 
+    # Before any recall number is produced, on THIS model's tokenizer -- the
+    # property is per-tokenizer, so asserting it once at authoring time would not
+    # hold for the next model someone runs.
+    _assert_needle_unambiguous(w.tokenizer, NEEDLE, check)
+
     cases = [("2k", 200, 0.0), ("2k", 200, 0.5), ("2k", 200, 0.9)]
     if not quick:
         cases += [("8k", 800, 0.0), ("8k", 800, 0.5), ("8k", 800, 0.9)]
@@ -407,7 +486,21 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
         _norm = lambda s: "".join(c for c in s.upper() if c.isalnum())  # noqa: E731
         _needle_n = _norm(NEEDLE)
         hits = sum(_needle_n in _norm(o) for o in outs)
-        check(f"{label} ({ntok} tok) needle recall", hits == 3, f"{hits}/3 — {outs[0][:60]!r}")
+        # PASS stays exact-match on alphanumerics. Deliberately NOT loosened:
+        # loosening the criterion to make cases pass is fitting the score to the
+        # engine. What is added is GRADING of the misses, because "0/3" collapses
+        # two failures that need completely different responses -- a code with one
+        # character wrong (fidelity is close, the model nearly had it) and a code
+        # that is gone entirely (the content never reached attention). The old
+        # bench reported both as a bare FAIL, which is how a one-character
+        # near-miss on a 1.5B was read for a long time as "the needle is lost".
+        _best = min((_edit_distance(_needle_n, _norm(o)) for o in outs),
+                    default=len(_needle_n))
+        _detail = f"{hits}/3 — {outs[0][:60]!r}"
+        if hits < 3:
+            _detail += (f"  [closest: edit distance {_best} of {len(_needle_n)}"
+                        f"{' — NEAR MISS' if 0 < _best <= 2 else ''}]")
+        check(f"{label} ({ntok} tok) needle recall", hits == 3, _detail)
         # Report WHICH run diverged, not just how many distinct outputs there
         # were. "2 distinct across 3 runs" is compatible with two very different
         # causes and cannot distinguish them:

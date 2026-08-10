@@ -47,7 +47,7 @@ MLX_FILLER = (
 )
 
 # ── validator bench ──────────────────────────────────────────────────────────
-DKV_CODE = "ZEBRA-4471-QUARTZ"
+DKV_CODE = "Falcon-9427-6183"   # in sync with validate_cuda_dkv.py
 DKV_POOL = [
     "The morning fog rolled over the hills before the sun broke through the clouds.",
     "Researchers published a new dataset covering climate trends across five continents.",

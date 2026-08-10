@@ -58,7 +58,8 @@ sys.path.insert(0, _ROOT)
 
 import torch
 
-NEEDLE = "ZEBRA-4471-QUARTZ"
+NEEDLE = "Falcon-9427-6183"   # kept in sync with validate_cuda_dkv.py; see the
+                             # note there on why the old needle was a coin flip
 
 # verbatim from validate_cuda_dkv.py
 FILLER = [
