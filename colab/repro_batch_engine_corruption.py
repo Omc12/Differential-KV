@@ -1,6 +1,13 @@
 """Repro for intermittent OUTPUT CORRUPTION in the ContinuousBatchEngine path.
 
-STATUS: OPEN, but NO LONGER INTERMITTENT -- it is 100% DETERMINISTIC and the
+STATUS: OPEN, and NOT A DKV DEFECT. Run UNPATCH=1 to see it with DKV's attention
+interception removed entirely: 10/10 corrupt, against 7/10 and 3/6 with DKV
+installed. The bug lives in serving/batch_engine.py (or in how it drives the
+model), not in the KV compression path. Every DKV-side hypothesis eliminated
+below was therefore chasing the wrong component -- kept only so nobody repeats
+them.
+
+STATUS (rate), NO LONGER INTERMITTENT -- it is 100% DETERMINISTIC and the
 repro is one command. That reframing is the main result here; everything below
 about "fires ~15%" was an artefact of how it was being sampled.
 
@@ -48,6 +55,7 @@ set contains on generation 0 versus generation 1.
 WHAT IS ESTABLISHED
   * Corruption is real, not a style quibble: outputs contain U+FFFD and mojibake,
     e.g. "- Red: A委员会S���r / - Blue: A委员会Sin / - Green: A委员会Sam".
+  * NOT DKV AT ALL -- see UNPATCH=1 above, 10/10 with the interception removed.
   * NOT SHOWN TO BE DKV's COMPRESSION. An earlier note here claimed it was, on
     the strength of DKV_ENGAGE_THRESHOLD=999999 being clean 3/3. That was three
     samples against a ~70% event (P(3 clean) = 0.027) and it did not replicate:
@@ -129,6 +137,27 @@ async def main():
     from serving.batch_engine import ContinuousBatchEngine
     MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
     w = DKVHFWrapper(MODEL, config={"rank": 16}, device="cuda")
+    # UNPATCH=1 — THE CONTROL THAT WAS NEVER RUN. Every other arm varies DKV env
+    # flags while DKV's attention interception stays installed, so none of them can
+    # separate "the batch engine corrupts cold generations" from "DKV's
+    # interception does". This removes the interception itself: each attention
+    # module goes back to its saved _original_forward (dkv_attention.py:4232), and
+    # the lm_head last-token slicing is turned off through the flag that path
+    # already honours (_disable_lm_head_slicing, :4238).
+    if os.environ.get("UNPATCH") == "1":
+        _m = w.model
+        _layers = _m.model.layers if hasattr(_m, "model") else _m.layers
+        _n = 0
+        for _l in _layers:
+            _a = getattr(_l, "self_attn", None)
+            _of = getattr(_a, "_original_forward", None) if _a is not None else None
+            if _of is not None:
+                _a.forward = _of
+                _n += 1
+        _m._disable_lm_head_slicing = True
+        print(f"[UNPATCH] restored {_n} attention modules + disabled lm_head slicing",
+              flush=True)
+
     eng = ContinuousBatchEngine(w, max_batch_size=2)
     eng.start()
     bad = 0
