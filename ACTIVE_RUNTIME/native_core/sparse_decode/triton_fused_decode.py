@@ -98,6 +98,11 @@ def _gather_into(src, indices, cache, name):
 _heat_call_counter = 0
 
 
+# DKV_GRAPH_SAFE_DECODE=1 — see runtime/dkv_attention.py. Read once at import;
+# every consumer is on the per-decode-step path.
+_GRAPH_SAFE_DECODE = os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"
+
+
 def _occupied_slots(pool, n_fallback: int):
     """Slots holding real data, as ONE device sync instead of `current_blocks`.
 
@@ -2731,8 +2736,17 @@ def native_triton_sparse_attn_decode(
     # ── Features 1 & 2: Heat update + step-ahead prefetch ─────────────────
     # After routing delivers block_indices, tell the TieredBlockStore that these
     # slots are "hot" and submit an async prefetch job for the next decode step.
-    # Both calls are O(K) and non-blocking; no GPU synchronisation is introduced.
-    if N > 0 and session_id is not None:
+    #
+    # These DO synchronise, contrary to what this comment used to claim: both
+    # need a HOST-side slot list, and block_indices.cpu().tolist() below is a
+    # device->host copy on every decode step.
+    # torch.cuda.set_sync_debug_mode("error") names it directly.
+    #
+    # Skipped under DKV_GRAPH_SAFE_DECODE because a stream capture is invalidated
+    # by any host sync. Both are performance heuristics -- keeping routed slots
+    # warm, and prefetching them before the next step -- so dropping them costs
+    # some tiering benefit and nothing in correctness.
+    if N > 0 and session_id is not None and not _GRAPH_SAFE_DECODE:
         _mgr = getattr(pool, "_manager", None) if pool is not None else None
         if _mgr is not None:
             # Feature 1: mark routed slots hot so eviction keeps them warm.

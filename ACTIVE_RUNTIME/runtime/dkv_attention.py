@@ -144,6 +144,12 @@ _SRL_VALIDATE_EVERY = int(os.environ.get("DKV_VALIDATE_EVERY", "50"))
 # one flag's expectations (e.g. an "interval") to the other would be wrong.
 _DECODE_CACHE_CUDA = os.environ.get("DKV_DECODE_CACHE_CUDA", "0") == "1"
 
+# DKV_GRAPH_SAFE_DECODE=1 — remove every device->host sync from the decode step so
+# the forward can be CUDA-graph captured. Read once at import: the sites that
+# consult it run per layer per decode step, and an environ lookup there is the
+# same host overhead the flag exists to eliminate.
+_GRAPH_SAFE_DECODE = os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"
+
 # ── Re-materialisation cache (DKV_REMAT_CACHE, default OFF) ──────────────────
 # Read once at import; see native_core/sparse_decode/remat_cache.py for the
 # staleness contract. _LAST_DKV_LAYER tracks which layer index is the last
@@ -1958,9 +1964,35 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             session_dict = kv_manager.decode_workspace.setdefault(sid, {})
                                             cos_all = session_dict.get("rope_cos")
                                             sin_all = session_dict.get("rope_sin")
-                                            _max_anc = int(anchor_indices.max().item()) + 1 if (anchor_indices is not None and anchor_indices.numel() > 0) else 1
-                                            if pool is not None and getattr(pool, "residual_K_positions", None) is not None and pool.residual_K_positions.numel() > 0:
-                                                _max_anc = max(_max_anc, int(pool.residual_K_positions.max().item()) + 1)
+                                            # HOST-SIDE UPPER BOUND, no D2H sync.
+                                            # This only sizes a cos/sin CACHE that is
+                                            # grown, never shrunk, so any valid upper
+                                            # bound gives identical results -- and the
+                                            # two .item() calls it replaces ran on
+                                            # EVERY decode step of EVERY layer purely
+                                            # to re-check a cache that is almost always
+                                            # already big enough.
+                                            #
+                                            # Both bounds are known without touching the
+                                            # GPU: anchor_indices are absolute positions
+                                            # in this session, so they cannot exceed its
+                                            # sequence length; and residual_K_positions
+                                            # are BLOCK-LOCAL int16 offsets bounded by
+                                            # the pool's per-block capacity (pool.U's
+                                            # sequence dim), not global positions.
+                                            #
+                                            # These syncs also block CUDA-graph capture:
+                                            # a stream capture is invalidated by any
+                                            # host synchronisation, which is why
+                                            # capturing this forward raised
+                                            # cudaErrorStreamCaptureInvalidated.
+                                            _max_anc = 1
+                                            try:
+                                                _max_anc = int(kv_manager.get_session_sequence_length(sid)) + 1
+                                            except Exception:                    # noqa: BLE001
+                                                _max_anc = 1
+                                            if pool is not None and getattr(pool, "U", None) is not None:
+                                                _max_anc = max(_max_anc, int(pool.U.shape[1]))
                                             if cos_all is None or sin_all is None or cos_all.shape[1] < _max_anc:
                                                 hist_pos = torch.arange(_max_anc, device=query_states.device, dtype=torch.long).unsqueeze(0)
                                                 _rot_emb = getattr(self, "rotary_emb", None) or getattr(getattr(model, "model", None), "rotary_emb", None)
@@ -2138,6 +2170,26 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 changed = (last_slots is not None)
                             elif last_slots is None:
                                 changed = True
+                            elif block_indices is last_slots:
+                                # Same tensor OBJECT: routing did not re-run this
+                                # step, so the slots are provably unchanged. Pure
+                                # identity check, no device read.
+                                changed = False
+                            elif _GRAPH_SAFE_DECODE:
+                                # torch.equal on CUDA tensors returns a PYTHON bool,
+                                # so it is a device->host sync -- one per decode step.
+                                # It is also what invalidated CUDA-graph capture:
+                                # torch.cuda.set_sync_debug_mode("error") names this
+                                # exact line as the first offender after the
+                                # already-gated .cpu() above.
+                                #
+                                # Under the graph-safe flag, decide from SHAPE alone
+                                # and otherwise assume changed. That is conservative
+                                # in the safe direction: treating an unchanged set as
+                                # changed only clears a cache early, while the reverse
+                                # would serve stale routing. Off by default so the
+                                # exact comparison remains the shipping behaviour.
+                                changed = (block_indices.shape != last_slots.shape) or True
                             else:
                                 changed = not torch.equal(block_indices, last_slots)
                             if changed:
