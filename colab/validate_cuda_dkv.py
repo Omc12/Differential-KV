@@ -260,6 +260,14 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
     # _assert_needle_unambiguous below re-checks this per model at runtime, so
     # swapping in a fragmenting needle fails loudly instead of silently
     # reintroducing the coin flip.
+    # Token budget for the answer. 24 suffices for a model whose thinking block
+    # is EMPTY -- Qwen3.5-2B emits an open/close pair with nothing between -- but
+    # a model that actually reasons spends the whole budget before reaching the
+    # answer. Qwen3.5-9B produces "Thinking Process: 1. Analyze the Request:"
+    # and scores 0/3 for a reason that has nothing to do with the KV cache, which
+    # is a benchmark limit being misread as a recall failure.
+    _MAX_NEW = int(os.environ.get("DKV_VALIDATE_MAX_NEW", "24"))
+
     NEEDLE = "Falcon-9427-6183"
     random.seed(5)
     pool = [
@@ -471,7 +479,7 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
         for _ in range(3):
             # 24 tokens: 12 truncates "ZEBRA-4471-QUARTZ" mid-word once the
             # <think></think> preamble is counted, which reads as a failure.
-            r = w.generate(prompt=prompt, max_new_tokens=24, temperature=0.0,
+            r = w.generate(prompt=prompt, max_new_tokens=_MAX_NEW, temperature=0.0,
                            top_p=1.0, repetition_penalty=1.0)
             outs.append(r.rsplit("assistant", 1)[-1].strip())
         # Match on alphanumerics only. The needle is one code rendered with
