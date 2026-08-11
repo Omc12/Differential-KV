@@ -1,8 +1,30 @@
 """Repro for intermittent OUTPUT CORRUPTION in the ContinuousBatchEngine path.
 
-STATUS: OPEN. The defect is confirmed real and confirmed to be DKV's, but the
-cause is not found. This script exists so the next attempt starts from samples
-instead of from scratch.
+STATUS: OPEN, but NO LONGER INTERMITTENT -- it is 100% DETERMINISTIC and the
+repro is one command. That reframing is the main result here; everything below
+about "fires ~15%" was an artefact of how it was being sampled.
+
+    REPS=1, fresh process, the exact prompt below:  10/10 CORRUPT
+    REPS=2, fresh process:  generation 0 corrupt, generation 1 CLEAN  (3/3 runs)
+
+So: THE FIRST GENERATION ON A COLD DKV POOL IS ALWAYS CORRUPTED, and every
+generation after it in the same process is clean. Sessions are unique per
+iteration, so this is not turn-to-turn carry-over; it is cold pool vs warm pool.
+
+Why it ever looked intermittent, twice over:
+  * A long-lived process does 1 cold generation and N-1 warm ones, so a REPS=20
+    run reports 1/20 and reads as "~5%, flaky".
+  * Under pytest every run is a fresh process, hence always cold, hence always
+    corrupt -- yet the test only FAILS ~60% of the time, because the assertions
+    (newlines / list marker / ASCII punctuation) sometimes hold on garbled text.
+    Corruption is 100%; assertion sensitivity is 60%.
+
+Chase it as a deterministic cold-vs-warm difference, NOT as a race. A cold pool is
+freshly torch.zeros'd and lazily allocated; a warm one has slots that have been
+written and recycled. Reading a slot that was never written yields zeros, and
+zeros here evidently decode to garbage -- which would mean a warm pool MASKS the
+same bug with plausible-looking data rather than fixing it. Diff what the routed
+set contains on generation 0 versus generation 1.
 
 WHAT IS ESTABLISHED
   * Corruption is real, not a style quibble: outputs contain U+FFFD and mojibake,
@@ -26,6 +48,15 @@ WHAT IS ESTABLISHED
     corruption hits iteration 0 -- a FRESH session's FIRST generation -- so it is
     not accumulation across turns.
   * NOT async SVD publication: DKV_SYNC_COMPRESS=1 measured 1/40 vs 1/40.
+  * NOT the async driver: DRIVER=anyio measured 0/20 vs asyncio's 1/20. This had
+    been the leading hypothesis (pytest marks coroutine tests pytest.mark.anyio
+    and fails far more often) and it is WRONG -- the pytest difference is that
+    pytest gives a fresh process, i.e. a cold pool, every run.
+  * NOT autotune, and not shape-dependent: VARY_LEN=1 changes the prompt length
+    each iteration, so the @triton.autotune key ['N','L_dense'] changes too, and
+    it measured 0/14 -- including iteration 0, because VARY_LEN alters the prompt
+    even at i=0. Corruption tracks the EXACT prompt on a cold pool, not the
+    autotune key.
 
 THE RATE DEPENDS ON THE ASYNC DRIVER, which is the best remaining lead. This
 script drives the engine with asyncio.run and sees ~2.5% (1/40). The identical
@@ -83,7 +114,16 @@ async def main():
         # state reuse is where this codebase's previous intermittent corruption
         # lived, so the two rates are a diagnostic, not just a knob.
         _sid = "sess_shared" if os.environ.get("SESSION_MODE", "unique") == "same" else f"sess_{i}"
-        q = await eng.submit(_sid, {"prompt": PROMPT, "max_tokens": 128,
+        # VARY_LEN=1 changes the PROMPT LENGTH each iteration. The Triton decode
+        # kernels are @triton.autotune'd with key=['N','L_dense'], so a new length
+        # is a new autotune key and forces a fresh benchmarking pass. If autotune
+        # is what corrupts the first generation, corruption should follow the
+        # SHAPE CHANGES rather than sitting only on iteration 0.
+        _p = PROMPT
+        if os.environ.get("VARY_LEN") == "1":
+            _p = PROMPT.replace("three major colors",
+                                "three major colors " + ("and shades " * (i % 7)))
+        q = await eng.submit(_sid, {"prompt": _p, "max_tokens": 128,
                                            "temperature": 0.0, "top_p": 0.9,
                                            "repetition_penalty": 1.15})
         buf = []
@@ -102,4 +142,15 @@ async def main():
     await eng.stop()
     print(f"RESULT corrupt={bad}/{N}  mode={os.environ.get('MODE','dkv')}", flush=True)
 
-asyncio.run(main())
+# DRIVER=anyio runs the SAME coroutine through anyio instead of asyncio.run.
+# This is the experiment the header calls for: under pytest (which conftest marks
+# pytest.mark.anyio) this defect fires ~60%, while asyncio.run sees ~2.5%. If the
+# driver is what moves the rate, the bug is a scheduling-sensitive race in the
+# engine rather than anything in the KV math, and that is a completely different
+# place to look.
+_driver = os.environ.get("DRIVER", "asyncio")
+if _driver == "anyio":
+    import anyio
+    anyio.run(main)
+else:
+    asyncio.run(main())
