@@ -1192,8 +1192,31 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _p0 = int(cache_position.reshape(-1)[0])
                                 _fresh_seq = (_p0 == 0)
                             if "dense_cache" not in sess_dict or _fresh_seq:
-                                from transformers.cache_utils import DynamicCache
-                                sess_dict["dense_cache"] = DynamicCache()
+                                if _GRAPH_SAFE_DECODE:
+                                    # A DynamicCache GROWS by torch.cat every step,
+                                    # allocating fresh tensors, and that is what
+                                    # blocks CUDA-graph capture -- proven by a
+                                    # one-variable test: the same patched forward
+                                    # captures when sid="dummy_session" (no cache
+                                    # built) and fails when a cache is threaded,
+                                    # while the UNPATCHED model captures either way.
+                                    #
+                                    # StaticCache preallocates a fixed buffer and
+                                    # writes at cache_position, so addresses and
+                                    # shapes are stable across replays. That is the
+                                    # static device-resident state the graph ABI
+                                    # needs.
+                                    from transformers.cache_utils import StaticCache
+                                    _gmax = int(os.environ.get("DKV_GRAPH_MAX_CTX", "8192"))
+                                    sess_dict["dense_cache"] = StaticCache(
+                                        config=model.config,
+                                        max_cache_len=_gmax,
+                                        device=hidden_states.device,
+                                        dtype=hidden_states.dtype,
+                                    )
+                                else:
+                                    from transformers.cache_utils import DynamicCache
+                                    sess_dict["dense_cache"] = DynamicCache()
                             cache_obj = sess_dict["dense_cache"]
 
                     kwargs_clean = kwargs.copy()
@@ -1247,6 +1270,15 @@ def apply_dkv_attention_patch(model, kv_manager):
                             _m.masked_fill_(~_allowed, torch.finfo(_dt).min)
                             attention_mask = _m.view(1, 1, q_len, _kv_len)
 
+                    # StaticCache hands SDPA a mask that is a SLICE of the
+                    # preallocated [B, 1, q, max_cache_len] buffer, and SDPA
+                    # requires the last dimension to be contiguous -- it raises
+                    # "(*bias): last dimension must be contiguous" during graph
+                    # capture otherwise. A DynamicCache mask happens to be
+                    # contiguous already, so this only bites on the static path.
+                    if (_GRAPH_SAFE_DECODE and attention_mask is not None
+                            and not attention_mask.is_contiguous()):
+                        attention_mask = attention_mask.contiguous()
                     return self._original_forward(
                         hidden_states=hidden_states,
                         attention_mask=attention_mask,
