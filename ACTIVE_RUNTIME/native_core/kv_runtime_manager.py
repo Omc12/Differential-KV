@@ -19,6 +19,12 @@ import time
 import sys, os
 import threading
 
+# DKV_SLOT_TRACE=1 — diagnostic: report aliased or use-after-free pool slots in
+# the decode read path. Read ONCE here rather than per call, because its only
+# consumer runs per layer per decode step on a host-bound path; an environ lookup
+# there is measurable overhead for a check that is off by default.
+_SLOT_TRACE = os.environ.get("DKV_SLOT_TRACE") == "1"
+
 from native_core.sparse_decode.triton_fused_decode import TritonDKV
 from native_core.compression.lowrank import compress_lowrank, LowRankDelta, _exact_keys_enabled
 from native_core.paging.paged_kv_store import PagedKVStore
@@ -2381,9 +2387,13 @@ class KVRuntimeManager:
             #              pool's free list, i.e. it has been handed back and may
             #              already belong to a different block.
             #
-            # Silent by default and only computed when the flag is set; this runs
-            # per layer per decode step.
-            if os.environ.get("DKV_SLOT_TRACE") == "1":
+            # Read ONCE at import (module constant below), not per call. This
+            # line runs per layer per decode step, and an os.environ lookup here
+            # is dispatch overhead added to the exact host-bound path the perf
+            # work is trying to shrink -- self-defeating for a diagnostic that is
+            # off by default. Same pattern the decode gather-cache flag already
+            # uses (dkv_attention.py:145).
+            if _SLOT_TRACE:
                 _idx = cpu_indices.tolist()
                 _seen, _dupes = set(), []
                 for _s in _idx:

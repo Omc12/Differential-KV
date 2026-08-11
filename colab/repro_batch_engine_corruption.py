@@ -19,6 +19,23 @@ WHAT IS ESTABLISHED
     (see the note below), so setting it changes nothing on CUDA.
   * It still fires with DKV_COMPRESSED_DECODE=0, so prefill/ingest compression is
     implicated, not only the sparse decode kernel.
+  * NOT tiered eviction (DKV_TIER_ENABLED=0): 1/20 vs 1/20, despite maybe_evict's
+    own docstring describing exactly this failure ("a routed block could be zeroed
+    out from under the launch that was about to read it").
+  * NOT session-state reuse: SESSION_MODE=same measured 1/20, same as unique, and
+    corruption hits iteration 0 -- a FRESH session's FIRST generation -- so it is
+    not accumulation across turns.
+  * NOT async SVD publication: DKV_SYNC_COMPRESS=1 measured 1/40 vs 1/40.
+
+THE RATE DEPENDS ON THE ASYNC DRIVER, which is the best remaining lead. This
+script drives the engine with asyncio.run and sees ~2.5% (1/40). The identical
+generation under pytest -- where conftest marks coroutine tests pytest.mark.anyio
+-- fails ~60% (2 of 3 runs). Same engine, same model, same prompt, same env; only
+the event-loop driver differs. That says the defect is a SCHEDULING-SENSITIVE RACE
+between the engine's background generation loop and the consumer awaiting its
+queue, not anything in the KV math. Chase it there: run the same body under anyio
+in this script and confirm the rate jumps, then look for state the engine touches
+between an await point and its next resumption.
 
 THE STRONGEST UNCHASED CLUE. The garbage REPEATS across list items -- the same
 wrong fragment ("A委员会S", or "major" in another sample) appears on every line.
@@ -61,7 +78,12 @@ async def main():
     eng.start()
     bad = 0
     for i in range(N):
-        q = await eng.submit(f"sess_{i}", {"prompt": PROMPT, "max_tokens": 128,
+        # SESSION_MODE=same reuses ONE session id across every generation, which
+        # is what the failing test does; "unique" gives each its own. Session
+        # state reuse is where this codebase's previous intermittent corruption
+        # lived, so the two rates are a diagnostic, not just a knob.
+        _sid = "sess_shared" if os.environ.get("SESSION_MODE", "unique") == "same" else f"sess_{i}"
+        q = await eng.submit(_sid, {"prompt": PROMPT, "max_tokens": 128,
                                            "temperature": 0.0, "top_p": 0.9,
                                            "repetition_penalty": 1.15})
         buf = []
