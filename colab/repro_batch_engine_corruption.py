@@ -32,6 +32,12 @@ routing block there are no DKV blocks to route, and the corruption happens on th
 path taken when the block set is EMPTY. Stop looking at routing/pool/slot code --
 none of it runs here -- and look at what dkv_forward does with an empty block set.
 
+THE UNTESTED CONTROL, and the one that matters next: every arm so far has run
+through DKVHFWrapper with DKV's attention interception installed, varying only
+DKV env flags. The engine has NEVER been run against a completely unpatched
+model. Until that is done, "the batch engine corrupts cold generations" and "DKV's
+interception corrupts cold generations" are indistinguishable.
+
 Chase the rest as a cold-vs-warm difference, NOT as a race. A cold pool is
 freshly torch.zeros'd and lazily allocated; a warm one has slots that have been
 written and recycled. Reading a slot that was never written yields zeros, and
@@ -42,9 +48,14 @@ set contains on generation 0 versus generation 1.
 WHAT IS ESTABLISHED
   * Corruption is real, not a style quibble: outputs contain U+FFFD and mojibake,
     e.g. "- Red: A委员会S���r / - Blue: A委员会Sin / - Green: A委员会Sam".
-  * It is DKV's. With DKV_ENGAGE_THRESHOLD=999999 (DKV never engages) the same
-    prompt through the same engine was clean 3/3; with DKV engaged it fires at
-    roughly 10-20%.
+  * NOT SHOWN TO BE DKV's COMPRESSION. An earlier note here claimed it was, on
+    the strength of DKV_ENGAGE_THRESHOLD=999999 being clean 3/3. That was three
+    samples against a ~70% event (P(3 clean) = 0.027) and it did not replicate:
+    re-run properly it is 7/10 CORRUPT. Retracted.
+    It could not have been what that claim assumed in any case -- the default
+    threshold is 4096 (dkv_attention.py:406) and this prompt is ~60 tokens, so
+    prefill BYPASSES DKV either way and the two arms are the same code path.
+    Whatever this is, it survives DKV being bypassed.
   * It is NOT the streaming detokeniser. batch_engine decodes the FULL generated
     sequence and takes a delta (:1846), never per-token, so U+FFFD is in the
     model's actual output rather than a decode artefact.
