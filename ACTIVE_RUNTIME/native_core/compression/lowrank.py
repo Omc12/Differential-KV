@@ -1419,13 +1419,21 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         if block_token_ids and getattr(manager, "tokenizer", None) is not None:
             try:
                 _sid = getattr(block, "session_id", None)
+                # anchor_idx is only the CACHE KEY. Reading it as block.anchor_idx
+                # raised AttributeError for any block without one, and the except
+                # below swallowed that -- so a missing key did not skip the
+                # cache, it silently disabled the whole content-aware boost and
+                # left the residual budget at the 15% default. An optimisation's
+                # key must never be able to switch off the thing it optimises.
+                _anchor_key = getattr(block, "anchor_idx", None)
                 _cached_boost = None
-                if _sid is not None:
+                _session_boosts = None
+                if _sid is not None and _anchor_key is not None:
                     _boost_cache = getattr(manager, "_res_capture_boost_rows", None)
                     if _boost_cache is None:
                         _boost_cache = manager._res_capture_boost_rows = {}
                     _session_boosts = _boost_cache.setdefault(_sid, {})
-                    _cached_boost = _session_boosts.get(block.anchor_idx)
+                    _cached_boost = _session_boosts.get(_anchor_key)
 
                 if _cached_boost is not None:
                     boost_row, n_boosted = _cached_boost
@@ -1457,8 +1465,11 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                         _counts_cache[_ckey] = _counts
                     boost_row, n_boosted = compute_boost_multipliers(
                         tok_strs, block_token_ids, _counts or {}, _total)
-                    if _sid is not None:
-                        _session_boosts[block.anchor_idx] = (boost_row, n_boosted)
+                    # Store only when there IS a key to store under; the same
+                    # reasoning as the lookup above -- no key means no caching,
+                    # not no boost.
+                    if _session_boosts is not None:
+                        _session_boosts[_anchor_key] = (boost_row, n_boosted)
 
                 if boost_row is not None and n_boosted > 0:
                     _bt = torch.tensor(boost_row, device=rel_error_K.device,
@@ -1473,7 +1484,18 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                     n_max_residual = max(n_max_residual,
                                          min(T_active, n_boosted + _margin))
             except Exception:
-                pass
+                # Content-aware capture is best-effort, but swallowing SILENTLY
+                # means any error here disables the boost with no trace: the
+                # residual budget quietly stays at the 15% default and the tokens
+                # this exists to protect lose their slots. That failure is
+                # invisible in output -- it looks exactly like "the ranking chose
+                # differently". DKV_DBG_RESIDUAL_ERRORS=1 surfaces it.
+                if os.environ.get("DKV_DBG_RESIDUAL_ERRORS") == "1":
+                    import traceback
+                    print("[DKV] residual content-capture FAILED (boost skipped) "
+                          f"for anchor={getattr(block, 'anchor_idx', '?')}:",
+                          flush=True)
+                    traceback.print_exc()
 
         fact_positions_K = None
         residual_K_vals = None

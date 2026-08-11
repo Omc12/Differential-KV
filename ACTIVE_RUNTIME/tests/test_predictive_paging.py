@@ -26,9 +26,20 @@ class MockBlock:
         self.active_k = None
         self.active_v = None
 
-def test_predictive_paging():
-    os.environ["DKV_PREDICTIVE_PAGING"] = "1"
-    
+def test_predictive_paging(monkeypatch):
+    # TWO flags are needed, and only one was set. DKV_PREDICTIVE_PAGING gates
+    # prefetch() ENQUEUEING the request; DKV_PAGER_BG_PREFETCH starts the thread
+    # that DRAINS the queue (paged_kv_store.py:135) and is opt-in, default off,
+    # because it mutates residency on its own thread. With only the first set the
+    # request was queued and nobody ever read it, so the block stayed on CPU
+    # forever -- not a slow prefetch, no prefetch at all.
+    #
+    # monkeypatch.setenv rather than a bare os.environ write: the old form leaked
+    # DKV_PREDICTIVE_PAGING=1 into every test that ran afterwards in the process,
+    # the same class of cross-test contamination as test_4k's HAS_TRITON.
+    monkeypatch.setenv("DKV_PREDICTIVE_PAGING", "1")
+    monkeypatch.setenv("DKV_PAGER_BG_PREFETCH", "1")
+
     # Init store with small budget (roughly 2 blocks worth of memory)
     store = PagedKVStore(gpu_budget_gb=0.0001, device="cuda")
     
@@ -53,10 +64,14 @@ def test_predictive_paging():
     print(f"Issuing prefetch for block {block_idx}...")
     store.prefetch("sess-0", 0, block_idx)
     
-    # Wait for background prefetch reload thread
-    time.sleep(0.1)
-    
+    # POLL, don't sleep a fixed 0.1s and hope. This waits on a background thread,
+    # so a fixed sleep is a race that fails on a loaded machine and says nothing
+    # about the code. Polling to a generous deadline is fast when it works and
+    # only slow when it is genuinely about to fail.
     entry = store._entries[target_key]
+    deadline = time.time() + 5.0
+    while time.time() < deadline and entry.residency != BlockResidency.GPU:
+        time.sleep(0.01)
     assert entry.residency == BlockResidency.GPU, "Prefetch did not reload the block to GPU!"
     assert entry.prefetched is True, "entry.prefetched flag not set!"
     

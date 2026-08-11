@@ -9,7 +9,21 @@ Verifies:
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+# This exercises MLXDKVWrapper, and importing it pulls in `mlx`, which exists
+# only on Apple Silicon. On a CUDA box it raised ModuleNotFoundError and was
+# counted as a FAILURE -- a red result that says nothing about the code and that
+# no amount of work on this machine could turn green.
+#
+# Same guard the repo already uses for its other MLX-only tests
+# (test_dkv_kernel_parity.py:26, test_decode_cache_fused_parity.py:27), so this
+# is the established convention here rather than a new one.
+pytest.importorskip("mlx.core",
+                    reason="MLX-only test; mlx is Apple-Silicon only")
+
 
 def test_multi_turn_session_invalidation():
     from serving.mlx_dkv_wrapper import MLXDKVWrapper

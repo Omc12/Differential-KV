@@ -42,8 +42,26 @@ def test_pool_rank_boosting():
     assert pool_rank == 24, f"Expected boosted pool_rank of 24, got {pool_rank}"
     print("[PASS] test_pool_rank_boosting")
 
-def test_python_dynamic_rank_boosting_decision():
+def test_python_dynamic_rank_boosting_decision(monkeypatch):
     """Verify that _compress_block_sync dynamically boosts SVD rank for digits, math, or definitions."""
+    # BOTH knobs set explicitly, because this test straddles two INDEPENDENT
+    # rank mechanisms and silently depended on the default of each:
+    #
+    #   DKV_RANK_BOOST     the content boost this test actually exercises. Now
+    #                      defaults to "off" for MLX parity (MLX has no
+    #                      rank-boost concept), so on defaults the feature under
+    #                      test does not run at all.
+    #   DKV_LAYER_ADAPTIVE_RANK  an unrelated per-layer schedule, default ON,
+    #                      which at layer 10 of 28 returns round(1.5*16) = 24.
+    #                      That is what made the "standard rank 16" assertion
+    #                      fail -- the baseline had moved for reasons that have
+    #                      nothing to do with content boosting.
+    #
+    # Pinning them here makes the test measure the one mechanism it names, and
+    # monkeypatch restores both at teardown so it cannot leak into other files
+    # the way test_4k's HAS_TRITON did.
+    monkeypatch.setenv("DKV_RANK_BOOST", "auto")
+    monkeypatch.setenv("DKV_LAYER_ADAPTIVE_RANK", "0")
     from native_core.kv_runtime_manager import KVRuntimeManager
     from native_core.streaming_sparse_ingest import StreamingKVBlock
     
@@ -62,27 +80,49 @@ def test_python_dynamic_rank_boosting_decision():
     manager.total_norm_drift = 0.0
     manager.rank_histogram = {}
     manager.vram_saved_bytes = 0
+    # __new__ SKIPS __init__, so every attribute the code under test touches has
+    # to be set by hand here -- and this mock silently goes stale each time
+    # __init__ grows one. That is what broke it: Feature 4 added
+    # _kt_mla_projectors (kv_runtime_manager.py:931) and _compress_block_sync
+    # reads it unconditionally at :3712, so the test died with AttributeError on
+    # a code path it does not even exercise.
+    #
+    # Set to the same empty dict __init__ uses, which keeps the MLA branch
+    # disabled — the behaviour this test was written against. Fixing it here
+    # rather than making production defensive with getattr(): the runtime is
+    # entitled to assume its own constructor ran, and loosening it would hide
+    # genuinely half-built managers.
+    manager._kt_mla_projectors = {}
+    manager._kt_tiered_store = None
+    manager._kt_prefetch_engine = None
     
     # Mock compress_lowrank and get_layer_rank
     called_ranks = []
     
-    def mock_compress_lowrank(normalized_deltas, rank):
+    def mock_compress_lowrank(normalized_deltas, rank, *args, **kwargs):
+        # *args/**kwargs deliberately: this stub exists only to RECORD the rank
+        # the caller chose, which is the single thing the test asserts. Pinning
+        # the exact signature made it break every time the real
+        # compress_lowrank gained a parameter (token_norms, then force_exact)
+        # -- a red test about an argument it does not care about.
         called_ranks.append(rank)
-        # return dummy LowRankDelta
+        # Return the REAL LowRankDelta, not a hand-rolled stand-in. The stand-in
+        # listed its fields by hand and so went stale every time the dataclass
+        # gained one -- it died here on residual_K_positions, which it had no
+        # opinion about. The dataclass defaults every optional field to
+        # None/0, which is exactly the "nothing captured" case this test wants,
+        # and it cannot drift out of sync with production by construction.
         n = normalized_deltas.shape[0]
         d = normalized_deltas.shape[1]
-        class DummyDelta:
-            U = torch.zeros((n, rank), dtype=torch.float16)
-            V = torch.zeros((rank, d), dtype=torch.float16)
-            scale = 1.0
-            cosine_sim = 1.0
-            norm_drift = 0.0
-            dynamic_rank = rank
-            U_sem_int4 = None
-            U_sem_scale = None
-            U_fact_fp16 = None
-            n_semantic = 1
-        return DummyDelta()
+        from native_core.compression.lowrank import LowRankDelta
+        return LowRankDelta(
+            U=torch.zeros((n, rank), dtype=torch.float16),
+            V=torch.zeros((rank, d), dtype=torch.float16),
+            shape=(n, d),
+            rank=rank,
+            scale=1.0,
+            dynamic_rank=rank,
+        )
         
     global compress_lowrank
     import native_core.kv_runtime_manager as krm

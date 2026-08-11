@@ -1,4 +1,5 @@
 import torch
+import pytest
 import numpy as np
 import sys
 import os
@@ -33,8 +34,18 @@ def test_residual_scaling_and_quantization():
     pos = lr_delta.residual_K_positions[0].item()
     norm = token_norms[pos].item()
     
+    # What this test is actually about is the token_norms DENORMALIZATION, so it
+    # has to expect whichever residual FORM is in effect rather than hard-coding
+    # one. It hard-coded the correction form (delta - recon); CUDA has since
+    # defaulted to the MLX-parity EXACT form (delta), which stores a genuinely
+    # different value per element -- so this failed while the scaling it checks
+    # was perfectly correct.
+    from native_core.compression.lowrank import _exact_keys_enabled
     recon = (lr_delta.U.float() @ lr_delta.V.float()) * lr_delta.scale
-    expected_unscaled = (deltas.cpu()[:, :64] - recon.cpu()[:, :64])[pos]
+    if _exact_keys_enabled(device):
+        expected_unscaled = deltas.cpu()[:, :64][pos]
+    else:
+        expected_unscaled = (deltas.cpu()[:, :64] - recon.cpu()[:, :64])[pos]
     expected_scaled = expected_unscaled * norm
     
     val_diff = (lr_delta.residual_K_values[0].cpu() - expected_scaled).abs().max().item()
@@ -155,7 +166,40 @@ def test_fact_anchors_and_factual_store():
     assert out_final.shape == (H_q, head_dim)
 
 
-def test_localized_vertical_factual_retrieval():
+@pytest.fixture
+def _deterministic_numerics():
+    """Make this test independent of WHAT RAN BEFORE IT. Two separate leaks:
+
+    1. UNSEEDED RNG -- the real root cause. The test builds k, v and W_proj with
+       bare torch.randn, and its final assertion turns on a cosine similarity
+       crossing an explicit 0.5 threshold. Run alone the global RNG is at its
+       default state and the draw happens to clear the threshold; run after ANY
+       other test, those draws are consumed and different values land on the
+       other side. Nothing about the store changed -- the inputs did.
+
+    2. TF32 -- an independent second trigger. Importing DKV sets
+       torch.set_float32_matmul_precision("high") GLOBALLY (a documented speed
+       choice, DKV_TF32=0 disables it), so once any file pulls DKV in every later
+       test runs at ~10-bit mantissa. Verified separately: running this test by
+       itself, with the default RNG state but precision forced to 'high',
+       reproduces the failure on its own.
+
+    Both are pinned rather than the assertion being loosened, because the test is
+    about the store's THRESHOLD LOGIC, not about which random matrix it got or
+    how many mantissa bits the matmul used. Both are restored on teardown so this
+    fixture cannot become the next leak.
+    """
+    torch.manual_seed(0)
+
+    prev = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("highest")
+    try:
+        yield
+    finally:
+        torch.set_float32_matmul_precision(prev)
+
+
+def test_localized_vertical_factual_retrieval(_deterministic_numerics):
     # Setup inputs to test mapping token spans to slot IDs
     num_kv_heads = 4
     head_dim = 64
@@ -218,7 +262,19 @@ def test_localized_vertical_factual_retrieval():
     q_desc = q_desc / (q_desc.norm() + 1e-8)
     
     entry_1.descriptor = q_desc.cpu() * 0.2
-    
+    # Mutating a descriptor in place breaks an invariant the store documents and
+    # relies on: _ensure_desc_matrix caches the stacked [E, DESC] descriptors and
+    # rebuilds ONLY when the entry COUNT changes ("entries are fixed after
+    # prefill"). Four queries above have already populated that cache, so without
+    # this the query below scores against entry_1's ORIGINAL descriptor and the
+    # assignment has no effect at all.
+    #
+    # Production never hits this -- descriptors are written during build() and
+    # never touched again, which is exactly why the cache is safe there. This is
+    # a white-box test reaching past the public API, so it has to maintain the
+    # invariant it just broke.
+    store._desc_matrix = None
+
     matches_fallback = store.query(Q, W_proj, threshold=0.5, active_slots={100})
     assert len(matches_fallback) == 1
     assert matches_fallback[0].start_idx == 4
