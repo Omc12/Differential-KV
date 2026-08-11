@@ -25,6 +25,12 @@ import threading
 # there is measurable overhead for a check that is off by default.
 _SLOT_TRACE = os.environ.get("DKV_SLOT_TRACE") == "1"
 
+# DKV_ROUTE_DUMP=1 — dump the routed set per layer per decode step, tagged with a
+# generation counter the harness bumps, so the cold first generation can be
+# diffed against the warm second one. Same read-once rule as above.
+_ROUTE_DUMP = os.environ.get("DKV_ROUTE_DUMP") == "1"
+_ROUTE_DUMP_STATE = {"gen": 0}
+
 from native_core.sparse_decode.triton_fused_decode import TritonDKV
 from native_core.compression.lowrank import compress_lowrank, LowRankDelta, _exact_keys_enabled
 from native_core.paging.paged_kv_store import PagedKVStore
@@ -2335,6 +2341,17 @@ class KVRuntimeManager:
         Phase 29: metadata is now CPU-resident (zero CUDA syncs on write).
         Only the final small block_indices array is transferred to GPU.
         """
+        # At function ENTRY, before every early return. The probe further down
+        # printed nothing on the failing case even after being moved out of the
+        # compressed branch, which means this function bails before reaching it --
+        # and WHICH guard fires is the whole question.
+        if _ROUTE_DUMP and layer_idx == 0:
+            _nb = len(self.get_streaming_blocks(session_id, layer_idx) or []) \
+                if self._streaming_mgr is not None else -1
+            print(f"[ROUTE-DUMP] gen={_ROUTE_DUMP_STATE['gen']} ENTRY layer=0 "
+                  f"streaming_mgr={'None' if self._streaming_mgr is None else 'yes'} "
+                  f"n_blocks={_nb}", flush=True)
+
         if self._streaming_mgr is None:
             return None, [], None, None, None
 
@@ -2361,6 +2378,17 @@ class KVRuntimeManager:
             return cached[2]
 
         active_meta = metadata[:num_blocks]          # CPU slice view
+
+        # Outside the compressed branch on purpose: the first version of this
+        # probe sat inside `if compressed_mask.any()` and printed NOTHING on the
+        # failing case, which is itself the finding -- it says how many blocks
+        # exist and how many are COMPRESSED, so "no compressed blocks at all"
+        # is visible rather than looking like a broken probe.
+        if _ROUTE_DUMP:
+            _states = active_meta[:, 3].tolist() if num_blocks else []
+            print(f"[ROUTE-DUMP] gen={_ROUTE_DUMP_STATE['gen']} layer={layer_idx} "
+                  f"n_blocks={num_blocks} state_codes={_states} "
+                  f"(2==COMPRESSED)", flush=True)
 
         # state_code 2 == COMPRESSED
         compressed_mask = active_meta[:, 3] == 2     # CPU compare
@@ -2393,6 +2421,30 @@ class KVRuntimeManager:
             # work is trying to shrink -- self-defeating for a diagnostic that is
             # off by default. Same pattern the decode gather-cache flag already
             # uses (dkv_attention.py:145).
+            # DKV_ROUTE_DUMP=1 — dump the reader's ENTIRE view of the routed set,
+            # so generation 0 (cold pool) can be diffed against generation 1 (warm)
+            # for the identical prompt. The cold-pool hypothesis is that some
+            # routed slot was NEVER WRITTEN, in which case it reads as the zeros
+            # torch.zeros left there; `unwritten` counts exactly that by checking
+            # each routed slot's stored anchor for all-zero, which no real
+            # compressed block produces.
+            if _ROUTE_DUMP:
+                try:
+                    _sl = cpu_indices.tolist()
+                    _pool = getattr(self, "native_pool", None)
+                    _sq, _unwritten = [], []
+                    if _pool is not None:
+                        for _s in _sl:
+                            _sq.append(int(_pool.seq_lens[_s]))
+                            if not bool(_pool.anchors_KV[_s].any()):
+                                _unwritten.append(_s)
+                    print(f"[ROUTE-DUMP] gen={_ROUTE_DUMP_STATE['gen']} "
+                          f"layer={layer_idx} n={len(_sl)} slots={_sl} "
+                          f"anchors={cpu_anchors.tolist()} seq_lens={_sq} "
+                          f"UNWRITTEN={_unwritten}", flush=True)
+                except Exception as _e:                              # noqa: BLE001
+                    print(f"[ROUTE-DUMP] failed: {_e}", flush=True)
+
             if _SLOT_TRACE:
                 _idx = cpu_indices.tolist()
                 _seen, _dupes = set(), []

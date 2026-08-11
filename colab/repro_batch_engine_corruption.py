@@ -4,10 +4,14 @@ STATUS: OPEN, but NO LONGER INTERMITTENT -- it is 100% DETERMINISTIC and the
 repro is one command. That reframing is the main result here; everything below
 about "fires ~15%" was an artefact of how it was being sampled.
 
-    REPS=1, fresh process, the exact prompt below:  10/10 CORRUPT
-    REPS=2, fresh process:  generation 0 corrupt, generation 1 CLEAN  (3/3 runs)
+    REPS=1, fresh process:   ~13/18 CORRUPT across all batches (10/10, then 3/6,
+                             then 0/2) -- roughly 70%, NOT the 100% an early
+                             10/10 streak suggested. Do not trust a streak.
+    REPS=2, fresh process:   generation 0 corrupt, generation 1 CLEAN (3/3)
+    PRE-EXISTING:            5/6 at commit 6f24bb19, before any change in this
+                             series, so it is not a regression from this work.
 
-So: THE FIRST GENERATION ON A COLD DKV POOL IS ALWAYS CORRUPTED, and every
+So: THE FIRST GENERATION ON A COLD DKV POOL IS USUALLY CORRUPTED (~70%), and every
 generation after it in the same process is clean. Sessions are unique per
 iteration, so this is not turn-to-turn carry-over; it is cold pool vs warm pool.
 
@@ -19,7 +23,16 @@ Why it ever looked intermittent, twice over:
     (newlines / list marker / ASCII punctuation) sometimes hold on garbled text.
     Corruption is 100%; assertion sensitivity is 60%.
 
-Chase it as a deterministic cold-vs-warm difference, NOT as a race. A cold pool is
+THE ROUTED-SET DIFF CANNOT BE DONE AS FRAMED, and that is itself the finding.
+DKV_ROUTE_DUMP=1 instruments get_cached_decode_blocks at three depths -- inside
+the compressed branch, outside it, and at FUNCTION ENTRY before every early
+return. All three print NOTHING on runs that corrupt. So this decode never
+consults DKV's block metadata at all: at ~60 prompt tokens against a 257-token
+routing block there are no DKV blocks to route, and the corruption happens on the
+path taken when the block set is EMPTY. Stop looking at routing/pool/slot code --
+none of it runs here -- and look at what dkv_forward does with an empty block set.
+
+Chase the rest as a cold-vs-warm difference, NOT as a race. A cold pool is
 freshly torch.zeros'd and lazily allocated; a warm one has slots that have been
 written and recycled. Reading a slot that was never written yields zeros, and
 zeros here evidently decode to garbage -- which would mean a warm pool MASKS the
@@ -119,6 +132,13 @@ async def main():
         # is a new autotune key and forces a fresh benchmarking pass. If autotune
         # is what corrupts the first generation, corruption should follow the
         # SHAPE CHANGES rather than sitting only on iteration 0.
+        # Tag every ROUTE-DUMP line with which generation produced it, so gen 0
+        # (cold pool) and gen 1 (warm) can be separated in one capture.
+        try:
+            from native_core import kv_runtime_manager as _krm
+            _krm._ROUTE_DUMP_STATE["gen"] = i
+        except Exception:
+            pass
         _p = PROMPT
         if os.environ.get("VARY_LEN") == "1":
             _p = PROMPT.replace("three major colors",
