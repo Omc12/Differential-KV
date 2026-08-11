@@ -59,6 +59,8 @@ class CUDAGraphDecodeRunner:
         self._static_position_ids    = None   # [B, 1] long — static buffer
         self._static_output_logits   = None   # [B, V] float — static output
         self._captured_shape_sig     = None   # (batch, seq) shape for invalidation
+        self._captured_past_kv       = None   # cache object the graph mutates in place
+        self._static_cache_position  = None   # [q] long — KV slot to write this step
         self._model_ref              = None   # weak ref to the model (non-owning)
         # CUDA graph capture is DISABLED by default.
         #
@@ -93,7 +95,92 @@ class CUDAGraphDecodeRunner:
         """Returns True if a CUDA graph has been captured and is ready for replay."""
         return self._graph is not None and self._capture_enabled
 
-    def capture(self, model, input_ids: torch.Tensor, position_ids: torch.Tensor):
+    def _fill_mask(self, position_ids):
+        """Causal mask for a decode step, written in place on-device.
+
+        Entry j is 0 where key j is visible to this query and -inf otherwise.
+        For a decode step every key up to the current absolute position is
+        visible, so the row is a prefix of zeros. Done with a device-side
+        comparison -- no host round-trip, so it stays valid to call between
+        graph replays.
+        """
+        _min = torch.finfo(self._static_attn_mask.dtype).min
+        cols = torch.arange(self._mask_kv_len, device=position_ids.device)
+        # position_ids is [B, q]; allow keys <= that query's absolute position.
+        allowed = cols.view(1, 1, 1, -1) <= position_ids.view(
+            position_ids.shape[0], 1, position_ids.shape[1], 1)
+        self._static_attn_mask.copy_(
+            torch.where(allowed,
+                        torch.zeros((), device=position_ids.device,
+                                    dtype=self._static_attn_mask.dtype),
+                        torch.full((), _min, device=position_ids.device,
+                                   dtype=self._static_attn_mask.dtype)))
+
+    # ── Decode-state snapshot/restore ─────────────────────────────────────
+    # Warmup and capture each run a REAL forward, so between them they advance
+    # the decode state by 4 steps for the single token being captured. The
+    # wrapper then calls run() for that same token, so the KV write index ends up
+    # ahead of position_ids and the position-derived attention mask points at the
+    # wrong keys -- the model degenerates into repeating one token while still
+    # returning well-formed logits. Capture must therefore be a no-op on state:
+    # snapshot before, restore after, so run() performs exactly one write.
+    #
+    # Two kinds of state matter on a hybrid model like Qwen3.5:
+    #   StaticLayer          -- `cumulative_length`, a 0-dim DEVICE tensor that is
+    #                           the K/V write index (slot contents past it are
+    #                           masked off, so only the counter needs restoring).
+    #   LinearAttentionLayer -- `conv_states` / `recurrent_states`, dicts of
+    #                           tensors carrying the recurrence. These are not
+    #                           reconstructible from a counter; they must be cloned.
+    _STATE_DICTS = ("conv_states", "recurrent_states")
+
+    @staticmethod
+    def _snapshot_cache(cache):
+        snap = []
+        for layer in getattr(cache, "layers", []) or []:
+            ent = {}
+            cl = getattr(layer, "cumulative_length", None)
+            if isinstance(cl, torch.Tensor):
+                ent["cumulative_length"] = cl.clone()
+            elif isinstance(cl, int):
+                ent["cumulative_length"] = cl
+            for name in CUDAGraphDecodeRunner._STATE_DICTS:
+                d = getattr(layer, name, None)
+                if isinstance(d, dict):
+                    ent[name] = {k: (v.clone() if isinstance(v, torch.Tensor) else v)
+                                 for k, v in d.items()}
+            snap.append(ent)
+        return snap
+
+    @staticmethod
+    def _restore_cache(cache, snap):
+        # Restores IN PLACE. The captured graph holds raw pointers to these exact
+        # tensors, so rebinding the attribute to a fresh tensor would leave the
+        # graph writing into an orphaned buffer.
+        for layer, ent in zip(getattr(cache, "layers", []) or [], snap):
+            cl = ent.get("cumulative_length")
+            if cl is not None:
+                cur = getattr(layer, "cumulative_length", None)
+                if isinstance(cur, torch.Tensor) and isinstance(cl, torch.Tensor):
+                    cur.copy_(cl)
+                else:
+                    setattr(layer, "cumulative_length", cl)
+            for name in CUDAGraphDecodeRunner._STATE_DICTS:
+                d = ent.get(name)
+                if not isinstance(d, dict):
+                    continue
+                cur = getattr(layer, name, None)
+                if not isinstance(cur, dict):
+                    continue
+                for k, v in d.items():
+                    tgt = cur.get(k)
+                    if isinstance(v, torch.Tensor) and isinstance(tgt, torch.Tensor)                             and tgt.shape == v.shape:
+                        tgt.copy_(v)
+                    else:
+                        cur[k] = v
+
+    def capture(self, model, input_ids: torch.Tensor, position_ids: torch.Tensor,
+                cache=None):
         """
         Capture a CUDA graph of model(input_ids, position_ids, use_cache=True).
 
@@ -104,8 +191,23 @@ class CUDAGraphDecodeRunner:
             model:        The causal LM model (wrapper.model).
             input_ids:    [B, 1] int64 on CUDA — current token ids.
             position_ids: [B, 1] int64 on CUDA — current absolute positions.
+            cache:        The decode cache the forward mutates (the DKV bypass
+                          StaticCache). REQUIRED — without it capture cannot undo
+                          its own warmup writes, so it refuses rather than leave
+                          the cache misaligned and produce silently wrong text.
         """
         if not self._capture_enabled:
+            return
+
+        if cache is None:
+            if not self._unsafe_capture_warned:
+                import sys as _sys
+                print(
+                    "[DKV] CUDA graph capture skipped: no decode cache supplied, "
+                    "so capture's warmup writes could not be rolled back.",
+                    file=_sys.stderr,
+                )
+                self._unsafe_capture_warned = True
             return
 
         # A full DKV model is not a static CUDA-graph workload yet.  Its
@@ -135,15 +237,99 @@ class CUDAGraphDecodeRunner:
 
         self._model_ref = model
 
-        # ── Warmup ────────────────────────────────────────────────────────
-        with torch.no_grad():
-            for _ in range(self._num_warmup):
-                _out = model(input_ids=input_ids, position_ids=position_ids, use_cache=True)
-        torch.cuda.synchronize()
-
         # ── Allocate static input buffers (pinned to a fixed GPU address) ──
+        # Allocated BEFORE warmup on purpose: warmup must run through the exact
+        # same tensors as the capture. Warming up on the caller's tensors without
+        # a cache_position let every warmup pass append another token to the dense
+        # KV cache at a drifting slot, so capture recorded a forward over a cache
+        # already polluted with 3 junk tokens.
         self._static_input_ids    = input_ids.clone()
         self._static_position_ids = position_ids.clone()
+
+        # ── Static 4D attention mask ──────────────────────────────────────
+        # Without this, transformers builds the causal mask itself every forward
+        # and masking_utils.eager_mask does
+        #     torch.where(mask, tensor(0.0, device=...), min_dtype)
+        # where min_dtype is a bare PYTHON FLOAT. Torch wraps that scalar in a
+        # CPU tensor and copies it to the GPU, which raises during capture:
+        # "Cannot copy between CPU and CUDA tensors during CUDA graph capture
+        # unless the CPU tensor is pinned".
+        #
+        # _preprocess_mask_arguments returns an already-4D mask AS-IS and skips
+        # creation entirely, so supplying one avoids that copy. It also fixes the
+        # separate "(*bias): last dimension must be contiguous" SDPA raises on
+        # StaticCache's sliced mask, because this buffer is contiguous by
+        # construction.
+        #
+        # Contents are rebuilt per step in run(), OUTSIDE the graph -- only the
+        # buffer's address has to stay fixed, exactly like input_ids.
+        _dtype = next(model.parameters()).dtype
+        _kv_len = int(os.environ.get("DKV_GRAPH_MAX_CTX", "8192"))
+        _q = int(input_ids.shape[1])
+        self._static_attn_mask = torch.zeros(
+            (int(input_ids.shape[0]), 1, _q, _kv_len),
+            device=input_ids.device, dtype=_dtype)
+        self._mask_kv_len = _kv_len
+        self._fill_mask(position_ids)
+
+        # ── Static cache_position ─────────────────────────────────────────
+        # THE correctness blocker for replay. If cache_position is not passed,
+        # model.forward builds it as
+        #     torch.arange(past_key_values.get_seq_length(), ...)
+        # and get_seq_length() is a HOST int, so capture bakes the write index in
+        # as a constant. Every replay then index_copy_'s the new token's K/V into
+        # the SAME slot and attends over a prefix that never grows -- the model
+        # degenerates into repeating a token ("susersusers...") while still
+        # returning well-formed logits, so nothing raises.
+        #
+        # Passing it makes the write index a device tensor read at replay time.
+        # On the bypass path the dense StaticCache holds the prefix densely, so
+        # slot index == absolute position and position_ids can drive it directly.
+        self._static_cache_position = position_ids.reshape(-1).clone()
+
+        # ── Hybrid (linear-attention) models cannot be captured ───────────
+        # Qwen3.5 interleaves LinearAttentionLayer with full attention. Those
+        # layers REBIND their conv/recurrent state every forward
+        # (recurrent_states[i] = new_tensor) instead of writing in place --
+        # measured: 0/36 state tensors kept their address across a decode step.
+        # A replay executes no Python, so the dict never gets reassigned and the
+        # graph keeps reading and writing the addresses that were live at
+        # capture: the recurrence freezes while the full-attention layers keep
+        # advancing, and the model emits fluent-looking garbage with nothing
+        # raised. Refusing is the only correct option until those layers update
+        # in place, which is transformers' modeling code, not ours.
+        _recurrent = [type(L).__name__ for L in (getattr(cache, "layers", []) or [])
+                      if any(isinstance(getattr(L, _n, None), dict)
+                             for _n in self._STATE_DICTS)]
+        if _recurrent:
+            if not self._unsafe_capture_warned:
+                import sys as _sys
+                print(
+                    f"[DKV] CUDA graph capture skipped: hybrid model has "
+                    f"{len(_recurrent)} recurrent layers ({_recurrent[0]}) whose "
+                    f"state rebinds each step and cannot be replayed; using eager "
+                    f"decode for correctness.",
+                    file=_sys.stderr,
+                )
+                self._unsafe_capture_warned = True
+            return
+
+        _snap = self._snapshot_cache(cache)
+
+        # ── Warmup ────────────────────────────────────────────────────────
+        # Same tensors, same kwargs as the capture below. Because every pass
+        # writes K/V at the identical cache_position, warmup is idempotent: the
+        # cache ends holding exactly one token at that slot, which is precisely
+        # the state one real decode step would have produced. The first replay
+        # then overwrites it correctly.
+        with torch.no_grad():
+            for _ in range(self._num_warmup):
+                model(input_ids=self._static_input_ids,
+                      position_ids=self._static_position_ids,
+                      attention_mask=self._static_attn_mask,
+                      cache_position=self._static_cache_position,
+                      use_cache=True)
+        torch.cuda.synchronize()
 
         # ── Capture ────────────────────────────────────────────────────────
         self._graph = torch.cuda.CUDAGraph()
@@ -152,10 +338,21 @@ class CUDAGraphDecodeRunner:
                 _captured_out = model(
                     input_ids=self._static_input_ids,
                     position_ids=self._static_position_ids,
+                    attention_mask=self._static_attn_mask,
+                    cache_position=self._static_cache_position,
                     use_cache=True,
                 )
                 # Capture only the last-token logits slice — that's all we need
                 self._static_output_logits = _captured_out.logits[:, -1:, :]
+                # The graph writes K/V into THIS cache object every replay, so the
+                # caller's `past_kv = outputs.past_key_values` must keep pointing at
+                # it. Without this the decode loop sets past_kv=None on the first
+                # replayed step and the next eager fallback would re-prefill.
+                self._captured_past_kv = _captured_out.past_key_values
+
+        # Roll the decode state back to exactly what it was on entry, so the
+        # caller's following run() is this token's one and only step.
+        self._restore_cache(cache, _snap)
 
         self._captured_shape_sig = sig
 
@@ -174,19 +371,26 @@ class CUDAGraphDecodeRunner:
         # In-place copy new tokens into static buffers (no allocation)
         self._static_input_ids.copy_(input_ids, non_blocking=True)
         self._static_position_ids.copy_(position_ids, non_blocking=True)
+        # Rebuild the causal row for THIS step. Outside the graph, so it may use
+        # ordinary ops; only the buffer address is what replay depends on.
+        self._fill_mask(position_ids)
+        self._static_cache_position.copy_(position_ids.reshape(-1), non_blocking=True)
 
         self._graph.replay()
 
         # Return a lightweight wrapper so batch_engine can do out.logits[:, -1, :]
-        return _GraphOutput(self._static_output_logits)
+        return _GraphOutput(self._static_output_logits, self._captured_past_kv)
 
     def invalidate(self):
         """Reset — next run() will re-capture (called when pool layout changes)."""
         self._graph                 = None
         self._static_input_ids      = None
         self._static_position_ids   = None
+        self._static_attn_mask      = None
         self._static_output_logits  = None
         self._captured_shape_sig    = None
+        self._captured_past_kv      = None
+        self._static_cache_position = None
 
 
 class _GraphOutput:
@@ -197,13 +401,14 @@ class _GraphOutput:
     _static_output_logits already has shape [B, 1, V] (last token only),
     so out.logits[:, -1, :] correctly gives [B, V].
     """
-    __slots__ = ("logits",)
+    __slots__ = ("logits", "past_key_values")
 
-    def __init__(self, static_logits: torch.Tensor):
-        # static_logits: [B, 1, V] — the captured output slice
-        # Expand to [B, 2, V] so [:, -1, :] gives the right slice
-        # (the static_logits tensor IS the last-token slice)
-        self.logits = static_logits  # [B, 1, V] — index [:, -1, :] gives [B, V]
+    def __init__(self, static_logits: torch.Tensor, past_key_values=None):
+        # static_logits: [B, 1, V] — the captured output slice, so [:, -1, :]
+        # gives [B, V] exactly as it would on a real CausalLMOutput.
+        self.logits = static_logits
+        # Same cache object the capture ran against; the graph mutates it in place.
+        self.past_key_values = past_key_values
 
 
 

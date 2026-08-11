@@ -1237,6 +1237,31 @@ def apply_dkv_attention_patch(model, kv_manager):
                     if "past_key_values" in _op_params:
                         kwargs_clean["past_key_values"] = cache_obj
 
+                    # A StaticCache's key buffer is its FULL preallocated length
+                    # (max_cache_len), not the number of tokens written, and the
+                    # block below only builds a mask when q_len > 1. So a decode
+                    # step arrived with attention_mask=None against 8192 keys, of
+                    # which all but a handful are uninitialised -- the model
+                    # attended to zeroed slots and emitted word salad. DynamicCache
+                    # never showed this because its buffer is exactly as long as
+                    # the tokens in it. Build the mask over the whole buffer:
+                    # position_ids gives each query's absolute position, and the
+                    # bypass cache is dense, so keys 0..position are the valid ones.
+                    if (_GRAPH_SAFE_DECODE and cache_obj is not None
+                            and attention_mask is None
+                            and position_ids is not None and position_ids.numel() > 0):
+                        _buf = getattr(cache_obj, "max_cache_len", None)
+                        if _buf:
+                            _dev = hidden_states.device
+                            _dt = hidden_states.dtype
+                            _col = torch.arange(_buf, device=_dev).view(1, 1, 1, -1)
+                            _p = position_ids.reshape(position_ids.shape[0], 1, -1, 1)
+                            attention_mask = torch.where(
+                                _col <= _p,
+                                torch.zeros((), device=_dev, dtype=_dt),
+                                torch.full((), torch.finfo(_dt).min,
+                                           device=_dev, dtype=_dt))
+
                     # Multi-chunk bypass correctness. The wrapper prefills in
                     # chunks and calls the model WITHOUT past_key_values, so the
                     # model sees key_value_length == query_length, takes the SDPA
@@ -1269,6 +1294,20 @@ def apply_dkv_attention_patch(model, kv_manager):
                             _m = torch.zeros((q_len, _kv_len), dtype=_dt, device=_dev)
                             _m.masked_fill_(~_allowed, torch.finfo(_dt).min)
                             attention_mask = _m.view(1, 1, q_len, _kv_len)
+
+                    # cache_position must address OUR bypass cache, not the
+                    # model-level one. Every attended layer is patched and uses
+                    # sess_dict["dense_cache"], so the cache model.forward was
+                    # handed stays empty -- its get_seq_length() is 0, and the
+                    # cache_position derived from it is [0] on every decode step.
+                    # DynamicCache survives that because it appends via cat and
+                    # ignores the index, but StaticCache writes AT the index, so
+                    # every decode token landed in slot 0 and the output was
+                    # word salad. position_ids holds the true absolute position
+                    # and the bypass cache is dense, so slot == position.
+                    if (_GRAPH_SAFE_DECODE and cache_obj is not None
+                            and position_ids is not None and position_ids.numel() > 0):
+                        cache_position = position_ids.reshape(-1)
 
                     # StaticCache hands SDPA a mask that is a SLICE of the
                     # preallocated [B, 1, q, max_cache_len] buffer, and SDPA

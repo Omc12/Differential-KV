@@ -1598,7 +1598,39 @@ class PyTorchDKVHFWrapper:
                 if self._cuda_graph_runner is not None:
                     if not self._cuda_graph_runner.is_captured():
                         try:
-                            self._cuda_graph_runner.capture(self.model, input_ids, pos_tensor)
+                            # Hand capture() the cache the DKV bypass actually
+                            # mutates so it can roll back its own warmup writes.
+                            # Without it the runner declines to capture rather
+                            # than leave the KV write index ahead of position_ids.
+                            _dkv_cache = None
+                            try:
+                                _ws = getattr(self.manager, "decode_workspace", None)
+                                _sids = getattr(self.model, "_dkv_session_ids", None)
+                                _sid = (_sids[0] if _sids else None)
+                                if _ws is not None and _sid in _ws:
+                                    _dkv_cache = _ws[_sid].get("dense_cache")
+                            except Exception:
+                                _dkv_cache = None
+
+                            # Advertise the static-state ABI only for the case
+                            # that has actually been shown replayable: the
+                            # BYPASS path under DKV_GRAPH_SAFE_DECODE, where the
+                            # only decode state is a StaticCache whose write
+                            # index is a device tensor updated in place.
+                            #
+                            # A dense_cache exists only while the session is
+                            # bypassed, so its presence IS the bypass test. Once
+                            # DKV engages, decode runs through the routed sparse
+                            # path, whose block routing is recomputed in Python
+                            # every step and would be frozen by replay — that
+                            # path still needs its own static ABI. The runner
+                            # applies one further refusal of its own for hybrid
+                            # models with recurrent layers.
+                            self.model._dkv_cuda_graph_safe = bool(
+                                _dkv_cache is not None
+                                and os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1")
+                            self._cuda_graph_runner.capture(
+                                self.model, input_ids, pos_tensor, cache=_dkv_cache)
                         except Exception:
                             pass
                     
