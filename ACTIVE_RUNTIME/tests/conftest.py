@@ -14,7 +14,15 @@ import inspect
 _GOOD_DKV_TEST_DEFAULTS = {
     "DKV_COMPRESSED_DECODE": "1",     # force sparse — never the dense fallback for DKV runs
     "DKV_COMPRESSED_MIN_CTX": "8192",  # (moot while COMPRESSED_DECODE=1; kept for parity)
-    "DKV_DECODE_CACHE": "1",          # decompress-and-cache fast decode (~2x tps; bit-exact)
+    # NOTE: this is a NO-OP ON CUDA. The only reader of DKV_DECODE_CACHE is
+    # mlx_dkv_wrapper.py:1772; the CUDA path gates the same feature on
+    # DKV_DECODE_CACHE_CUDA (dkv_attention.py:145), which defaults to "0".
+    # So the "~2x tps decode cache" that this line and
+    # serving/decode_config.py both believe is enabled is actually OFF on CUDA,
+    # in tests AND in production. Left set for MLX parity and to keep the two
+    # default sets identical; flipping the CUDA flag on is a perf change that
+    # needs measuring, not a rename.
+    "DKV_DECODE_CACHE": "1",          # decompress-and-cache fast decode (MLX only)
     "DKV_SPARSE_BIAS": "auto",        # adaptive merge bias (synthesis- AND NIAH-safe)
     "DKV_V_SCALE": "1",               # V rebalanced before joint SVD (CUDA↔MLX parity)
     # PIN THE POOL BUDGET — this is an ISOLATION fix, not a tuning knob.
