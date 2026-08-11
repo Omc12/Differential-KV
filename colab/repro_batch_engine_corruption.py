@@ -1,11 +1,19 @@
 """Repro for intermittent OUTPUT CORRUPTION in the ContinuousBatchEngine path.
 
-STATUS: OPEN, and NOT A DKV DEFECT. Run UNPATCH=1 to see it with DKV's attention
-interception removed entirely: 10/10 corrupt, against 7/10 and 3/6 with DKV
-installed. The bug lives in serving/batch_engine.py (or in how it drives the
-model), not in the KV compression path. Every DKV-side hypothesis eliminated
-below was therefore chasing the wrong component -- kept only so nobody repeats
-them.
+STATUS: OPEN. Component NOT established.
+
+DO NOT TRUST UNPATCH=1 AS A CONTROL. It measured 10/10 corrupt and was briefly
+read as proving the bug is not DKV's. It proves nothing of the kind: batch_engine
+calls self.wrapper.model(input_ids, position_ids, use_cache=True) with NO
+past_key_values (:1112, :1136), so DKV's interception is the ONLY thing threading
+a KV cache. Removing it leaves the model with no cache at all, and garbage is the
+expected result by construction. The flag is kept because it is useful for other
+questions, but it cannot separate "engine bug" from "DKV bug".
+
+What IS solid: the engine corrupts (7/10 cold with DKV installed) while
+model.generate() on the SAME model in the SAME process is clean 3/3 with coherent
+output. So the fault is in the engine-plus-DKV KV path, not in the model or the
+environment. Which of the two owns it is still open.
 
 STATUS (rate), NO LONGER INTERMITTENT -- it is 100% DETERMINISTIC and the
 repro is one command. That reframing is the main result here; everything below
@@ -199,6 +207,21 @@ async def main():
         bad += int(corrupt)
         if corrupt:
             print(f"  [{i}] CORRUPT: {txt[:90]!r}", flush=True)
+    # DIRECT=1 — after the engine run, generate the SAME prompt straight through
+    # model.generate() in the SAME process. If the engine's output is corrupt
+    # while the direct one is clean, the defect is in the engine's prefill/decode
+    # loop rather than the model or the environment, and that is the whole
+    # remaining question.
+    if os.environ.get("DIRECT") == "1":
+        import torch as _t
+        _tok = w.tokenizer
+        _ids = _tok(PROMPT, return_tensors="pt").input_ids.to("cuda")
+        with _t.no_grad():
+            _out = w.model.generate(_ids, max_new_tokens=128, do_sample=False,
+                                    pad_token_id=_tok.eos_token_id)
+        _txt = _tok.decode(_out[0][_ids.shape[1]:], skip_special_tokens=True)
+        print(f"DIRECT corrupt={'�' in _txt}  text={_txt[:110]!r}", flush=True)
+
     await eng.stop()
     print(f"RESULT corrupt={bad}/{N}  mode={os.environ.get('MODE','dkv')}", flush=True)
 
