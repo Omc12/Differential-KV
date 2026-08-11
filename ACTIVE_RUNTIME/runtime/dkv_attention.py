@@ -1154,7 +1154,38 @@ def apply_dkv_attention_patch(model, kv_manager):
                     if sid and sid != "dummy_session":
                         if hasattr(kv_manager, "decode_workspace"):
                             sess_dict = kv_manager.decode_workspace.setdefault(sid, {})
-                            if "dense_cache" not in sess_dict:
+                            # RESET ON A NEW SEQUENCE. This cache was created once
+                            # per session and then kept forever, so a second
+                            # generation on the same session began with the FIRST
+                            # one's keys still in it and the model attended to a
+                            # context nobody asked for.
+                            #
+                            # It makes greedy decoding nondeterministic, which is
+                            # how it was found: with the patch installed, three
+                            # do_sample=False generations of one prompt produced
+                            # THREE DIFFERENT outputs, and generation 1 matched the
+                            # unpatched model exactly while 2 and 3 drifted. With
+                            # the patch removed, 1 distinct output from 3.
+                            #
+                            # A prefill whose first position is 0 IS a new
+                            # sequence, which is the cheapest reliable signal here:
+                            # clear_session() also drops this entry, but nothing
+                            # guarantees a caller goes through it -- model.generate()
+                            # on a DKV-patched model never does.
+                            # ONLY at the first DKV layer. One DynamicCache holds
+                            # EVERY layer's entries, so resetting it per layer
+                            # wipes the layers already written in this same
+                            # prefill -- which produced a deterministic but
+                            # completely wrong answer when tried.
+                            _fresh_seq = False
+                            if not is_decode and captured_layer_idx == _first_dkv_layer:
+                                _p0 = None
+                                if position_ids is not None and position_ids.numel() > 0:
+                                    _p0 = int(position_ids.reshape(-1)[0])
+                                elif cache_position is not None and cache_position.numel() > 0:
+                                    _p0 = int(cache_position.reshape(-1)[0])
+                                _fresh_seq = (_p0 == 0)
+                            if "dense_cache" not in sess_dict or _fresh_seq:
                                 from transformers.cache_utils import DynamicCache
                                 sess_dict["dense_cache"] = DynamicCache()
                             cache_obj = sess_dict["dense_cache"]

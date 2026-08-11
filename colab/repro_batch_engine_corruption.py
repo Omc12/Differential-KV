@@ -166,6 +166,47 @@ async def main():
         print(f"[UNPATCH] restored {_n} attention modules + disabled lm_head slicing",
               flush=True)
 
+    # MINCACHE=1 — THE VALID CONTROL. UNPATCH alone is not one: batch_engine calls
+    # model(...) with no past_key_values, so DKV's interception is the only thing
+    # threading a KV cache and removing it starves the model by construction.
+    # This replaces DKV's forward with a shim that does NOTHING BUT thread a
+    # DynamicCache into the original attention. If output is clean, cache
+    # threading is fine without DKV and the fault is in DKV's bypass cache
+    # handling; if it still corrupts, the engine's own loop is wrong.
+    if os.environ.get("MINCACHE") == "1":
+        import inspect
+        from transformers.cache_utils import DynamicCache
+        _cache = DynamicCache()
+        _m = w.model
+        _layers = _m.model.layers if hasattr(_m, "model") else _m.layers
+        _n = 0
+        for _l in _layers:
+            _a = getattr(_l, "self_attn", None)
+            _of = getattr(_a, "_original_forward", None) if _a is not None else None
+            if _of is None:
+                continue
+            try:
+                _params = set(inspect.signature(_of).parameters)
+            except (ValueError, TypeError):
+                _params = {"past_key_value"}
+
+            def _mk(of, params):
+                def fwd(hidden_states, **kw):
+                    # Same key-selection rule DKV's bypass uses: pass only the
+                    # cache kwarg this transformers version actually accepts.
+                    if "past_key_value" in params:
+                        kw["past_key_value"] = _cache
+                    if "past_key_values" in params:
+                        kw["past_key_values"] = _cache
+                    return of(hidden_states, **kw)
+                return fwd
+
+            _a.forward = _mk(_of, _params)
+            _n += 1
+        _m._disable_lm_head_slicing = True
+        print(f"[MINCACHE] {_n} modules -> plain DynamicCache, no DKV logic",
+              flush=True)
+
     eng = ContinuousBatchEngine(w, max_batch_size=2)
     eng.start()
     bad = 0
@@ -193,7 +234,7 @@ async def main():
                                 "three major colors " + ("and shades " * (i % 7)))
         q = await eng.submit(_sid, {"prompt": _p, "max_tokens": 128,
                                            "temperature": 0.0, "top_p": 0.9,
-                                           "repetition_penalty": 1.15})
+                                           "repetition_penalty": float(os.environ.get("REP_PEN","1.15"))})
         buf = []
         while True:
             c = await asyncio.wait_for(q.get(), timeout=60.0)
