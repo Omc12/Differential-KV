@@ -253,6 +253,53 @@ def compute_boost_multipliers(tok_strs, tids, counts, total_tokens):
                 b = tok_boost * (_idf_weight(tids[i], counts, total_tokens) / 2.0) * priority * m
                 boost[i] = max(boost[i], b)
 
+    # ── Rarity pass — RARE PROSE WORDS ───────────────────────────────────────
+    # Every pass above flags a SHAPE: digits, all-caps runs, '-'/'_', table rows,
+    # entity owners. That protects codes and tables and leaves ordinary rare
+    # WORDS -- author names, technical terms -- with no boost at all, so they
+    # must out-error 250 tokens of filler to earn an exact slot.
+    #
+    # That is precisely what document-level synthesis needs. Measured on the
+    # Random Features paper at 16k (colab/multifact_eval_cuda.py): DKV scored
+    # 30.0 against dense's 60.0, and forcing DKV_MAX_RESIDUAL_TOKENS=256 -- i.e.
+    # making EVERY token exact -- recovered exactly 60.0. So the ceiling was not
+    # routing coverage (K=64 changed nothing, 33.3) and not rank
+    # (DKV_RANK_BOOST=auto changed nothing, 30.0); it was WHICH 128 tokens got
+    # exact treatment.
+    #
+    # This does NOT raise the budget: the pool still keeps max_residual rows, so
+    # the same number of slots is spent on a better-chosen set. The weight is
+    # deliberately below 1 so a code or table cell still outranks a merely rare
+    # word when they compete for the last slot -- NIAH must not regress to buy
+    # synthesis.
+    # RARITY IS MEANINGLESS WITHOUT FREQUENCIES. _idf_weight falls back to
+    # count=1 for an unknown token, so with counts={} EVERY token scores the
+    # 6.0 ceiling and this pass boosts the whole block -- which is worse than not
+    # running, because a boost applied uniformly carries no ranking information
+    # and simply inflates n_boosted. Callers that cannot supply counts get the
+    # shape-based passes only.
+    if os.environ.get("DKV_RESIDUAL_RARITY_CAPTURE", "1") == "1" and counts:
+        try:
+            _rarity_w = float(os.environ.get("DKV_RESIDUAL_RARITY_WEIGHT", "0.5"))
+        except ValueError:
+            _rarity_w = 0.5
+        try:
+            # Floor in IDF units. _idf_weight saturates at 6.0, and a token
+            # appearing once in a 16k context sits near the top of that range,
+            # so 3.0 selects genuinely rare vocabulary rather than common prose.
+            _rarity_min = float(os.environ.get("DKV_RESIDUAL_RARITY_MIN_IDF", "3.0"))
+        except ValueError:
+            _rarity_min = 3.0
+        for i in range(S):
+            if boost[i] > 1.0:
+                continue                     # already protected by a shape rule
+            sc = tok_strs[i].strip()
+            if not sc or not any(c.isalnum() for c in sc):
+                continue                     # punctuation/whitespace carries nothing
+            _idf = _idf_weight(tids[i], counts, total_tokens)
+            if _idf >= _rarity_min:
+                boost[i] = tok_boost * (_idf / 2.0) * _rarity_w
+
     # Window pass (contiguous runs)
     final = list(boost)
     W = 2

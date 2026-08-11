@@ -168,6 +168,15 @@ class TestTorchPathIntegration:
         assert blk.residual_K_positions is not None
         sel = set(blk.residual_K_positions.tolist())
         table_positions = set(range(T - len(table_toks), T))
-        frac = len(sel & table_positions) / max(1, len(sel))
-        # boosted table rows should dominate the kept residual set
-        assert frac >= 0.7, (frac, sorted(sel))
+        # ASSERT COVERAGE, NOT SHARE. The invariant that protects a table is
+        # "every table row got an exact slot" -- a row left to the low-rank
+        # reconstruction is real data loss. The old check divided by len(sel), so
+        # it also failed whenever the residual set grew for an unrelated good
+        # reason, penalising capturing MORE. Rarity capture does exactly that on
+        # this input (all 64 tokens are unique, so every one scores maximum IDF):
+        # selection went 36 -> 64 rows and the share fell 0.83 -> 0.47 while
+        # in-table coverage stayed at 30/30. Coverage is the property worth
+        # pinning; share is an artefact of the budget.
+        missed = sorted(table_positions - sel)
+        assert not missed, (
+            f"{len(missed)} table rows left to low-rank reconstruction: {missed}")

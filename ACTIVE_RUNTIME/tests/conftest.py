@@ -17,6 +17,18 @@ _GOOD_DKV_TEST_DEFAULTS = {
     "DKV_DECODE_CACHE": "1",          # decompress-and-cache fast decode (~2x tps; bit-exact)
     "DKV_SPARSE_BIAS": "auto",        # adaptive merge bias (synthesis- AND NIAH-safe)
     "DKV_V_SCALE": "1",               # V rebalanced before joint SVD (CUDA↔MLX parity)
+    # PIN THE POOL BUDGET — this is an ISOLATION fix, not a tuning knob.
+    # Without it the budget is derived from FREE VRAM at manager init
+    # ("ceiling: 50% of N GB free VRAM"), so max_blocks depends on how much
+    # memory the PREVIOUS test happened to leave allocated. Block sizing feeds
+    # routing and eviction, which makes numeric results order-dependent: a test
+    # passes alone and fails in the suite, or flips between suite runs, with no
+    # code change anywhere. test_formatting_rendering was intermittent for
+    # exactly this reason.
+    # 2.0 GB comfortably covers the 0.5B and 1.5B models the suite uses (they
+    # derive 1.0 and 1.9 GB respectively when VRAM is free) so pinning it
+    # reproduces the uncontended sizing every time.
+    "DKV_POOL_BUDGET_GB": "2.0",
 }
 
 
