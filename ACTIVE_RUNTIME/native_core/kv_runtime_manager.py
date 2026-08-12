@@ -1501,6 +1501,35 @@ class KVRuntimeManager:
             if pending <= 0:
                 self.finalize_srl_index(session_id)
 
+                # Trim ONCE, here, where prefill is actually finished.
+                # Compression allocates and frees thousands of short-lived
+                # tensors of many sizes, and the caching allocator keeps every
+                # segment it grew: measured on Qwen2.5-1.5B at 32k, 5.44 GB of
+                # live tensors against 8.90 GB reserved -- 3.46 GB of churn held
+                # for the whole decode, where dense holds 0.68 GB. That gap is
+                # the reason DKV's real device usage sat ABOVE dense despite a
+                # smaller KV.
+                #
+                # Doing it per chunk cost 1.21 s of a 4.6 s prefill and is gated
+                # on memory pressure above; doing it once at the boundary is a
+                # single ~0.12 s collect for the whole prefill, and decode
+                # allocates almost nothing so the freed segments stay free.
+                # empty_cache ONLY -- deliberately no gc.collect() here.
+                # Measured on Qwen2.5-1.5B at 32k, isolating the two halves:
+                #   off        ttft 15.04 s   reserved 8.82 GB
+                #   gc only    ttft 19.30 s   reserved 8.82 GB
+                #   gc + empty ttft 20.41 s   reserved 5.95 GB
+                # The collect costs 4.3 s and frees nothing, because CPython
+                # refcounts the compression temporaries away as they go out of
+                # scope -- there is no cycle for the collector to find. Every
+                # byte of the saving comes from empty_cache handing the
+                # allocator's grown segments back.
+                #
+                # DKV_POST_PREFILL_TRIM=0 keeps the segments, which trades ~2.6
+                # GB for ~1 s of TTFT on a machine with memory to spare.
+                if _os.environ.get("DKV_POST_PREFILL_TRIM", "1") != "0":
+                    _empty_cache(self.device)
+
         if _os.environ.get("DKV_TELEMETRY", "0") == "1":
             if _has_cuda():
                 alloc = torch.cuda.memory_allocated() / 1024**3
