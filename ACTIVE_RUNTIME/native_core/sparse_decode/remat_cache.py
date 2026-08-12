@@ -64,16 +64,51 @@ def remat_enabled() -> bool:
     knob-name collisions have already been found in this project where a
     same-sounding CUDA flag was a different, narrower feature with a different
     default; this does not add a fifth.
+
+    DEFAULT-ON since 2026-08-12, through the gate this module and
+    validate_cuda_dkv.py --long both name: the 32k depth sweep, where the router
+    chooses 16 of ~170 blocks and frozen routing has the most room to lose the
+    needle. 9/9 recall and 9/9 determinism on Qwen2.5-1.5B-Instruct and
+    Qwen3.5-2B, and 9/9 on multifact_eval_cuda at 16k on Qwen3.5-2B with
+    synthesis unchanged at 46.7 (facts 8/15, links 2/5) either way.
+
+    Decode throughput on Qwen2.5-1.5B, per-token inside the real generate loop:
+    13.83 -> 20.08 tok/s at 8.4k and 6.95 -> 10.18 tok/s at 32k.
+
+    KNOWN COST, recorded rather than hidden: on Qwen2.5-1.5B the 16k synthesis
+    case loses fact coverage, 5/15 -> 3/15 back to back. That model fails the
+    >=30 bar with the cache off too (16.7) so this is a failing regime either
+    way, and the model where synthesis works is unaffected -- but it is the
+    staleness contract showing up where the contract says it would, on the task
+    that needs the widest block coverage. Set DKV_REMAT_CACHE=0 for
+    synthesis-shaped work on small models.
     """
-    return os.environ.get("DKV_REMAT_CACHE", "0") == "1"
+    return os.environ.get("DKV_REMAT_CACHE", "1") == "1"
 
 
 def remat_interval() -> int:
-    """Tokens between refreshes. MLX's DKV_DECODE_CACHE_INTERVAL default is 16."""
+    """Tokens between refreshes.
+
+    MLX's DKV_DECODE_CACHE_INTERVAL default is 16; this defaults to 4 instead,
+    because on CUDA the extra staleness buys no speed. Measured on Qwen2.5-1.5B
+    at 8.4k, decode throughput is flat across the range -- 18.28 / 18.61 / 18.52
+    tok/s at 16 / 8 / 4 -- since skipping reconstruction on 3 steps in 4 already
+    captures nearly all of the saving over rebuilding every step. 4 is therefore
+    the least staleness the speedup will pay for.
+
+    Do not compare interval settings across DIFFERENT multifact_eval_cuda
+    invocations. Its tests share one wrapper and session, so `--tests synthesis`
+    and the full run score the same config differently (16.7 vs 20.0 with the
+    cache off), and an interval sweep spread across both invocations produces a
+    clean-looking monotone trend that is entirely the invocation. Held constant
+    at `--tests synthesis`, off / 16 / 8 all score 16.7 and only 4 differs
+    (26.7). Even `off` moves 16.7-20.0 between runs, so treat a few points of
+    synthesis score as noise.
+    """
     try:
-        return max(1, int(os.environ.get("DKV_REMAT_INTERVAL", "16")))
+        return max(1, int(os.environ.get("DKV_REMAT_INTERVAL", "4")))
     except ValueError:
-        return 16
+        return 4
 
 
 def remat_freeze_routing() -> bool:
