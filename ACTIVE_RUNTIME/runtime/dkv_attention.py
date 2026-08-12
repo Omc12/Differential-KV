@@ -4096,8 +4096,26 @@ def apply_dkv_attention_patch(model, kv_manager):
                         )
                         # B2: Pre-compute per-batch position offsets with a single .tolist()
                         # sync so the inner chunk loop reads plain Python ints, not tensors.
+                        # ONE sync per CHUNK, not per chunk per layer. Every
+                        # attended layer is handed the same position_ids tensor
+                        # for a given chunk, so each was paying its own .tolist()
+                        # for an identical answer: 242 syncs for a 8.4k prefill,
+                        # 0.495 s of a 3.27 s prefill -- the largest single entry
+                        # left in the profile, on a path only 39% GPU-busy. Each
+                        # costs ~2 ms because a D2H read drains the queued work.
+                        # Memo on the manager, keyed by the tensor's address so a
+                        # new chunk (a different buffer) misses and recomputes.
                         if position_ids is not None:
-                            _pos_ids_cpu = position_ids[:, 0].tolist()
+                            _pk = (position_ids.data_ptr(), int(position_ids.shape[0]))
+                            _memo = getattr(kv_manager, "_prefill_pos0_memo", None)
+                            if _memo is not None and _memo[0] == _pk:
+                                _pos_ids_cpu = _memo[1]
+                            else:
+                                _pos_ids_cpu = position_ids[:, 0].tolist()
+                                try:
+                                    kv_manager._prefill_pos0_memo = (_pk, _pos_ids_cpu)
+                                except Exception:
+                                    pass
                         else:
                             _pos_ids_cpu = [0] * bsz
                         _global_offset = _pos_ids_cpu[0]
