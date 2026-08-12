@@ -440,18 +440,56 @@ def resolve_sparse_bias(lse_sparse=None, lse_dense=None):
         return 0.0
 
 
-def _blocks_per_chunk() -> int:
+_SM_COUNT_CACHE: dict = {}
+
+
+def _sm_count(device) -> int:
+    """SM count for `device`, cached (this is on the per-layer decode path)."""
+    key = getattr(device, "index", None) or 0
+    n = _SM_COUNT_CACHE.get(key)
+    if n is None:
+        try:
+            n = int(torch.cuda.get_device_properties(device).multi_processor_count)
+        except Exception:
+            n = 32
+        _SM_COUNT_CACHE[key] = n
+    return n
+
+
+def _blocks_per_chunk(n_blocks: int = 0, h_q: int = 0, device=None) -> int:
     """KV blocks each Triton program handles before the cross-chunk reduction.
 
-    Default 16 = the long-standing value. Raising it above the routed block count
-    forces num_chunks=1, which bypasses _dispatch_reduction altogether — the
-    cheapest way to test whether a recall failure lives in the per-block math or
-    in the multi-chunk merge.
+    Chosen from GPU occupancy, not a constant. The grid is (H_q, num_chunks), so
+    a fixed 16 meant that a routed set at or below 16 blocks produced num_chunks=1
+    and launched H_q programs TOTAL -- 12 on Qwen2.5-1.5B. On a 56-SM card that
+    left ~80% of the GPU idle while each program serially walked every routed
+    block, and it is the dominant cost of long-context decode: the fused kernel
+    measured 53 ms/step at 32k, 61% of all device time, against 10.8 ms once the
+    work was actually spread out.
+
+    The routed set is PRUNED to a small count (12 here) independent of context
+    length, so longer context never grew num_chunks past 1 on its own -- the
+    bigger the context, the worse the relative loss.
+
+    Targets ~2 programs per SM, and never returns FEWER chunks than the old
+    constant would have, so large routed sets keep their previous shape and only
+    the under-parallelised small-N case changes. DKV_BLOCKS_PER_CHUNK still
+    overrides it outright, which is what makes num_chunks=1 reachable for
+    isolating the per-block math from the cross-chunk merge.
     """
-    try:
-        return max(1, int(os.environ.get("DKV_BLOCKS_PER_CHUNK", "16")))
-    except ValueError:
+    env = os.environ.get("DKV_BLOCKS_PER_CHUNK")
+    if env is not None:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            return 16
+    if n_blocks <= 0 or h_q <= 0:
         return 16
+    target_programs = 2 * _sm_count(device)
+    chunks_for_occupancy = -(-target_programs // h_q)      # ceil
+    chunks_at_old_default = -(-n_blocks // 16)             # ceil
+    n_chunks = min(n_blocks, max(chunks_for_occupancy, chunks_at_old_default))
+    return max(1, -(-n_blocks // n_chunks))                # ceil
 
 
 def _partial_rope_apply(x, cos, sin):
@@ -2784,7 +2822,7 @@ def native_triton_sparse_attn_decode(
             # and None. Setting this above N forces num_chunks=1 and skips the
             # reduction entirely, which isolates "the reduction is wrong" from
             # "the per-block math is wrong" in ONE run.
-            BLOCKS_PER_CHUNK = _blocks_per_chunk()
+            BLOCKS_PER_CHUNK = _blocks_per_chunk(N, H_q, q.device)
             if N > BLOCKS_PER_CHUNK:
                 num_chunks = (N + BLOCKS_PER_CHUNK - 1) // BLOCKS_PER_CHUNK
             else:
