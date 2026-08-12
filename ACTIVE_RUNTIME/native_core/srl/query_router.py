@@ -957,6 +957,23 @@ def route_blocks_relevance(
     if _span > 0:
         _pool_default = max(16, 4096 // max(1, _span + 1))   # +1 for the anchor row
 
+    # ── Measured: the default is tuned for retrieval, not for synthesis ──────
+    # _pool_default works out to 16 for the usual 256-token block, which is
+    # enough to find a needle but not to hold a whole topic. Raising it doubles
+    # the evidence the decoder sees, measured on multifact_eval_cuda synthesis at
+    # 16k (Qwen3.5-2B), reproduced twice per setting:
+    #
+    #     default (16)   score 46.7   facts 8/15   links 2/5
+    #     DKV_TOPK_BLOCKS=32   score 60.0   facts 9/15   links 3/5
+    #     DKV_TOPK_BLOCKS=48   score 60.0   (saturated)
+    #
+    # Cost is decode only: 15.32 -> 14.14 tok/s at 32k (-7.7%), VRAM unchanged
+    # (5.03 -> 5.04 GB), and validate_cuda_dkv --long stays 9/9 recall + 9/9
+    # determinism. NOT made the default, because the same setting moved
+    # Qwen2.5-1.5B's synthesis 26.7 -> 16.7 -- inside that model's observed
+    # 16.7-26.7 run-to-run band, and it fails the >=30 bar either way, so the
+    # evidence does not support paying 8% decode for every model. Set
+    # DKV_TOPK_BLOCKS=32 for synthesis-shaped work.
     _topk_env = os.environ.get("DKV_TOPK_BLOCKS")
     if _topk_env is None or _topk_env.strip() == "":
         topk = _pool_default

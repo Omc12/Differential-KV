@@ -508,6 +508,16 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
         if hits < 3:
             _detail += (f"  [closest: edit distance {_best} of {len(_needle_n)}"
                         f"{' — NEAR MISS' if 0 < _best <= 2 else ''}]")
+            # A reasoning model that is still inside <think> when the budget runs
+            # out never reaches its answer, and that is a BENCH limit, not a lost
+            # needle. Qwen3.5-9B scored 0/3 at every depth and length for exactly
+            # this reason at _MAX_NEW=24, then 3/3 at all three 32k depths at 400.
+            # Say so, instead of leaving a recall failure that is not one.
+            if any("<think>" in o and "</think>" not in o for o in outs):
+                _detail += (f"  [TRUNCATED MID-<think>: the answer budget ran out "
+                            f"before the model finished reasoning. This is the "
+                            f"benchmark's limit, not recall — re-run with "
+                            f"DKV_VALIDATE_MAX_NEW=400 (currently {_MAX_NEW})]")
         check(f"{label} ({ntok} tok) needle recall", hits == 3, _detail)
         # Report WHICH run diverged, not just how many distinct outputs there
         # were. "2 distinct across 3 runs" is compatible with two very different
