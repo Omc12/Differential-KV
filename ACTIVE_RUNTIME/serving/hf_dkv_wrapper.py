@@ -3,6 +3,24 @@ import sys
 if os.environ.get("DKV_FORCE_PYTORCH") == "1" and sys.platform != "darwin":
     sys.modules["dkv_core"] = None
 os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+# Bound the CUDA caching allocator's fragmentation. Prefill compresses every
+# block on every layer, allocating and freeing thousands of short-lived tensors
+# of many different sizes, and the default segment allocator cannot reuse a freed
+# segment for a differently-sized request. Measured on Qwen2.5-1.5B at 32k: 5.44
+# GB of live tensors against 16.2 GB RESERVED, which on a 12 GB card spills into
+# WDDM shared host memory -- that spill is why prefill was slow and why DKV took
+# ~2x dense's real VRAM despite holding a smaller KV.
+#
+# expandable_segments lets one segment grow and shrink instead, so mixed sizes
+# share it: reserved 16.2 -> 8.9 GB, real device use 11.0 -> 8.5 GB, and TTFT
+# 21.2 -> 15.7 s at 32k.
+#
+# Must be set before the caching allocator initialises (first CUDA allocation);
+# importing torch alone does not initialise it, so setting it here is in time.
+# setdefault so an explicit caller value still wins. Note this is the one
+# allocator mode that has historically interacted badly with CUDA graph capture,
+# which is why the graph path stays opt-in.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 """
 runtime/hf_dkv_wrapper.py
 

@@ -837,20 +837,48 @@ def _gather_block_token_ids(block, manager) -> Optional[List[int]]:
     token ids" step, just for different downstream purposes.  One vectorised
     gather + tolist() replaces a per-position .item() loop (256 Python
     round-trips per block).
+
+    CACHED PER BLOCK, not per layer.  A block's token ids are a property of the
+    block, identical for all layers, but the residual-capture loop calls this
+    once per (block, layer) — 784 times for a 28-block prompt on 28 layers.  Each
+    call ended in .tolist(), a device->host sync, so the uncached form put 756
+    redundant syncs in the prefill path.  Measured at 8.4k: 0.47 s of a 4.6 s
+    prefill, and prefill is already only 29% GPU-busy, so this is pure added
+    latency.  Same key and same lifetime as _block_rank_cache, which caches a
+    value derived from this one, and is dropped by KVRuntimeManager.clear_session
+    alongside it.
     """
     if manager is None:
         return None
     sid = getattr(block, "session_id", None)
+    anchor = getattr(block, "anchor_idx", None)
+
+    tok_cache = None
+    if sid is not None and anchor is not None:
+        tok_cache = getattr(manager, "_block_token_ids_cache", None)
+        if tok_cache is None:
+            tok_cache = manager._block_token_ids_cache = {}
+        cached = tok_cache.setdefault(sid, {}).get(anchor)
+        if cached is not None:
+            return cached
+
     all_tids = None
     if getattr(manager, "_session_token_ids", None) is not None:
         all_tids = manager._session_token_ids.get(sid)
     if all_tids is None:
         return None
-    positions = [p for p in getattr(block, "token_indices", []) if 0 <= p < len(all_tids)]
+    # len(all_tids) is Tensor.__len__ -- hoisted out of the comprehension, where
+    # it was re-evaluated for EVERY token position (201,556 calls on an 8.4k
+    # prompt), each one a Python-level call through _get_tracing_state.
+    _n_tids = all_tids.shape[0]
+    positions = [p for p in getattr(block, "token_indices", []) if 0 <= p < _n_tids]
     if not positions:
         return None
     idx = torch.tensor(positions, dtype=torch.long, device=all_tids.device)
-    return all_tids[idx].tolist()
+    out = all_tids[idx].tolist()
+    if tok_cache is not None:
+        tok_cache[sid][anchor] = out
+    return out
 
 
 def _block_boost_rank(block, rank: int, manager) -> int:

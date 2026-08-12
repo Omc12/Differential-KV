@@ -1467,8 +1467,30 @@ class KVRuntimeManager:
                 and self._streaming_mgr is not None:
             self._streaming_mgr.compress_deferred_blocks(session_id)
 
-        _gc.collect()
-        _empty_cache(self.device)
+        # Trim only under real memory pressure.  This ran after EVERY prefill
+        # chunk and cost 1.21 s of a 4.6 s prefill on an 8.4k prompt (10 chunks
+        # x ~0.12 s) -- the largest single item in the profile, on a path that is
+        # already only 29% GPU-busy.  empty_cache() compounds it by handing the
+        # caching allocator's blocks back, so the next chunk re-enters cudaMalloc
+        # for allocations it had already cached.
+        #
+        # The guard exists for the raw-KV/pool co-residency spike described
+        # above, which only matters when the device is near full, so gate it on
+        # actually being near full.  DKV_CHUNK_GC=always restores the
+        # unconditional trim; =never disables it outright.
+        _gc_mode = _os.environ.get("DKV_CHUNK_GC", "auto").lower()
+        _should_trim = True
+        if _gc_mode == "never":
+            _should_trim = False
+        elif _gc_mode != "always":
+            try:
+                _free_b, _total_b = torch.cuda.mem_get_info(self.device)
+                _should_trim = _free_b < 0.20 * _total_b
+            except Exception:
+                _should_trim = True      # unknown pressure -> keep the guard
+        if _should_trim:
+            _gc.collect()
+            _empty_cache(self.device)
 
         # ── SRL: build or update the semantic routing index ──────────────
         # Deferred until ALL blocks are finalized (pending_cpu_blocks == 0).
@@ -1803,8 +1825,8 @@ class KVRuntimeManager:
         self._session_token_ids.pop(session_id, None)
         # Per-session content caches keyed by block anchor.  These are derived
         # from _session_token_ids, so they are stale the moment it is dropped.
-        for _cache_attr in ("_block_rank_cache", "_res_capture_boost_rows",
-                            "_rank_boost_stats"):
+        for _cache_attr in ("_block_rank_cache", "_block_token_ids_cache",
+                            "_res_capture_boost_rows", "_rank_boost_stats"):
             _cache = getattr(self, _cache_attr, None)
             if _cache is not None:
                 _cache.pop(session_id, None)
