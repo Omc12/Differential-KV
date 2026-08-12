@@ -189,7 +189,20 @@ class NativeBlockPool:
         reserve_blocks_per_layer = 1 + (
             reserve_tokens + self.max_seq_len - 1
         ) // self.max_seq_len
-        return (blocks_per_layer + reserve_blocks_per_layer) * self.num_layers
+        # Size by the layers DKV actually COMPRESSES, not by the model's total
+        # layer count.  On a hybrid model most layers are linear-attention and
+        # never hold a block: Qwen3.5-2B has 24 layers but only 6 attended
+        # (3, 7, 11, 15, ...), so sizing by 24 allocated 4x the slots the session
+        # can ever use -- 1246 MB of pool for ~312 MB of blocks at 32k, dead VRAM
+        # that is the reason DKV measured ABOVE dense on real device memory.
+        #
+        # Safe to under-estimate: slots come from one global free list
+        # (allocate_block pops _free_indices, they are not partitioned per layer)
+        # and _grow_pool() covers a shortfall.  Falls back to num_layers when the
+        # attended count was never published, i.e. non-hybrid models where the
+        # two are equal anyway.
+        _sizing_layers = getattr(self, "sizing_layers", None) or self.num_layers
+        return (blocks_per_layer + reserve_blocks_per_layer) * _sizing_layers
 
     def ensure_allocated(self, n_tokens: int = None) -> None:
         """

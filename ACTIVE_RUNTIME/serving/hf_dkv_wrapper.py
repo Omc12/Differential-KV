@@ -751,6 +751,24 @@ class PyTorchDKVHFWrapper:
 
         apply_dkv_attention_patch(self.model, self.manager)
 
+        # Tell the pool how many layers actually hold blocks.  The patch only
+        # wraps full-attention layers, so on a hybrid model this is a fraction of
+        # config.num_hidden_layers (6 of 24 on Qwen3.5-2B) and the pool would
+        # otherwise reserve slots for layers that never allocate one.
+        try:
+            _n_attended = sum(
+                1 for _l in self.model.model.layers
+                if hasattr(getattr(_l, "self_attn", None), "_original_forward"))
+            _pool = getattr(self.manager, "native_pool", None)
+            if _pool is not None and _n_attended > 0:
+                _pool.sizing_layers = _n_attended
+                if _n_attended != self.num_layers:
+                    print(f"[DKV] Pool sized for {_n_attended} attended layers "
+                          f"(model has {self.num_layers}); hybrid model, the rest "
+                          f"hold no compressed blocks.")
+        except Exception:
+            pass
+
         use_compile = "1" if self.manager.config.torch_compile else "0"
         if _is_apple_silicon():
             if use_compile == "auto":
