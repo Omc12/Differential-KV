@@ -324,10 +324,17 @@ class NativeBlockPool:
         max_seq_len  = self.max_seq_len
 
         # ── Release old memory BEFORE allocating new tensors ──────────────
-        # Running gc+empty_cache here helps the GPU allocator reclaim the
-        # old pool pages before the new (larger) tensors are created, cutting
-        # the momentary peak from ~2x down to ~1.x of the new pool size.
-        gc.collect()
+        # empty_cache here lets the allocator reclaim the old pool pages before
+        # the new (larger) tensors are created, cutting the momentary peak from
+        # ~2x to ~1.x of the new pool size.
+        #
+        # No gc.collect(). The pool GROWS DURING DECODE as generated tokens form
+        # blocks, and a decode-only profile put gc.collect at 3.59 ms/token at
+        # 32k -- ~140 ms for a single call, on a path where the whole token costs
+        # ~90 ms. It also frees nothing: the same isolation done for the prefill
+        # trim measured reserved memory identical with and without the collect
+        # (8.82 GB either way), because CPython refcounts the old pool tensors
+        # away as soon as they are rebound. empty_cache is what reclaims.
         _empty_cache(self.device)
         
         _legacy = self._needs_legacy_slots
@@ -409,8 +416,10 @@ class NativeBlockPool:
         self._free_indices.extend(added_range)
         self._free_indices_set.update(added_range)
         self.current_blocks = new_blocks
-        
-        gc.collect()
+
+        # Same reasoning as the pre-realloc trim above: empty_cache reclaims, the
+        # collect only costs. This one runs after the new tensors are live, so
+        # there is even less for a collector to find.
         _empty_cache(self.device)
         
     def allocate_block(self) -> int:

@@ -161,9 +161,17 @@ _GRAPH_SAFE_DECODE = os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"
 # compaction is a safety net that never fires and removing it changes nothing.
 # Where it WOULD fire, argmax returns 0 for a non-matching row, so that row
 # duplicates the sink block rather than being dropped -- a bounded softmax
-# weighting error, not a crash. Opt-in for that reason; the exact path stays the
-# default.
-_GRAPH_SAFE_ROUTING = os.environ.get("DKV_GRAPH_SAFE_ROUTING", "0") == "1"
+# weighting error, not a crash.
+#
+# DEFAULT-ON since 2026-08-13, for SPEED rather than for capture. A decode-only
+# profile (differencing generate(1) against generate(1+K), because generate
+# re-prefills and a single profile at 32k is ~95% prefill) put torch.nonzero at
+# 27.6 calls per token, one per attended layer, each syncing to size its output.
+# Removing them measured 10.70 -> 12.25 tok/s at 32k on Qwen2.5-1.5B, +14.5%,
+# with generated text byte-identical to the exact path.
+#
+# DKV_GRAPH_SAFE_ROUTING=0 restores the compaction.
+_GRAPH_SAFE_ROUTING = os.environ.get("DKV_GRAPH_SAFE_ROUTING", "1") == "1"
 
 # ── Re-materialisation cache (DKV_REMAT_CACHE, default OFF) ──────────────────
 # Read once at import; see native_core/sparse_decode/remat_cache.py for the
