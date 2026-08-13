@@ -182,13 +182,33 @@ near-misses), because a residual is rotated at its token's true position while
 the base term it corrects is rotated at the anchor -- they are in different
 frames and their sum is exact in neither.
 
-**The actual fix, for whichever runtime does it first:** store keys UNROTATED (so
-the SVD fits un-mixed vectors, which is what recovers the content discrimination)
-and apply RoPE PER TOKEN at read, rather than once per block at the anchor. The
-CUDA docstring rejected this as "a D-dim reconstruction per token", but the fused
-decode kernel already reconstructs per token to score it, so the rotation can ride
-along inside that loop instead of being a separate pass. That is kernel work on
-CUDA and would be `mx.fast.rope` inside the equivalent MLX path.
+**Per-token RoPE is NOT cheap — correcting an earlier note in this file.**
+
+An earlier revision said the fix was to store keys unrotated and rotate per token
+at read, on the grounds that "the fused kernel already reconstructs per token, so
+the rotation can ride along inside that loop". That is wrong, and the original
+CUDA docstring's cost objection was right.
+
+`triton_fused_decode.py:567` computes the query projection ONCE per chunk:
+
+    q_proj_k = tl.sum(q[None, :] * vk_data, axis=1) * scale   # [RANK]
+    # "Q projection -- computed once for this entire chunk"
+
+and the token loop then only does a RANK-dim dot product against it. RoPE acts in
+D-space while that projection is D -> rank, so rotating per token means
+recomputing a D x rank projection for every token instead of once per block: S x
+more work in the hottest loop, with S up to the block size. Rotating the key
+instead is worse (it needs V_K rotated per token, a rank x D matrix each time).
+
+The relative-position identity does not rescue it either. Within a block
+positions are consecutive, so R(p_q - anchor - t) factors as R(p_q - anchor) .
+R(-t) and the R(-t) part is shared across blocks -- but it still has to be applied
+BEFORE the D -> rank projection, so the projection is still per token.
+
+**So the practical path is dual-scale, not per-token rotation.** Small blocks
+under an unrotated pool do bound the phase error -- block 128 with
+`DKV_ROTATED_POOL=0` fails 2 needle cases against 3-4 at block 256/512 -- but it
+does not reach clean, so this is a real dead end rather than a tuning problem.
 
 ---
 
