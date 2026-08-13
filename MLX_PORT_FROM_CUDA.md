@@ -237,6 +237,42 @@ distractor-heavy retrieval specifically.
 **On MLX: check the block_size default and sweep it.** This is the strongest
 single lever found in the whole CUDA effort, and it moved four metrics at once.
 
+### What actually drives it (measured, and it is not what it looks like)
+
+Distractor retrieval tracks the NUMBER OF BLOCKS the representation is split
+into, and reaches dense parity whenever that number is small, regardless of how
+it got small:
+
+| block | ctx | ~blocks | linkbench |
+|---|---|---|---|
+| 256 | 4k | 15 | 24/24 |
+| 1024 | 16k | 15 | 24/24 |
+| 2048 | 32k | 14 | 24/24 |
+| 1024 | 32k | 29 | 23/24 |
+| 512 | 16k | 29 | 15/24 |
+| 256 | 16k | 58 | 14/24 |
+
+**It is NOT routing coverage.** `DKV_TOPK_FRAC` at 0.0 / 0.5 / 1.0 all give
+15/24, and `DKV_TOPK_BLOCKS=0` (attend every block) gives 14/24. Letting the
+model see every block does not help at all.
+
+**It is NOT reconstruction fidelity.** SVD rank (32/96), residual budget
+(32/128/224) and recency window (512/4096) all leave it at EXACTLY 14/24 --
+and note a 1024-token block has WORSE per-token fidelity than a 512-token one
+(same rank 32, same 128 residuals spread over 4x the tokens) yet scores better.
+
+So what a bigger block buys is not more information and not more of it being
+looked at -- it is that an association stays inside ONE unit. Splitting a
+document into more pieces destroys cross-piece associations no matter how
+faithfully each piece is stored or how many are retrieved.
+
+That is why the fix is multi-scale blocks rather than a better constant: the same
+content compressed at two granularities, with attention seeing both, so
+associations survive at the coarse scale while the fine scale keeps the
+granularity synthesis needs. Note the corollary -- because routing is provably
+irrelevant here, a multi-scale ROUTER would not help; the two scales have to
+both reach attention.
+
 This also supersedes the rotated-pool theory in item 5 as the *practical* lever:
 `DKV_ROTATED_POOL=0` closes linkbench too, but breaks needle ORDER (edit-distance-1
 transpositions), whereas block size closes it with needles intact. Both point at
