@@ -192,7 +192,7 @@ CUDA and would be `mx.fast.rope` inside the equivalent MLX path.
 
 ---
 
-## 5b. Block size 256 -> 512 (CUDA default changed; check MLX's)
+## 5b. Block size 256 -> 1024 (CUDA default changed; check MLX's)
 
 **Priority: high — it is the only knob that moves either, and MLX has the same
 constant.**
@@ -214,8 +214,13 @@ Big blocks keep an association intact inside one block, which distractor-heavy
 retrieval needs. Small blocks give routing finer granularity to assemble diverse
 content, which synthesis needs.
 
-**CUDA now defaults to 512**, because with prefill and VRAM measured too, 512
-turned out to DOMINATE 256 rather than trade against it:
+**CUDA now defaults to 1024**, chosen for LINKAGE. 1024 is the smallest block
+that reaches dense parity on distractor retrieval (24/24), and it is also the
+best point measured for prefill and VRAM. It costs synthesis, 50.0 -> 30.0 --
+taken deliberately, because retrieving the right fact from a document full of
+similar ones is the workload this system is for, and at 512 it lost 9 of 24 such
+lookups that dense got right. Use `micro_block_size=512` for synthesis-shaped
+work.
 
 | block | linkbench | synthesis | TTFT (1.5B, 32k) | peak_alloc | needles |
 |---|---|---|---|---|---|
@@ -224,15 +229,13 @@ turned out to DOMINATE 256 rather than trade against it:
 | 1024 | **24/24** | 30.0 | 11.43 s | 4.96 GB | 9/9 |
 | dense | 24/24 | 60.0 | 5.70 s | — | — |
 
-512 is better on prefill (-24%), VRAM, synthesis and distractor retrieval at
-once; decode measured 2-4% lower, inside the run-to-run band. Fewer, larger
+512 beats 256 on all four; 1024 then buys the remaining 9 linkbench points for
+synthesis. Decode differences across these sizes were inside the run-to-run band. Fewer, larger
 blocks mean fewer per-block compressions, and that is where prefill time goes --
 on a non-hybrid model where all 28 layers are compressed, the model forward is
 only about a third of prefill.
 
-1024 is NOT taken despite reaching dense parity on distractor retrieval, because
-it costs synthesis 50.0 -> 30.0. Use `micro_block_size=1024` for
-distractor-heavy retrieval specifically.
+512 remains the best single point for synthesis if that is your workload.
 
 **On MLX: check the block_size default and sweep it.** This is the strongest
 single lever found in the whole CUDA effort, and it moved four metrics at once.
