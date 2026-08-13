@@ -1662,6 +1662,34 @@ class PyTorchDKVHFWrapper:
                             # path still needs its own static ABI. The runner
                             # applies one further refusal of its own for hybrid
                             # models with recurrent layers.
+                            # Two capturable configurations now:
+                            #   bypass  -- short context, state is the dense
+                            #              StaticCache, gated on the cache existing
+                            #   routed  -- DKV engaged, state is the pool + dense
+                            #              window; capturable only once routing is
+                            #              fixed-shape (DKV_GRAPH_SAFE_ROUTING),
+                            #              because torch.nonzero otherwise makes
+                            #              every downstream shape data-dependent
+                            # Only the BYPASS path is capturable today.
+                            #
+                            # The routed path now CAPTURES successfully once
+                            # routing is fixed-shape (DKV_GRAPH_SAFE_ROUTING
+                            # removes the two torch.nonzero compactions), but it
+                            # does not REPLAY correctly: the dense window of
+                            # recently generated tokens is rebuilt in Python every
+                            # step by assemble_dense_window_kv, and replay runs no
+                            # Python, so the graph keeps attending the recent
+                            # context frozen at capture time and the text diverges
+                            # from eager.
+                            #
+                            # It is also not faster. Replay skips ALL of the
+                            # forward's Python and still measured 85 ms/token
+                            # against eager's 79 at 32k, which says the host time
+                            # is mostly OUTSIDE the captured region -- so closing
+                            # the dense-window gap would buy correctness, not
+                            # speed. Enabling routed capture is therefore gated
+                            # off until the dense window becomes a device-resident
+                            # ring buffer AND the host cost is located.
                             self.model._dkv_cuda_graph_safe = bool(
                                 _dkv_cache is not None
                                 and os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1")

@@ -199,7 +199,15 @@ class CUDAGraphDecodeRunner:
         if not self._capture_enabled:
             return
 
-        if cache is None:
+        # The ROUTED path has no dense_cache to snapshot: its decode state is the
+        # block pool and the dense window, not a StaticCache. Warmup is safe
+        # there for a different reason -- every warmup pass and the capture run
+        # with the SAME input_ids and position_ids, so each writes the same token
+        # to the same slot rather than advancing, exactly as the bypass path
+        # relies on. Correctness is checked by comparing generated text against
+        # the eager path, not assumed.
+        _routed_ok = os.environ.get("DKV_GRAPH_SAFE_ROUTING", "0") == "1"
+        if cache is None and not _routed_ok:
             if not self._unsafe_capture_warned:
                 import sys as _sys
                 print(
@@ -298,7 +306,7 @@ class CUDAGraphDecodeRunner:
         # advancing, and the model emits fluent-looking garbage with nothing
         # raised. Refusing is the only correct option until those layers update
         # in place, which is transformers' modeling code, not ours.
-        _recurrent = [type(L).__name__ for L in (getattr(cache, "layers", []) or [])
+        _recurrent = [type(L).__name__ for L in (getattr(cache, "layers", None) or [])
                       if any(isinstance(getattr(L, _n, None), dict)
                              for _n in self._STATE_DICTS)]
         if _recurrent:
@@ -314,7 +322,7 @@ class CUDAGraphDecodeRunner:
                 self._unsafe_capture_warned = True
             return
 
-        _snap = self._snapshot_cache(cache)
+        _snap = self._snapshot_cache(cache) if cache is not None else None
 
         # ── Warmup ────────────────────────────────────────────────────────
         # Same tensors, same kwargs as the capture below. Because every pass
@@ -352,7 +360,8 @@ class CUDAGraphDecodeRunner:
 
         # Roll the decode state back to exactly what it was on entry, so the
         # caller's following run() is this token's one and only step.
-        self._restore_cache(cache, _snap)
+        if _snap is not None:
+            self._restore_cache(cache, _snap)
 
         self._captured_shape_sig = sig
 

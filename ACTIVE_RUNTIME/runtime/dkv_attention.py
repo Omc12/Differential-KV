@@ -149,6 +149,21 @@ _DECODE_CACHE_CUDA = os.environ.get("DKV_DECODE_CACHE_CUDA", "0") == "1"
 # consult it run per layer per decode step, and an environ lookup there is the
 # same host overhead the flag exists to eliminate.
 _GRAPH_SAFE_DECODE = os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"
+# Fixed-shape routing, for CUDA graph capture of the ROUTED decode path.
+# The two compactions in dkv_forward use torch.nonzero, whose output LENGTH
+# depends on its input values, so every shape downstream is data-dependent. A
+# CUDA graph records fixed shapes and cannot replay that, and nonzero also syncs
+# in order to size its own output.
+#
+# Measured over a 48-token generation at 32k on Qwen2.5-1.5B: the compaction
+# dropped 0 of 1,792 rows at the first site and 0 of 21,504 at the second. Every
+# selected slot was already in its layer's block set, so on the observed path the
+# compaction is a safety net that never fires and removing it changes nothing.
+# Where it WOULD fire, argmax returns 0 for a non-matching row, so that row
+# duplicates the sink block rather than being dropped -- a bounded softmax
+# weighting error, not a crash. Opt-in for that reason; the exact path stays the
+# default.
+_GRAPH_SAFE_ROUTING = os.environ.get("DKV_GRAPH_SAFE_ROUTING", "0") == "1"
 
 # ── Re-materialisation cache (DKV_REMAT_CACHE, default OFF) ──────────────────
 # Read once at import; see native_core/sparse_decode/remat_cache.py for the
@@ -2092,17 +2107,24 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         has_match = mask.any(dim=1)
                                         # Same two-syncs-on-one-predicate pattern as the
                                         # per-layer reroute below; resolve the shape once.
-                                        _keep0 = torch.nonzero(has_match, as_tuple=True)[0]
-                                        block_idx_in_full = mask.to(torch.uint8).argmax(dim=1)[_keep0]
+                                        if _GRAPH_SAFE_ROUTING:
+                                            # Every row kept: argmax alone, no
+                                            # nonzero, so the shape is static.
+                                            block_idx_in_full = mask.to(torch.uint8).argmax(dim=1)
+                                            _kept_slots = selected_slots
+                                        else:
+                                            _keep0 = torch.nonzero(has_match, as_tuple=True)[0]
+                                            block_idx_in_full = mask.to(torch.uint8).argmax(dim=1)[_keep0]
+                                            _kept_slots = selected_slots[_keep0]
                                         selected_anchors = anchor_indices[block_idx_in_full]
-                                        srl_state.current_step_slots = selected_slots[_keep0]
+                                        srl_state.current_step_slots = _kept_slots
                                         srl_state.current_step_anchors = selected_anchors
                                         # Publish to the PER-LAYER cache so the hold branch
                                         # below replays THIS layer's decision, not whichever
                                         # layer happened to route last.
                                         _rt_cache[captured_layer_idx] = (
                                             _step_ctr, _n_cand,
-                                            selected_slots[_keep0], selected_anchors)
+                                            _kept_slots, selected_anchors)
 
                                         # DKV_ROUTE_PROBE=2: report WHICH blocks
                                         # were kept, once per (layer, candidate
@@ -2168,14 +2190,22 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     # .numel() is then free and integer indexing is a
                                     # plain gather. x[bool_mask] and x[nonzero(mask)]
                                     # select the same rows in the same order.
-                                    _keep = torch.nonzero(has_match, as_tuple=True)[0]
-                                    if _keep.numel() > 0:
-                                        block_idx_in_layer = mask.to(torch.uint8).argmax(dim=1)[_keep]
+                                    if _GRAPH_SAFE_ROUTING:
+                                        # Static shape, and no _keep.numel() host
+                                        # read -- that guard is itself a sync.
+                                        block_idx_in_layer = mask.to(torch.uint8).argmax(dim=1)
                                         block_indices = block_indices[block_idx_in_layer]
-                                        anchor_indices = selected_anchors[_keep]
-
-                                        # Cache is structured and self-evicting based on layer_idx and anchors_tuple comparison
+                                        anchor_indices = selected_anchors
                                         _srl_rerouted = True
+                                    else:
+                                        _keep = torch.nonzero(has_match, as_tuple=True)[0]
+                                        if _keep.numel() > 0:
+                                            block_idx_in_layer = mask.to(torch.uint8).argmax(dim=1)[_keep]
+                                            block_indices = block_indices[block_idx_in_layer]
+                                            anchor_indices = selected_anchors[_keep]
+
+                                            # Cache is structured and self-evicting based on layer_idx and anchors_tuple comparison
+                                            _srl_rerouted = True
 
                                     # Log routing decision if verbose or telemetry is enabled
                                     if captured_layer_idx == _first_dkv_layer and (os.environ.get("DKV_SRL_VERBOSE", "0") == "1" or os.environ.get("DKV_TELEMETRY", "0") == "1"):
