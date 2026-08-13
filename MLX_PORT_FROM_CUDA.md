@@ -125,6 +125,57 @@ the MacBook.
 
 ---
 
+## 5. The pool stores POST-RoPE keys, which costs accuracy at long context
+
+**Priority: highest accuracy item found so far. Not yet fixed on CUDA either —
+this is a shared open bug, not a port.**
+
+**MLX status: CHECK THIS.** CUDA's flag is `DKV_ROTATED_POOL` (default `1` =
+store rotated). Find MLX's equivalent before assuming it differs.
+
+**What CUDA found.** A new benchmark (`colab/linkbench_cuda.py`) plants 16
+near-identical sentences ("The X Institute is located in Y") and asks for one of
+them. On 24 seeds at 16k on Qwen3.5-2B:
+
+    dense   24/24
+    DKV     14/24     (Fisher p ~ 0.0004)
+
+This is a SINGLE-HOP lookup, and the needle benchmark cannot see it, because one
+unique code in bland filler has no confusable distractors.
+
+It is not a fidelity problem. Every knob leaves it at **exactly** 14/24 -- routing
+K (0/32/default), residual budget (32/128/224), recency window (512/4096), SVD
+rank (32/96). Only context length moves it: 4k 24/24, 8k 19/24, 16k 14/24.
+
+`DKV_ROTATED_POOL=0` gives **24/24 at 8k, 16k and 32k** -- the whole gap closes.
+Storing post-RoPE keys bakes in the position a block held at compression time,
+so the values were never wrong; the positions were.
+
+**Why it is not simply flipped on:** with `DKV_ROTATED_POOL=0` the needle sweep
+falls 9/9 -> 6/9, including a one-character near-miss (`Falcon-9427-613` for
+`-6183`) and two failures at 2k, where nothing is compressed at all. Failing at
+2k means the un-rotated READ path is buggy, not that this is a real trade. The
+fix is to make the rotated path carry correct positions.
+
+If MLX stores rotated keys too, it likely has the same accuracy ceiling on
+distractor-heavy retrieval, and the same benchmark will show it.
+
+---
+
+## 6. Model load kept a full CPU copy of the weights (CUDA-only, fixed)
+
+**MLX status: N/A** — different loader entirely. Recorded because it explains a
+number you may have seen.
+
+The CUDA wrapper loaded with `from_pretrained(...).to(device)`, which
+materialises every weight on the CPU and leaves the host pages resident:
+Qwen3.5-2B held 6.22 GB RSS against dense's 2.07 GB for the same work. Switching
+to `device_map=device` streams shards straight to the GPU: **RSS 6.22 -> 2.60 GB**,
+GPU unchanged. DKV's own structures held 0.00 GB of CPU tensors, so this was the
+entire system-RAM gap.
+
+---
+
 ## Not portable — CUDA-only, listed so you do not go looking
 
 * **Occupancy-driven decode chunking** (`a5289a18`) — sizes a Triton kernel grid

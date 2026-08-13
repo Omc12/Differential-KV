@@ -617,15 +617,28 @@ class PyTorchDKVHFWrapper:
                 **attn_impl_kwarg,
             )
         elif quantization_config is None and str(device).startswith("cuda"):
+            # device_map, NOT load-then-.to(device).
+            #
+            # The .to(device) form materialises every weight on the CPU first and
+            # the host pages stay resident afterwards: measured on Qwen3.5-2B,
+            # RSS went 0.82 -> 4.97 GB across this one call and stayed there,
+            # against 2.07 GB total for the same model loaded with device_map.
+            # That is ~4 GB of system memory held for nothing, and it is the
+            # whole of DKV's system-RAM overhead over dense -- DKV's own
+            # structures hold 0.00 GB of CPU tensors once loaded.
+            #
+            # device_map streams each shard straight to the GPU instead. The MPS
+            # and quantized branches around this one already do it this way.
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 torch_dtype=torch_dtype,
+                device_map=device,
                 trust_remote_code=True,
                 use_safetensors=True,
                 low_cpu_mem_usage=True,
                 local_files_only=self.local_files_only,
                 **attn_impl_kwarg,
-            ).to(device)
+            )
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
