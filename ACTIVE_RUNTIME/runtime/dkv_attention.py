@@ -167,8 +167,13 @@ _GRAPH_SAFE_DECODE = os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"
 # profile (differencing generate(1) against generate(1+K), because generate
 # re-prefills and a single profile at 32k is ~95% prefill) put torch.nonzero at
 # 27.6 calls per token, one per attended layer, each syncing to size its output.
-# Removing them measured 10.70 -> 12.25 tok/s at 32k on Qwen2.5-1.5B, +14.5%,
-# with generated text byte-identical to the exact path.
+# Generated text is byte-identical to the exact path.
+#
+# Speedup is +8.4% at 32k on Qwen2.5-1.5B, 95% CI [4.4%, 12.4%], from
+# colab/bench_decode_paired.py (12 paired rounds, arms interleaved in one
+# process). An earlier note here claimed +14.5%; that came from a single pair of
+# separate runs, and this metric moves ~20% run to run, so it was noise on top of
+# a real effect rather than the effect.
 #
 # DKV_GRAPH_SAFE_ROUTING=0 restores the compaction.
 _GRAPH_SAFE_ROUTING = os.environ.get("DKV_GRAPH_SAFE_ROUTING", "1") == "1"
