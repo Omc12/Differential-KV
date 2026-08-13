@@ -209,6 +209,11 @@ def main():
         _cfg = {"mode": "nf4" if QUANT == "nf4" else "fp16"}
         if os.environ.get("RANK"):
             _cfg["rank"] = int(os.environ["RANK"])
+        # Block size changes WHERE the boundaries fall. If the failures are
+        # sentences straddling a boundary, this moves them and the hit rate
+        # shifts; if they are fidelity, it should not.
+        if os.environ.get("BLOCK"):
+            _cfg["micro_block_size"] = int(os.environ["BLOCK"])
         w = PyTorchDKVHFWrapper(model_id=MODEL, config=_cfg, device="cuda")
         w.ensure_loaded()
 

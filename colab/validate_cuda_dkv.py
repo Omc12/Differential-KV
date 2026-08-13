@@ -432,7 +432,7 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
         w = _DenseW()
     else:
         w = PyTorchDKVHFWrapper(model_id=model_id,
-                                config={"mode": "fp16"}, device="cuda")
+                                config=_wrapper_cfg(), device="cuda")
         w.ensure_loaded()
 
     # Before any recall number is produced, on THIS model's tokenizer -- the
@@ -559,6 +559,23 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
     check("Triton kernel used (no fallback)",
           getattr(tfd, "_triton_fallback_count", 0) == 0,
           f"fallback_count={getattr(tfd, '_triton_fallback_count', 0)}")
+
+
+def _wrapper_cfg():
+    """Wrapper config, with the knobs a sweep needs threaded from the env.
+
+    rank and micro_block_size are wrapper-config values rather than environment
+    variables, so without this they cannot be A/B-ed against the validator at
+    all.
+    """
+    cfg = {"mode": "fp16"}
+    if os.environ.get("DKV_QUANTIZATION") == "nf4":
+        cfg["mode"] = "nf4"
+    if os.environ.get("BLOCK"):
+        cfg["micro_block_size"] = int(os.environ["BLOCK"])
+    if os.environ.get("RANK"):
+        cfg["rank"] = int(os.environ["RANK"])
+    return cfg
 
 
 if __name__ == "__main__":

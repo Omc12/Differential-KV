@@ -467,6 +467,48 @@ class PyTorchDKVHFWrapper:
         # exact value already diagnosed as a ~43% needle-recall floor in the
         # native runtime — CUDA was the last runtime still shipping it.
         self.rank = self.config.get("rank", 32)
+        # 1024, not 256. Blocks of 256 lose distractor-heavy retrieval: on
+        # colab/linkbench_cuda.py (16 near-identical "The X Institute is located
+        # in Y" sentences, answer graded on attribution, 24 seeds at 16k on
+        # Qwen3.5-2B) a dense control scores 24/24 and DKV scored 14/24. Block
+        # size is the only thing that moved it:
+        #
+        #     128 -> 11/24    256 -> 14/24    512 -> 15/24    1024 -> 24/24
+        #
+        # Nothing else did: routing K (0/32/default), residual budget
+        # (32/128/224), recency window (512/4096) and SVD rank (32/96) all left
+        # it at EXACTLY 14/24. Needle recall is unaffected (9/9 + 9/9
+        # determinism at 1024, same as at 256), and the needle benchmark cannot
+        # see the gap at all because one unique code in bland filler has no
+        # confusable distractors.
+        #
+        # Cost: peak tensor bytes +0.10 GB and TTFT unchanged at 32k. The decode
+        # effect is not resolvable here -- interleaved repeats of the SAME config
+        # spanned 14.85-21.56 tok/s -- so it is somewhere between nil and ~16%,
+        # and colab/bench_decode_paired.py cannot settle it because block size is
+        # fixed when the manager is constructed rather than read per call.
+        # 256 stays, but it is a TRADE, not a tuned optimum. Block size is the
+        # only knob that moves distractor-heavy retrieval, and it moves broad
+        # synthesis the opposite way. Measured on Qwen3.5-2B at 16k:
+        #
+        #   block   linkbench (24 seeds)   multifact synthesis   needles
+        #   128     11/24                  -                     -
+        #   256     14/24                  46.7 (8 facts, 2 links)  9/9
+        #   512     15/24                  -                     -
+        #   1024    24/24                  30.0 (6 facts, 1 link)   9/9
+        #   dense   24/24                  60.0 (9 facts, 3 links)  -
+        #
+        # Big blocks keep an association intact inside one block, which is what
+        # distractor retrieval needs; small blocks give routing finer granularity
+        # to assemble diverse content, which is what synthesis needs. Nothing
+        # else moves either: routing K (0/32/default), residual budget
+        # (32/128/224), recency window (512/4096) and SVD rank (32/96) leave
+        # linkbench at EXACTLY 14/24.
+        #
+        # Neither setting reaches dense on both, so 256 is kept as the incumbent
+        # rather than trading one benchmark for the other. Set
+        # micro_block_size=1024 for distractor-heavy retrieval workloads.
+        # A real fix is multi-scale blocks, not a different constant.
         self.micro_block_size = self.config.get("micro_block_size", 256)
         
         self.local_files_only = (

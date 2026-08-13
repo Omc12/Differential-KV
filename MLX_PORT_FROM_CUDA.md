@@ -192,6 +192,38 @@ CUDA and would be `mx.fast.rope` inside the equivalent MLX path.
 
 ---
 
+## 5b. Block size trades distractor retrieval against synthesis
+
+**Priority: high — it is the only knob that moves either, and MLX has the same
+constant.**
+
+**MLX status: LIKELY** — MLX takes `block_size` in `MLXKVBlockManager.__init__`
+(`mlx_dkv_wrapper.py:1656`). Check its default against CUDA's 256.
+
+Measured on Qwen3.5-2B at 16k, CUDA:
+
+| block | linkbench (24 seeds) | multifact synthesis | needles |
+|---|---|---|---|
+| 128 | 11/24 | — | — |
+| 256 | 14/24 | 46.7 (8 facts, 2 links) | 9/9 |
+| 512 | 15/24 | — | — |
+| 1024 | **24/24** | 30.0 (6 facts, 1 link) | 9/9 |
+| dense | 24/24 | 60.0 (9 facts, 3 links) | — |
+
+Big blocks keep an association intact inside one block, which distractor-heavy
+retrieval needs. Small blocks give routing finer granularity to assemble diverse
+content, which synthesis needs. **Neither reaches dense on both**, so CUDA kept
+256 rather than trade one benchmark for the other.
+
+This also supersedes the rotated-pool theory in item 5 as the *practical* lever:
+`DKV_ROTATED_POOL=0` closes linkbench too, but breaks needle ORDER (edit-distance-1
+transpositions), whereas block size closes it with needles intact. Both point at
+the same underlying thing -- how much positional and associative structure
+survives one block -- and the real fix for either is multi-scale blocks or
+per-token rotation, not a different constant.
+
+---
+
 ## 6. Model load kept a full CPU copy of the weights (CUDA-only, fixed)
 
 **MLX status: N/A** — different loader entirely. Recorded because it explains a
