@@ -341,6 +341,46 @@ per-token rotation, not a different constant.
 
 ---
 
+## 5c. Why the VRAM saving looks small — it is the denominator, not the compression
+
+**MLX status: applies to any comparison you run.** If MLX appears to save far more
+than CUDA, check what each number is a fraction OF before concluding the
+compression differs.
+
+Measured on Qwen3.5-2B at 32k (6 attended layers, 2 kv_heads, head_dim 256), pool
+against the dense KV it replaces for the same tokens:
+
+| block | pool | dense-KV equivalent | ratio | residual share |
+|---|---|---|---|---|
+| 256 | 311.6 MB | 393.9 MB | 0.79x | 64% of pool |
+| **1024** | **105.3 MB** | 393.9 MB | **0.27x** | 49% |
+
+So the compression itself is fine — at the current default the pool is **3.7x
+smaller** than the KV it stands in for. The reason total VRAM barely moves is that
+the pool is 105 MB of a ~5 GB footprint: the model weights (~4 GB in fp16) dominate,
+so a 289 MB KV saving is ~5% of the total.
+
+A KV-compression system only shows a large TOTAL saving where KV outweighs
+weights. At 32k with 6 attended layers and 2 KV heads that is nowhere near true.
+It becomes true with much longer context, more KV heads (a non-GQA or wide-GQA
+model), batching, or a quantized model where weights shrink but KV does not.
+
+**Report the KV-side ratio, not total device memory**, or the number is dominated
+by whatever the weights happen to cost.
+
+Two consequences worth carrying:
+
+* Block size drives this too. At 256 the residual budget (a fixed 128 tokens per
+  block regardless of block size) was 64% of the pool, so most of the "compressed"
+  store was exact tokens. At 1024 the same budget covers 4x the tokens and the
+  ratio improves 0.79x -> 0.27x.
+* **Dual-scale is affordable.** A second pool at a coarser scale roughly doubles
+  105 MB, i.e. ~2% of the footprint, not "double the VRAM". An earlier note in
+  this file worried that dual-scale would give back the VRAM result; that was
+  wrong by an order of magnitude.
+
+---
+
 ## 6. Model load kept a full CPU copy of the weights (CUDA-only, fixed)
 
 **MLX status: N/A** — different loader entirely. Recorded because it explains a
