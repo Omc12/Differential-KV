@@ -18,6 +18,27 @@ from typing import List, Optional, Tuple
 import torch
 
 
+def _svd_energy_target() -> float:
+    """Fraction of spectral energy a block's low-rank form must retain.
+
+    This is what actually decides a block's rank. `rank` is only a CEILING: the
+    compressor keeps the smallest k whose singular values carry this fraction of
+    the total energy, and 0.999 is reached early enough that raising the ceiling
+    changes almost nothing. Measured on Qwen3.5-2B at 16k, asking for rank 32 vs
+    128 moved the ACTUAL median dynamic_rank only 24 -> 34, which is why a rank
+    sweep looked like "fidelity does not matter" when it was really "the knob was
+    not connected to what it appeared to control".
+
+    Raising this raises the real rank, at proportional cost in pool bytes (U is
+    [tokens, k]) and reconstruction work.
+    """
+    try:
+        v = float(os.environ.get("DKV_SVD_ENERGY", "0.999"))
+    except ValueError:
+        return 0.999
+    return min(max(v, 0.5), 1.0 - 1e-9)
+
+
 def _rsvd_omega(*shape, device=None, dtype=torch.float32) -> torch.Tensor:
     """Deterministic random projection for the randomized SVD.
 
@@ -439,7 +460,7 @@ def compress_lowrank(
     k = rank
     if total_energy > 1e-9:
         cum = torch.cumsum(S ** 2, dim=0)
-        threshold = 0.999 * total_energy
+        threshold = _svd_energy_target() * total_energy
         idx = torch.where(cum >= threshold)[0]
         if idx.numel() > 0:
             k = max(4, min(int(idx[0].item() + 1), rank))
@@ -1202,7 +1223,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     S_sq = S_cpu.float() ** 2                                            # [N, r_proj]
     tot = S_sq.sum(dim=1)                                                # [N]
     cum = torch.cumsum(S_sq, dim=1)                                      # [N, r_proj]
-    ge = cum >= (0.999 * tot).unsqueeze(1)                               # [N, r_proj]
+    ge = cum >= (_svd_energy_target() * tot).unsqueeze(1)                # [N, r_proj]
     has_idx = ge.any(dim=1)                                              # [N]
     first_idx = ge.float().argmax(dim=1) + 1                             # first True col + 1
     # Truncation branch: tot > 1e-9 AND an index crossed the threshold.

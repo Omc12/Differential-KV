@@ -240,7 +240,8 @@ def main():
         for k, v in BEST_DECODE_DEFAULTS.items():
             os.environ.setdefault(k, v)
         from ACTIVE_RUNTIME.serving.hf_dkv_wrapper import PyTorchDKVHFWrapper
-        w = PyTorchDKVHFWrapper(model_id=a.model, config={"mode": "fp16", **({"micro_block_size": int(os.environ["BLOCK"])} if os.environ.get("BLOCK") else {})},
+        w = PyTorchDKVHFWrapper(model_id=a.model, config={"mode": "fp16", **({"micro_block_size": int(os.environ["BLOCK"])} if os.environ.get("BLOCK") else {}),
+                                **({"rank": int(os.environ["RANK"])} if os.environ.get("RANK") else {})},
                                 device="cuda")
         w.ensure_loaded()
         print(f"=== DKV — {a.model} ===", flush=True)

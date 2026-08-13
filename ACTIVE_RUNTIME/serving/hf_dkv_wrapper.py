@@ -466,7 +466,20 @@ class PyTorchDKVHFWrapper:
         # paper's config of record.  This path defaulted to 16, which is the
         # exact value already diagnosed as a ~43% needle-recall floor in the
         # native runtime — CUDA was the last runtime still shipping it.
-        self.rank = self.config.get("rank", 32)
+        # Take the rank from the PRESET when the caller did not pin one. This
+        # wrapper fixes self.rank before KVRuntimeManager builds its DKVConfig,
+        # so a hardcoded default here silently overrode the preset: DKV_PRESET=high
+        # resolved svd_energy=0.99999 but still ran rank 32, and the ceiling caps
+        # the energy target -- the quality preset could not actually reach the
+        # fidelity it asks for. Explicit config["rank"] still wins.
+        if "rank" in self.config:
+            self.rank = self.config["rank"]
+        else:
+            try:
+                from native_core.config import DKVConfig as _DKVCfg
+                self.rank = int(getattr(_DKVCfg(self.config), "rank", 32))
+            except Exception:                                      # noqa: BLE001
+                self.rank = 32
         # 1024, not 256. Blocks of 256 lose distractor-heavy retrieval: on
         # colab/linkbench_cuda.py (16 near-identical "The X Institute is located
         # in Y" sentences, answer graded on attribution, 24 seeds at 16k on

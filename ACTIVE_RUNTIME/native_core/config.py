@@ -51,6 +51,21 @@ class DKVConfig:
             # time, and 40 now genuinely stores ~3x fewer exact tokens per block
             # than `high`.  Re-measure before treating `low` as quality-neutral.
             self.max_residual_tokens = 40
+            # Spectral energy a block's low-rank form must retain, and the rank
+            # ceiling that serves it. This -- not `rank` -- is what actually sets
+            # a block's rank: the compressor keeps the smallest k carrying this
+            # fraction of the energy, so raising the ceiling alone does nothing
+            # (asking for rank 32 vs 128 moved the real median rank only 24->34).
+            #
+            # Measured on Qwen3.5-2B at 16k, multifact synthesis, block 1024:
+            #   0.999   / rank 32   -> 30.0   peak_alloc 5.07 GB
+            #   0.9999  / rank 64   -> 43.3   peak_alloc 5.16 GB
+            #   0.99999 / rank 128  -> 46.7   peak_alloc 5.41 GB
+            # TTFT is flat across all three (10.45-10.77 s, inside noise), so the
+            # cost is VRAM, not latency. Distractor retrieval stays 24/24 at
+            # every setting.
+            self.svd_energy = 0.999
+            self.rank = 32
         elif self.preset == "high":
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 16384
@@ -67,6 +82,14 @@ class DKVConfig:
             # record, MLX default) for table/factual-dense docs, accepting the
             # larger pool.  See the "mid" branch for the ladder rationale.
             self.max_residual_tokens = 128
+            # Quality end: keep enough of the spectrum that synthesis recovers.
+            # Nothing cheaper reproduces this -- selective per-block rank boost
+            # (DKV_RANK_BOOST=auto) and routing every token instead of every 4
+            # (DKV_REMAT_CACHE=0) both leave synthesis at 30.0, because at this
+            # block size K already routes every block and no routing change can
+            # add information the model is not already being shown.
+            self.svd_energy = 0.99999
+            self.rank = 128
         else:  # "mid" (Default)
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 4096
@@ -79,6 +102,12 @@ class DKVConfig:
             self.approximate_attn = True if is_macos else False
             self.srl_age_penalty = 0.0  # MLX parity: pure relevance, no recency bias (see override note)
             self.kv_quant = "q8_0"
+            # Middle of the fidelity ladder -- see the `low` branch for the
+            # measurements. 0.9999/64 recovers most of the synthesis that 0.999
+            # gives up (30.0 -> 43.3 of the 46.7 that `high` reaches) for a third
+            # of its VRAM cost (+0.09 GB against +0.34).
+            self.svd_energy = 0.9999
+            self.rank = 64
             self.max_active_dense_tokens = 2048
             # Residual budget per block: how many exact (uncompressed) tokens
             # correct the lossy SVD.  This is the main quality dial.
@@ -266,9 +295,15 @@ class DKVConfig:
         #   compression critical for bounding peak VRAM without performance penalty.
         # ──────────────────────────────────────────────────────────────────────
 
+        # Publish the fidelity target where the compressor reads it. lowrank's
+        # _svd_energy_target() consults DKV_SVD_ENERGY at call time; setdefault so
+        # an explicit environment override still wins over the preset.
+        os.environ.setdefault("DKV_SVD_ENERGY", str(getattr(self, "svd_energy", 0.999)))
+
         verbose = os.environ.get("DKV_TELEMETRY", "0") == "1"
         if verbose:
             print(f"[DKV Config] Loaded preset: {self.preset.upper()}")
+            print(f"  svd_energy / rank         = {getattr(self, 'svd_energy', None)} / {self.rank}")
             print(f"  decode_cache_enabled      = {self.decode_cache_enabled}")
             print(f"  decode_cache_max_tokens   = {self.decode_cache_max_tokens}")
             print(f"  prefill_chunk_size        = {self.prefill_chunk_size}")
