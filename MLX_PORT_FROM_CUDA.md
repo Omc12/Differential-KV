@@ -157,8 +157,38 @@ falls 9/9 -> 6/9, including a one-character near-miss (`Falcon-9427-613` for
 2k means the un-rotated READ path is buggy, not that this is a real trade. The
 fix is to make the rotated path carry correct positions.
 
-If MLX stores rotated keys too, it likely has the same accuracy ceiling on
-distractor-heavy retrieval, and the same benchmark will show it.
+**MLX almost certainly shares this.** `triton_fused_decode.py:242` documents the
+two designs explicitly and cites `mlx_dkv_wrapper.py:4565/4613`: MLX rotates keys
+and THEN compresses them, which is exactly the `DKV_ROTATED_POOL=1` design. So
+the distractor-heavy weakness measured here is a property of the shared
+architecture, not of the CUDA port, and `linkbench_cuda.py` should reproduce it
+on MLX.
+
+**Both modes are wrong, in complementary ways.** Neither is a fix to adopt:
+
+| | linkbench (content) | needle sweep (order) |
+|---|---|---|
+| `=1` rotated, MLX parity | 14/24 | 9/9 |
+| `=0` unrotated | 24/24 at 8k/16k/32k | 6/9 |
+
+The `=0` needle failures are all EDIT DISTANCE 1 and all order errors --
+`Falcon-94276-6183`, `Falcon-9427-6138`, `Falcon-9427-613` for `Falcon-9427-6183`.
+Right digits, wrong order. That is the fingerprint of the phase error the
+docstring predicts: the unrotated path rotates the anchor and the whole V_K basis
+at the ANCHOR's position, so every token in a block shares one rotation and
+carries a positional error of up to a full block (256 positions). Raising the
+residual budget to 224 of 256 does NOT repair it (still 4 failures, still all
+near-misses), because a residual is rotated at its token's true position while
+the base term it corrects is rotated at the anchor -- they are in different
+frames and their sum is exact in neither.
+
+**The actual fix, for whichever runtime does it first:** store keys UNROTATED (so
+the SVD fits un-mixed vectors, which is what recovers the content discrimination)
+and apply RoPE PER TOKEN at read, rather than once per block at the anchor. The
+CUDA docstring rejected this as "a D-dim reconstruction per token", but the fused
+decode kernel already reconstructs per token to score it, so the rotation can ride
+along inside that loop instead of being a separate pass. That is kernel work on
+CUDA and would be `mx.fast.rope` inside the equivalent MLX path.
 
 ---
 
