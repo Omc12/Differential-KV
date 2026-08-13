@@ -192,7 +192,7 @@ CUDA and would be `mx.fast.rope` inside the equivalent MLX path.
 
 ---
 
-## 5b. Block size trades distractor retrieval against synthesis
+## 5b. Block size 256 -> 512 (CUDA default changed; check MLX's)
 
 **Priority: high — it is the only knob that moves either, and MLX has the same
 constant.**
@@ -212,8 +212,30 @@ Measured on Qwen3.5-2B at 16k, CUDA:
 
 Big blocks keep an association intact inside one block, which distractor-heavy
 retrieval needs. Small blocks give routing finer granularity to assemble diverse
-content, which synthesis needs. **Neither reaches dense on both**, so CUDA kept
-256 rather than trade one benchmark for the other.
+content, which synthesis needs.
+
+**CUDA now defaults to 512**, because with prefill and VRAM measured too, 512
+turned out to DOMINATE 256 rather than trade against it:
+
+| block | linkbench | synthesis | TTFT (1.5B, 32k) | peak_alloc | needles |
+|---|---|---|---|---|---|
+| 256 (old default) | 14/24 | 46.7 | 15.17 s | 5.44 GB | 9/9 |
+| **512 (new)** | **15/24** | **50.0** | **11.58 s** | **5.10 GB** | 9/9 |
+| 1024 | **24/24** | 30.0 | 11.43 s | 4.96 GB | 9/9 |
+| dense | 24/24 | 60.0 | 5.70 s | — | — |
+
+512 is better on prefill (-24%), VRAM, synthesis and distractor retrieval at
+once; decode measured 2-4% lower, inside the run-to-run band. Fewer, larger
+blocks mean fewer per-block compressions, and that is where prefill time goes --
+on a non-hybrid model where all 28 layers are compressed, the model forward is
+only about a third of prefill.
+
+1024 is NOT taken despite reaching dense parity on distractor retrieval, because
+it costs synthesis 50.0 -> 30.0. Use `micro_block_size=1024` for
+distractor-heavy retrieval specifically.
+
+**On MLX: check the block_size default and sweep it.** This is the strongest
+single lever found in the whole CUDA effort, and it moved four metrics at once.
 
 This also supersedes the rotated-pool theory in item 5 as the *practical* lever:
 `DKV_ROTATED_POOL=0` closes linkbench too, but breaks needle ORDER (edit-distance-1

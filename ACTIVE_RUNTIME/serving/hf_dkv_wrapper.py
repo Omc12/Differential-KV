@@ -487,29 +487,32 @@ class PyTorchDKVHFWrapper:
         # spanned 14.85-21.56 tok/s -- so it is somewhere between nil and ~16%,
         # and colab/bench_decode_paired.py cannot settle it because block size is
         # fixed when the manager is constructed rather than read per call.
-        # 256 stays, but it is a TRADE, not a tuned optimum. Block size is the
-        # only knob that moves distractor-heavy retrieval, and it moves broad
-        # synthesis the opposite way. Measured on Qwen3.5-2B at 16k:
+        # 512, not 256. Block size is the strongest lever in the system and
+        # 256 was dominated on every axis measured. Qwen2.5-1.5B TTFT and VRAM at
+        # 32k, Qwen3.5-2B accuracy at 16k:
         #
-        #   block   linkbench (24 seeds)   multifact synthesis   needles
-        #   128     11/24                  -                     -
-        #   256     14/24                  46.7 (8 facts, 2 links)  9/9
-        #   512     15/24                  -                     -
-        #   1024    24/24                  30.0 (6 facts, 1 link)   9/9
-        #   dense   24/24                  60.0 (9 facts, 3 links)  -
+        #   block  linkbench  synthesis  TTFT     peak_alloc  needles
+        #   256    14/24      46.7       15.17 s  5.44 GB     9/9
+        #   512    15/24      50.0       11.58 s  5.10 GB     9/9
+        #   1024   24/24      30.0       11.43 s  4.96 GB     9/9
+        #   dense  24/24      60.0        5.70 s  -           -
         #
-        # Big blocks keep an association intact inside one block, which is what
-        # distractor retrieval needs; small blocks give routing finer granularity
-        # to assemble diverse content, which is what synthesis needs. Nothing
-        # else moves either: routing K (0/32/default), residual budget
-        # (32/128/224), recency window (512/4096) and SVD rank (32/96) leave
-        # linkbench at EXACTLY 14/24.
+        # 512 beats 256 on prefill (-24%), VRAM, synthesis AND distractor
+        # retrieval at once; decode measured 2-4% lower, inside the run-to-run
+        # band. Fewer, larger blocks mean fewer per-block compressions, which is
+        # where prefill time goes -- the model forward is only about a third of
+        # it on a non-hybrid model where all 28 layers are compressed.
         #
-        # Neither setting reaches dense on both, so 256 is kept as the incumbent
-        # rather than trading one benchmark for the other. Set
-        # micro_block_size=1024 for distractor-heavy retrieval workloads.
-        # A real fix is multi-scale blocks, not a different constant.
-        self.micro_block_size = self.config.get("micro_block_size", 256)
+        # 1024 is NOT taken despite closing distractor retrieval to dense parity:
+        # it costs synthesis 50.0 -> 30.0. Big blocks keep an association intact
+        # inside one block; small blocks give routing the granularity to assemble
+        # diverse content. 512 is the point where both are still served. Set
+        # micro_block_size=1024 for distractor-heavy retrieval specifically.
+        #
+        # Nothing else moves distractor retrieval at all: routing K
+        # (0/32/default), residual budget (32/128/224), recency window
+        # (512/4096) and SVD rank (32/96) all leave it at EXACTLY 14/24.
+        self.micro_block_size = self.config.get("micro_block_size", 512)
         
         self.local_files_only = (
             os.environ.get("HF_HUB_OFFLINE", "0") == "1"
