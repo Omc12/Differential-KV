@@ -75,11 +75,45 @@ MODE = os.environ.get("MODE", "AA")          # AA = control, AB = real compariso
 _TOK = re.compile(r"total_token=([0-9.]+)ms")
 
 
+# EXPERIMENT selects what the two arms differ by. Knobs read from os.environ at
+# CALL time can simply be set here; knobs captured into a module constant at
+# import time must be rebound on the module, which is why both forms appear.
+EXPERIMENT = os.environ.get("EXPERIMENT", "routing")
+
+
 def set_arm(arm):
-    """Apply an arm's config by rebinding module constants."""
+    """Apply an arm's config. A is the 'new'/'on' side by convention."""
     if MODE == "AA":
         return                                # both arms identical: the control
-    DA._GRAPH_SAFE_ROUTING = (arm == "A")
+    on = (arm == "A")
+    if EXPERIMENT == "routing":
+        DA._GRAPH_SAFE_ROUTING = on
+    elif EXPERIMENT == "topk":
+        # Read at call time by query_router, so the environment is enough.
+        if on:
+            os.environ["DKV_TOPK_BLOCKS"] = os.environ.get("TOPK_ON", "32")
+        else:
+            os.environ.pop("DKV_TOPK_BLOCKS", None)
+    elif EXPERIMENT == "remat_interval":
+        os.environ["DKV_REMAT_INTERVAL"] = (os.environ.get("IV_ON", "16") if on
+                                            else os.environ.get("IV_OFF", "4"))
+    elif EXPERIMENT == "remat":
+        # NOT the environment: dkv_attention captures remat_enabled() into
+        # _REMAT_ENABLED at import, so setting DKV_REMAT_CACHE here would leave
+        # both arms on and the benchmark would truthfully report "no effect" for
+        # a change it never actually made.
+        DA._REMAT_ENABLED = on
+    elif EXPERIMENT == "dense_ring":
+        # Requires the append-only patch in assemble_dense_window_kv, which is
+        # NOT in the tree: measured with this harness it was neutral at both
+        # 8.4k (CI [-1.42, +0.83] ms) and 32k (CI [-1.53, +2.82] ms), so it was
+        # dropped rather than carried for no gain. Re-apply the patch to use it.
+        import native_core.kv_runtime_manager as KVM
+        if not hasattr(KVM, "_DENSE_RING"):
+            raise SystemExit("dense_ring: append-only patch not present in tree")
+        KVM._DENSE_RING = on
+    else:
+        raise SystemExit(f"unknown EXPERIMENT={EXPERIMENT}")
 
 
 def clocks():
@@ -102,7 +136,7 @@ def main():
     prompt = tok.apply_chat_template(
         [{"role": "user", "content": ctx + "\nWrite a detailed essay about archives."}],
         tokenize=False, add_generation_prompt=True)
-    print(f"CTX {len(tok(prompt).input_ids)} mode={MODE} rounds={ROUNDS} ntok={NTOK}",
+    print(f"CTX {len(tok(prompt).input_ids)} mode={MODE} exp={EXPERIMENT} rounds={ROUNDS} ntok={NTOK}",
           flush=True)
 
     def run(n):

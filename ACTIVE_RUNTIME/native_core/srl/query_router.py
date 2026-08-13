@@ -967,13 +967,19 @@ def route_blocks_relevance(
     #     DKV_TOPK_BLOCKS=32   score 60.0   facts 9/15   links 3/5
     #     DKV_TOPK_BLOCKS=48   score 60.0   (saturated)
     #
-    # Cost is decode only: 15.32 -> 14.14 tok/s at 32k (-7.7%), VRAM unchanged
-    # (5.03 -> 5.04 GB), and validate_cuda_dkv --long stays 9/9 recall + 9/9
-    # determinism. NOT made the default, because the same setting moved
-    # Qwen2.5-1.5B's synthesis 26.7 -> 16.7 -- inside that model's observed
-    # 16.7-26.7 run-to-run band, and it fails the >=30 bar either way, so the
-    # evidence does not support paying 8% decode for every model. Set
-    # DKV_TOPK_BLOCKS=32 for synthesis-shaped work.
+    # It is FREE on speed. Measured with colab/bench_decode_paired.py (arms
+    # interleaved in one process, paired statistic): 2.4% FASTER at 8.4k, CI
+    # [-3.5%, -1.2%], and no resolvable difference at 32k, CI [-5.8%, +5.8%].
+    # VRAM unchanged, and validate_cuda_dkv --long stays 9/9 recall + 9/9
+    # determinism. An earlier note here claimed it cost -7.7% decode; that came
+    # from single unpaired runs of a metric that moves ~20% between runs.
+    #
+    # Still NOT the default, on QUALITY grounds rather than speed: the same
+    # setting reproducibly moves Qwen2.5-1.5B's synthesis 26.7 -> 16.7 (twice
+    # each, identical facts 5/15, one fewer link), while helping Qwen3.5-2B
+    # 46.7 -> 60.0 (twice each). It helps the model where synthesis works and
+    # hurts the one where it does not, so the choice belongs to the caller.
+    # Set DKV_TOPK_BLOCKS=32 for synthesis-shaped work on a capable model.
     _topk_env = os.environ.get("DKV_TOPK_BLOCKS")
     if _topk_env is None or _topk_env.strip() == "":
         topk = _pool_default
