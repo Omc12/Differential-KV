@@ -177,6 +177,28 @@ _GRAPH_SAFE_DECODE = os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"
 #
 # DKV_GRAPH_SAFE_ROUTING=0 restores the compaction.
 _GRAPH_SAFE_ROUTING = os.environ.get("DKV_GRAPH_SAFE_ROUTING", "1") == "1"
+# Fused attention for the prefill history path instead of an eager
+# matmul+softmax. DEFAULT ON.
+#
+# The eager form materialises the whole [B, H, Lq, Lk] score matrix. Replacing it
+# with the ATen SDPA op (which, unlike the public API, also returns the
+# log-sum-exp that _combine_outputs needs to merge this path with the local and
+# compressed ones) measured on Qwen2.5-1.5B at 32k:
+#
+#     TTFT        12.11 -> 8.25 s   (-32%)
+#     peak_alloc   5.17 -> 5.03 GB  (the score matrix stops existing)
+#     decode      unchanged within the run-to-run band
+#
+# Generated text is NOT bit-identical -- a fused kernel reduces in a different
+# order, which flips the occasional greedy tie -- so this was gated behind the
+# accuracy suite rather than assumed safe. All of it passes, and synthesis
+# IMPROVES: multifact 43.3 -> 50.0 (links 2/5 -> 3/5), with linkbench still 24/24
+# and needle recall 9/9 + 9/9 on both models.
+#
+# This is strictly better than DKV_CONTIGUOUS_PREFILL, which reaches 9.28 s but
+# costs +0.75 GB because it keeps a persistent rotated K/V buffer of every token.
+# DKV_SDPA_HISTORY=0 restores the eager path.
+_SDPA_HISTORY = os.environ.get("DKV_SDPA_HISTORY", "1") == "1"
 
 # ── Re-materialisation cache (DKV_REMAT_CACHE, default OFF) ──────────────────
 # Read once at import; see native_core/sparse_decode/remat_cache.py for the
@@ -4367,11 +4389,49 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             v_dense_rep = repeat_kv(v_dense, num_key_value_groups)
 
                                             _scale = 1.0 / math.sqrt(head_dim)
-                                            scores_dense = torch.matmul(chunk_q * _scale, k_dense_rep.transpose(-2, -1))
-                                            lse_hist_dense = torch.logsumexp(scores_dense, dim=-1)
-                                            weights_dense = torch.softmax(scores_dense, dim=-1)
-                                            out_hist_dense = torch.matmul(weights_dense, v_dense_rep)
-                                            del scores_dense, weights_dense
+                                            # Fused attention instead of eager
+                                            # matmul+softmax.
+                                            #
+                                            # The eager form materialises the full
+                                            # [B, H, Lq, Lk] score matrix, which is
+                                            # both the O(N^2) prefill memory and a
+                                            # large share of its GPU time: at 32k on
+                                            # Qwen2.5-1.5B the prefill kernel budget
+                                            # is 8.4 s, of which GEMM is ~25% and
+                                            # softmax ~8%, against a total dense
+                                            # prefill of 5.8 s. The SVD everyone
+                                            # assumes is the cost is only 8%.
+                                            #
+                                            # SDPA cannot normally be used here
+                                            # because _combine_outputs needs the
+                                            # log-sum-exp to merge this path with the
+                                            # local and compressed ones, and the
+                                            # public API returns only the output. The
+                                            # ATen op underneath returns both, so the
+                                            # merge stays exact rather than being
+                                            # approximated or dropped.
+                                            #
+                                            # No mask and is_causal=False: every key
+                                            # here is history, strictly before this
+                                            # chunk, so all of it is visible to every
+                                            # query in the chunk.
+                                            _sdpa_ok = False
+                                            if _SDPA_HISTORY:
+                                                try:
+                                                    _o, _l = torch.ops.aten._scaled_dot_product_efficient_attention(
+                                                        chunk_q, k_dense_rep, v_dense_rep,
+                                                        None, True, 0.0, False, scale=_scale)[:2]
+                                                    out_hist_dense = _o
+                                                    lse_hist_dense = _l[..., :chunk_q.shape[-2]]
+                                                    _sdpa_ok = True
+                                                except Exception:      # noqa: BLE001
+                                                    _sdpa_ok = False
+                                            if not _sdpa_ok:
+                                                scores_dense = torch.matmul(chunk_q * _scale, k_dense_rep.transpose(-2, -1))
+                                                lse_hist_dense = torch.logsumexp(scores_dense, dim=-1)
+                                                weights_dense = torch.softmax(scores_dense, dim=-1)
+                                                out_hist_dense = torch.matmul(weights_dense, v_dense_rep)
+                                                del scores_dense, weights_dense
 
                                         if comp_blocks and getattr(kv_manager, "native_pool", None) is not None:
                                             out_hist_comp, lse_hist_comp = _project_then_attend_history(
