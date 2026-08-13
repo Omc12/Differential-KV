@@ -91,7 +91,7 @@ FILLER = [
 ]
 
 
-def build(tokenizer):
+def build(tokenizer, seed):
     """Return (prompt, question, answer) with the chain's links scattered.
 
     Each link of the target chain goes into a DIFFERENT region of the context, so
@@ -99,7 +99,7 @@ def build(tokenizer):
     hop. Distractor chains are laid down the same way and interleaved, so the
     regions are not identifiable by density.
     """
-    rng = random.Random(SEED)
+    rng = random.Random(seed)
     people = rng.sample(PEOPLE, N_CHAINS + N_DISTRACT)
     orgs = rng.sample(ORGS, N_CHAINS + N_DISTRACT)
     cities = rng.sample(CITIES, N_CHAINS + N_DISTRACT)
@@ -202,21 +202,33 @@ def main():
         if QUANT == "nf4":
             os.environ["DKV_QUANTIZATION"] = "nf4"
         from serving.hf_dkv_wrapper import PyTorchDKVHFWrapper
-        w = PyTorchDKVHFWrapper(model_id=MODEL,
-                                config={"mode": "nf4" if QUANT == "nf4" else "fp16"},
-                                device="cuda")
+        # rank is a wrapper-config value, not an environment knob, so it has to
+        # be threaded here to be sweepable. It is the last fidelity lever: the
+        # residual budget controls how many tokens are kept EXACT, rank controls
+        # how well everything else is approximated.
+        _cfg = {"mode": "nf4" if QUANT == "nf4" else "fp16"}
+        if os.environ.get("RANK"):
+            _cfg["rank"] = int(os.environ["RANK"])
+        w = PyTorchDKVHFWrapper(model_id=MODEL, config=_cfg, device="cuda")
         w.ensure_loaded()
 
-    body, question, answer, candidates = build(w.tokenizer)
-    prompt = w.tokenizer.apply_chat_template([{"role": "user", "content": body}],
-                                             tokenize=False, add_generation_prompt=True)
-    ntok = len(w.tokenizer(prompt).input_ids)
-    t0 = time.perf_counter()
-    out = w.generate(prompt=prompt, max_new_tokens=MAX_NEW, temperature=0.0,
-                     top_p=1.0, repetition_penalty=1.0)
-    dt = time.perf_counter() - t0
-    if isinstance(out, dict):
-        out = out.get("text", str(out))
+    # Sweep seeds in ONE process against ONE model load. A fresh process per seed
+    # would pay a model load each time and, worse, would let load-order and
+    # thermal state vary between the arms being compared.
+    seeds = [int(x) for x in os.environ.get("SEEDS", str(SEED)).split(",")]
+    hits, rows = 0, []
+    for seed in seeds:
+        body, question, answer, candidates = build(w.tokenizer, seed)
+        prompt = w.tokenizer.apply_chat_template(
+            [{"role": "user", "content": body}], tokenize=False,
+            add_generation_prompt=True)
+        ntok = len(w.tokenizer(prompt).input_ids)
+        t0 = time.perf_counter()
+        out = w.generate(prompt=prompt, max_new_tokens=MAX_NEW, temperature=0.0,
+                         top_p=1.0, repetition_penalty=1.0)
+        dt = time.perf_counter() - t0
+        if isinstance(out, dict):
+            out = out.get("text", str(out))
     # Grade on ATTRIBUTION, not presence. A model that simply echoes context can
     # emit the right name by accident -- the dense arm was observed reciting
     # filler with the answer buried in it. Requiring the FIRST candidate name in
@@ -228,15 +240,19 @@ def main():
     # the distractors it was merely quoting -- the two arms would not be graded
     # on the same text. The question is the last thing in the prompt, so whatever
     # follows its final occurrence is the model's own output.
-    ans = out.split(question)[-1] if question in out else out
-    low = ans.lower()
-    firsts = [(low.find(c.lower()), c) for c in candidates if c.lower() in low]
-    firsts = [f for f in firsts if f[0] >= 0]
-    said = min(firsts)[1] if firsts else None
-    hit = (said is not None and said.lower() == answer.lower())
+        ans = out.split(question)[-1] if question in out else out
+        low = ans.lower()
+        firsts = [(low.find(c.lower()), c) for c in candidates if c.lower() in low]
+        firsts = [f for f in firsts if f[0] >= 0]
+        said = min(firsts)[1] if firsts else None
+        hit = (said is not None and said.lower() == answer.lower())
+        hits += bool(hit)
+        rows.append((seed, answer, said, hit))
+        print(f"  seed={seed} answer={answer} said={said} hit={hit} ({dt:.0f}s)",
+              flush=True)
     print(f"LINKBENCH engine={ENGINE} model={MODEL} ctx={ntok} hops={HOPS} "
-          f"answer={answer} said={said} hit={hit} ({dt:.0f}s)", flush=True)
-    print(f"  tail={out[-120:]!r}", flush=True)
+          f"qmode={os.environ.get('QMODE', 'chain')} "
+          f"HITS={hits}/{len(seeds)}", flush=True)
 
 
 if __name__ == "__main__":
