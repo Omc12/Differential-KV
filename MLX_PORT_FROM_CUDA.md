@@ -395,6 +395,82 @@ entire system-RAM gap.
 
 ---
 
+## 7. Prefill's history attention was eager — fuse it
+
+**Priority: high — it is the single biggest prefill win found, and it improved
+accuracy rather than costing it.**
+
+**MLX status: CHECK THIS.** CUDA's site is the history branch of
+`_sparse_prefill_attend` in `runtime/dkv_attention.py`; MLX has a function of the
+same name. If it builds a full score matrix and calls softmax itself, the same
+change applies.
+
+**What CUDA found.** Profiling prefill at 32k on Qwen2.5-1.5B contradicted the
+obvious assumption that compression dominates. Of an 8.4 s kernel budget the SVD
+is only **8%** (eigh 457 ms + qr 214 ms); GEMM is ~25%, softmax ~8%, elementwise
+~22%. That is the history cross-attention, which ran as
+`matmul -> logsumexp -> softmax -> matmul` and materialised the whole
+`[B, H, Lq, Lk]` score matrix.
+
+Replacing it with a fused attention call gave:
+
+    TTFT        12.11 -> 8.25 s   (-32%)
+    peak_alloc   5.17 -> 5.03 GB  (the score matrix stops existing)
+
+**The constraint that shapes the fix.** This path's output is merged with the
+local and compressed paths by log-sum-exp, so the call must return the LSE, not
+just the output. On CUDA the public `scaled_dot_product_attention` is therefore
+unusable and the change goes through
+`torch.ops.aten._scaled_dot_product_efficient_attention`, which returns
+`(out, logsumexp, ...)`. **Check whether MLX's fused attention primitive
+(`mx.fast.scaled_dot_product_attention`) can return the LSE.** If it cannot, this
+item does not port as written — do not approximate the merge to get the speed.
+
+No mask, `is_causal=False`: every key on this path is history strictly before the
+chunk, so it is visible to every query in it.
+
+**Accuracy moved, and up.** A fused kernel reduces in a different order and flips
+the occasional greedy tie, so output is not bit-identical and this needs the full
+suite rather than an assumption. On CUDA: multifact synthesis **43.3 -> 50.0**
+(links 2/5 -> 3/5), linkbench still 24/24, needles 9/9 on both models.
+
+---
+
+## 8. Fidelity is a preset ladder, not one constant
+
+**Priority: medium — it is what fixed synthesis without touching block size.**
+
+**MLX status: LIKELY.** CUDA's rank-selection site keeps singular values until
+cumulative energy reaches a hardcoded `0.999`. Look for the same constant in
+MLX's low-rank path.
+
+**What CUDA found.** With block size pinned at 1024 for linkage, synthesis was
+stuck at 30.0. The lever that moved it was not routing, residuals or block size
+(all measured, all flat — see 5b) but **how much spectral energy the SVD keeps**.
+`0.999` truncates harder than it looks: it is the knee of a fast-decaying
+spectrum, so the tail it drops still carries the distinctions synthesis needs.
+
+CUDA now ties energy and rank to the existing quality presets rather than picking
+one number:
+
+| preset | svd_energy | rank |
+|---|---|---|
+| low | 0.999 | 32 |
+| mid | 0.9999 | 64 |
+| high | 0.99999 | 128 |
+
+This is the "smarter routing instead of more rank" question answered the other
+way: routing genuinely cannot help (5b measured that), so the fidelity has to
+come from the spectrum — but paying for it is now the *caller's* choice per
+preset instead of a constant everyone pays.
+
+Related measurement, worth not repeating: trading residual budget for rank does
+NOT work once rank carries more of the fidelity. `max_residual` 128/64/32 gives
+synthesis 43.3/40.0/23.3, so the residual bytes still earn their place and are
+not a place to reclaim memory from.
+
+---
+
 ## Not portable — CUDA-only, listed so you do not go looking
 
 * **Occupancy-driven decode chunking** (`a5289a18`) — sizes a Triton kernel grid

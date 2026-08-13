@@ -55,7 +55,6 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
-
 def remat_enabled() -> bool:
     """DKV_REMAT_CACHE — deliberately a NEW name.
 
@@ -383,12 +382,24 @@ def attend_with_remat(
 
     K_all = K_all.permute(1, 0, 2).unsqueeze(0)                  # [1, H_kv, T, D]
     V_all = V_all.permute(1, 0, 2).unsqueeze(0)
+    # The GQA expansion is materialised on purpose. SDPA's enable_gqa does the
+    # same broadcast inside the kernel and looks strictly better on paper -- it
+    # skips two fresh [1, H_q, T, D] tensors per layer per decode step, a 6x
+    # blow-up on Qwen2.5-1.5B (12 q heads / 2 kv heads). Measured, it is SLOWER:
+    # paired A/B at 8.4k, +3.1 ms/token against this path in 6 of 6 clean rounds
+    # in both orders (~8.7%). Expanding first hands SDPA contiguous inputs and a
+    # fast backend; enable_gqa together with an attn_mask does not get one, so
+    # the broadcast it saves costs more than the copy it avoids.
     if num_key_value_groups > 1:
         K_all = K_all.repeat_interleave(num_key_value_groups, dim=1)
         V_all = V_all.repeat_interleave(num_key_value_groups, dim=1)
 
-    attn_mask = torch.zeros(1, 1, 1, keep.shape[0], device=dev, dtype=dt)
-    attn_mask.masked_fill_(~keep.view(1, 1, 1, -1), float("-inf"))
+    # A boolean mask rather than a float one built by masked_fill_ on a fresh
+    # zeros tensor: SDPA takes bool directly (True = attend), so this is one
+    # allocation and one fill less per layer per token for the same result. A
+    # paired A/B could NOT resolve a speed difference, so this is here for being
+    # simpler, not because it measured faster.
+    attn_mask = keep.view(1, 1, 1, -1)
 
     # ── DKV_MASS_TRACE: how much softmax mass reaches the NEEDLE'S ROW? ───────
     # Every other observable has been exhausted for 32k@depth0.9: the block is
@@ -411,7 +422,7 @@ def attend_with_remat(
         with torch.no_grad():
             _sc = 1.0 / (D ** 0.5)
             _s = (q.float() @ K_all.float().transpose(-1, -2)) * _sc   # [1,H_q,1,T]
-            _s = _s + attn_mask.float()
+            _s = _s.masked_fill(~keep.view(1, 1, 1, -1), float("-inf"))
             _w = torch.softmax(_s, dim=-1)[0, :, 0, :]                 # [H_q, T]
             _mine = _w[:, trace_row]
             _best_h = int(torch.argmax(_mine).item())
