@@ -32,6 +32,15 @@ Resolution is ~+-1.8% of a token at 8.4k and ~+-4% at 32k (the longer context is
 noisier: bigger pool, compression running during decode). Before the pairing and
 the min estimator the same comparison could not resolve 20%.
 
+USE THIS, NOT cProfile SELF-TIME, TO SIZE A CHANGE. cProfile charges its own
+per-call overhead to the callee, so a high-count cheap builtin looks expensive:
+its decode attribution put .to() at 6.21 ms/token over 365 calls, but cutting
+those calls 229.8 -> 56.4 (a manager-owned cache for the key boxes, which worked
+mechanically) produced NO resolvable change here. Tensor.to() returns self when
+the tensor is already on the right device, so it costs dispatch and nothing else.
+cProfile is a good tool for finding WHICH code issues the calls; it is a bad tool
+for deciding whether removing them is worth anything.
+
 Usage:
     MODE=AA  ROUNDS=8  REP=700  python colab/bench_decode_paired.py   # control
     MODE=AB  ROUNDS=12 REP=2800 python colab/bench_decode_paired.py   # comparison
