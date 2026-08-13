@@ -266,12 +266,48 @@ looked at -- it is that an association stays inside ONE unit. Splitting a
 document into more pieces destroys cross-piece associations no matter how
 faithfully each piece is stored or how many are retrieved.
 
-That is why the fix is multi-scale blocks rather than a better constant: the same
-content compressed at two granularities, with attention seeing both, so
-associations survive at the coarse scale while the fine scale keeps the
-granularity synthesis needs. Note the corollary -- because routing is provably
-irrelevant here, a multi-scale ROUTER would not help; the two scales have to
-both reach attention.
+### The two metrics want opposite block sizes, and nothing bridges them
+
+Full sweep on Qwen3.5-2B at 16k:
+
+| block | linkbench | synthesis (facts/links) |
+|---|---|---|
+| 256 | 14/24 | 46.7 (8/2) |
+| 512 | 15/24 | **50.0** (6/3) |
+| 1024 | **24/24** | 30.0 (6/1) |
+| 1536 | — | 26.7 (5/1) — fails the >=30 bar |
+| 2048 | **24/24** (at 32k) | 33.3 (4/2) |
+
+Synthesis peaks at 512 and degrades as blocks grow; distractor retrieval rises
+monotonically with block size. There is no crossover point that serves both.
+
+Everything that might have bridged them was measured and does not:
+
+* rank scaled WITH block size (1024 at rank 32 / 64 / 128) -> synthesis 30.0 in
+  all three, so the synthesis loss is not lost per-token fidelity
+* routing coverage (`DKV_TOPK_FRAC` 0.0/0.5/1.0, `DKV_TOPK_BLOCKS=0`) -> no
+  effect on either
+* residual budget, recency window -> no effect
+
+### So dual-scale is required, and here is the shape of it
+
+The same content compressed at BOTH granularities, with attention seeing both:
+the coarse scale keeps associations inside one unit, the fine scale keeps the
+granularity synthesis needs.
+
+Because routing is provably irrelevant here, a multi-scale ROUTER cannot help --
+both scales have to reach ATTENTION. The cheapest correct structure found on the
+CUDA side, not yet implemented:
+
+1. a second pool at the coarse scale (a single pool cannot hold both: its per-slot
+   tensors are sized `[n_blocks, block_size-1, rank]`, so sizing for the coarse
+   scale inflates every fine slot by the same factor)
+2. ingest writing both scales from the same token stream
+3. decode running the existing fused kernel once per scale and merging the two
+   outputs by log-sum-exp -- the prefill path already does exactly this merge for
+   chunked attention, so the kernel itself does not need to change
+
+Cost is roughly 2x pool memory and a second decode kernel launch per layer.
 
 This also supersedes the rotated-pool theory in item 5 as the *practical* lever:
 `DKV_ROTATED_POOL=0` closes linkbench too, but breaks needle ORDER (edit-distance-1
