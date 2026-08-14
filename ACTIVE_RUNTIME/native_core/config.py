@@ -49,7 +49,17 @@ class DKVConfig:
             # capped 40 and 128 to the same 38 exact tokens — of course they
             # matched.  With that cap removed this ladder is real for the first
             # time, and 40 now genuinely stores ~3x fewer exact tokens per block
-            # than `high`.  Re-measure before treating `low` as quality-neutral.
+            # than `high`.
+            #
+            # RE-MEASURED, on a metric that can actually resolve it. linkbench at
+            # 32k over 24 seeds, `low` with max_residual 40 vs 128: 18/24 BOTH
+            # WAYS. So the residual budget is not what limits `low` -- 40 stays,
+            # and it is now measured rather than assumed.
+            #
+            # What DOES limit `low` is its energy target: 0.999 gives a realised
+            # mean per-block rank of 35 against mid's 53, and `low` scores 18/24
+            # where mid scores 20/24 and ultra 47/48. That is the memory-for-
+            # fidelity trade the preset exists to make, working as intended.
             self.max_residual_tokens = 40
             # Spectral energy a block's low-rank form must retain, and the rank
             # ceiling that serves it. This -- not `rank` -- is what actually sets

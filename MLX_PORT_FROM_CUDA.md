@@ -212,6 +212,26 @@ already selecting correctly and the one remaining failure is not a selection
 failure. This confirms, at the new and much better operating point, the earlier
 finding that `DKV_TOPK_FRAC` 0.0/0.5/1.0 were indistinguishable.
 
+### Confirmed again on generated PROSE, not just on retrieval scores
+
+The objection to the above is fair: linkbench scores one extracted fact, so it
+cannot see whether routing changes the quality of an actual answer.
+`colab/qual_routing_cuda.py` tests exactly that — a 16k structured handbook (five
+departments, each with a budget, headcount, policy and a dependency on another),
+and a four-part question needing facts from four sections plus a dependency chain.
+
+**K=16 and attend-every-block produced BYTE-IDENTICAL answers.** Not similar —
+identical. Both got the budget comparison, the headcount total (416) and the full
+dependency chain including its loop; both missed the same fourth part. Dense also
+got parts 1-3 and missed part 4 differently. So routing changed nothing about the
+generated response either.
+
+**One honest caveat on the ceiling argument.** "Attend everything" is not a strict
+upper bound on quality — attending more CAN dilute attention, which is exactly
+what killed dual-scale (item 10d), so a cleverer *subset* could in principle beat
+both. What the data rules out is the assumption that the router is currently
+*missing* something: it is not, because showing it everything changes nothing.
+
 **The consequence for design:** distractor retrieval was never a *selection*
 problem, it was a *representation* problem — which is exactly why the rotated/
 unrotated fix moved it 40 → 47 while every routing knob ever tried moved it
@@ -481,6 +501,47 @@ Related measurement, worth not repeating: trading residual budget for rank does
 NOT work once rank carries more of the fidelity. `max_residual` 128/64/32 gives
 synthesis 43.3/40.0/23.3, so the residual bytes still earn their place and are
 not a place to reclaim memory from.
+
+---
+
+## 8b. The `ultra` preset — what CUDA ships, and what each setting is worth
+
+**MLX status: the settings are portable; the JUSTIFICATIONS are what matter.**
+
+CUDA added a fourth preset above `high`. Recording it in full because two of its
+four defining choices are things MLX should copy and two are things MLX should
+NOT copy, and the difference is only visible with the measurements attached.
+
+| setting | low | mid | high | **ultra** |
+|---|---|---|---|---|
+| `svd_energy` | 0.999 | 0.9999 | 0.99999 | **0.999999** |
+| realised mean per-block rank | 35 | 53 | 67 | **94** |
+| `rank` (ceiling) | 32 | 64 | 128 | **224** |
+| `rotated_pool` | True | True | True | **False** |
+| `prefill_chunk_size` | 1024 | 1024 | 2048 | 1024 |
+| `max_residual_tokens` | 40 | 128 | 128 | 128 |
+
+**Take `rotated_pool=False`** — item 5. This is the one setting that measurably
+closes a gap to dense on a metric with real statistical power: linkbench 40/48 →
+47/48 over 48 seeds, exactly matching dense's 47/48. It costs 18-24% of decode
+and +1.1 GB, which is why it lives here and not in the defaults.
+
+**Take the energy ladder** — item 8, but justified by REALISED RANK (the table
+above), which is deterministic and directly instrumentable, not by benchmark
+scores. `rank` is only a ceiling; at these energies it binds for 0.0% of blocks,
+so setting it does almost nothing on its own. Set energy, and set `rank` merely
+high enough not to clip the target (realised max at 0.999999 is 205, hence 224).
+
+**Do NOT take `rank=224` as meaningful on its own** — item 10. It was originally
+chosen from a rank sweep that turned out to be randomised-SVD projection noise.
+
+**Do NOT assume `ultra` wins on synthesis.** It does not: over three seeds it
+means 48.9 against `mid`'s 53.3 and dense's 60.0. The preset is justified on
+linkbench and on realised rank, both of which can be measured; multifact cannot
+resolve any of it.
+
+`ultra` is otherwise a copy of `mid`, not of `high` — that is deliberate and is
+the configuration everything above was measured on.
 
 ---
 
