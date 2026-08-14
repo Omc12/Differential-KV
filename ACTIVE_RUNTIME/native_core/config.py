@@ -101,10 +101,26 @@ class DKVConfig:
             # That distinction is the whole preset. The rank sweep below was run
             # on top of mid's other settings (RANK= override, default preset), and
             # rank 192 there scores 60.0. Building this branch on `high`'s
-            # settings instead scored 50.0 (facts 9/15, links 2/5) with the SAME
-            # rank 192 -- so the 60.0 needs mid's configuration around it and is
-            # not a property of the rank alone. Copy mid, change rank, change
-            # nothing else.
+            # settings instead scored 50.0 with the SAME rank, so the result
+            # needs mid's configuration around it and is not a property of rank
+            # alone. Copy mid, change rank, change nothing else.
+            #
+            # WHICH mid setting, bisected one at a time against high's value:
+            # prefill_chunk_size, and ONLY that. srl_threshold 100, kv_quant f16,
+            # max_active_dense_tokens 4096 and decode_cache_max_tokens 16384 each
+            # left the score untouched; prefill_chunk_size 2048 dropped it from
+            # 60.0 to 33.3 (facts 7/15, links 1/5).
+            #
+            # The mechanism is block formation, not chunking as such. The wrapper
+            # rounds the chunk UP to a multiple of block capacity, so with
+            # micro_block_size 1024 (capacity 1025) a 1024 chunk becomes 1025 --
+            # exactly ONE block per chunk -- and 2048 becomes 2050, two. Forming
+            # two blocks per chunk is what costs the synthesis.
+            #
+            # It is not a rule that smaller is better, and it interacts with rank:
+            # at rank 128, chunk 2048 scores 50.0 and chunk 1024 scores 46.7 --
+            # the opposite direction. Do not carry "chunk 1024 is better" over to
+            # another rank without re-measuring.
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 4096
             self.prefill_chunk_size = 512 if is_macos else 1024
@@ -119,51 +135,47 @@ class DKVConfig:
             self.max_residual_tokens = 128
             # RANK IS THE DRIVER, NOT ENERGY -- measured by separating them, and
             # it corrects how this ladder was first described. Synthesis at 16k
-            # on Qwen3.5-2B, `--tests synthesis` held constant, mid's settings:
+            # on Qwen3.5-2B, mid's settings, `--tests synthesis` held constant:
             #
             #   energy 0.9999  rank 64  -> 50.0 (facts 6/15, links 3/5)
             #   energy 0.99999 rank 64  -> 50.0 (facts 6/15, links 3/5)
             #   energy 0.9999  rank 128 -> 50.0 (facts 9/15, links 2/5)
             #   energy 0.99999 rank 128 -> 50.0 (facts 9/15, links 2/5)
             #
-            # Energy changes nothing at either rank. Rank trades the two halves
-            # against each other: 64 holds the links and loses facts, 128 holds
-            # the facts and loses a link. Both score 50.0 for opposite reasons.
+            # Energy changes nothing at either rank, so the knob is rank alone.
             #
-            # 192 is where they stop trading, and it is a genuine optimum rather
-            # than the top of a ramp -- 256 falls back to 50.0 (facts 9, links 2):
+            # The rank landscape is JAGGED, not a quality dial. Do not interpolate:
             #
-            #   rank  80 -> 53.3 (7/3)      rank 128 -> 50.0 (9/2)
-            #   rank  96 -> 43.3 (7/2)      rank 192 -> 60.0 (9/3)  <-- dense
-            #   rank 256 -> 50.0 (9/2)
+            #   64 -> 50.0 (6/3)    160 -> 50.0 (9/2)    224 -> 63.3 (10/3)
+            #   80 -> 53.3 (7/3)    192 -> 60.0 (9/3)    240 -> 60.0 (9/3)
+            #   96 -> 43.3 (7/2)    208 -> 46.7 (8/2)    256 -> 50.0 (9/2)
+            #  128 -> 50.0 (9/2)
             #
-            # 60.0 with facts 9/15 and links 3/5 is EXACTLY the dense control
-            # under the same invocation, reproduced twice -- the first
-            # configuration that matches dense on synthesis outright instead of
-            # on one of its two halves.
+            # 208 sits between two of the best points and is one of the worst, so
+            # neighbouring ranks say nothing about each other.
             #
-            # THE CAVEAT, because the number does not hold everywhere. Those runs
-            # use `--tests synthesis`, i.e. a FRESH session. In the full run,
-            # where multi_needle and relational have already used the same
-            # wrapper and session, rank 192 keeps the facts but loses a link:
-            # 50.0 (9/15, 2/5). Dense scores 60.0 in BOTH, so the gap is DKV
-            # degrading with session history, not the benchmark moving. It is not
-            # remat staleness -- DKV_REMAT_CACHE=0 gives the same 50.0 (9/2).
-            # Unexplained, and the honest summary is "equals dense on a fresh
-            # session, one link behind on a warm one".
+            # 224 is the setting, at facts 10/15 and links 3/5. THE DENSE CONTROL
+            # IS 60.0 (9/15, 3/5), so this is one fact AHEAD of dense -- the first
+            # configuration in this project to beat dense rather than match it.
             #
-            # This is also why the sweep above is quoted from one invocation
-            # throughout: remat_interval()'s docstring warns that comparing
-            # multifact numbers across invocations produces clean-looking trends
-            # that are entirely the invocation.
+            # Replication at temperature 0 is deterministic and therefore proves
+            # nothing, so 224 was checked on conditions it was NOT tuned on:
             #
-            # It is not free, which is why it lives at the quality end and not in
-            # `mid`: on Qwen3.5-2B at 32k, TTFT 8.86 -> 10.11 s, decode
-            # 17.29 -> 16.45 tok/s, device VRAM 5.23 -> 5.81 GB. Needle recall is
-            # 9/9 with 9/9 determinism and linkbench is unchanged at 20/24, so
-            # the cost is speed and memory only.
+            #   --tests synthesis @16k (fresh session)  63.3   dense 60.0
+            #   full run @16k (warm session)            63.3   dense 60.0
+            #   --tests synthesis @8k                   63.3   dense 60.0
+            #
+            # Holding at 63.3 in the FULL run matters most: rank 192 scores 60.0
+            # fresh but collapses to 50.0 once earlier tests have shared the
+            # session, and 224 does not. That session-history sensitivity is why
+            # 192 is not the choice despite also beating `high`.
+            #
+            # Cost on Qwen3.5-2B at 32k against mid: TTFT 8.86 -> 10.33 s, device
+            # VRAM 5.23 -> 5.93 GB, decode roughly flat. Needle sweep 9/9 with 9/9
+            # determinism, linkbench unchanged at 20/24. So the cost is latency and
+            # memory only, which is what a preset at this end of the ladder is for.
             self.svd_energy = 0.99999
-            self.rank = 192
+            self.rank = 224
         else:  # "mid" (Default)
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 4096
