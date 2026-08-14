@@ -731,6 +731,60 @@ still open, and now has one fewer candidate solution.
 
 ---
 
+## 11a. THE finding on speed: DKV is HOST-BOUND, not kernel-bound
+
+**Priority: highest for anyone optimising either runtime. It reframes what to
+work on, and it explains why five separate kernel-level attempts measured zero.**
+
+**MLX status: MEASURE THIS FIRST on MLX.** Metal's launch overhead is much lower
+than CUDA's, so MLX may not share it — but if it does, the same conclusion
+follows and no amount of kernel tuning will help.
+
+Both halves of CUDA's runtime spend roughly 40% of their time with the GPU IDLE,
+waiting on Python:
+
+| phase | GPU kernel time | wall | host-bound share |
+|---|---|---|---|
+| prefill (1.5B, 32k) | 4.52 s | 7.83 s | **~42%** |
+| decode (2B, 16k) | 27.19 ms/tok | 44.7 ms/tok | **~39%** |
+
+And within decode's GPU time, attention is a minority:
+
+| | ms/token | share |
+|---|---|---|
+| attention kernels | 5.35 | 19.7% |
+| everything else | 21.84 | 80.3% |
+
+The single largest decode kernel is `cublasGemv` at **8.08 ms/token** — the
+model's own weight reading, which decode is memory-bound on and which no
+KV-compression scheme touches.
+
+**What this explains.** Every kernel-level optimisation tried this session
+measured zero or near-zero: removing 46% of prefill's GPU syncs, caching the
+history rotary tables across layers, `enable_gqa`, chunk-size tuning, streaming
+compression. That is not a coincidence — they were all aimed at a GPU that was
+already idle 40% of the time. The binding constraint is host dispatch, not kernel
+efficiency.
+
+**The fix, and why CUDA cannot take it yet.** Host-bound decode is what CUDA
+graphs exist for. CUDA's graph runner works and is bit-exact on the BYPASS path
+(1.25x), but `config.cuda_graph` is hard-disabled because the routed path
+captures mutable Python routing state and replays it stale. Fixing that means a
+device-resident routing/session ABI — a redesign, not a tuning change, and by far
+the highest-value speed work remaining.
+
+**Two measurement lessons to carry over:**
+
+* `DKV_TIME_ATTN` (MLX has the same style of timer) measures the attention path
+  with host time around it, NOT attention GPU kernels. It reports 39.4 ms/token
+  where attention kernels are 5.35. Quote it as an attention-path figure, never
+  as a serving figure.
+* Wall-clock throughput is ~12% below the reported tok/s at 16k. Harnesses in
+  `colab/` now measure both: `decode_wall_vs_timer.py` and
+  `decode_kernel_split.py`.
+
+---
+
 ## 11. Prefill: what was tried and did NOT work
 
 **Priority: read before spending time on TTFT, so you do not repeat this.**
