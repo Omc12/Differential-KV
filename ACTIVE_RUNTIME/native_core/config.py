@@ -197,6 +197,10 @@ class DKVConfig:
             # spectrum, which is measured and deterministic.
             self.svd_energy = 0.999999
             self.rank = 224
+            # Store keys UNROTATED. This is the one change in the project that
+            # measurably closes a gap to dense on a metric that can actually
+            # resolve it -- see the rotated_pool resolution below.
+            self.rotated_pool = False
             # Dual-scale is implemented and OFF here too -- see the dual_scale
             # resolution below for the three policies measured and why none of
             # them earns its place. `ultra` was the intended home for it.
@@ -482,6 +486,42 @@ class DKVConfig:
         self.dual_scale = self._get_bool(
             "dual_scale", "DKV_DUAL_SCALE", getattr(self, "dual_scale", False),
             config_dict)
+
+        # ── Rotated vs unrotated pool ─────────────────────────────────────────
+        # Whether the pool stores POST-RoPE keys (MLX's design) or pre-RoPE keys
+        # rotated at read time. Storing rotated bakes in the position a block
+        # held at COMPRESSION time, which is what makes near-identical
+        # distractors collapse together at long context.
+        #
+        # UNROTATED IS NOW STRICTLY BETTER ON ACCURACY. Measured on Qwen3.5-2B,
+        # linkbench at 32k over 48 seeds -- a metric that averages 48 samples per
+        # point, unlike multifact, whose +-15-point seed band cannot resolve
+        # anything (see the `ultra` branch):
+        #
+        #     rotated (default)   40/48
+        #     UNROTATED           47/48
+        #     dense               47/48   <- exact parity
+        #
+        # The needle regression that previously blocked this IS GONE. The note in
+        # triton_fused_decode.pool_stores_rotated_k recorded 6/9 with unrotated
+        # keys, including failures at 2k where nothing is compressed -- the
+        # signature of a broken read path rather than a fidelity trade. It now
+        # scores 9/9 with 9/9 determinism on BOTH Qwen3.5-2B and
+        # Qwen2.5-1.5B-Instruct, so whatever caused it was fixed by later work
+        # and the trade it implied no longer exists.
+        #
+        # It is not free, which is why only `ultra` takes it: rotating at read
+        # costs decode and memory. Qwen3.5-2B at 32k, interleaved and reversed:
+        #     decode  17.60 -> 13.37 and 15.55 -> 12.70 tok/s  (-18% to -24%)
+        #     TTFT     9.82 -> 10.15 s
+        #     device VRAM 5.21 -> 6.31 GB
+        #
+        # Exported to the environment because pool_stores_rotated_k() reads
+        # DKV_ROTATED_POOL at call time; setdefault so an explicit override wins.
+        self.rotated_pool = self._get_bool(
+            "rotated_pool", "DKV_ROTATED_POOL", getattr(self, "rotated_pool", True),
+            config_dict)
+        os.environ.setdefault("DKV_ROTATED_POOL", "1" if self.rotated_pool else "0")
 
         # Publish the fidelity target where the compressor reads it. lowrank's
         # _svd_energy_target() consults DKV_SVD_ENERGY at call time; setdefault so

@@ -144,90 +144,58 @@ the MacBook.
 
 ---
 
-## 5. The pool stores POST-RoPE keys, which costs accuracy at long context
+## 5. RESOLVED: store keys UNROTATED — it reaches dense parity and the blocker is gone
 
-**Priority: highest accuracy item found so far. Not yet fixed on CUDA either —
-this is a shared open bug, not a port.**
+**Priority: highest actionable accuracy item in this file. This is the one change
+that measurably closes a gap to dense on a metric that can resolve it.**
 
-**MLX status: CHECK THIS.** CUDA's flag is `DKV_ROTATED_POOL` (default `1` =
-store rotated). Find MLX's equivalent before assuming it differs.
+**MLX status: MLX SHARES THE PROBLEM AND SHOULD TAKE THE FIX.**
+`triton_fused_decode.py` cites `mlx_dkv_wrapper.py:4565/4613`: MLX rotates keys
+and THEN compresses them, which is exactly the rotated design. So the weakness
+below is a property of the shared architecture, not of the CUDA port.
 
-**What CUDA found.** A new benchmark (`colab/linkbench_cuda.py`) plants 16
-near-identical sentences ("The X Institute is located in Y") and asks for one of
-them. On 24 seeds at 16k on Qwen3.5-2B:
+**The problem.** `colab/linkbench_cuda.py` plants 16 near-identical sentences
+("The X Institute is located in Y") and asks for one. Storing POST-RoPE keys
+bakes in the position a block held at COMPRESSION time, so near-identical
+distractors collapse together at long context. The values were never wrong; the
+positions were. The needle benchmark cannot see this — one unique code in bland
+filler has no confusable distractors.
 
-    dense   24/24
-    DKV     14/24     (Fisher p ~ 0.0004)
+**It is not a fidelity problem.** Every knob left it unchanged: routing K, residual
+budget, recency window, SVD rank. Only context length moved it.
 
-This is a SINGLE-HOP lookup, and the needle benchmark cannot see it, because one
-unique code in bland filler has no confusable distractors.
+**What changed.** This item previously said unrotated keys could not be adopted
+because the needle sweep fell 9/9 → 6/9, *including failures at 2k where nothing
+is compressed*. That was read as a broken unrotated READ path rather than a real
+trade — and that reading was correct. **It is now fixed.** On the current build,
+`DKV_ROTATED_POOL=0` scores **9/9 with 9/9 determinism on BOTH Qwen3.5-2B and
+Qwen2.5-1.5B-Instruct**, at every depth and every length.
 
-It is not a fidelity problem. Every knob leaves it at **exactly** 14/24 -- routing
-K (0/32/default), residual budget (32/128/224), recency window (512/4096), SVD
-rank (32/96). Only context length moves it: 4k 24/24, 8k 19/24, 16k 14/24.
+With the blocker gone, linkbench at 32k over **48 seeds** (48 samples per point —
+unlike multifact, whose ±15-point seed band cannot resolve anything, see item 10):
 
-`DKV_ROTATED_POOL=0` gives **24/24 at 8k, 16k and 32k** -- the whole gap closes.
-Storing post-RoPE keys bakes in the position a block held at compression time,
-so the values were never wrong; the positions were.
+| arm | 48 seeds |
+|---|---|
+| rotated (default) | 40/48 |
+| **UNROTATED** | **47/48** |
+| dense | 47/48 |
 
-**Why it is not simply flipped on:** with `DKV_ROTATED_POOL=0` the needle sweep
-falls 9/9 -> 6/9, including a one-character near-miss (`Falcon-9427-613` for
-`-6183`) and two failures at 2k, where nothing is compressed at all. Failing at
-2k means the un-rotated READ path is buggy, not that this is a real trade. The
-fix is to make the rotated path carry correct positions.
+**Exact parity with dense**, up from a 7-point deficit. Fisher p ≈ 0.03 against
+the rotated arm.
 
-**MLX almost certainly shares this.** `triton_fused_decode.py:242` documents the
-two designs explicitly and cites `mlx_dkv_wrapper.py:4565/4613`: MLX rotates keys
-and THEN compresses them, which is exactly the `DKV_ROTATED_POOL=1` design. So
-the distractor-heavy weakness measured here is a property of the shared
-architecture, not of the CUDA port, and `linkbench_cuda.py` should reproduce it
-on MLX.
+**The cost, which is why it is not the global default.** Rotating at read time
+costs decode and memory. Qwen3.5-2B at 32k, interleaved and reversed:
 
-**Both modes are wrong, in complementary ways.** Neither is a fix to adopt:
+    decode       17.60 -> 13.37  and  15.55 -> 12.70 tok/s   (-18% to -24%)
+    TTFT          9.82 -> 10.15 s
+    device VRAM   5.21 -> 6.31 GB
 
-| | linkbench (content) | needle sweep (order) |
-|---|---|---|
-| `=1` rotated, MLX parity | 14/24 | 9/9 |
-| `=0` unrotated | 24/24 at 8k/16k/32k | 6/9 |
+CUDA therefore keeps `rotated_pool=True` in low/mid/high and sets it **False in
+`ultra`**, which is the preset that exists to trade speed and memory for quality.
 
-The `=0` needle failures are all EDIT DISTANCE 1 and all order errors --
-`Falcon-94276-6183`, `Falcon-9427-6138`, `Falcon-9427-613` for `Falcon-9427-6183`.
-Right digits, wrong order. That is the fingerprint of the phase error the
-docstring predicts: the unrotated path rotates the anchor and the whole V_K basis
-at the ANCHOR's position, so every token in a block shares one rotation and
-carries a positional error of up to a full block (256 positions). Raising the
-residual budget to 224 of 256 does NOT repair it (still 4 failures, still all
-near-misses), because a residual is rotated at its token's true position while
-the base term it corrects is rotated at the anchor -- they are in different
-frames and their sum is exact in neither.
-
-**Per-token RoPE is NOT cheap — correcting an earlier note in this file.**
-
-An earlier revision said the fix was to store keys unrotated and rotate per token
-at read, on the grounds that "the fused kernel already reconstructs per token, so
-the rotation can ride along inside that loop". That is wrong, and the original
-CUDA docstring's cost objection was right.
-
-`triton_fused_decode.py:567` computes the query projection ONCE per chunk:
-
-    q_proj_k = tl.sum(q[None, :] * vk_data, axis=1) * scale   # [RANK]
-    # "Q projection -- computed once for this entire chunk"
-
-and the token loop then only does a RANK-dim dot product against it. RoPE acts in
-D-space while that projection is D -> rank, so rotating per token means
-recomputing a D x rank projection for every token instead of once per block: S x
-more work in the hottest loop, with S up to the block size. Rotating the key
-instead is worse (it needs V_K rotated per token, a rank x D matrix each time).
-
-The relative-position identity does not rescue it either. Within a block
-positions are consecutive, so R(p_q - anchor - t) factors as R(p_q - anchor) .
-R(-t) and the R(-t) part is shared across blocks -- but it still has to be applied
-BEFORE the D -> rank projection, so the projection is still per token.
-
-**So the practical path is dual-scale, not per-token rotation.** Small blocks
-under an unrotated pool do bound the phase error -- block 128 with
-`DKV_ROTATED_POOL=0` fails 2 needle cases against 3-4 at block 256/512 -- but it
-does not reach clean, so this is a real dead end rather than a tuning problem.
+**For MLX:** find the equivalent of `DKV_ROTATED_POOL`, run `linkbench` on both
+settings with at least 24 seeds, and confirm the needle sweep is clean before
+adopting. Do not judge it on multifact.
 
 ---
 

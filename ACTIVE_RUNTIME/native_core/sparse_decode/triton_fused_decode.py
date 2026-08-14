@@ -241,6 +241,10 @@ def _substitute_scores_(scores, index, exact_scores, valid_mask):
 def pool_stores_rotated_k() -> bool:
     """DKV_ROTATED_POOL — store POST-RoPE keys, as MLX does.
 
+    STATUS 2026-08-14: the accuracy argument for keeping this ON is GONE, and
+    `ultra` now sets it to 0. Whatever text below says unrotated keys cost needle
+    recall is stale -- see the correction at the end of this docstring.
+
     THE ROOT ARCHITECTURAL DIVERGENCE BETWEEN THE TWO RUNTIMES.
 
         MLX   mlx_dkv_wrapper.py:4565  keys_rot = self.rope(keys, offset=offset0)
@@ -312,6 +316,30 @@ def pool_stores_rotated_k() -> bool:
     A pool built under one setting is not readable under the other, which is a
     non-issue in practice (the value is fixed for a process) but matters if a
     session is ever persisted across a config change.
+
+    CORRECTION 2026-08-14 -- the trade described above no longer exists.
+
+    The reason this stayed ON was that unrotated keys scored 6/9 on the needle
+    sweep, including failures at 2k where nothing is compressed at all. That
+    was read at the time as a broken unrotated READ path rather than a real
+    fidelity trade, and that reading was right: it is now fixed. Re-measured
+    with DKV_ROTATED_POOL=0 on the current build, the sweep is 9/9 with 9/9
+    determinism on BOTH Qwen3.5-2B and Qwen2.5-1.5B-Instruct, at every depth
+    and every length.
+
+    With that gone, unrotated is strictly better on accuracy. linkbench at 32k
+    over 48 seeds on Qwen3.5-2B -- 48 samples per point, unlike multifact whose
+    +-15-point RSVD-seed band cannot resolve anything:
+
+        rotated (default)   40/48
+        UNROTATED           47/48
+        dense               47/48   <- exact parity
+
+    It is not free: rotating at read costs decode and memory. Qwen3.5-2B at
+    32k, interleaved and reversed, 17.60 -> 13.37 and 15.55 -> 12.70 tok/s
+    (-18% to -24%), and device VRAM 5.21 -> 6.31 GB. So the DEFAULT stays
+    rotated and the `ultra` preset sets rotated_pool=False, which is where a
+    speed-for-accuracy trade of that size belongs.
     """
     # DEFAULT 0. This shipped as "1" while EVERY prefill capture site stored
     # `unrot_key_states` unconditionally, so the pool held PRE-RoPE keys and this
