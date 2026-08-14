@@ -604,6 +604,53 @@ only thing left that could serve both.**
 
 ---
 
+## 10d. Dual-scale storage does NOT work — and the design note's structure is why
+
+**Priority: highest, because this closes the item every earlier note pointed at
+as the fix. Do not build it on MLX.**
+
+Item 5b proposed dual-scale as the answer to the block-size trade, with this
+structure: a second pool at the coarse scale, ingest writing both, and decode
+"merging the two outputs by log-sum-exp". CUDA has now implemented it
+(`DKV_DUAL_SCALE=1`, default off) and measured all three ways of combining the
+scales. None works.
+
+| policy | result |
+|---|---|
+| **union** (attend both scales; what the note proposed) | synthesis **63.3 → 33.3** |
+| **extend** (coarse only where fine routing covered nothing) | 63.3, 20/24 — no change |
+| **swap** (coarse replaces fine where it split an association) | linkbench 20/24 → **19/24** |
+
+**The log-sum-exp merge is not a fix, it is the failure.** Merging two softmaxes
+over disjoint key sets is arithmetically identical to one softmax over their
+union — so the note's proposed structure is exactly the union row. Every token
+then appears TWICE, as two different lossy reconstructions of itself; its
+attention mass splits between them and the exact dense window is diluted in the
+same proportion.
+
+Isolated with `DKV_DUAL_SCALE_ATTEND=0` (keeps the coarse ingest and the widened
+pool, skips attending the coarse rows): 63.3 either way. So the second
+compression pass and the pool sizing are harmless, and it is combination at
+attention that fails.
+
+**Two structural things worth taking even though the feature is off:**
+
+* **A second pool is not needed.** Blocks are already keyed by session id and
+  block size is already per-session, so the coarse scale is a SHADOW SESSION and
+  every existing path works on it unchanged. MLX has per-session state too.
+* **Widening slots is cheap.** The note assumed sizing slots for the coarse scale
+  inflates the whole pool. Only `U` scales with block width — `V_KV`, anchors and
+  residuals are indexed by rank or by the residual budget — so it is one doubling
+  of `U`, ~20 MB of a 114 MB pool.
+
+**The conclusion is narrower and more useful than "dual-scale does not work":
+combining two granularities AT ATTENTION cannot work, because attention over a
+set of representations is not attention over a set of tokens.** Granularity has
+to be chosen where the representation is BUILT. The block-size trade in 10c is
+still open, and now has one fewer candidate solution.
+
+---
+
 ## 11. Prefill: what was tried and did NOT work
 
 **Priority: read before spending time on TTFT, so you do not repeat this.**
