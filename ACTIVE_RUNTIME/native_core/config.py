@@ -194,6 +194,22 @@ class DKVConfig:
             # and DKV does not beat dense on synthesis at either. The earlier
             # "ultra beats dense 63.3 vs 60.0" was one lucky seed.
             #
+            # MEASURED PROPERLY, AND `ultra` DOES REACH DENSE. Using
+            # colab/synthesis_power.py -- replicated over document windows AND
+            # SVD seeds, paired against dense, 4 replicates, Qwen3.5-2B at 16k:
+            #
+            #     dense   mean 61.7  sd 1.9
+            #     ultra   mean 63.3  sd 4.7   paired diff +1.67,
+            #                                 95% CI [-7.5, +10.9]
+            #                                 -> no difference resolvable
+            #     mid     mean 45.0  sd 6.4   paired diff vs dense -16.7,
+            #                                 95% CI [-28.1, -5.2] -> behind
+            #
+            # So ultra is at PARITY with dense on synthesis, and mid is genuinely
+            # behind it. This is NOT the retracted claim returning: that one was a
+            # single seed on a fixed document window, this is replicated, paired
+            # and interval-bounded.
+            #
             # NEVER quote a single-seed multifact number again. At temperature 0
             # a repeat run is deterministic and proves nothing; the seed is the
             # axis that has to be varied, and a difference under ~15 points is

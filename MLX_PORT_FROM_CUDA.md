@@ -25,6 +25,10 @@ I did not run anything on MLX; nothing here is measured on Apple silicon.
 > numbers from before this was understood; each is now flagged inline, and
 > item 10 is a full retraction. MLX runs the same randomised SVD
 > (`DKV_SVD_SEED`) and has the same noise floor.
+>
+> **Use `colab/synthesis_power.py` instead** - replicated, paired against dense,
+> with a confidence interval. It resolves differences the old harness could not
+> (item 12), and reports how many replicates a given effect size needs.
 
 ---
 
@@ -814,6 +818,56 @@ What the profile actually says, after the fused history attention landed: GEMM
 60%, elementwise 20%, SVD ~12%, softmax 4%. The single largest kernel is the
 fused attention itself at 25%. **DKV prefill does everything dense prefill does
 and then compresses**, so parity is not reachable; the SVD alone is ~0.5 s.
+
+---
+
+## 12. Synthesis, measured properly: `ultra` reaches dense, `mid` does not
+
+**Priority: highest accuracy result in this file, and the first synthesis
+comparison in the project with a confidence interval attached.**
+
+**MLX status: PORT THE HARNESS FIRST.** `colab/synthesis_power.py`. Nothing below
+is obtainable without it.
+
+The old harness had three defects, all fixed:
+
+1. **One sample per config** - now R replicates.
+2. **Dense had n=1 BY CONSTRUCTION.** The document window was fixed and dense has
+   no randomised SVD, so dense could only ever emit one number and a DKV
+   distribution had nothing to be compared against. Replicates now vary the
+   DOCUMENT WINDOW as well as the SVD seed, giving both arms a real distribution.
+3. **Unpaired** - every arm now walks the SAME replicate list, so the statistic is
+   the per-replicate difference, whose variance is far below either arm's own.
+
+Qwen3.5-2B at 16k, 4 paired replicates:
+
+| arm | mean | sd | 95% CI |
+|---|---|---|---|
+| dense | 61.7 | 1.9 | [59.8, 63.6] |
+| **DKV `ultra`** | **63.3** | 4.7 | [58.7, 68.0] |
+| DKV `mid` | 45.0 | 6.4 | [38.7, 51.3] |
+
+| paired | diff | 95% CI | verdict |
+|---|---|---|---|
+| ultra - dense | **+1.67** | [-7.5, +10.9] | **no difference resolvable -> parity** |
+| ultra - mid | +18.3 | [+3.0, +33.6] | ultra genuinely ahead |
+| mid - dense | -16.7 | [-28.1, -5.2] | mid genuinely behind |
+
+**So `ultra` reaches dense on synthesis and `mid` does not.** This is not the
+retracted claim returning: that one was a single seed on a fixed window, this is
+replicated, paired and interval-bounded.
+
+Two things worth carrying:
+
+* **Dense's sd is 1.9 against DKV's 4.7-6.4.** DKV matches it on the mean while
+  remaining a higher-variance system, so a single reading of either can mislead.
+* **The fixed window the old harness used was EASIER than average** - `mid`
+  scores 53.3 on it against 45.0 over varied windows. A harness with one fixed
+  document is partly measuring that document.
+
+**Power:** the tool prints the replicates a target effect needs. At the observed
+spread, 5 points needs ~6 replicates; 4 suffices for the ~17-point gaps above but
+not for ultra-vs-dense.
 
 ---
 
