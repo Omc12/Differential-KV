@@ -12,6 +12,20 @@ construct is there — line numbers are from `ACTIVE_RUNTIME/serving/mlx_dkv_wra
 `LIKELY` means the mechanism is shared but I did not confirm the MLX code path.
 I did not run anything on MLX; nothing here is measured on Apple silicon.
 
+> ## ⚠ READ ITEM 10 BEFORE TRUSTING ANY `multifact` NUMBER HERE
+>
+> The randomised SVD draws its projection from a seeded generator whose SHAPE
+> depends on the configured rank. Changing `DKV_RSVD_SEED` alone, at a fixed
+> config, moves the synthesis score **63.3 / 33.3 / 50.0** — a 30-point spread
+> with nothing else altered.
+>
+> Temperature-0 replication is deterministic and therefore proves nothing: a
+> number "reproduced twice" is one sample, not two. **Any synthesis difference
+> under ~15 points is not a difference.** Several items below quote single-seed
+> numbers from before this was understood; each is now flagged inline, and
+> item 10 is a full retraction. MLX runs the same randomised SVD
+> (`DKV_SVD_SEED`) and has the same noise floor.
+
 ---
 
 ## 1. Routed-block count K=16 is tuned for retrieval, not synthesis
@@ -22,9 +36,14 @@ I did not run anything on MLX; nothing here is measured on Apple silicon.
 K=16 (topk_frac=0)", read from `DKV_TOPK_BLOCKS`. Identical default to CUDA's
 (CUDA derives 16 from the pool span; same number, same effect).
 
+**⚠ SINGLE-SEED — see item 10.** "Reproduced twice" here means two deterministic
+runs of the same seed, which is one sample. The gap below (46.7 → 60.0) is inside
+the ±15-point seed band, so the ordering is NOT established. The structural
+argument still stands and is worth testing properly on MLX; the numbers are not
+evidence. Re-run across `DKV_SVD_SEED` before acting on it.
+
 **What CUDA found.** K=16 is enough to find a needle but not to hold a topic. On
-`colab/multifact_eval_cuda.py` at 16k on Qwen3.5-2B, each setting reproduced
-twice:
+`colab/multifact_eval_cuda.py` at 16k on Qwen3.5-2B:
 
 | K | synthesis | facts | links |
 |---|---|---|---|
@@ -438,6 +457,10 @@ suite rather than an assumption. On CUDA: multifact synthesis **43.3 -> 50.0**
 
 ## 8. Fidelity is a preset ladder, not one constant
 
+**⚠ Partly superseded by item 10.** The ladder is right and now rests on realised
+per-block rank rather than on the synthesis scores quoted below, which are
+single-seed. Read item 10 first.
+
 **Priority: medium — it is what fixed synthesis without touching block size.**
 
 **MLX status: LIKELY.** CUDA's rank-selection site keeps singular values until
@@ -512,95 +535,101 @@ honest about which is which; MLX's unified memory has no equivalent.
 
 ---
 
-## 10. Rank 224 BEATS dense on synthesis — and SVD energy does nothing
+## 10. RETRACTED: the rank sweep was randomised-SVD noise. Energy is the dial.
 
-**Priority: highest actionable accuracy item. Supersedes the energy half of item 8.**
+**Priority: read this BEFORE trusting any multifact number in this file, mine or
+your own.**
 
-**MLX status: LIKELY — MLX has the same rank knob.** CUDA ships this as a fourth
-preset, `ultra`.
+An earlier revision of this item claimed rank 224 beat the dense synthesis
+control (63.3 vs 60.0) and that `svd_energy` did nothing. **Both halves are
+withdrawn.** What actually happened:
 
-Item 8 said the ladder moved synthesis by keeping more spectral energy. That is
-**wrong**: energy changes nothing at any rank, and rank was doing all of it.
+**`rank` is a CEILING that almost never binds.** The compressor keeps the
+smallest k reaching `svd_energy`, then clamps to `rank`. Instrumented on
+Qwen3.5-2B at 16k, the realised per-block rank at configured 216 / 224 / 232 is
+52-137 with **mean ~67 in all three cases — the ceiling binds for 0.0% of
+blocks.** Configuring 216 versus 232 changes nothing about what is stored.
 
-The rank landscape is **JAGGED — do not interpolate it.** Synthesis at 16k on
-Qwen3.5-2B, mid's settings, `--tests synthesis`:
+**`svd_energy` is the dial, and it is monotone.** Realised MEAN per-block rank:
 
-| rank | score | rank | score | rank | score |
-|---|---|---|---|---|---|
-| 64 | 50.0 (6/3) | 128 | 50.0 (9/2) | 208 | 46.7 (8/2) |
-| 80 | 53.3 (7/3) | 160 | 50.0 (9/2) | **224** | **63.3 (10/3)** |
-| 96 | 43.3 (7/2) | 192 | 60.0 (9/3) | 240 | 60.0 (9/3) |
-| | | | | 256 | 50.0 (9/2) |
+| energy | realised mean rank | | energy | realised mean rank |
+|---|---|---|---|---|
+| 0.999 | 35 | | 0.999999 | 94 |
+| 0.9999 | 53 | | 0.9999999 | 180 |
+| 0.99999 | 67 | | | |
 
-208 sits between two of the best points and is one of the worst. A rank sweep of
-three points would have missed this entirely.
+**What a different `rank` DOES change is `r_proj = rank + 5`**, the width of the
+randomised-SVD projection — so it redraws Omega and yields a different
+approximate basis at the same realised rank. The "rank landscape" was that
+redraw.
 
-**Rank 224 scores 63.3 (facts 10/15, links 3/5) against a dense control of 60.0
-(9/15, 3/5)** — one fact ahead. This is the first configuration in the project to
-beat dense rather than match it.
+**The benchmark cannot resolve any of it.** Holding the config fixed at rank 224
+and changing only `DKV_RSVD_SEED`:
 
-**Replication at temperature 0 is deterministic and proves nothing.** 224 was
-therefore checked on conditions it was not tuned on, which is the only evidence
-worth having:
+| seed | 0 | 1 | 2 |
+|---|---|---|---|
+| synthesis | 63.3 | 33.3 | 50.0 |
 
-| condition | DKV r224 | dense |
+A **30-point spread from the random draw alone** — the entire range the rank
+sweep "discovered". Over three seeds:
+
+| config | seeds | mean |
 |---|---|---|
-| `--tests synthesis` @16k (fresh session) | 63.3 | 60.0 |
-| full run @16k (warm session) | 63.3 | 60.0 |
-| `--tests synthesis` @8k | 63.3 | 60.0 |
+| mid (rank 64) | 50.0 / 56.7 / 53.3 | 53.3 |
+| ultra (rank 224) | 63.3 / 33.3 / 50.0 | 48.9 |
+| **dense** | seed-independent | **60.0** |
 
-The full-run row matters most: rank 192 scores 60.0 fresh but collapses to 50.0
-once earlier tests have shared the session, and 224 does not.
+So rank 224 is **worse on average** than rank 64 and far less stable, and **DKV
+does not beat dense on synthesis at either.**
 
-Cost at 32k: TTFT 8.86 → 10.33 s, VRAM 5.23 → 5.93 GB, decode flat. Needle 9/9,
-linkbench unchanged.
+**Method, and it applies to MLX too** (`DKV_SVD_SEED` there): temperature-0
+replication is deterministic and proves nothing. The seed is the axis that must
+be varied. Treat any multifact difference under ~15 points as no difference, and
+never quote a single-seed number. MLX uses the same randomised SVD, so it has the
+same noise floor.
+
+**What to port instead:** the energy ladder, justified by realised rank — which
+is deterministic and directly measurable — rather than by benchmark scores.
+CUDA's presets now differ on `svd_energy` (0.999 / 0.9999 / 0.99999 / 0.999999),
+with `rank` set only high enough not to clip the target.
 
 ---
 
-## 10b. prefill_chunk_size silently controls BLOCKS PER CHUNK, and that drives synthesis
+## 10b. RETRACTED with it: the prefill_chunk_size score
 
-**Priority: high, and it is a trap rather than a tuning knob.**
+The bisect finding stands as a MECHANISM and falls as a measurement.
 
-**MLX status: CHECK THIS.** MLX takes `prefill_chunk_size` too (256 on macOS).
-Check whether it has the same rounding.
+Real and visible in the code: the wrapper rounds the prefill chunk UP to a
+multiple of block capacity, so at `micro_block_size` 1024 (capacity 1025) a 1024
+chunk becomes 1025 — exactly ONE block per chunk — and 2048 becomes 2050, two.
+Worth checking whether MLX has the same rounding.
 
-`mid` + rank scored far better than `high` + rank. Bisecting the two presets one
-setting at a time: it is **prefill_chunk_size, and only that.** `srl_threshold`
-100, `kv_quant` f16, `max_active_dense_tokens` 4096 and `decode_cache_max_tokens`
-16384 each left the score untouched at 60.0; `prefill_chunk_size` 2048 dropped it
-to **33.3** (facts 7/15, links 1/5).
-
-The mechanism is not chunking. The wrapper rounds the chunk UP to a multiple of
-block capacity, so at `micro_block_size` 1024 (capacity 1025) a 1024 chunk becomes
-1025 — **exactly one block per chunk** — and 2048 becomes 2050, two. Forming two
-blocks per chunk is what costs the synthesis.
-
-**It is not "smaller is better", and it interacts with rank**: at rank 128 the
-ordering REVERSES (chunk 2048 → 50.0, chunk 1024 → 46.7). Do not carry a chunk
-setting across ranks without re-measuring.
-
-Also note CUDA's safety guard is stale — it clamps to `2 * 257 = 514`, which
-assumes the old `micro_block_size=256`. It no longer binds anything at the
-current default and is not what produces the rounding.
+Not established: that this is worth 60.0 → 33.3 of synthesis. That is a
+single-seed comparison sitting inside the ±15-point seed band from item 10. The
+bisect that isolated `prefill_chunk_size` from the other four `high` settings has
+the same problem. Re-run across seeds before believing the direction.
 
 ---
 
-## 10c. Block size still trades retrieval against synthesis — dual-scale confirmed at the new optimum
+## 10c. Block size: the retrieval half survives, the synthesis half does not
 
-Re-measured at rank 224, since the earlier block sweep was done at rank 64:
+Re-stated after the retraction. Of the sweep at rank 224:
 
-| block | synthesis | linkbench @32k |
+| block | synthesis (single seed — **not** reliable) | linkbench @32k (24 seeds — reliable) |
 |---|---|---|
-| 1024 | **63.3** (10/3) | 20/24 |
-| 1536 | 33.3 (7/1) | 22/24 |
-| 2048 | 46.7 (8/2) | **23/24** (= dense) |
+| 1024 | 63.3 | 20/24 |
+| 1536 | 33.3 | 22/24 |
+| 2048 | 46.7 | **23/24** (= dense) |
 
-DKV now BEATS dense on synthesis at block 1024, and MATCHES dense on distractor
-retrieval at block 2048 — **but not at the same time**, and 1536 is worse than
-both on synthesis, so the middle is not a compromise. Higher rank did not dissolve
-the trade; it only moved both endpoints up. This is the same conclusion as item
-5b, now confirmed at the best known operating point: **dual-scale storage is the
-only thing left that could serve both.**
+**Linkbench is the trustworthy column** — it already averages 24 seeds per point,
+and its ordering is monotone in block size, which matches the independent
+block-count finding in item 5b. The synthesis column is one draw per point and
+spans exactly the noise band; do not read a trade-off out of it.
+
+So the honest statement is narrower than before: **larger blocks help distractor
+retrieval, and whether they cost synthesis is unmeasured.** Dual-scale was
+motivated by a trade-off whose synthesis half is not established — see 10d, where
+it fails anyway.
 
 ---
 

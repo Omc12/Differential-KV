@@ -57,13 +57,20 @@ class DKVConfig:
             # fraction of the energy, so raising the ceiling alone does nothing
             # (asking for rank 32 vs 128 moved the real median rank only 24->34).
             #
-            # Measured on Qwen3.5-2B at 16k, multifact synthesis, block 1024:
+            # The claim above is CONFIRMED by direct instrumentation: at
+            # configured rank 216/224/232 the realised per-block rank is 52-137
+            # with mean ~67 in all three cases, i.e. the ceiling binds for 0.0%
+            # of blocks. Energy is the dial; see the `ultra` branch for the
+            # realised-rank-vs-energy table.
+            #
+            # These synthesis numbers, however, are SINGLE SEED and inside the
+            # +-15-point RSVD-seed band, so they do not establish an ordering:
             #   0.999   / rank 32   -> 30.0   peak_alloc 5.07 GB
             #   0.9999  / rank 64   -> 43.3   peak_alloc 5.16 GB
             #   0.99999 / rank 128  -> 46.7   peak_alloc 5.41 GB
-            # TTFT is flat across all three (10.45-10.77 s, inside noise), so the
-            # cost is VRAM, not latency. Distractor retrieval stays 24/24 at
-            # every setting.
+            # The VRAM column is real and deterministic. TTFT is flat across all
+            # three (10.45-10.77 s), so the cost is VRAM, not latency, and
+            # distractor retrieval stays 24/24 at every setting.
             self.svd_energy = 0.999
             self.rank = 32
         elif self.preset == "high":
@@ -82,34 +89,42 @@ class DKVConfig:
             # record, MLX default) for table/factual-dense docs, accepting the
             # larger pool.  See the "mid" branch for the ladder rationale.
             self.max_residual_tokens = 128
-            # Quality end: keep enough of the spectrum that synthesis recovers.
-            # Nothing cheaper reproduces this -- selective per-block rank boost
-            # (DKV_RANK_BOOST=auto) and routing every token instead of every 4
-            # (DKV_REMAT_CACHE=0) both leave synthesis at 30.0, because at this
-            # block size K already routes every block and no routing change can
-            # add information the model is not already being shown.
+            # Quality end: keep more of the spectrum. The supporting note here
+            # used to be that DKV_RANK_BOOST=auto and DKV_REMAT_CACHE=0 "both
+            # leave synthesis at 30.0"; those are single-seed numbers inside the
+            # +-15-point RSVD-seed band and are not evidence either way. What
+            # survives is the structural half: at this block size K already
+            # routes every block, so no routing change can add information the
+            # model is not already being shown -- that is visible in the routing
+            # code, not inferred from a score.
             #
             # `high` is the top of the ladder for cost-sensitive quality work.
-            # `ultra` goes further (rank 192) and is the only setting that
-            # matches dense on synthesis -- see its branch for the sweep and for
-            # what it costs in TTFT and VRAM.
+            # `ultra` keeps one more energy rung; see its branch, which also
+            # carries the retraction of the rank-sweep numbers this ladder was
+            # originally justified with.
             self.svd_energy = 0.99999
             self.rank = 128
         elif self.preset == "ultra":
-            # `ultra` is MID with rank 192 -- not `high` with rank 192.
+            # `ultra` is MID's settings with a higher energy target.
             #
-            # That distinction is the whole preset. The rank sweep below was run
-            # on top of mid's other settings (RANK= override, default preset), and
-            # rank 192 there scores 60.0. Building this branch on `high`'s
-            # settings instead scored 50.0 with the SAME rank, so the result
-            # needs mid's configuration around it and is not a property of rank
-            # alone. Copy mid, change rank, change nothing else.
+            # It was originally "mid with rank 192", justified by a rank sweep
+            # that is now retracted (see the correction further down). The
+            # settings are still mid's rather than high's, because that is the
+            # configuration everything here was measured on -- but the preset now
+            # differs from `high` on `svd_energy`, which is the parameter that
+            # provably changes what gets stored.
             #
             # WHICH mid setting, bisected one at a time against high's value:
-            # prefill_chunk_size, and ONLY that. srl_threshold 100, kv_quant f16,
-            # max_active_dense_tokens 4096 and decode_cache_max_tokens 16384 each
-            # left the score untouched; prefill_chunk_size 2048 dropped it from
-            # 60.0 to 33.3 (facts 7/15, links 1/5).
+            # prefill_chunk_size, and ONLY that -- srl_threshold 100, kv_quant
+            # f16, max_active_dense_tokens 4096 and decode_cache_max_tokens 16384
+            # each left the score untouched, while prefill_chunk_size 2048 took
+            # it from 60.0 to 33.3.
+            #
+            # TREAT THAT AS UNPROVEN. It is a single-seed comparison and 60.0 ->
+            # 33.3 is inside the +-15-point RSVD-seed band measured in the
+            # `ultra` branch. The block-formation mechanism below is real and
+            # visible in the code; the SCORE attributed to it is not established,
+            # and needs re-running across seeds before it is trusted.
             #
             # The mechanism is block formation, not chunking as such. The wrapper
             # rounds the chunk UP to a multiple of block capacity, so with
@@ -133,65 +148,54 @@ class DKVConfig:
             self.kv_quant = "q8_0"
             self.max_active_dense_tokens = 2048
             self.max_residual_tokens = 128
-            # RANK IS THE DRIVER, NOT ENERGY -- measured by separating them, and
-            # it corrects how this ladder was first described. Synthesis at 16k
-            # on Qwen3.5-2B, mid's settings, `--tests synthesis` held constant:
+            # ENERGY IS THE DIAL. RANK IS A CEILING THAT USUALLY DOES NOT BIND.
             #
-            #   energy 0.9999  rank 64  -> 50.0 (facts 6/15, links 3/5)
-            #   energy 0.99999 rank 64  -> 50.0 (facts 6/15, links 3/5)
-            #   energy 0.9999  rank 128 -> 50.0 (facts 9/15, links 2/5)
-            #   energy 0.99999 rank 128 -> 50.0 (facts 9/15, links 2/5)
+            # This block previously claimed the opposite ("rank is the driver,
+            # not energy") off a rank sweep whose every number is now known to be
+            # noise. Both halves of that claim were wrong; the corrected version:
             #
-            # Energy changes nothing at either rank, so the knob is rank alone.
+            # 1. `rank` is a CEILING on the per-block SVD rank, not the rank.
+            #    The compressor keeps the smallest k reaching `svd_energy` and
+            #    then clamps to `rank`. Instrumented on Qwen3.5-2B at 16k, the
+            #    realised per-block rank at ranks 216/224/232 is 52-137 with mean
+            #    ~67 in ALL THREE cases -- the ceiling binds for 0.0% of blocks.
+            #    Configuring 216 vs 232 changes nothing about what is stored.
             #
-            # The rank landscape is JAGGED, not a quality dial. Do not interpolate:
+            # 2. `svd_energy` is what actually sets it, and it is monotone.
+            #    Realised MEAN per-block rank against the energy target:
+            #        0.999     -> 35        0.999999   -> 94
+            #        0.9999    -> 53        0.9999999  -> 180
+            #        0.99999   -> 67
             #
-            #   64 -> 50.0 (6/3)   176 -> 50.0 (9/2)   232 -> 33.3 (7/1)
-            #   80 -> 53.3 (7/3)   192 -> 60.0 (9/3)   240 -> 60.0 (9/3)
-            #   96 -> 43.3 (7/2)   200 -> 50.0 (9/2)   248 -> 63.3 (10/3)
-            #  128 -> 50.0 (9/2)   208 -> 46.7 (8/2)   256 -> capped, see below
-            #  160 -> 50.0 (9/2)   216 -> 33.3 (7/1)   288 -> capped, see below
+            # 3. What a different `rank` DOES change is r_proj = rank + 5, the
+            #    width of the randomised-SVD projection -- so it redraws Omega
+            #    and produces a different approximate basis at the same realised
+            #    rank. The "rank landscape" was that redraw, not fidelity.
             #
-            # There is a broad good band from 192 to 248 with two sharp dips
-            # inside it at 216 and 232. 224 and 248 both reach 63.3, so 224 is
-            # not an isolated fluke -- but 216 and 232 are, and neighbouring
-            # ranks say nothing about each other.
+            # THE SYNTHESIS BENCHMARK CANNOT RESOLVE ANY OF THIS. Holding the
+            # config fixed at rank 224 and changing ONLY DKV_RSVD_SEED:
+            #        seed 0 -> 63.3      seed 1 -> 33.3      seed 2 -> 50.0
+            # a 30-point spread from the random draw alone, which is the entire
+            # range the rank sweep "found". Over three seeds:
+            #        mid   (rank 64)  50.0 / 56.7 / 53.3   mean 53.3
+            #        ultra (rank 224) 63.3 / 33.3 / 50.0   mean 48.9
+            #        dense                                      60.0
+            # so rank 224 is WORSE on average than rank 64 and far less stable,
+            # and DKV does not beat dense on synthesis at either. The earlier
+            # "ultra beats dense 63.3 vs 60.0" was one lucky seed.
             #
-            # The dips are NOT an alignment artefact. 216 and 232 were the only
-            # tested ranks that are not multiples of 16, which looked like a
-            # clean explanation; 200 is not a multiple of 16 either and scores
-            # 50.0, and 248 is not a multiple of 16 and scores 63.3. Hypothesis
-            # tested and dropped -- the dips remain unexplained.
+            # NEVER quote a single-seed multifact number again. At temperature 0
+            # a repeat run is deterministic and proves nothing; the seed is the
+            # axis that has to be varied, and a difference under ~15 points is
+            # not a difference.
             #
-            # The landscape is DETERMINISTIC, not noise: 216 and 232 both score
-            # 33.3 at 8k as well as at 16k, and 224 scores 63.3 at both.
-            #
-            # Ranks >= head_dim are silently capped to head_dim // 2 by
-            # KVRuntimeManager (it warns). On Qwen3.5-2B head_dim is 256, which
-            # is why 256 and 288 both score exactly what 128 scores -- they ARE
-            # 128. Do not read them as a real ceiling.
-            #
-            # 224 is the setting, at facts 10/15 and links 3/5. THE DENSE CONTROL
-            # IS 60.0 (9/15, 3/5), so this is one fact AHEAD of dense -- the first
-            # configuration in this project to beat dense rather than match it.
-            #
-            # Replication at temperature 0 is deterministic and therefore proves
-            # nothing, so 224 was checked on conditions it was NOT tuned on:
-            #
-            #   --tests synthesis @16k (fresh session)  63.3   dense 60.0
-            #   full run @16k (warm session)            63.3   dense 60.0
-            #   --tests synthesis @8k                   63.3   dense 60.0
-            #
-            # Holding at 63.3 in the FULL run matters most: rank 192 scores 60.0
-            # fresh but collapses to 50.0 once earlier tests have shared the
-            # session, and 224 does not. That session-history sensitivity is why
-            # 192 is not the choice despite also beating `high`.
-            #
-            # Cost on Qwen3.5-2B at 32k against mid: TTFT 8.86 -> 10.33 s, device
-            # VRAM 5.23 -> 5.93 GB, decode roughly flat. Needle sweep 9/9 with 9/9
-            # determinism, linkbench unchanged at 20/24. So the cost is latency and
-            # memory only, which is what a preset at this end of the ladder is for.
-            self.svd_energy = 0.99999
+            # So `ultra` is defined on the dial that demonstrably moves the
+            # stored representation -- one energy rung above `high` -- and its
+            # rank is set to 224 only so the ceiling does not clip that target
+            # (realised max at this energy is 205). It is NOT claimed to beat
+            # `high` on any benchmark; it is claimed to store more of the
+            # spectrum, which is measured and deterministic.
+            self.svd_energy = 0.999999
             self.rank = 224
             # Dual-scale is implemented and OFF here too -- see the dual_scale
             # resolution below for the three policies measured and why none of
