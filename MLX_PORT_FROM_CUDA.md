@@ -471,6 +471,47 @@ not a place to reclaim memory from.
 
 ---
 
+## 9. Measure VRAM against the POOL, and check for slots nothing fills
+
+**Priority: high if you are trying to show a memory win — this is where CUDA's
+went.**
+
+**MLX status: CHECK THIS.** MLX allocates one array per layer for `comp_U`,
+`comp_U_scale`, `comp_VK` etc. (item 3). Check whether it also carries
+stratified-U / fact-anchor equivalents, and whether anything writes them.
+
+**What CUDA found.** Attributing decode-time VRAM by owner on Qwen3.5-2B at 32k:
+
+| owner | DKV | dense |
+|---|---|---|
+| model weights | 3.764 GB | 3.764 GB |
+| **KV store** (pool vs HF cache) | **0.114 GB** | 0.433 GB |
+| activations | 0.293 GB | 0.009 GB |
+| fragmentation (reserved − allocated) | 0.417 GB | 2.163 GB |
+| CUDA context | 0.261 GB | 0.219 GB |
+| **device total** | **4.96 GB** | **6.59 GB** |
+
+Two things only this breakdown shows:
+
+* **The compression works and the total hides it.** The pool is **0.26x** the KV
+  it replaces — a 3.8x saving — but it is 114 MB of a 4.96 GB footprint, so it
+  moves the total by 2%. Weights are 76% of DKV's total and no KV scheme touches
+  them. Report the KV-side ratio.
+* **31% of CUDA's pool was slots nothing ever wrote.** Stratified-U and fact
+  anchors are filled only by the CPU compress path; on CUDA the GPU path owns
+  compression, so they sat all-zero at 52 MB — and were still handed to the
+  decode kernel every token, which looped three dead fact slots per block per
+  layer. Dropping them: pool 166 -> 114 MB, and decode got slightly FASTER
+  (18.20 vs 16.90 and 17.42 vs 16.98 tok/s, interleaved arms, change ahead in
+  both rounds).
+
+Note dense's 2.16 GB of fragmentation against DKV's 0.42 — that is
+`expandable_segments`, which DKV sets and the plain HF path does not. Most of
+DKV's apparent total-memory win on this model is that, not compression. Be
+honest about which is which; MLX's unified memory has no equivalent.
+
+---
+
 ## Not portable — CUDA-only, listed so you do not go looking
 
 * **Occupancy-driven decode chunking** (`a5289a18`) — sizes a Triton kernel grid
