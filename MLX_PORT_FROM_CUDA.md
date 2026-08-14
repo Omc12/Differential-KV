@@ -612,13 +612,32 @@ Qwen3.5-2B at 16k, the realised per-block rank at configured 216 / 224 / 232 is
 52-137 with **mean ~67 in all three cases — the ceiling binds for 0.0% of
 blocks.** Configuring 216 versus 232 changes nothing about what is stored.
 
-**`svd_energy` is the dial, and it is monotone.** Realised MEAN per-block rank:
+**Which of the two binds depends on the SPECTRAL RICHNESS OF THE INPUT.** On
+repetitive filler, energy binds and the ceiling never does:
 
 | energy | realised mean rank | | energy | realised mean rank |
 |---|---|---|---|---|
 | 0.999 | 35 | | 0.999999 | 94 |
 | 0.9999 | 53 | | 0.9999999 | 180 |
 | 0.99999 | 67 | | | |
+
+**On REAL PROSE the opposite holds** — realised rank tracks the CEILING and barely
+responds to energy (Random Features paper, 16k):
+
+| rank ceiling | realised mean, energy 0.999 -> 0.999999 |
+|---|---|
+| 64 | 66.5 -> 66.7 |
+| 128 | 130.3 -> 133.3 |
+| 224 | 215.3 -> 233.3 |
+
+A document's spectrum does not decay fast enough to meet the target under the
+cap, so the cap binds. **On the workloads this system is for, `rank` is the dial
+and `svd_energy` is nearly inert** — which is why an energy A/B on the paper
+corpus gave BYTE-IDENTICAL text at 0.9999 / 0.99999 / 0.999999 even though
+`pool.U` differed at every setting.
+
+**Do not quote the filler table as if it described documents.** Measure realised
+rank on YOUR corpus before choosing either knob.
 
 **What a different `rank` DOES change is `r_proj = rank + 5`**, the width of the
 randomised-SVD projection — so it redraws Omega and yields a different

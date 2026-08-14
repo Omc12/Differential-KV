@@ -171,11 +171,35 @@ class DKVConfig:
             #    ~67 in ALL THREE cases -- the ceiling binds for 0.0% of blocks.
             #    Configuring 216 vs 232 changes nothing about what is stored.
             #
-            # 2. `svd_energy` is what actually sets it, and it is monotone.
-            #    Realised MEAN per-block rank against the energy target:
+            # 2. `svd_energy` sets it ONLY WHEN THE CONTENT IS LOW-RANK. Which
+            #    of the two binds depends on the SPECTRAL RICHNESS OF THE INPUT,
+            #    and the numbers below are from repetitive filler:
             #        0.999     -> 35        0.999999   -> 94
             #        0.9999    -> 53        0.9999999  -> 180
             #        0.99999   -> 67
+            #    Those were measured on "The archive records a long sequence of
+            #    unremarkable events." repeated -- a nearly rank-deficient input,
+            #    where the energy target is met far below the ceiling.
+            #
+            #    ON REAL PROSE THE OPPOSITE HOLDS. Re-measured on the Random
+            #    Features paper at 16k, realised MEAN per-block rank tracks the
+            #    CEILING and barely moves with energy:
+            #        ceiling  64 -> 66.5 (energy 0.999) .. 66.7 (0.999999)
+            #        ceiling 128 -> 130.3 .. 133.3
+            #        ceiling 224 -> 215.3 .. 233.3
+            #    (slightly above the ceiling because get_layer_rank boosts early
+            #    layers.) A real document's spectrum does not decay fast enough to
+            #    reach the target under the cap, so the CAP binds and `rank` is
+            #    the dial.
+            #
+            #    This is why an energy A/B on the paper corpus produced BYTE-
+            #    IDENTICAL generated text at 0.9999 / 0.99999 / 0.999999 while
+            #    pool.U differed at every setting: the stored bytes changed a
+            #    little, the rank did not, and the answer did not.
+            #
+            #    PRACTICAL CONSEQUENCE: on the workloads this system is for, the
+            #    preset ladder works through `rank`, not through `svd_energy`.
+            #    Do not quote the filler table as though it described documents.
             #
             # 3. What a different `rank` DOES change is r_proj = rank + 5, the
             #    width of the randomised-SVD projection -- so it redraws Omega
