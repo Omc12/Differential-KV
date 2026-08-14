@@ -566,6 +566,24 @@ class DKVConfig:
         #     TTFT     9.82 -> 10.15 s
         #     device VRAM 5.21 -> 6.31 GB
         #
+        # IT IS A STANDALONE KNOB, NOT AN `ultra` FEATURE. Measured: `mid` with
+        # rotated_pool=False also scores 47/48 over the same 48 seeds -- identical
+        # to ultra. So the whole win comes from the unrotated pool and none of it
+        # from ultra's rank or energy, and DKV_ROTATED_POOL=0 buys dense-parity
+        # distractor retrieval on ANY preset without ultra's other costs.
+        #
+        # DECIDED: low/mid/high keep rotated_pool=True and only `ultra` takes it.
+        # The reasoning, recorded so it can be revisited rather than re-derived:
+        #   * the cost is ~24% of decode and +1.1 GB, and `mid` is the default
+        #     preset -- a quarter of decode is too much to spend by default on
+        #     behalf of users who are not doing distractor-heavy retrieval;
+        #   * the gain is specific to CONFUSABLE content. Ordinary needle recall
+        #     is 9/9 either way on both models, so nothing is lost by default;
+        #   * `ultra` exists precisely to trade speed and memory for quality and
+        #     already takes it.
+        # Revisit if decode stops being host-bound (~39% GPU-idle today): the
+        # rotate-at-read cost may partly hide under dispatch once graphs land.
+        #
         # Exported to the environment because pool_stores_rotated_k() reads
         # DKV_ROTATED_POOL at call time; setdefault so an explicit override wins.
         self.rotated_pool = self._get_bool(

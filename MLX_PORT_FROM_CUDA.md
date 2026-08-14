@@ -201,8 +201,17 @@ costs decode and memory. Qwen3.5-2B at 32k, interleaved and reversed:
     TTFT          9.82 -> 10.15 s
     device VRAM   5.21 -> 6.31 GB
 
-CUDA therefore keeps `rotated_pool=True` in low/mid/high and sets it **False in
-`ultra`**, which is the preset that exists to trade speed and memory for quality.
+**It is a STANDALONE knob, not an `ultra` feature.** `mid` with the unrotated pool
+also scores **47/48** over the same 48 seeds -- identical to ultra. The whole win
+comes from the unrotated pool and none of it from ultra's rank or energy, so
+setting it on any preset buys dense-parity distractor retrieval without ultra's
+other costs. That is the single most valuable line in this file for MLX.
+
+CUDA keeps `rotated_pool=True` in low/mid/high and sets it **False in `ultra`**:
+the cost is ~24% of decode and +1.1 GB, `mid` is the default preset, and ordinary
+needle recall is 9/9 either way -- so nothing is lost by default and only
+confusable-content retrieval gains. Decide the same way for MLX, on your own
+decode budget.
 
 **For MLX:** find the equivalent of `DKV_ROTATED_POOL`, run `linkbench` on both
 settings with at least 24 seeds, and confirm the needle sweep is clean before
