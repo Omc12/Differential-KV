@@ -9,7 +9,7 @@ class DKVConfig:
         # Preset can be specified in config_dict['preset'] or environment variable DKV_PRESET.
         # Default is "mid".
         preset = config_dict.get("preset", os.environ.get("DKV_PRESET", "mid")).lower()
-        if preset not in ("low", "mid", "high"):
+        if preset not in ("low", "mid", "high", "ultra"):
             preset = "mid"
         self.preset = preset
 
@@ -88,8 +88,82 @@ class DKVConfig:
             # (DKV_REMAT_CACHE=0) both leave synthesis at 30.0, because at this
             # block size K already routes every block and no routing change can
             # add information the model is not already being shown.
+            #
+            # `high` is the top of the ladder for cost-sensitive quality work.
+            # `ultra` goes further (rank 192) and is the only setting that
+            # matches dense on synthesis -- see its branch for the sweep and for
+            # what it costs in TTFT and VRAM.
             self.svd_energy = 0.99999
             self.rank = 128
+        elif self.preset == "ultra":
+            # `ultra` is MID with rank 192 -- not `high` with rank 192.
+            #
+            # That distinction is the whole preset. The rank sweep below was run
+            # on top of mid's other settings (RANK= override, default preset), and
+            # rank 192 there scores 60.0. Building this branch on `high`'s
+            # settings instead scored 50.0 (facts 9/15, links 2/5) with the SAME
+            # rank 192 -- so the 60.0 needs mid's configuration around it and is
+            # not a property of the rank alone. Copy mid, change rank, change
+            # nothing else.
+            self.decode_cache_enabled = True
+            self.decode_cache_max_tokens = 4096
+            self.prefill_chunk_size = 512 if is_macos else 1024
+            self.srl_threshold = 50
+            self.async_svd = False if is_macos else True
+            self.mps_watermark = 0.0
+            self.torch_compile = False
+            self.approximate_attn = True if is_macos else False
+            self.srl_age_penalty = 0.0
+            self.kv_quant = "q8_0"
+            self.max_active_dense_tokens = 2048
+            self.max_residual_tokens = 128
+            # RANK IS THE DRIVER, NOT ENERGY -- measured by separating them, and
+            # it corrects how this ladder was first described. Synthesis at 16k
+            # on Qwen3.5-2B, `--tests synthesis` held constant, mid's settings:
+            #
+            #   energy 0.9999  rank 64  -> 50.0 (facts 6/15, links 3/5)
+            #   energy 0.99999 rank 64  -> 50.0 (facts 6/15, links 3/5)
+            #   energy 0.9999  rank 128 -> 50.0 (facts 9/15, links 2/5)
+            #   energy 0.99999 rank 128 -> 50.0 (facts 9/15, links 2/5)
+            #
+            # Energy changes nothing at either rank. Rank trades the two halves
+            # against each other: 64 holds the links and loses facts, 128 holds
+            # the facts and loses a link. Both score 50.0 for opposite reasons.
+            #
+            # 192 is where they stop trading, and it is a genuine optimum rather
+            # than the top of a ramp -- 256 falls back to 50.0 (facts 9, links 2):
+            #
+            #   rank  80 -> 53.3 (7/3)      rank 128 -> 50.0 (9/2)
+            #   rank  96 -> 43.3 (7/2)      rank 192 -> 60.0 (9/3)  <-- dense
+            #   rank 256 -> 50.0 (9/2)
+            #
+            # 60.0 with facts 9/15 and links 3/5 is EXACTLY the dense control
+            # under the same invocation, reproduced twice -- the first
+            # configuration that matches dense on synthesis outright instead of
+            # on one of its two halves.
+            #
+            # THE CAVEAT, because the number does not hold everywhere. Those runs
+            # use `--tests synthesis`, i.e. a FRESH session. In the full run,
+            # where multi_needle and relational have already used the same
+            # wrapper and session, rank 192 keeps the facts but loses a link:
+            # 50.0 (9/15, 2/5). Dense scores 60.0 in BOTH, so the gap is DKV
+            # degrading with session history, not the benchmark moving. It is not
+            # remat staleness -- DKV_REMAT_CACHE=0 gives the same 50.0 (9/2).
+            # Unexplained, and the honest summary is "equals dense on a fresh
+            # session, one link behind on a warm one".
+            #
+            # This is also why the sweep above is quoted from one invocation
+            # throughout: remat_interval()'s docstring warns that comparing
+            # multifact numbers across invocations produces clean-looking trends
+            # that are entirely the invocation.
+            #
+            # It is not free, which is why it lives at the quality end and not in
+            # `mid`: on Qwen3.5-2B at 32k, TTFT 8.86 -> 10.11 s, decode
+            # 17.29 -> 16.45 tok/s, device VRAM 5.23 -> 5.81 GB. Needle recall is
+            # 9/9 with 9/9 determinism and linkbench is unchanged at 20/24, so
+            # the cost is speed and memory only.
+            self.svd_energy = 0.99999
+            self.rank = 192
         else:  # "mid" (Default)
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 4096
