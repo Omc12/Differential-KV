@@ -923,6 +923,21 @@ class KVRuntimeManager:
                 os.environ.get("DKV_DETERMINISTIC", "0") == "1":
             self._async = False
 
+        # NOTE: on CUDA with DKV_GPU_COMPRESS=1 -- the default -- this thread is
+        # started and then never fed. _submit_blocks_batched takes the GPU branch
+        # and calls compress_layer_blocks_gpu INLINE, returning before it reaches
+        # the is_async_active check further down; the async submit path is only
+        # the CPU fallback. So `async_svd` / DKV_ASYNC_SVD does not control
+        # anything on the path production takes, which is why DKV_ASYNC_SVD=0
+        # measures 8.01 s against the default's 8.02 s at 32k -- identical.
+        #
+        # Recorded rather than removed: the flag IS live on the CPU-compress and
+        # MPS paths. This is the sixth knob in this project found to read as
+        # enabled while controlling nothing on the default path, which is exactly
+        # the failure mode remat_cache's docstring opens by warning about. If
+        # overlapping compression with the model forward is ever wanted on CUDA,
+        # it has to be built into the GPU branch -- turning this flag on will not
+        # do it.
         self._compressor = AsyncCompressor(compress_fn=self._compress_block_sync)
         if self._async:
             self._compressor.start()
