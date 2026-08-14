@@ -90,9 +90,15 @@ def build_body(tok, ctx: int, offset: int):
         raise SystemExit(f"corpus missing: {paper}")
     text = open(paper, encoding="utf-8", errors="ignore").read()
     ids = tok(text, add_special_tokens=False).input_ids
+    # Repeat enough times to cover offset+ctx. The corpus is ~8k tokens, so a
+    # single doubling silently capped every ctx above ~16k at the corpus length --
+    # a 32k run then measured the same 16k context and two configs came back
+    # byte-identical, which is what exposed it. Compute the count instead.
+    need = offset + ctx
+    if len(ids) < need:
+        ids = ids * (need // max(1, len(ids)) + 1)
     win = ids[offset:offset + ctx]
-    if len(win) < ctx:                       # wrap so every replicate is full length
-        win = (ids + ids)[offset:offset + ctx]
+    assert len(win) == ctx, f"window {len(win)} != ctx {ctx}"
     return tok.decode(win) + QUESTION
 
 

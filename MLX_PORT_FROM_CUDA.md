@@ -32,47 +32,54 @@ I did not run anything on MLX; nothing here is measured on Apple silicon.
 
 ---
 
-## 1. Routed-block count K=16 is tuned for retrieval, not synthesis
+## 1. RETRACTED: K=16 vs K=32 makes no difference. Routing is not a lever.
 
-**Priority: highest — this is an accuracy change, and it is free on speed.**
+**Priority: read before spending any time on routing. This closes the question
+with three independent methods.**
 
-**MLX status: VERIFIED.** `mlx_dkv_wrapper.py:1713-1724` — "Default is fixed
-K=16 (topk_frac=0)", read from `DKV_TOPK_BLOCKS`. Identical default to CUDA's
-(CUDA derives 16 from the pool span; same number, same effect).
+**MLX status: the knob is VERIFIED to exist** (`mlx_dkv_wrapper.py:1713-1724`,
+`DKV_TOPK_BLOCKS`, same default). **Do not bother changing it.**
 
-**⚠ SINGLE-SEED — see item 10.** "Reproduced twice" here means two deterministic
-runs of the same seed, which is one sample. The gap below (46.7 → 60.0) is inside
-the ±15-point seed band, so the ordering is NOT established. The structural
-argument still stands and is worth testing properly on MLX; the numbers are not
-evidence. Re-run across `DKV_SVD_SEED` before acting on it.
+This item used to claim K=32 lifted synthesis 46.7 -> 60.0 and called it "the
+single largest accuracy finding of the session". That was one deterministic run
+per setting on a fixed document window, i.e. one sample, inside a +-15-point seed
+band. Re-measured with `colab/synthesis_power.py` -- replicated, paired,
+interval-bounded -- it does not reproduce.
 
-**What CUDA found.** K=16 is enough to find a needle but not to hold a topic. On
-`colab/multifact_eval_cuda.py` at 16k on Qwen3.5-2B:
+**Measured where routing actually BINDS.** At 16k with block 1024 there are only
+~15 blocks, so K=16 already routes every one of them and K cannot do anything;
+an earlier re-test at 16k was therefore also meaningless. At 32k there are 31
+blocks and K=16 routes about half. Qwen3.5-2B, 4 paired replicates at 32k:
 
-| K | synthesis | facts | links |
-|---|---|---|---|
-| 16 (default) | 46.7 | 8/15 | 2/5 |
-| 32 | **60.0** | 9/15 | 3/5 |
-| 48 | 60.0 | — | — (saturated) |
+| arm | mean | sd |
+|---|---|---|
+| K=16 (default) | 62.5 | 4.2 |
+| K=32 | 62.5 | 6.3 |
 
-**A dense control scores 60.0 (9/15, 3/5).** So at K=16 DKV is measurably below
-dense on synthesis, and at K=32 it reaches parity. That is the single largest
-accuracy finding of the session.
+    paired mean_diff = +0.00   95% CI [-4.33, +4.33]
 
-Cost on CUDA was nil — 2.4% *faster* at 8.4k (95% CI [-3.5%, -1.2%]) and no
-resolvable difference at 32k — because more routed blocks give the decode kernel
-more parallelism, which offsets the extra work. **That offset is CUDA-specific
-(it comes from the kernel's grid), so measure the cost on MLX rather than
-assuming it.**
+Exactly zero, with a resolution of +-4.3 points -- tight enough that a 5-point
+effect would have shown.
 
-**Caveat, and why CUDA did not make it the default.** The same K=32 reproducibly
-*hurt* Qwen2.5-1.5B: synthesis 26.7 -> 16.7, identical facts (5/15), one fewer
-link. It helps the capable model and hurts the weak one, so on CUDA it stayed a
-knob. Decide for MLX with your own models.
+**Three independent methods now agree that routing does nothing:**
 
-**To try:** `DKV_TOPK_BLOCKS=32`, then run the multifact synthesis case and a
-needle sweep. Needle recall did not move on CUDA (9/9 either way) — synthesis is
-the metric that responds.
+| method | result |
+|---|---|
+| linkbench, 48 seeds, K=16 vs attend-EVERY-block | 47/48 vs 47/48 |
+| generated prose (`qual_routing_cuda.py`), K=16 vs attend-all | **byte-identical** |
+| synthesis, paired and powered, K=16 vs K=32 @32k | +0.00 +-4.33 |
+
+**Why, structurally.** Retrieval and synthesis were never *selection* problems.
+Showing the model every block changes nothing, so the router is not missing
+anything -- what limits DKV is what the blocks CONTAIN, not which are chosen.
+That is why the unrotated-pool change (item 5) moved linkbench 40 -> 47 while no
+routing knob has ever moved anything.
+
+**The one caveat worth keeping:** "attend everything" is not a strict upper bound
+on quality, since attending more can dilute attention -- that is what killed
+dual-scale (item 10d). A cleverer *subset* could in principle beat both. But no
+evidence supports it, and three methods say the current router is not the
+constraint.
 
 ---
 
