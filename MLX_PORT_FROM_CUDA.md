@@ -197,6 +197,28 @@ CUDA therefore keeps `rotated_pool=True` in low/mid/high and sets it **False in
 settings with at least 24 seeds, and confirm the needle sweep is clean before
 adopting. Do not judge it on multifact.
 
+### Routing has ZERO headroom here — do not spend time on a smarter router
+
+Re-tested at this operating point, where it actually binds (32k, ~29 blocks,
+K=16 routed), with `DKV_TOPK_BLOCKS=0` so the model attends EVERY block:
+
+| routing | 48 seeds |
+|---|---|
+| K=16 (default) | 47/48 |
+| **every block** | **47/48** |
+
+Identical. Showing the model the entire context changes nothing, so the router is
+already selecting correctly and the one remaining failure is not a selection
+failure. This confirms, at the new and much better operating point, the earlier
+finding that `DKV_TOPK_FRAC` 0.0/0.5/1.0 were indistinguishable.
+
+**The consequence for design:** distractor retrieval was never a *selection*
+problem, it was a *representation* problem — which is exactly why the rotated/
+unrotated fix moved it 40 → 47 while every routing knob ever tried moved it
+nothing. Graph-structured routing, learned routing, multi-scale routing: none of
+them can beat "attend everything", and attending everything is already measured
+at 47/48. Spend effort on what is stored, not on what is selected.
+
 ---
 
 ## 5b. Block size 256 -> 1024 (CUDA default changed; check MLX's)
