@@ -512,43 +512,95 @@ honest about which is which; MLX's unified memory has no equivalent.
 
 ---
 
-## 10. Rank 192 matches dense on synthesis — and SVD energy does nothing
+## 10. Rank 224 BEATS dense on synthesis — and SVD energy does nothing
 
-**Priority: highest accuracy item that is actually actionable. Supersedes the
-energy half of item 8.**
+**Priority: highest actionable accuracy item. Supersedes the energy half of item 8.**
 
-**MLX status: LIKELY — MLX has the same rank knob.** CUDA now ships this as a
-fourth preset, `ultra`.
+**MLX status: LIKELY — MLX has the same rank knob.** CUDA ships this as a fourth
+preset, `ultra`.
 
-Item 8 said the fidelity ladder moved synthesis by keeping more spectral energy.
-Separating the two variables shows that is **wrong**: energy changes nothing, and
-rank was doing all of it. Synthesis at 16k on Qwen3.5-2B, `--tests synthesis`:
+Item 8 said the ladder moved synthesis by keeping more spectral energy. That is
+**wrong**: energy changes nothing at any rank, and rank was doing all of it.
 
-| energy | rank | synthesis | facts | links |
-|---|---|---|---|---|
-| 0.9999 | 64 | 50.0 | 6/15 | 3/5 |
-| 0.99999 | 64 | 50.0 | 6/15 | 3/5 |
-| 0.9999 | 128 | 50.0 | 9/15 | 2/5 |
-| 0.99999 | 128 | 50.0 | 9/15 | 2/5 |
+The rank landscape is **JAGGED — do not interpolate it.** Synthesis at 16k on
+Qwen3.5-2B, mid's settings, `--tests synthesis`:
 
-Rank trades the halves: 64 holds links and loses facts, 128 holds facts and loses
-a link. **Rank 192 stops the trade — 60.0, facts 9/15, links 3/5, exactly the
-dense control, reproduced twice.** It is an optimum, not a ramp: 80 → 53.3,
-96 → 43.3, 128 → 50.0, 192 → 60.0, 256 → 50.0.
+| rank | score | rank | score | rank | score |
+|---|---|---|---|---|---|
+| 64 | 50.0 (6/3) | 128 | 50.0 (9/2) | 208 | 46.7 (8/2) |
+| 80 | 53.3 (7/3) | 160 | 50.0 (9/2) | **224** | **63.3 (10/3)** |
+| 96 | 43.3 (7/2) | 192 | 60.0 (9/3) | 240 | 60.0 (9/3) |
+| | | | | 256 | 50.0 (9/2) |
 
-Two traps worth inheriting:
+208 sits between two of the best points and is one of the worst. A rank sweep of
+three points would have missed this entirely.
 
-* **A preset is not an env override.** Rank 192 on top of `mid`'s other settings
-  scores 60.0; on top of `high`'s settings the same rank 192 scores 50.0. CUDA's
-  `ultra` is therefore mid+rank192. Verify end to end, not by overriding one knob.
-* **Fresh vs warm session.** The 60.0 is on a fresh session. In a full run where
-  earlier tests shared the wrapper, rank 192 keeps the facts and loses a link
-  (50.0). Dense scores 60.0 in both, so this is DKV degrading with session
-  history. Not remat staleness (`DKV_REMAT_CACHE=0` gives the same 50.0).
-  Unexplained on CUDA; if MLX reproduces it, that is a shared bug worth chasing.
+**Rank 224 scores 63.3 (facts 10/15, links 3/5) against a dense control of 60.0
+(9/15, 3/5)** — one fact ahead. This is the first configuration in the project to
+beat dense rather than match it.
 
-Cost on CUDA at 32k: TTFT 8.86 → 10.26 s, VRAM 5.23 → 5.82 GB, decode roughly
-flat. Needle 9/9 and linkbench unchanged.
+**Replication at temperature 0 is deterministic and proves nothing.** 224 was
+therefore checked on conditions it was not tuned on, which is the only evidence
+worth having:
+
+| condition | DKV r224 | dense |
+|---|---|---|
+| `--tests synthesis` @16k (fresh session) | 63.3 | 60.0 |
+| full run @16k (warm session) | 63.3 | 60.0 |
+| `--tests synthesis` @8k | 63.3 | 60.0 |
+
+The full-run row matters most: rank 192 scores 60.0 fresh but collapses to 50.0
+once earlier tests have shared the session, and 224 does not.
+
+Cost at 32k: TTFT 8.86 → 10.33 s, VRAM 5.23 → 5.93 GB, decode flat. Needle 9/9,
+linkbench unchanged.
+
+---
+
+## 10b. prefill_chunk_size silently controls BLOCKS PER CHUNK, and that drives synthesis
+
+**Priority: high, and it is a trap rather than a tuning knob.**
+
+**MLX status: CHECK THIS.** MLX takes `prefill_chunk_size` too (256 on macOS).
+Check whether it has the same rounding.
+
+`mid` + rank scored far better than `high` + rank. Bisecting the two presets one
+setting at a time: it is **prefill_chunk_size, and only that.** `srl_threshold`
+100, `kv_quant` f16, `max_active_dense_tokens` 4096 and `decode_cache_max_tokens`
+16384 each left the score untouched at 60.0; `prefill_chunk_size` 2048 dropped it
+to **33.3** (facts 7/15, links 1/5).
+
+The mechanism is not chunking. The wrapper rounds the chunk UP to a multiple of
+block capacity, so at `micro_block_size` 1024 (capacity 1025) a 1024 chunk becomes
+1025 — **exactly one block per chunk** — and 2048 becomes 2050, two. Forming two
+blocks per chunk is what costs the synthesis.
+
+**It is not "smaller is better", and it interacts with rank**: at rank 128 the
+ordering REVERSES (chunk 2048 → 50.0, chunk 1024 → 46.7). Do not carry a chunk
+setting across ranks without re-measuring.
+
+Also note CUDA's safety guard is stale — it clamps to `2 * 257 = 514`, which
+assumes the old `micro_block_size=256`. It no longer binds anything at the
+current default and is not what produces the rounding.
+
+---
+
+## 10c. Block size still trades retrieval against synthesis — dual-scale confirmed at the new optimum
+
+Re-measured at rank 224, since the earlier block sweep was done at rank 64:
+
+| block | synthesis | linkbench @32k |
+|---|---|---|
+| 1024 | **63.3** (10/3) | 20/24 |
+| 1536 | 33.3 (7/1) | 22/24 |
+| 2048 | 46.7 (8/2) | **23/24** (= dense) |
+
+DKV now BEATS dense on synthesis at block 1024, and MATCHES dense on distractor
+retrieval at block 2048 — **but not at the same time**, and 1536 is worse than
+both on synthesis, so the middle is not a compromise. Higher rank did not dissolve
+the trade; it only moved both endpoints up. This is the same conclusion as item
+5b, now confirmed at the best known operating point: **dual-scale storage is the
+only thing left that could serve both.**
 
 ---
 
