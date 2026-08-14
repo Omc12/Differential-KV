@@ -890,6 +890,89 @@ def _apply_rope_single(x, cos, sin):
     return torch.cat([x_embed, x_pass], dim=-1)
 
 
+_HIST_ROPE_CACHE: dict = {}
+
+
+def _history_cos_sin(model, ref, max_pos: int, device):
+    """cos/sin for history positions [0, max_pos), cached across LAYERS.
+
+    The rotary tables depend only on POSITION and head_dim -- never on which
+    layer is asking. The prefill history path was rebuilding them from scratch
+    inside every layer's attention: an arange over the whole context so far, plus
+    the rotary forward, 28 times per prefill chunk on a non-hybrid model, for 28
+    identical results. At 32k the last chunk builds a 32k-long table each time.
+
+    Cached on one entry keyed by (model, max_pos, device, dtype). max_pos grows
+    monotonically through a prefill, so the entry is naturally replaced once per
+    chunk and the cache never holds more than one table. Keeping it keyed by
+    max_pos rather than cleared per chunk also means a repeat prefill of the same
+    length reuses it.
+    """
+    key = (id(model), int(max_pos), str(device), ref.dtype)
+    hit = _HIST_ROPE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    _HIST_ROPE_CACHE.clear()             # only ever one live table
+    hist_pos = torch.arange(max_pos, device=device, dtype=torch.long).unsqueeze(0)
+    cos_all, sin_all = _resolve_rotary_emb(model)(ref, hist_pos)
+    _HIST_ROPE_CACHE[key] = (cos_all, sin_all)
+    return cos_all, sin_all
+
+
+_POS_STAGE: dict = {}
+_POS_STAGE_RING = 8
+
+
+def _to_device_positions(positions: list, device) -> torch.Tensor:
+    """Move a Python list of history positions to `device` without synchronising.
+
+    `torch.tensor(list, device="cuda")` copies from PAGEABLE host memory, which
+    forces a synchronisation. It is a small copy, but it happens once per layer
+    per prefill chunk and a sync probe over one 32k prefill caught 896 of them --
+    the single largest sync site in prefill, on a path that only builds an index
+    vector.
+
+    Staging through PINNED memory makes the copy genuinely asynchronous, so the
+    GPU keeps working through it. That introduces the standard hazard: the copy
+    may still be in flight when the next call wants the buffer, and overwriting
+    it then would silently corrupt the positions. So this keeps a RING of
+    buffers, each with the event recorded after its copy was enqueued, and waits
+    on that event before reusing a slot. With a ring of 8 the wait is on an event
+    from eight calls ago, which has long since completed -- the correctness is
+    exact and the cost is nil.
+
+    Falls back to the direct form on CPU, or if pinning is unavailable.
+    """
+    n = len(positions)
+    if n == 0 or getattr(device, "type", None) != "cuda":
+        return torch.tensor(positions, dtype=torch.long, device=device)
+    key = str(device)
+    st = _POS_STAGE.get(key)
+    if st is None:
+        st = {"buf": [None] * _POS_STAGE_RING,
+              "evt": [None] * _POS_STAGE_RING, "i": 0}
+        _POS_STAGE[key] = st
+    i = st["i"]
+    st["i"] = (i + 1) % _POS_STAGE_RING
+    buf = st["buf"][i]
+    if buf is None or buf.numel() < n:
+        try:
+            cap = max(1024, 1 << (n - 1).bit_length())
+            buf = torch.empty(cap, dtype=torch.long, pin_memory=True)
+        except Exception:                                            # noqa: BLE001
+            return torch.tensor(positions, dtype=torch.long, device=device)
+        st["buf"][i] = buf
+        st["evt"][i] = None
+    elif st["evt"][i] is not None:
+        st["evt"][i].synchronize()          # this slot's previous copy is done
+    buf[:n] = torch.as_tensor(positions, dtype=torch.long)
+    out = buf[:n].to(device, non_blocking=True)
+    evt = torch.cuda.Event()
+    evt.record()
+    st["evt"][i] = evt
+    return out
+
+
 def _rope_history_k(k, cos, sin):
     """Rotate history K read back out of the pool -- ONLY if the pool stores it
     unrotated. The prefill counterpart of the decode gather's `do_rot` guard
@@ -4372,15 +4455,16 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             mbs = getattr(comp_blocks[0], "micro_block_size", kv_manager.get_session_micro_block_size(sid))
                                             max_pos = max(max_pos, max(b.anchor_idx for b in comp_blocks) + mbs)
 
-                                        hist_pos = torch.arange(max_pos, device=query_states.device, dtype=torch.long).unsqueeze(0)
-                                        _rot_emb_fn_fresh = _resolve_rotary_emb(model)
-                                        cos_all, sin_all = _rot_emb_fn_fresh(value_states[b_idx:b_idx+1], hist_pos)
+                                        cos_all, sin_all = _history_cos_sin(
+                                            model, value_states[b_idx:b_idx + 1],
+                                            max_pos, query_states.device)
 
                                         if dense_k:
                                             k_dense = torch.cat(dense_k, dim=1).unsqueeze(0)
                                             v_dense = torch.cat(dense_v, dim=1).unsqueeze(0)
 
-                                            dense_positions_tensor = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
+                                            dense_positions_tensor = _to_device_positions(
+                                                dense_positions_list, query_states.device)
                                             cos_dense = cos_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1)
                                             sin_dense = sin_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1)
                                             k_dense_rot = _rope_history_k(k_dense, cos_dense, sin_dense)

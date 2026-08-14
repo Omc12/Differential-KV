@@ -529,7 +529,13 @@ class NativeBlockPool:
                 # seq_lens on the next write, so a slot is only ever "occupied"
                 # between its write and its free, which is what every consumer
                 # already assumes.
-                self.seq_lens[pool_idx] = 0
+                #
+                # .zero_() and not `= 0`. Assigning a Python scalar into a CUDA
+                # tensor stages it through host memory and synchronises; a sync
+                # probe over one 32k prefill caught 868 of them here alone (one
+                # per block per layer), on a path that is only bookkeeping.
+                # zero_() is a device-side fill and never touches the host.
+                self.seq_lens[pool_idx].zero_()
                 if pool_idx not in self._free_indices_set:
                     self._free_indices.append(pool_idx)
                     self._free_indices_set.add(pool_idx)

@@ -1376,6 +1376,39 @@ if use_compile == "1":
     # a no-op for the current default and only unblocks streaming.
     _prefill_compile_mode = "default"
 
+    def _compile_guard(compiled, eager, name):
+        """Fall back to eager if the backend fails AT CALL TIME.
+
+        torch.compile() itself only wraps -- it does not compile -- so the
+        try/except around it catches nothing. The backend actually runs on the
+        first call with a new shape, and when it fails there the exception
+        escapes into whatever was running. On a box without a working C compiler
+        (Windows without MSVC: "Compiler: cl is not found") that turned
+        DKV_STREAMING_COMPRESS=1 into a hard InductorError crash mid-prefill
+        rather than a slower-but-working run.
+
+        Only backend failures are swallowed. A genuine runtime error from the
+        function -- OOM, a shape bug -- is re-raised, because silently switching
+        to eager there would hide it.
+        """
+        state = {"use": compiled}
+
+        def _run(*a, **kw):
+            if state["use"] is eager:
+                return eager(*a, **kw)
+            try:
+                return state["use"](*a, **kw)
+            except Exception as exc:                                # noqa: BLE001
+                mod = type(exc).__module__ or ""
+                if "inductor" not in mod and "dynamo" not in mod:
+                    raise
+                print(f"[DKV JIT] {name}: backend failed at call time ({exc}). "
+                      f"Falling back to eager for the rest of the process.",
+                      flush=True)
+                state["use"] = eager
+                return eager(*a, **kw)
+        return _run
+
     try:
         _backend = "inductor"
         print(f"[DKV JIT] Compiling _reconstruct_and_score with backend={_backend}, mode={_decode_compile_mode} (dynamic=True) ...")
@@ -1386,6 +1419,8 @@ if use_compile == "1":
             fullgraph=False,
             dynamic=True,
         )
+        _reconstruct_and_score = _compile_guard(
+            _reconstruct_and_score, _reconstruct_and_score_compiled, "_reconstruct_and_score")
     except Exception as e:
         print(f"[DKV JIT] torch.compile of _reconstruct_and_score failed ({e}). Falling back to eager.")
         _reconstruct_and_score = _reconstruct_and_score_compiled
@@ -1400,6 +1435,8 @@ if use_compile == "1":
             fullgraph=False,
             dynamic=True,
         )
+        _attend_and_reconstruct_v = _compile_guard(
+            _attend_and_reconstruct_v, _attend_and_reconstruct_v_compiled, "_attend_and_reconstruct_v")
     except Exception as e:
         print(f"[DKV JIT] torch.compile of _attend_and_reconstruct_v failed ({e}). Falling back to eager.")
         _attend_and_reconstruct_v = _attend_and_reconstruct_v_compiled
@@ -1413,6 +1450,8 @@ if use_compile == "1":
             fullgraph=False,
             dynamic=True,
         )
+        _prefill_fused_history_attend = _compile_guard(
+            _prefill_fused_history_attend, _prefill_fused_history_attend_compiled, "_prefill_fused_history_attend")
     except Exception as e:
         print(f"[DKV JIT] torch.compile of _prefill_fused_history_attend failed ({e}). Falling back to JIT script.")
         try:
