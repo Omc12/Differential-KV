@@ -512,6 +512,78 @@ honest about which is which; MLX's unified memory has no equivalent.
 
 ---
 
+## 10. Rank 192 matches dense on synthesis — and SVD energy does nothing
+
+**Priority: highest accuracy item that is actually actionable. Supersedes the
+energy half of item 8.**
+
+**MLX status: LIKELY — MLX has the same rank knob.** CUDA now ships this as a
+fourth preset, `ultra`.
+
+Item 8 said the fidelity ladder moved synthesis by keeping more spectral energy.
+Separating the two variables shows that is **wrong**: energy changes nothing, and
+rank was doing all of it. Synthesis at 16k on Qwen3.5-2B, `--tests synthesis`:
+
+| energy | rank | synthesis | facts | links |
+|---|---|---|---|---|
+| 0.9999 | 64 | 50.0 | 6/15 | 3/5 |
+| 0.99999 | 64 | 50.0 | 6/15 | 3/5 |
+| 0.9999 | 128 | 50.0 | 9/15 | 2/5 |
+| 0.99999 | 128 | 50.0 | 9/15 | 2/5 |
+
+Rank trades the halves: 64 holds links and loses facts, 128 holds facts and loses
+a link. **Rank 192 stops the trade — 60.0, facts 9/15, links 3/5, exactly the
+dense control, reproduced twice.** It is an optimum, not a ramp: 80 → 53.3,
+96 → 43.3, 128 → 50.0, 192 → 60.0, 256 → 50.0.
+
+Two traps worth inheriting:
+
+* **A preset is not an env override.** Rank 192 on top of `mid`'s other settings
+  scores 60.0; on top of `high`'s settings the same rank 192 scores 50.0. CUDA's
+  `ultra` is therefore mid+rank192. Verify end to end, not by overriding one knob.
+* **Fresh vs warm session.** The 60.0 is on a fresh session. In a full run where
+  earlier tests shared the wrapper, rank 192 keeps the facts and loses a link
+  (50.0). Dense scores 60.0 in both, so this is DKV degrading with session
+  history. Not remat staleness (`DKV_REMAT_CACHE=0` gives the same 50.0).
+  Unexplained on CUDA; if MLX reproduces it, that is a shared bug worth chasing.
+
+Cost on CUDA at 32k: TTFT 8.86 → 10.26 s, VRAM 5.23 → 5.82 GB, decode roughly
+flat. Needle 9/9 and linkbench unchanged.
+
+---
+
+## 11. Prefill: what was tried and did NOT work
+
+**Priority: read before spending time on TTFT, so you do not repeat this.**
+
+CUDA prefill sits at ~7.9 s against dense's ~5.5 s on Qwen2.5-1.5B at 32k, with
+4.5 s of that GPU kernel time. Everything below was measured and rejected:
+
+* **Removing GPU syncs — no effect.** A sync probe
+  (`torch.cuda.set_sync_debug_mode`) found **3858 syncs** in one prefill. Killing
+  the two biggest sites took it to 2094 (−46%) and TTFT did not move
+  (7.89/8.09 s vs 7.96/8.23 s). The prefill gap is not host stalls. Both fixes
+  were kept anyway since they are strictly correct: `seq_lens[i] = 0` →
+  `.zero_()` (assigning a Python scalar into a CUDA tensor synchronises), and
+  `torch.tensor(list, device="cuda")` → a pinned staging ring.
+* **`DKV_STREAMING_COMPRESS=1`, which is MLX's default — much worse on CUDA.**
+  At 8k: TTFT 5.69 s vs 1.88 s, peak_alloc 7.07 vs 3.78 GB. **Do not port CUDA's
+  OFF default back to MLX either** — the reason is CUDA-specific dispatch
+  overhead, and MLX's low launch cost is exactly why it is on there.
+* **Caching the history rotary tables across layers — no effect.** cos/sin depend
+  only on position, and were being rebuilt in all 28 layers per chunk. Correct to
+  cache, and cached now, but GPU time was unchanged, so the cost was never there.
+* **`DKV_CONTIGUOUS_PREFILL=1`** alongside the fused history attention: 8.91 s and
+  5.76 GB against 7.83 s and 4.81 GB.
+* **Prefill chunk 2048 / 4096** against 1024: TTFT 8.21 and 9.18 s vs 7.96 s.
+
+What the profile actually says, after the fused history attention landed: GEMM
+60%, elementwise 20%, SVD ~12%, softmax 4%. The single largest kernel is the
+fused attention itself at 25%. **DKV prefill does everything dense prefill does
+and then compresses**, so parity is not reachable; the SVD alone is ~0.5 s.
+
+---
+
 ## Not portable — CUDA-only, listed so you do not go looking
 
 * **Occupancy-driven decode chunking** (`a5289a18`) — sizes a Triton kernel grid
