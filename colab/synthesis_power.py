@@ -116,6 +116,15 @@ def run_dkv(a, reps):
     cfg = {"mode": "fp16"}
     if os.environ.get("DKV_PRESET"):
         cfg["preset"] = os.environ["DKV_PRESET"]
+    # BLOCK / RANK, matching the convention in linkbench_cuda.py and
+    # multifact_eval_cuda.py. These are CONSTRUCTOR arguments, not environment
+    # knobs the runtime re-reads -- without forwarding them here a sweep silently
+    # runs the default every time and returns identical numbers for every arm,
+    # which is exactly how this omission was caught.
+    if os.environ.get("BLOCK"):
+        cfg["micro_block_size"] = int(os.environ["BLOCK"])
+    if os.environ.get("RANK"):
+        cfg["rank"] = int(os.environ["RANK"])
     w = PyTorchDKVHFWrapper(model_id=a.model, config=cfg, device="cuda")
     w.ensure_loaded()
     tok = w.tokenizer
@@ -231,7 +240,13 @@ def main():
         raise SystemExit("need --arm or --compare")
 
     reps = replicates(a.reps)
-    label = a.arm if a.arm == "dense" else f"dkv/{os.environ.get('DKV_PRESET', 'mid')}"
+    label = a.arm
+    if a.arm != "dense":
+        label = f"dkv/{os.environ.get('DKV_PRESET', 'mid')}"
+        for _k in ("BLOCK", "RANK", "DKV_SVD_ENERGY", "DKV_TOPK_BLOCKS",
+                   "DKV_PREFILL_CHUNK_SIZE"):
+            if os.environ.get(_k):
+                label += f" {_k}={os.environ[_k]}"
     print(f"ARM {label}  model={a.model} ctx={a.ctx} reps={a.reps}", flush=True)
     xs = (run_dense if a.arm == "dense" else run_dkv)(a, reps)
     print()

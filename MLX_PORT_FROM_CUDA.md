@@ -828,6 +828,52 @@ and then compresses**, so parity is not reachable; the SVD alone is ~0.5 s.
 
 ---
 
+## 11b. Every remaining single-seed synthesis claim: NO RESOLVABLE DIFFERENCE
+
+**Priority: read before acting on any knob in this file. This is the clean-up
+sweep after item 10's retraction.**
+
+All four surviving single-seed findings re-run with `colab/synthesis_power.py`,
+paired, 4 replicates, Qwen3.5-2B at 16k on `ultra`:
+
+| knob | paired diff vs default | 95% CI | replicates a 5-pt effect needs |
+|---|---|---|---|
+| block 512 vs 1024 | +7.50 | [-13.9, +28.9] | **28** |
+| block 2048 vs 1024 | +8.33 | [-4.3, +21.0] | 10 |
+| block 512 vs 2048 | -0.83 | [-12.6, +10.9] | 9 |
+| prefill_chunk 2048 vs 1024 | +5.83 | [-23.6, +35.3] | **53** |
+| K=32 vs K=16 (at 32k) | +0.00 | [-4.3, +4.3] | 2 |
+| svd_energy 0.9999 vs 0.999999 | +0.00 | [0.0, 0.0] | 2 |
+
+**Not one is resolvable.** Every original claim -- block size trading synthesis
+against retrieval, `prefill_chunk_size` being worth 27 points, K=32 lifting
+synthesis, the energy ladder ordering -- came from a single sample and none
+survives replication.
+
+**Note the replicate column.** Block 512 vs 1024 would need **28** replicates and
+prefill chunk **53**. Those effects, if they exist at all, are far smaller than
+the single-seed numbers implied. Any future synthesis claim should quote this
+column.
+
+**What survives from 10c:** only the linkbench half. That column already averages
+24-48 seeds per point and its ordering is monotone in block size. The synthesis
+half is withdrawn -- **so the "block size trades retrieval against synthesis"
+premise, which is what motivated dual-scale (10d), was never established.**
+Dual-scale failed anyway, but it was chasing a trade-off that may not exist.
+
+**One open oddity, flagged rather than explained.** The `svd_energy` arm returned
+score vectors IDENTICAL to the default across all four replicates
+(`[40.0, 66.67, 63.33, 50.0]`), where the block, chunk and K arms all produced
+different vectors. The override does reach the compressor -- `_svd_energy_target()`
+returns the overridden value -- and it demonstrably changes the realised
+per-block rank (35/53/67/94 across the ladder, item 10). So either the generated
+summary is genuinely insensitive to that much of the spectrum, or something
+downstream of the rank selection is not consuming it. **Worth resolving before
+the energy ladder is trusted as a quality dial**; it is currently justified on
+realised rank, which is measured, not on scores.
+
+---
+
 ## 12. Synthesis, measured properly: `ultra` reaches dense, `mid` does not
 
 **Priority: highest accuracy result in this file, and the first synthesis
