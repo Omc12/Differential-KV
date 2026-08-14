@@ -483,6 +483,25 @@ class BlockSnapshot:
 # Manager
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Dual-scale storage (config.dual_scale / DKV_DUAL_SCALE).
+#
+# The coarse scale is a SHADOW SESSION carrying the same tokens at a larger block
+# size, not a second pool and not a second code path. Blocks are already keyed by
+# session id and `session_micro_block_sizes` is already per-session, so ingest,
+# compression, routing and eviction all work on the shadow unchanged -- the whole
+# feature is: ingest twice, and attend the union at decode.
+DUAL_SCALE_FACTOR = 2
+_COARSE_SUFFIX = "::coarse"
+
+
+def coarse_session_id(session_id: str) -> str:
+    return f"{session_id}{_COARSE_SUFFIX}"
+
+
+def is_coarse_session(session_id: str) -> bool:
+    return isinstance(session_id, str) and session_id.endswith(_COARSE_SUFFIX)
+
+
 class KVRuntimeManager:
     """
     Manages KV cache residency and on-demand reconstruction.
@@ -512,6 +531,8 @@ class KVRuntimeManager:
     ):
         from native_core.config import DKVConfig
         self.config      = DKVConfig(config)
+        # Read before the pool is sized -- dual-scale widens every slot's U rows.
+        self.dual_scale  = bool(getattr(self.config, "dual_scale", False))
         if getattr(self.config, "layer_adaptive_rank", False):
             os.environ["DKV_LAYER_ADAPTIVE_RANK"] = "1"
         self.num_layers  = num_layers
@@ -641,6 +662,14 @@ class KVRuntimeManager:
         pool_block_size = self.micro_block_size if self.streaming_ingest else self.block_size
         # Ensure pool_block_size can hold the maximum adaptive prefill block size (MBS + 1 anchor)
         pool_block_size = max(pool_block_size, 257)
+        # Under dual-scale the same pool also holds COARSE blocks, whose U rows
+        # are DUAL_SCALE_FACTOR x longer. Only `U` scales with this dimension --
+        # V_KV, anchors and residuals are all indexed by rank or by the residual
+        # budget -- so widening every slot costs one doubling of U, ~20 MB of a
+        # 114 MB pool on Qwen3.5-2B at 32k. That is far cheaper than the separate
+        # coarse pool the original design note assumed was necessary.
+        if getattr(self, "dual_scale", False):
+            pool_block_size = pool_block_size * DUAL_SCALE_FACTOR
         
         bytes_per_block = (
             (pool_block_size * pool_rank * 1) +                                # U (int8)
@@ -1638,6 +1667,14 @@ class KVRuntimeManager:
         self.finalize_contiguous_prefill(session_id)
         if self._streaming_mgr is not None:
             self._streaming_mgr.compress_deferred_blocks(session_id)
+            # The coarse shadow publishes at the SAME boundary. If it were left
+            # deferred its blocks would still be ACCUMULATING when decode starts
+            # and the coarse scale would silently contribute nothing -- the exact
+            # failure mode that has made four other knobs in this project dead.
+            if self.dual_scale and not is_coarse_session(session_id):
+                _csid = coarse_session_id(session_id)
+                if _csid in self._streaming_mgr.session_blocks:
+                    self._streaming_mgr.compress_deferred_blocks(_csid)
 
             # Drain the compression queue before decode starts. Blocks queued
             # above are SUBMITTED, which is in NEITHER collection
@@ -1805,6 +1842,18 @@ class KVRuntimeManager:
                   f"(was pending={_pending_before})")
 
     def clear_session(self, session_id: str):
+        # Drop the coarse shadow first. Its blocks hold pool slots keyed to a
+        # session id nothing else will ever ask about, so missing this leaks the
+        # whole coarse pool for the lifetime of the process.
+        if not is_coarse_session(session_id):
+            _csid = coarse_session_id(session_id)
+            if (self._streaming_mgr is not None
+                    and _csid in getattr(self._streaming_mgr, "session_blocks", {})):
+                try:
+                    self.clear_session(_csid)
+                except Exception:                                 # noqa: BLE001
+                    pass
+
         # Issue 6 fix: Invalidate the gather-KV workspace cache for this session
         # by bumping routing_version BEFORE freeing blocks.  Any in-flight decode
         # step that checks cached_val[0] == current_version will see a mismatch
@@ -2289,6 +2338,36 @@ class KVRuntimeManager:
 
     # ── Phase 24.5: Streaming Sparse Ingest ───────────────────────────────────
 
+    def _ingest_coarse(self, session_id: str, layer_idx: int,
+                       k: torch.Tensor, v: torch.Tensor) -> None:
+        """Feed the same tokens into the coarse shadow session.
+
+        Failures here are swallowed: the coarse scale is an ENRICHMENT. If it
+        cannot be built -- pool exhausted, an unexpected shape -- the fine scale
+        is still complete and correct on its own, and degrading to single-scale
+        is strictly better than failing the request.
+        """
+        try:
+            csid = coarse_session_id(session_id)
+            smgr = self._streaming_mgr
+            if csid not in smgr.session_blocks:
+                fine = smgr.session_micro_block_sizes.get(
+                    session_id, smgr.micro_block_size)
+                # Set the block size BEFORE init_session: it only assigns a
+                # default when the key is absent, so writing it afterwards would
+                # be a no-op and the shadow would silently be a second copy of
+                # the FINE scale -- dual-scale in name with nothing dual about it.
+                smgr.session_micro_block_sizes[csid] = fine * DUAL_SCALE_FACTOR
+                smgr.init_session(csid, self.num_layers, prefill_len=k.shape[2])
+            smgr.ingest_chunk(csid, layer_idx, k, v)
+        except Exception as exc:                                  # noqa: BLE001
+            if not getattr(self, "_dual_scale_warned", False):
+                self._dual_scale_warned = True
+                print(f"[DKV] dual-scale coarse ingest disabled for this run "
+                      f"({type(exc).__name__}: {exc}). Fine scale is unaffected.",
+                      flush=True)
+            self.dual_scale = False
+
     def ingest_streaming(
         self,
         session_id: str,
@@ -2357,6 +2436,12 @@ class KVRuntimeManager:
                     session_cap[layer_idx][1] = torch.cat([session_cap[layer_idx][1], v.cpu()], dim=2)
         else:
             self._streaming_mgr.ingest_chunk(session_id, layer_idx, k, v)
+            # Dual-scale: the same chunk into the coarse shadow. Prefill only --
+            # a decode token is appended to the dense window, which is never
+            # compressed and is already exact, so there is nothing for a second
+            # scale to add there.
+            if getattr(self, "dual_scale", False) and not is_coarse_session(session_id):
+                self._ingest_coarse(session_id, layer_idx, k, v)
 
     def get_streaming_blocks(self, session_id: str, layer_idx: int) -> list:
         """

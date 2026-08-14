@@ -244,6 +244,90 @@ def _resolve_trace_row(anchor_indices, seq_lens, S1: int, tok: int):
     return n, o, n * int(S1) + o
 
 
+def _coarse_scale_kv(kv_manager, sid, layer_idx, pool, cos_all, sin_all,
+                     layer_active_rank, device, fine_anchors=None,
+                     fine_seq=None):
+    """Materialise the COARSE shadow session's routed blocks, or None.
+
+    Dual-scale's read side. The coarse scale is routed, gathered and
+    reconstructed with exactly the same machinery as the fine one -- it is just
+    another session id -- so this is a second call to the same functions rather
+    than a second implementation.
+
+    Deliberately NOT cached in the remat cache: that cache is keyed by layer and
+    step and holds one entry per layer, so putting a second scale in it under the
+    same key would evict the fine scale every token and turn the cache off. The
+    coarse set is also the smaller of the two (half as many blocks), so it is the
+    cheaper one to rebuild.
+
+    Returns None on anything unexpected. The fine scale alone is complete and
+    correct, so degrading to single-scale always beats failing the token.
+    """
+    try:
+        from native_core.kv_runtime_manager import coarse_session_id
+        from native_core.sparse_decode.remat_cache import reconstruct_blocks as _rb
+        from native_core.sparse_decode.triton_fused_decode import (
+            _gather_routed_blocks_for_kernel as _grb,
+        )
+        csid = coarse_session_id(sid)
+        smgr = getattr(kv_manager, "_streaming_mgr", None)
+        if smgr is None or csid not in getattr(smgr, "session_blocks", {}):
+            return None
+        bi, _dn, ai, _mai, _mvl = kv_manager.get_cached_decode_blocks(
+            csid, layer_idx, device)
+        if bi is None or bi.numel() == 0:
+            return None
+
+        # ── Keep only coarse blocks the FINE routing did not already cover ────
+        # Attending the plain union of both scales is a measured disaster:
+        # synthesis 63.3 -> 33.3 at 16k. Every token then appears TWICE in one
+        # softmax, as two different lossy reconstructions of itself, so its mass
+        # is split between them and the exact dense window is diluted in the same
+        # proportion. (Isolated with DKV_DUAL_SCALE_ATTEND=0: the widened pool and
+        # the coarse ingest on their own leave the score at 63.3, so it is the
+        # duplication in the softmax and nothing else.)
+        #
+        # So the coarse scale EXTENDS coverage rather than duplicating it: a
+        # coarse block is kept only when no fine routed block starts inside its
+        # span, i.e. only where it is showing the model history the fine routing
+        # dropped. Nothing is represented twice, and what the coarse scale adds is
+        # exactly the associations big blocks hold and small ones fragment.
+        drop_fine = None
+        if _DUAL_SCALE_UNION != "1" and fine_anchors is not None                 and fine_anchors.numel() > 0:
+            ca = ai.to(device).long().view(-1, 1)                  # [C, 1]
+            span = int(kv_manager.get_session_micro_block_size(csid)) + 1
+            fa = fine_anchors.to(device).long().view(1, -1)        # [1, F]
+            inside = (fa >= ca) & (fa < ca + span)                 # [C, F]
+            n_inside = inside.sum(dim=1)                           # [C]
+
+            # SWAP, do not add. A coarse block is used only where the fine
+            # routing put TWO OR MORE blocks inside its span -- that is the
+            # signature of an association the fine scale split in half, and it is
+            # the only place a bigger block can tell the model something a smaller
+            # one cannot. The fine blocks it replaces are then dropped, so nothing
+            # is represented twice.
+            #
+            # Where the fine scale routed one block or none, the fine
+            # representation is kept: it has strictly better per-token fidelity
+            # and there is no split association for the coarse form to repair.
+            keep = n_inside >= 2
+            if not bool(keep.any().item()):
+                return None
+            drop_fine = inside[keep].any(dim=0)                    # [F]
+            bi, ai = bi[keep], ai[keep]
+        g = _grb(pool, bi, ai, cos_all, sin_all)
+        has_res = g.get("has_res", False)
+        K, V = _rb(g["U"], g["V_K"], g["V_V"], g["anchors_K"], g["anchors_V"],
+                   g["scales"], g["U_scale"], layer_active_rank,
+                   res_k=g["res_k"] if has_res else None,
+                   res_pos=g["res_pos"] if has_res else None,
+                   res_v=g["res_v"] if has_res else None,
+                   res_pos_v=g["res_pos_v"] if has_res else None)
+        return K, V, g["seq_lens"].clone(), drop_fine
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
 def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                   pool, block_indices, anchor_indices, cos_all, sin_all,
                   layer_active_rank, q, dense_k, dense_v, dense_len,
@@ -407,8 +491,37 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                           flush=True)
         except Exception:                                        # noqa: BLE001
             _trace_row = None
+    # Dual-scale: attend the union of both block scales in ONE softmax.
+    _extra = None
+    # DKV_DUAL_SCALE_ATTEND=0 keeps the coarse INGEST and the widened pool but
+    # skips attending the coarse rows. That separates "the second scale in the
+    # softmax changed the answer" from "sizing the pool for two scales changed
+    # the answer", which otherwise move together and cannot be told apart.
+    if (getattr(kv_manager, "dual_scale", False)
+            and os.environ.get("DKV_DUAL_SCALE_ATTEND", "1") == "1"):
+        _extra = _coarse_scale_kv(kv_manager, sid, captured_layer_idx, pool,
+                                  cos_all, sin_all, layer_active_rank, q.device,
+                                  fine_anchors=anchor_indices,
+                                  fine_seq=_seq_cached)
+        if _extra is not None:
+            _cK, _cV, _cS, _drop = _extra
+            _extra = (_cK, _cV, _cS)
+            if _drop is not None and bool(_drop.any().item()):
+                # -1 makes attend_with_remat's validity test (arange < seq+1)
+                # false for every row of the block, which is how a fine block
+                # superseded by a coarse one is removed from the softmax. Cloned
+                # because _seq_cached is the remat cache's own tensor and is
+                # reused on every hit until the next refresh.
+                _seq_cached = _seq_cached.clone()
+                _seq_cached[_drop.to(_seq_cached.device)] = -1
+            if not getattr(_remat_attend, "_ds_logged", False):
+                _remat_attend._ds_logged = True
+                _nd = int(_drop.sum().item()) if _drop is not None else 0
+                print(f"[DKV] dual-scale ACTIVE — {_cK.shape[0]} coarse blocks "
+                      f"replace {_nd} of {_Km.shape[0]} fine", flush=True)
     out = _awr(q, _Km, _Vm, _seq_cached, dense_k, dense_v, dense_len,
-               num_key_value_groups, trace_row=_trace_row, trace_tok=_trace_tok)
+               num_key_value_groups, trace_row=_trace_row, trace_tok=_trace_tok,
+               extra=_extra)
     # Advance once per token, on the LAST DKV layer. _LAST_DKV_LAYER learns the
     # max layer index by watching layers go by, so on the FIRST token it equals
     # the current layer at every layer; only advance once it has stopped growing.
@@ -918,6 +1031,10 @@ def _history_cos_sin(model, ref, max_pos: int, device):
     _HIST_ROPE_CACHE[key] = (cos_all, sin_all)
     return cos_all, sin_all
 
+
+# DKV_DUAL_SCALE_UNION=1 restores the plain union of both scales,
+# which measured 63.3 -> 33.3. Kept only so the comparison is re-runnable.
+_DUAL_SCALE_UNION = os.environ.get("DKV_DUAL_SCALE_UNION", "0")
 
 _POS_STAGE: dict = {}
 _POS_STAGE_RING = 8

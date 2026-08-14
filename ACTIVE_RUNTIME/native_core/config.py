@@ -176,6 +176,10 @@ class DKVConfig:
             # memory only, which is what a preset at this end of the ladder is for.
             self.svd_energy = 0.99999
             self.rank = 224
+            # Dual-scale is implemented and OFF here too -- see the dual_scale
+            # resolution below for the three policies measured and why none of
+            # them earns its place. `ultra` was the intended home for it.
+            self.dual_scale = False
         else:  # "mid" (Default)
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 4096
@@ -256,7 +260,19 @@ class DKVConfig:
         # can be small without this constraint.
         import sys as _sys
         if _sys.platform != "darwin":
-            _min_chunk = 2 * 257  # 2 × (1 anchor + 256 active) = 514
+            # Derive the floor from the ACTUAL block size. This was hardcoded to
+            # 2 * 257 = 514, which assumed micro_block_size=256; the default is
+            # now 1024 (capacity 1025), so the constant had stopped protecting
+            # anything -- a 600-token chunk would have passed it while producing
+            # zero full blocks, which is the collapse the guard exists to prevent.
+            #
+            # The floor is ONE block, not two. The wrapper rounds the chunk up to
+            # a multiple of block capacity anyway, and one block per chunk is the
+            # measured-best setting for synthesis, not a degenerate case -- two
+            # blocks per chunk scores 33.3 against 63.3 (see the `ultra` branch).
+            _mbs = (config_dict.get("micro_block_size")
+                    or getattr(self, "micro_block_size", None) or 256)
+            _min_chunk = _mbs + 1
             if self.prefill_chunk_size < _min_chunk:
                 self.prefill_chunk_size = _min_chunk
         self.srl_threshold = self._get_int(
@@ -380,6 +396,54 @@ class DKVConfig:
         # - MLX: ON (1). macOS unified memory and low launch overhead make streaming
         #   compression critical for bounding peak VRAM without performance penalty.
         # ──────────────────────────────────────────────────────────────────────
+
+        # ── Dual-scale storage ────────────────────────────────────────────────
+        # One block size cannot serve both metrics. Measured at rank 224 on
+        # Qwen3.5-2B: block 1024 gives synthesis 63.3 (past the dense 60.0) but
+        # distractor retrieval 20/24; block 2048 gives retrieval 23/24 (dense's
+        # own score) but synthesis 46.7. Block 1536 is worse than both on
+        # synthesis, so the middle is not a compromise -- see MLX_PORT item 10c.
+        #
+        # The idea: keep BOTH scales -- fine for the breadth synthesis needs, a
+        # coarse shadow at 2x for the associations retrieval needs.
+        #
+        # IMPLEMENTED AND DEFAULT OFF, because all three combination policies
+        # were measured and none of them earns its cost. Qwen3.5-2B, ultra:
+        #
+        #   union (attend both scales together, which is what the original
+        #     design note proposed via a log-sum-exp merge)
+        #                      synthesis 63.3 -> 33.3
+        #     Every token then appears TWICE in one softmax as two different
+        #     lossy reconstructions of itself; its mass splits between them and
+        #     the exact dense window is diluted in the same proportion. Isolated
+        #     with DKV_DUAL_SCALE_ATTEND=0: the coarse ingest and the widened
+        #     pool alone leave the score at 63.3, so it is the duplication and
+        #     nothing else. A log-sum-exp merge would NOT have avoided this --
+        #     merging two softmaxes over disjoint key sets is arithmetically the
+        #     same as one softmax over their union.
+        #
+        #   extend (coarse used only where fine routing covered nothing)
+        #                      synthesis 63.3, linkbench 20/24 -- no change
+        #     At 16k the fine scale routes every block, so the coarse scale
+        #     contributes nothing at all. At 32k it does contribute, and moves
+        #     neither metric, because the association that linkbench misses is
+        #     inside the region fine routing already covered.
+        #
+        #   swap (coarse replaces fine where 2+ fine blocks fall in its span,
+        #     the signature of a split association)
+        #                      linkbench 20/24 -> 19/24
+        #     The threshold is degenerate: a coarse block spans exactly 2 fine
+        #     blocks, so "2+ fine inside" is nearly always true and it replaced
+        #     15 of 16. It is "use the coarse scale for everything" wearing a
+        #     heuristic, and that is just block 2048 with worse routing.
+        #
+        # What this rules out is combining two scales AT ATTENTION. The block
+        # size result it was meant to solve (item 10c) is unmoved: the choice of
+        # granularity has to happen where the representation is BUILT, not where
+        # it is read. Left in, default off, DKV_DUAL_SCALE=1 to re-measure.
+        self.dual_scale = self._get_bool(
+            "dual_scale", "DKV_DUAL_SCALE", getattr(self, "dual_scale", False),
+            config_dict)
 
         # Publish the fidelity target where the compressor reads it. lowrank's
         # _svd_energy_target() consults DKV_SVD_ENERGY at call time; setdefault so

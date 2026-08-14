@@ -346,6 +346,7 @@ def attend_with_remat(
     num_key_value_groups: int,
     trace_row: Optional[int] = None,   # flat row index to report mass for
     trace_tok: int = -1,               # its absolute token index, for the log
+    extra: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
 ) -> torch.Tensor:
     """One plain attention over [materialised routed blocks | dense window].
 
@@ -356,6 +357,19 @@ def attend_with_remat(
     Padding MUST be masked. Blocks are S_max wide but only seq_lens[n] tokens are
     live; the tail is whatever the pool last held there. Attending it is the same
     class of bug as the dense-window trimming found earlier, and it is silent.
+
+    `extra` is the DUAL-SCALE second scale: (K_mat2, V_mat2, seq_lens2) at a
+    different block width. It cannot be stacked with the first -- the block
+    dimension differs -- but this function already flattens blocks to rows before
+    attending, so the two scales concatenate cleanly there and the result is ONE
+    softmax over the union. That is why dual-scale needs no log-sum-exp merge on
+    this path.
+
+    NOTE what the union means: a token present at both scales contributes TWO
+    rows, holding two different lossy reconstructions of itself, and the softmax
+    splits mass between them. That is deliberate -- the scales exist to disagree,
+    the coarse one keeping associations the fine one fragments -- but it does mean
+    the attention is over a representation set, not over distinct tokens.
     """
     N, S, H_kv, D = K_mat.shape
     H_q = q.shape[1]
@@ -370,6 +384,14 @@ def attend_with_remat(
     k_parts = [K_mat.reshape(N * S, H_kv, D)]
     v_parts = [V_mat.reshape(N * S, H_kv, D)]
     mask_parts = [valid.reshape(N * S)]
+
+    if extra is not None:
+        K2, V2, sl2 = extra
+        N2, S2 = K2.shape[0], K2.shape[1]
+        k_parts.append(K2.reshape(N2 * S2, H_kv, D))
+        v_parts.append(V2.reshape(N2 * S2, H_kv, D))
+        mask_parts.append((torch.arange(S2, device=dev).view(1, S2) <
+                           (sl2.to(dev).view(N2, 1) + 1)).reshape(N2 * S2))
 
     if dense_k is not None and dense_len > 0:
         k_parts.append(dense_k[0, :, :dense_len].permute(1, 0, 2))
