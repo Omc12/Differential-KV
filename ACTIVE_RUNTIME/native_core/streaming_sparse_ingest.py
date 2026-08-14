@@ -394,6 +394,12 @@ class StreamingKVBlock:
             return self._U_sem_int4
         if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
             pool = self.pool
+            # Legacy stratified-U / fact-anchor slots are not allocated
+            # when the GPU compress path owns compression. Absent means
+            # absent, not zero -- every caller already handles None here.
+            if not (getattr(pool, 'n_semantic', None) is not None and getattr(pool, 'U_sem', None) is not None):
+                return None
+            pool = self.pool
             pool_idx = self.pool_idx
             seq_len = int(pool.seq_lens[pool_idx].item())
             write_seq = (seq_len + 1) // 2
@@ -411,6 +417,12 @@ class StreamingKVBlock:
             return self._U_sem_scale
         if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
             pool = self.pool
+            # Legacy stratified-U / fact-anchor slots are not allocated
+            # when the GPU compress path owns compression. Absent means
+            # absent, not zero -- every caller already handles None here.
+            if not (getattr(pool, 'n_semantic', None) is not None and getattr(pool, 'U_sem_scale', None) is not None):
+                return None
+            pool = self.pool
             pool_idx = self.pool_idx
             n_sem = int(pool.n_semantic[pool_idx].item())
             return pool.U_sem_scale[pool_idx, :n_sem]
@@ -425,6 +437,12 @@ class StreamingKVBlock:
         if self._U_fact_fp16 is not None:
             return self._U_fact_fp16
         if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            # Legacy stratified-U / fact-anchor slots are not allocated
+            # when the GPU compress path owns compression. Absent means
+            # absent, not zero -- every caller already handles None here.
+            if not (getattr(pool, 'n_semantic', None) is not None and getattr(pool, 'U_fact', None) is not None):
+                return None
             pool = self.pool
             pool_idx = self.pool_idx
             seq_len = int(pool.seq_lens[pool_idx].item())
@@ -446,6 +464,12 @@ class StreamingKVBlock:
             return self._n_semantic
         if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
             pool = self.pool
+            # Legacy stratified-U / fact-anchor slots are not allocated
+            # when the GPU compress path owns compression. Absent means
+            # absent, not zero -- every caller already handles None here.
+            if not (getattr(pool, 'n_semantic', None) is not None):
+                return 0
+            pool = self.pool
             pool_idx = self.pool_idx
             return int(pool.n_semantic[pool_idx].item())
         return 0
@@ -459,6 +483,12 @@ class StreamingKVBlock:
         if self._fact_anchors_K is not None:
             return self._fact_anchors_K
         if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            # Legacy stratified-U / fact-anchor slots are not allocated
+            # when the GPU compress path owns compression. Absent means
+            # absent, not zero -- every caller already handles None here.
+            if not (getattr(pool, 'fact_anchors_K', None) is not None):
+                return None
             pool = self.pool
             pool_idx = self.pool_idx
             return pool.fact_anchors_K[pool_idx]
@@ -474,6 +504,12 @@ class StreamingKVBlock:
             return self._fact_anchors_V
         if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
             pool = self.pool
+            # Legacy stratified-U / fact-anchor slots are not allocated
+            # when the GPU compress path owns compression. Absent means
+            # absent, not zero -- every caller already handles None here.
+            if not (getattr(pool, 'fact_anchors_V', None) is not None):
+                return None
+            pool = self.pool
             pool_idx = self.pool_idx
             return pool.fact_anchors_V[pool_idx]
         return None
@@ -487,6 +523,12 @@ class StreamingKVBlock:
         if self._fact_anchor_positions is not None:
             return self._fact_anchor_positions
         if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            # Legacy stratified-U / fact-anchor slots are not allocated
+            # when the GPU compress path owns compression. Absent means
+            # absent, not zero -- every caller already handles None here.
+            if not (getattr(pool, 'fact_anchor_positions', None) is not None):
+                return None
             pool = self.pool
             pool_idx = self.pool_idx
             return pool.fact_anchor_positions[pool_idx]

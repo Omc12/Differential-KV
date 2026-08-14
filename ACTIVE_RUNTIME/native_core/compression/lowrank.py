@@ -1950,7 +1950,8 @@ def reconstruct_batch_U(pool, idx: torch.Tensor) -> torch.Tensor:
     
     idx_list = idx.tolist() if hasattr(idx, 'tolist') else list(idx)
     for i, pool_idx in enumerate(idx_list):
-        n_sem = int(pool.n_semantic[pool_idx].item()) if hasattr(pool, "n_semantic") else 0
+        n_sem = (int(pool.n_semantic[pool_idx].item())
+                 if getattr(pool, "n_semantic", None) is not None else 0)
         seq_len = int(pool.seq_lens[pool_idx].item())
         
         # If stratified quantization is not used (n_sem == 0), fallback to standard pool.U

@@ -107,18 +107,30 @@ class NativeBlockPool:
         # Skip allocating them when the GPU path owns compression; every reader
         # already treats "missing" as absent (getattr(...) is None →
         # _build_stratified_U_for_triton early-returns, has_fact=False).
-        # DEFERRED — kept True on purpose.  Skipping the allocation is only worth
-        # ~42 KB/slot (~110 MB at 13k, i.e. <1% of the ~15 GB peak), but
-        # `n_semantic`/`U_sem`/`U_fact` are read by EIGHT block-property getters
-        # (streaming_sparse_ingest.py:277/292/309/327,
-        # kv_runtime_manager.py:242/257/274/292) that index the pool tensors
-        # directly, and `getattr(b, "U_sem_int4", None)` at
-        # kv_runtime_manager.py:1708 triggers them.  Setting these to None
-        # without guarding every one of those is a crash waiting to happen for
-        # under 1% of peak — not a good trade.  Flip to the commented-out
-        # expression below ONLY after guarding all eight readers.
-        #   self._needs_legacy_slots = not (_is_cuda_dev and _gpu_compress)
-        self._needs_legacy_slots = True
+        # ENABLED 2026-08-13, after guarding all fourteen readers (seven paired
+        # block-property getters in kv_runtime_manager.py and their duplicates in
+        # streaming_sparse_ingest.py) plus _build_stratified_U_for_triton, which
+        # tested `hasattr(pool, "n_semantic")` — true even when the attribute is
+        # None. Every one now returns None/0 for "absent", which every caller
+        # already handled.
+        #
+        # This was previously deferred as "<1% of the ~15 GB peak", and that
+        # arithmetic was against the wrong denominator — the same denominator
+        # trap MLX_PORT_FROM_CUDA.md item 5c warns about. Measured against the
+        # POOL, which is the only line KV compression can move: on Qwen3.5-2B at
+        # 32k the legacy slots are 52 MB of a 166 MB pool, i.e. 31% of it.
+        #
+        # Writes are safe on the fallback path: write_block lazily builds the
+        # slots via _ensure_legacy_slots() if CPU compress output ever arrives.
+        # DKV_LEGACY_SLOTS forces the old always-allocate behaviour, which is
+        # what the A/B control that gated this change ran against.
+        _is_cuda_dev = (str(device) == "cuda" or
+                        (isinstance(device, torch.device) and device.type == "cuda"))
+        _gpu_compress = _os.environ.get("DKV_GPU_COMPRESS", "1") == "1"
+        _force_legacy = _os.environ.get("DKV_LEGACY_SLOTS")
+        self._needs_legacy_slots = (
+            _force_legacy == "1" if _force_legacy is not None
+            else not (_is_cuda_dev and _gpu_compress))
 
         # Bytes per block — used for n_blocks computation in ensure_allocated
         self._bytes_per_block = (
@@ -232,6 +244,31 @@ class NativeBlockPool:
         self._allocated = True
         print(f"[Pool] Lazy-allocated {n_blocks} slots for ~{n_tokens} tokens "
               f"= {self._pool_mb():.1f} MB (device={self.device})")
+
+    def _ensure_legacy_slots(self) -> None:
+        """Allocate the stratified-U / fact-anchor slots late.
+
+        Only the CPU compress path writes these. It is not dead code -- the GPU
+        path falls back to it on failure -- but it is not the path that normally
+        runs, so the slots are not allocated up front. Sized at current_blocks,
+        and _grow_pool carries them forward once they exist because it keys off
+        _needs_legacy_slots, which this flips.
+        """
+        if self.n_semantic is not None or not self._allocated:
+            return
+        n, r, S = self.current_blocks, self.rank, self.max_seq_len
+        H, D = self.num_kv_heads, self.head_dim
+        self.U_sem = torch.zeros((n, S // 2, r), device=self.device, dtype=torch.int8)
+        self.U_sem_scale = torch.zeros((n, r), device=self.device, dtype=self.dtype)
+        self.U_fact = torch.zeros((n, S, r), device=self.device, dtype=self.dtype)
+        self.n_semantic = torch.zeros((n,), device=self.device, dtype=torch.int16)
+        self.fact_anchors_K = torch.zeros((n, 3, H, D), device=self.device, dtype=self.dtype)
+        self.fact_anchors_V = torch.zeros((n, 3, H, D), device=self.device, dtype=self.dtype)
+        self.fact_anchor_positions = torch.full((n, 3), -1, device=self.device,
+                                                dtype=torch.int16)
+        self._needs_legacy_slots = True
+        print("[DKV] CPU compress path active — allocated stratified/fact slots "
+              f"for {n} blocks", flush=True)
 
     def _allocate_tensors(self, n_blocks: int) -> None:
         """Allocate (or re-allocate) all pool tensors at *n_blocks* size."""
@@ -625,12 +662,15 @@ class NativeBlockPool:
         # Copy stratified SVD components (Solution 2).  Skipped entirely when the
         # slots were never allocated (CUDA GPU-compress path — see
         # _needs_legacy_slots); that path never supplies U_sem_int4/n_semantic.
+        if self.n_semantic is None and n_semantic:
+            # The CPU compress path ran after all -- either DKV_GPU_COMPRESS=0 or
+            # the GPU helper raised and streaming_sparse_ingest fell back. Build
+            # the slots now rather than refusing the write: the fallback is a
+            # runtime event, so a pool built for the GPU path must still be able
+            # to accept CPU output.
+            self._ensure_legacy_slots()
         if self.n_semantic is None:
-            if n_semantic:
-                raise RuntimeError(
-                    "write_block received n_semantic>0 but the pool was built without "
-                    "stratified slots (DKV_GPU_COMPRESS path). Set DKV_GPU_COMPRESS=0."
-                )
+            pass
         else:
             self.U_sem[pool_idx] = 0
             self.U_sem_scale[pool_idx] = 0.0

@@ -76,6 +76,12 @@ def test_residual_scaling_and_quantization():
         lazy=False,
     )
     
+    # This test writes the stratified-U slots directly, which is the CPU
+    # compress path's contract. On CUDA those slots are no longer allocated up
+    # front (only the GPU compress path runs there, and it never fills them), so
+    # ask for them the same way write_block does when CPU output arrives.
+    pool._ensure_legacy_slots()
+
     pool_idx = pool.allocate_block()
     n_semantic = 2
     U_sem_int4 = packed[:, :n_semantic]
