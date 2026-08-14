@@ -146,13 +146,30 @@ class DKVConfig:
             #
             # The rank landscape is JAGGED, not a quality dial. Do not interpolate:
             #
-            #   64 -> 50.0 (6/3)    160 -> 50.0 (9/2)    224 -> 63.3 (10/3)
-            #   80 -> 53.3 (7/3)    192 -> 60.0 (9/3)    240 -> 60.0 (9/3)
-            #   96 -> 43.3 (7/2)    208 -> 46.7 (8/2)    256 -> 50.0 (9/2)
-            #  128 -> 50.0 (9/2)
+            #   64 -> 50.0 (6/3)   176 -> 50.0 (9/2)   232 -> 33.3 (7/1)
+            #   80 -> 53.3 (7/3)   192 -> 60.0 (9/3)   240 -> 60.0 (9/3)
+            #   96 -> 43.3 (7/2)   200 -> 50.0 (9/2)   248 -> 63.3 (10/3)
+            #  128 -> 50.0 (9/2)   208 -> 46.7 (8/2)   256 -> capped, see below
+            #  160 -> 50.0 (9/2)   216 -> 33.3 (7/1)   288 -> capped, see below
             #
-            # 208 sits between two of the best points and is one of the worst, so
-            # neighbouring ranks say nothing about each other.
+            # There is a broad good band from 192 to 248 with two sharp dips
+            # inside it at 216 and 232. 224 and 248 both reach 63.3, so 224 is
+            # not an isolated fluke -- but 216 and 232 are, and neighbouring
+            # ranks say nothing about each other.
+            #
+            # The dips are NOT an alignment artefact. 216 and 232 were the only
+            # tested ranks that are not multiples of 16, which looked like a
+            # clean explanation; 200 is not a multiple of 16 either and scores
+            # 50.0, and 248 is not a multiple of 16 and scores 63.3. Hypothesis
+            # tested and dropped -- the dips remain unexplained.
+            #
+            # The landscape is DETERMINISTIC, not noise: 216 and 232 both score
+            # 33.3 at 8k as well as at 16k, and 224 scores 63.3 at both.
+            #
+            # Ranks >= head_dim are silently capped to head_dim // 2 by
+            # KVRuntimeManager (it warns). On Qwen3.5-2B head_dim is 256, which
+            # is why 256 and 288 both score exactly what 128 scores -- they ARE
+            # 128. Do not read them as a real ceiling.
             #
             # 224 is the setting, at facts 10/15 and links 3/5. THE DENSE CONTROL
             # IS 60.0 (9/15, 3/5), so this is one fact AHEAD of dense -- the first
@@ -304,6 +321,23 @@ class DKVConfig:
         self.kv_quant = self._get_str(
             "kv_quant", "DKV_KV_QUANT", self.kv_quant, config_dict
         )
+        # How many recent tokens stay DENSE (uncompressed and exact).
+        #
+        # This is also the largest decode knob measured: halving mid/ultra's 2048
+        # to 1024 is worth ~5% on Qwen3.5-2B at 32k -- 20.99 vs 19.73 and 18.57
+        # vs 17.83 tok/s, the smaller window ahead in both interleaved rounds --
+        # because it is rows removed from every layer's softmax on every token.
+        # (A first unpaired reading said 14%; that was variance. Interleave.)
+        #
+        # Every accuracy gate held at 1024: synthesis 63.3, needle sweep 9/9
+        # INCLUDING depth 0.9, which is the case that actually probes recent
+        # context, and linkbench 20/24. TTFT and VRAM unchanged.
+        #
+        # NOT changed in any preset regardless. 5% of decode is not worth halving
+        # the exact-token window in `ultra`, whose whole purpose is fidelity, and
+        # the benchmarks that held are not a proof that nothing depends on those
+        # tokens. `low` already runs 1024. Set DKV_MAX_ACTIVE_DENSE_TOKENS=1024
+        # if you want the trade on a preset that does not default to it.
         self.max_active_dense_tokens = self._get_int(
             "max_active_dense_tokens", "DKV_MAX_ACTIVE_DENSE_TOKENS", self.max_active_dense_tokens, config_dict
         )
