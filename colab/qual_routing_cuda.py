@@ -81,6 +81,9 @@ QUESTION = (
     "goes, naming each department in order.\n"
     "4. Name one department whose policy would prevent it from operating "
     "continuously around the clock, and say why.\n"
+    "5. Hull Inspection needs a vessel cleared overnight. Working through the "
+    "dependency chain and the standing policies, explain whether that is "
+    "possible and which department is the obstacle.\n"
 )
 
 # Ground truth, for grading afterwards:
@@ -145,7 +148,7 @@ def run_dkv(prompt, attend_all):
     out = str(out)
     # The wrapper returns prompt + completion. Cut at the last line of the
     # question so only the model's own words are compared.
-    marker = "say why."
+    marker = "is the obstacle."
     idx = out.rfind(marker)
     if idx != -1:
         out = out[idx + len(marker):]
