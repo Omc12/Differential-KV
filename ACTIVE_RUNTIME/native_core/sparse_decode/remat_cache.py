@@ -456,11 +456,23 @@ def attend_with_remat(
     # compression -- it is the reduction inside this attention, which splits
     # differently once the concatenated key set gets large enough.
     #
-    # Off by default because the math backend materialises the score matrix and
-    # is slower; on when a run has to be reproducible, which includes ANY md5
-    # comparison. Roughly 15 such comparisons earlier in this work were made at
-    # 32k without this and were not measuring what they appeared to.
-    _det = os.environ.get("DKV_DETERMINISTIC") == "1"
+    # DEFAULT ON. Greedy decoding that does not reproduce is a defect, not a
+    # tuning preference: it breaks evals, regression tests and any A/B, and it
+    # does so SILENTLY. Roughly fifteen 32k comparisons earlier in this work were
+    # run without it and were not measuring what they appeared to -- the cost of
+    # that vastly exceeded the cost of the flag.
+    #
+    # What it costs, measured with interleaved arms on Qwen3.5-2B at 32k:
+    # decode 17.17 -> 15.79 tok/s, about 8%, because the math backend
+    # materialises the score matrix. DKV still decodes far ahead of dense there.
+    #
+    # What it does NOT cost: accuracy is unchanged -- needle sweep 28/28 checks
+    # PASS with 9/9 determinism, linkbench 20/24, both identical to the
+    # non-deterministic backend. It is the same arithmetic in a fixed order.
+    #
+    # DKV_DETERMINISTIC=0 restores the faster non-reproducible backend for anyone
+    # who would rather have the 8% and never compares two runs.
+    _det = os.environ.get("DKV_DETERMINISTIC", "1") == "1"
 
     # A boolean mask rather than a float one built by masked_fill_ on a fresh
     # zeros tensor: SDPA takes bool directly (True = attend), so this is one
