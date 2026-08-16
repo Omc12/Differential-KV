@@ -1787,21 +1787,41 @@ class PyTorchDKVHFWrapper:
                             # against 4.9 outside. So a working graph has
                             # something real to win -- roughly 30% of decode.
                             #
-                            # WHAT ACTUALLY BLOCKS CAPTURE, measured with
-                            # colab/decode_sync_probe.py: ~50 GPU syncs per token
-                            # inside model.forward, from exactly two sites --
-                            #   dkv_attention.py _sparse_prefill_filter_blocks
-                            #     (~33/token) topk(...).indices.tolist(), which
-                            #     pulls the routed block set to the host to build
-                            #     a Python list of block objects
-                            #   dkv_attention.py dkv_forward (~5/token, one per
-                            #     attended layer)
-                            # A sync inside a capture region is what produces
-                            # cudaErrorStreamCaptureInvalidated. Those two are the
-                            # whole device-resident-routing job: block selection
-                            # has to stay a device tensor and reach the kernel
-                            # without a host round-trip. The dense-window rewrite
-                            # is needed for REPLAY CORRECTNESS on top of that.
+                            # WHAT BLOCKED CAPTURE -- now fixed. A first pass
+                            # blamed _sparse_prefill_filter_blocks, which was an
+                            # ATTRIBUTION ERROR: generate() re-prefills on every
+                            # call and prefill runs through the same
+                            # model.forward, so prefill's syncs were being counted
+                            # as decode's. Filtering to q_len == 1 gave the real
+                            # list, and it was much smaller:
+                            #   get_cached_decode_blocks x2  cpu_indices.to(device)
+                            #                                and cpu_anchors.to()
+                            #                                -- pageable H2D copies
+                            #   dkv_forward:2530             torch.equal on CUDA
+                            #                                tensors (host bool)
+                            #   dkv_forward:1973             .cpu() on a key trail
+                            # The H2D copies now stage through pinned memory
+                            # (kv_runtime_manager.pinned_to_device); the other two
+                            # were already gated by DKV_GRAPH_SAFE_DECODE.
+                            # Inside-forward syncs: 62 -> 6 -> 0.
+                            #
+                            # CAPTURE NOW SUCCEEDS on the routed path, and replay
+                            # IS faster: wall-clock decode 16.59 -> 23.38 tok/s at
+                            # 16k on Qwen2.5-1.5B, a 1.41x speedup. (Do not
+                            # measure this with DKV_TIME_ATTN -- under replay the
+                            # DKV Python never runs, so it emits no per-token
+                            # lines and reports a fictional 1449 tok/s. Use
+                            # colab/decode_wall_vs_timer.py.)
+                            #
+                            # STILL GATED OFF, for correctness only: the dense
+                            # window of recently generated tokens is assembled in
+                            # Python (assemble_dense_window_kv) with a HOST write
+                            # index, so replay freezes it at capture time and the
+                            # text diverges. The remaining work is to make that
+                            # write index a device tensor and the append an
+                            # index_copy_, exactly as cache_position already does
+                            # for StaticCache -- then the graph captures the
+                            # append instead of baking it in.
                             # DKV_GRAPH_FORCE_ROUTED=1 is a MEASUREMENT-ONLY
                             # override: it lets the routed path capture and
                             # replay so the SPEED CEILING of a correct graph can

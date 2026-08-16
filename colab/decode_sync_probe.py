@@ -34,7 +34,16 @@ w = PyTorchDKVHFWrapper(model_id=MODEL, config={"mode": "fp16",
 w.ensure_loaded()
 _orig = w.model.forward
 def marked(*a, **kw):
-    INSIDE["v"] = True
+    # DECODE forwards only. generate() re-prefills on every call and prefill runs
+    # through the SAME model.forward, so marking every forward counts prefill's
+    # syncs as decode's -- which is how an earlier version of this probe
+    # mis-attributed ~33 syncs/token to a prefill-only routing path. q_len == 1
+    # is the decode step.
+    _ids = kw.get("input_ids")
+    if _ids is None and a:
+        _ids = a[0]
+    INSIDE["v"] = bool(_ids is not None and getattr(_ids, "ndim", 0) == 2
+                       and _ids.shape[1] == 1)
     try:
         return _orig(*a, **kw)
     finally:
@@ -63,5 +72,11 @@ tot = sum(HITS.values())
 inside = sum(v for k, v in HITS.items() if k.startswith("IN-FORWARD"))
 print(f"\nDECODE SYNCS over 6 tokens: {tot} total, {inside} INSIDE model.forward")
 print("  (only IN-FORWARD ones block CUDA graph capture)")
-for frame, n in HITS.most_common(14):
-    print(f"  {n:4d}  {frame}"[:150])
+print("  -- IN-FORWARD (capture blockers) --")
+for frame, n in HITS.most_common():
+    if frame.startswith("IN-FORWARD"):
+        print(f"  {n:4d}  {frame}"[:150])
+print("  -- outside the forward (harmless for capture) --")
+for frame, n in HITS.most_common(6):
+    if not frame.startswith("IN-FORWARD"):
+        print(f"  {n:4d}  {frame}"[:150])

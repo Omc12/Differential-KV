@@ -490,6 +490,57 @@ class BlockSnapshot:
 # session id and `session_micro_block_sizes` is already per-session, so ingest,
 # compression, routing and eviction all work on the shadow unchanged -- the whole
 # feature is: ingest twice, and attend the union at decode.
+_H2D_STAGE: dict = {}
+_H2D_RING = 8
+
+
+def pinned_to_device(t: torch.Tensor, device) -> torch.Tensor:
+    """Copy a CPU tensor to `device` WITHOUT synchronising.
+
+    `t.to(device)` from ordinary (pageable) host memory blocks until the copy
+    completes, which is a GPU synchronisation. Inside a CUDA graph capture region
+    that is illegal and aborts the capture with
+    cudaErrorStreamCaptureInvalidated -- and a sync probe found these copies to be
+    the ONLY blockers left in the decode forward.
+
+    Staging through PINNED memory makes the copy asynchronous. Pinned staging has
+    the classic hazard -- the copy may still be in flight when the next call wants
+    the buffer -- so this keeps a RING of buffers, each guarded by the event
+    recorded after its own copy, and waits on that event before reuse. With a ring
+    of 8 the wait is on an event from eight calls ago and costs nothing.
+
+    Returns a fresh device tensor, so callers may cache the result; only the host
+    staging buffer is recycled.
+    """
+    if t is None or getattr(device, "type", None) != "cuda" or t.is_cuda:
+        return t.to(device) if t is not None else None
+    key = (str(device), t.dtype)
+    st = _H2D_STAGE.get(key)
+    if st is None:
+        st = {"buf": [None] * _H2D_RING, "evt": [None] * _H2D_RING, "i": 0}
+        _H2D_STAGE[key] = st
+    i = st["i"]
+    st["i"] = (i + 1) % _H2D_RING
+    n = t.numel()
+    buf = st["buf"][i]
+    if buf is None or buf.numel() < n:
+        try:
+            cap = max(256, 1 << max(0, (n - 1)).bit_length())
+            buf = torch.empty(cap, dtype=t.dtype, pin_memory=True)
+        except Exception:                                        # noqa: BLE001
+            return t.to(device)
+        st["buf"][i] = buf
+        st["evt"][i] = None
+    elif st["evt"][i] is not None:
+        st["evt"][i].synchronize()
+    buf[:n].copy_(t.reshape(-1))
+    out = buf[:n].to(device, non_blocking=True).view(t.shape)
+    evt = torch.cuda.Event()
+    evt.record()
+    st["evt"][i] = evt
+    return out
+
+
 DUAL_SCALE_FACTOR = 2
 _COARSE_SUFFIX = "::coarse"
 
@@ -2662,12 +2713,14 @@ class KVRuntimeManager:
                     block_indices_tensor = cached_gpu_ind
                     anchor_indices_gpu = cached_gpu_anc
                 else:
-                    block_indices_tensor = cpu_indices.to(device)
-                    anchor_indices_gpu = cpu_anchors.to(device)
+                    # pinned_to_device, not .to(): a pageable H2D copy
+                    # synchronises, and a sync here aborts CUDA graph capture.
+                    block_indices_tensor = pinned_to_device(cpu_indices, device)
+                    anchor_indices_gpu = pinned_to_device(cpu_anchors, device)
                     indices_gpu_cache[layer_idx] = (cpu_indices_key, block_indices_tensor, anchor_indices_gpu)
             else:
-                block_indices_tensor = cpu_indices.to(device)
-                anchor_indices_gpu = cpu_anchors.to(device)
+                block_indices_tensor = pinned_to_device(cpu_indices, device)
+                anchor_indices_gpu = pinned_to_device(cpu_anchors, device)
                 indices_gpu_cache[layer_idx] = (cpu_indices_key, block_indices_tensor, anchor_indices_gpu)
         else:
             block_indices_tensor = None
