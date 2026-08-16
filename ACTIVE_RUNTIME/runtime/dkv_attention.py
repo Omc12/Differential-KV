@@ -168,7 +168,26 @@ _GRAPH_SAFE_DECODE = os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"
 #
 # Default OFF. The three changes are only correct together -- with the curr row
 # but without the ingest move the current token is attended twice.
-_MUTATION_OUT = os.environ.get("DKV_GRAPH_MUTATION_OUT", "0") == "1"
+# DKV_FAST_DECODE=1 -- one switch for the decode-optimised path, instead of
+# requiring two obscure flags to be set together and in agreement.
+#
+# It turns on mutation-out (this module) and routed CUDA-graph capture (the
+# wrapper). Those two are useless apart: capture needs a forward that does not
+# mutate KV state, and mutation-out without capture is pure overhead.
+#
+# WHAT IT IS NOT: a prefill-versus-decode trade. TTFT is unaffected either way.
+# The cost it can carry is a DECODE cost -- moving per-layer ingest and window
+# assembly into a Python loop in the wrapper, which runs once per ATTENDED LAYER
+# per token. Measured at 32k: Qwen3.5-2B (6 attended layers) is slightly faster
+# with it, Qwen2.5-1.5B (28 layers) about 9% slower, because at 32k the
+# selectivity gate declines the graph so the loop buys nothing.
+#
+# So it is a win where the graph actually engages -- routing non-selective, i.e.
+# compressed blocks <= K -- and a small loss where it does not. At 16k on
+# Qwen2.5-1.5B that is 17.3 -> 10.2 s wall with byte-identical output.
+_FAST_DECODE = os.environ.get("DKV_FAST_DECODE", "0") == "1"
+_MUTATION_OUT = os.environ.get(
+    "DKV_GRAPH_MUTATION_OUT", "1" if _FAST_DECODE else "0") == "1"
 # Fixed-shape routing, for CUDA graph capture of the ROUTED decode path.
 # The two compactions in dkv_forward use torch.nonzero, whose output LENGTH
 # depends on its input values, so every shape downstream is data-dependent. A

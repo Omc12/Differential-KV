@@ -2106,8 +2106,13 @@ class PyTorchDKVHFWrapper:
                             # Turn BOTH on together for the win where routing is
                             # non-selective: DKV_GRAPH_MUTATION_OUT=1 and
                             # DKV_GRAPH_FORCE_ROUTED=1.
+                            # DKV_FAST_DECODE=1 turns this on together with
+                            # mutation-out; either alone is useless (see the
+                            # note on _FAST_DECODE in dkv_attention).
+                            _fast_dec = os.environ.get("DKV_FAST_DECODE", "0") == "1"
                             _force_routed = os.environ.get(
-                                "DKV_GRAPH_FORCE_ROUTED", "0") == "1"
+                                "DKV_GRAPH_FORCE_ROUTED",
+                                "1" if _fast_dec else "0") == "1"
                             # ROUTED CAPTURE IS EXACT ONLY WHERE ROUTING IS
                             # NON-SELECTIVE, and that is checkable rather than
                             # hoped for. Replay cannot re-run the Python router,

@@ -1286,9 +1286,23 @@ def main():
                         default='balanced',
                         help="KV cache serving mode.")
     parser.add_argument('--preset', type=str,
-                        choices=['low', 'mid', 'high'],
+                        choices=['low', 'mid', 'high', 'ultra'],
                         default='mid',
-                        help="Hardware optimization preset.")
+                        help="Quality/cost preset. 'ultra' keeps the most "
+                             "spectrum and stores keys unrotated; it is the only "
+                             "preset that matches dense on distractor retrieval, "
+                             "and it costs decode and VRAM to do it.")
+
+    parser.add_argument('--fastdc', action='store_true',
+                        help="Decode-optimised path: capture the decode step as "
+                             "a CUDA graph and replay it. Byte-identical output "
+                             "where it engages (17.3 -> 10.2 s wall at 16k on "
+                             "Qwen2.5-1.5B). It engages only when routing is "
+                             "non-selective (compressed blocks <= K) and declines "
+                             "to a verified no-op otherwise. NOT free on every "
+                             "model: it moves per-layer work into the host loop, "
+                             "so on wide models at long context, where it "
+                             "declines, it costs ~9%.")
     
     # Quantization flags
     parser.add_argument('--load-in-4bit', action='store_true',
@@ -1316,6 +1330,14 @@ def main():
 
     # Disable parallel tokenization warnings
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
+    # --fastdc must reach the environment BEFORE the runtime is imported:
+    # dkv_attention resolves _MUTATION_OUT once at import time. The wrapper is
+    # imported lazily inside the run functions below, so setting it here is early
+    # enough -- but move this and the flag becomes a dead knob that reads as
+    # enabled while changing nothing, which this codebase has produced six times.
+    if getattr(args, 'fastdc', False):
+        os.environ['DKV_FAST_DECODE'] = '1'
 
     # Run client or direct mode
     if args.api_url is not None:
