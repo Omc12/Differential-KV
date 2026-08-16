@@ -245,8 +245,32 @@ class DKVConfig:
             # (realised max at this energy is 205). It is NOT claimed to beat
             # `high` on any benchmark; it is claimed to store more of the
             # spectrum, which is measured and deterministic.
-            self.svd_energy = 0.999999
-            self.rank = 224
+            # `ultra` IS MID PLUS AN UNROTATED POOL, AND NOTHING ELSE.
+            #
+            # It used to also carry rank 224 and svd_energy 0.999999. Both are
+            # removed, because measured against the version without them they
+            # bought nothing and cost a great deal. Qwen3.5-2B at 32k,
+            # interleaved arms:
+            #
+            #     with rank 224 / energy 1e-6    8.16 / 8.23 tok/s, 9.22 GB
+            #     mid settings + unrotated pool 10.05 / 10.07 tok/s, 6.28 GB
+            #
+            # 22% of decode and 2.9 GB of device memory, for NO difference on
+            # anything measurable: linkbench 47/48 either way, needle sweep clean
+            # either way, and synthesis cannot resolve it at all (+-15-point
+            # RSVD-seed band).
+            #
+            # The rank-224 choice came from a sweep later retracted as
+            # randomised-SVD projection noise, and the energy rung is nearly
+            # inert on real prose because the rank ceiling binds there. Both were
+            # carrying cost on evidence that no longer stands.
+            #
+            # What DOES stand is the unrotated pool, on the one accuracy metric
+            # with real power: linkbench at 32k over 48 seeds, 40/48 rotated
+            # against 47/48 unrotated -- exactly dense's 47/48. That single
+            # change is the whole preset.
+            self.svd_energy = 0.9999
+            self.rank = 64
             # Store keys UNROTATED. This is the one change in the project that
             # measurably closes a gap to dense on a metric that can actually
             # resolve it -- see the rotated_pool resolution below.

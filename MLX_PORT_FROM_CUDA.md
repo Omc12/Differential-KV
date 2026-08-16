@@ -546,11 +546,26 @@ closes a gap to dense on a metric with real statistical power: linkbench 40/48 �
 47/48 over 48 seeds, exactly matching dense's 47/48. It costs 18-24% of decode
 and +1.1 GB, which is why it lives here and not in the defaults.
 
-**Take the energy ladder** — item 8, but justified by REALISED RANK (the table
-above), which is deterministic and directly instrumentable, not by benchmark
-scores. `rank` is only a ceiling; at these energies it binds for 0.0% of blocks,
-so setting it does almost nothing on its own. Set energy, and set `rank` merely
-high enough not to clip the target (realised max at 0.999999 is 205, hence 224).
+**Do NOT take a high energy rung or a raised rank into `ultra`.** CUDA shipped
+both there and then removed them, because measured against the version without
+them they bought nothing and cost a lot. Qwen3.5-2B at 32k, interleaved:
+
+| ultra variant | decode | device VRAM |
+|---|---|---|
+| rank 224 + energy 0.999999 | 8.16 / 8.23 tok/s | 9.22 GB |
+| **mid settings + unrotated pool** | **10.05 / 10.07 tok/s** | **6.28 GB** |
+
+22% of decode and 2.9 GB, for NO difference on anything measurable — linkbench
+identical, needle sweep clean either way, synthesis unable to resolve it at all.
+`ultra` is now **mid + `rotated_pool=False`, and nothing else.**
+
+Two reasons those knobs failed to earn their place, both worth knowing before
+repeating them on MLX: the rank choice came from a sweep that was randomised-SVD
+projection noise (item 10), and the energy rung is nearly inert on real prose
+because the rank CEILING binds there rather than the energy target (also item 10).
+Neither is a general statement that fidelity does not matter — it is that these
+two dials, at these settings, on this workload, do not move anything a benchmark
+can see.
 
 **Do NOT take `rank=224` as meaningful on its own** — item 10. It was originally
 chosen from a rank sweep that turned out to be randomised-SVD projection noise.
@@ -562,6 +577,38 @@ resolve any of it.
 
 `ultra` is otherwise a copy of `mid`, not of `high` — that is deliberate and is
 the configuration everything above was measured on.
+
+---
+
+## 8c. Determinism: greedy decode is NOT reproducible at long context
+
+**Priority: read before running ANY A/B on either runtime.**
+
+**MLX status: LIKELY SHARED** — the cause is a reduction inside the decode
+attention, not anything CUDA-specific.
+
+At 32k, greedy decoding produced a small set of recurring distinct outputs across
+runs; 16k was byte-stable. Everything upstream was eliminated by measurement:
+
+* compression is deterministic — post-prefill state is byte-identical run to run
+  (same block-state counts, same realised-rank sum), and disabling async SVD
+  changes nothing
+* background tiering, prefetch and eviction: disabling them changes nothing
+* cuBLAS workspace config: changes nothing
+
+The cause is the SDPA inside the re-materialisation path, whose reduction splits
+differently once the concatenated key set is large (~33k rows at 32k against ~15k
+at 16k). CUDA's fix is `DKV_DETERMINISTIC=1`, which forces the math backend:
+byte-stable over 10 runs, at ~8% of decode.
+
+**It is OPT-IN, not default**, because at 32k it is paid with nothing to offset
+it. **Turn it on for any run you will compare.** Roughly fifteen 32k comparisons
+in this project were made without it and were not measuring what they appeared
+to — that produced one full retraction.
+
+**Do not accept a cheaper backend without testing it properly.**
+`EFFICIENT_ATTENTION` was tried as a faster deterministic option: 3 runs agreed,
+8 runs did not (6/8). Three-run agreement is not evidence.
 
 ---
 
