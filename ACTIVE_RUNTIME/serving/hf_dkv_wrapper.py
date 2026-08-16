@@ -1813,15 +1813,37 @@ class PyTorchDKVHFWrapper:
                             # lines and reports a fictional 1449 tok/s. Use
                             # colab/decode_wall_vs_timer.py.)
                             #
-                            # STILL GATED OFF, for correctness only: the dense
-                            # window of recently generated tokens is assembled in
-                            # Python (assemble_dense_window_kv) with a HOST write
-                            # index, so replay freezes it at capture time and the
-                            # text diverges. The remaining work is to make that
-                            # write index a device tensor and the append an
-                            # index_copy_, exactly as cache_position already does
-                            # for StaticCache -- then the graph captures the
-                            # append instead of baking it in.
+                            # STILL GATED OFF, and the reason is bigger than the
+                            # dense window. Making that one write index device-
+                            # resident is NOT sufficient, which is worth stating
+                            # because it looks like it should be.
+                            #
+                            # dkv_forward calls kv_manager.ingest_streaming() on
+                            # every decode token, INSIDE the forward. That call
+                            # appends the new K/V to the tail block, advances
+                            # _active_fill, finalises a block when it fills, and
+                            # triggers compression. All of it is Python. Graph
+                            # replay runs NO Python, so under replay the token is
+                            # never ingested at all: _active_fill never advances,
+                            # blocks never finalise, compression never fires, and
+                            # the KV store freezes wholesale. The frozen dense
+                            # window is the visible symptom of that, not the cause.
+                            #
+                            # So routed replay needs the block LIFECYCLE to be
+                            # device-resident -- append, finalise, and compression
+                            # triggering -- not just one index. That is the
+                            # "static-state ABI" this file originally called for,
+                            # and it is a redesign.
+                            #
+                            # The one design that avoids it: DEFER ingest by a
+                            # step. Replay the graph for token t, then read the
+                            # K/V back out of the graph's fixed-address buffers
+                            # and ingest token t-1 from Python, outside the
+                            # captured region. Attention semantics shift slightly
+                            # (the current token reaches the dense window one step
+                            # later, though it is still attended through the local
+                            # path), so it would need the full accuracy suite and
+                            # colab/graph_verify.py against eager.
                             # DKV_GRAPH_FORCE_ROUTED=1 is a MEASUREMENT-ONLY
                             # override: it lets the routed path capture and
                             # replay so the SPEED CEILING of a correct graph can
