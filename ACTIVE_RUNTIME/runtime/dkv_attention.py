@@ -348,6 +348,46 @@ def _coarse_scale_kv(kv_manager, sid, layer_idx, pool, cos_all, sin_all,
         return None
 
 
+def _stabilise_routed_set(kv_manager, sid, layer_idx, block_indices, anchor_indices):
+    """Pin the routed set into FIXED-ADDRESS buffers so a graph can read it.
+
+    The last thing that stops routed replay being correct is that block_indices
+    and anchor_indices are freshly allocated by Python on every decode step, so a
+    captured graph holds pointers to whichever pair existed at capture time and
+    routing never advances again.
+
+    Copying them into persistent per-(session, layer) buffers fixes the ADDRESS.
+    The graph then reads those buffers, and anything that writes them later --
+    an eager step, which is how this design refreshes routing -- is visible to
+    every subsequent replay without re-capture.
+
+    Deliberately NOT a re-routing path: the forward keeps doing the routing, so
+    there is no second implementation to drift from the first. That was the
+    failure mode of the alternative (a wrapper-side router that would have had to
+    replicate the forward's router-mode, k_eff and srl-threshold guards).
+
+    Returns the buffers to use, or the originals when the shape is not stable
+    (short context, where the graph is not used anyway).
+    """
+    if block_indices is None or anchor_indices is None:
+        return block_indices, anchor_indices
+    ws = kv_manager.decode_workspace.setdefault(sid, {})
+    bufs = ws.setdefault("_routed_buf", {})
+    ent = bufs.get(layer_idx)
+    n = int(block_indices.shape[0])
+    if ent is None or int(ent[0].shape[0]) != n:
+        # First use, or the routed count changed (still filling up early in a
+        # session). Allocate at the CURRENT size and hand back the originals this
+        # step; a size change also means any existing graph is stale, which the
+        # caller handles by invalidating on shape change.
+        bufs[layer_idx] = (block_indices.clone(), anchor_indices.clone())
+        return block_indices, anchor_indices
+    bi_buf, ai_buf = ent
+    bi_buf.copy_(block_indices)
+    ai_buf.copy_(anchor_indices)
+    return bi_buf, ai_buf
+
+
 def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                   pool, block_indices, anchor_indices, cos_all, sin_all,
                   layer_active_rank, q, dense_k, dense_v, dense_len,
@@ -515,6 +555,26 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                           flush=True)
         except Exception:                                        # noqa: BLE001
             _trace_row = None
+    # Pin the MATERIALISED blocks too. Fixing the routed indices was not enough:
+    # _Km/_Vm are fresh bmm outputs (or fresh cache entries) every step, so a
+    # captured graph held whichever pair existed at capture time and the
+    # reconstruction never advanced even when routing did. Same fix, same reason
+    # -- the graph needs a stable ADDRESS, and the periodic eager step rewrites
+    # the contents in place.
+    if _MUTATION_OUT:
+        _ws_pin = kv_manager.decode_workspace.setdefault(sid, {})
+        _pin = _ws_pin.setdefault("_remat_pin", {})
+        _ent = _pin.get(captured_layer_idx)
+        if (_ent is None or _ent[0].shape != _Km.shape
+                or _ent[1].shape != _seq_cached.shape):
+            _pin[captured_layer_idx] = (_Km.clone(), _Vm.clone(), _seq_cached.clone())
+        else:
+            _kb, _vb, _sb = _ent
+            _kb.copy_(_Km)
+            _vb.copy_(_Vm)
+            _sb.copy_(_seq_cached)
+            _Km, _Vm, _seq_cached = _kb, _vb, _sb
+
     # Dual-scale: attend the union of both block scales in ONE softmax.
     _extra = None
     # DKV_DUAL_SCALE_ATTEND=0 keeps the coarse INGEST and the widened pool but
@@ -4010,6 +4070,10 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         max_rank_early=getattr(_cfg, "max_rank_early", 0),
                                     )
                                     # MLX-parity decode form; see _remat_attend.
+                                    if _MUTATION_OUT and q_len == 1:
+                                        block_indices, anchor_indices = _stabilise_routed_set(
+                                            kv_manager, sid, captured_layer_idx,
+                                            block_indices, anchor_indices)
                                     _remat_out = _remat_attend(
                                         kv_manager, sid, captured_layer_idx,
                                         current_version, pool, block_indices,
@@ -4060,6 +4124,10 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # under DKV_ROTATED_POOL (the default);
                                 # _remat_attend declines when they are not,
                                 # rather than attending unrotated keys.
+                                if _MUTATION_OUT and q_len == 1:
+                                    block_indices, anchor_indices = _stabilise_routed_set(
+                                        kv_manager, sid, captured_layer_idx,
+                                        block_indices, anchor_indices)
                                 _remat_out = _remat_attend(
                                     kv_manager, sid, captured_layer_idx,
                                     current_version, pool, block_indices,

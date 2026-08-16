@@ -440,6 +440,12 @@ def _normalize_references(text: str) -> str:
         return body + '\n' + normalized_ref_block
     return normalized_ref_block
 
+import runtime.dkv_attention as _dkv_attn_mod  # noqa: E402
+from native_core.sparse_decode.remat_cache import (  # noqa: E402
+    remat_interval as _dkv_remat_interval,
+)
+
+
 class PyTorchDKVHFWrapper:
     """
     Wraps a HuggingFace model to use Differential KV cache.
@@ -1021,6 +1027,10 @@ class PyTorchDKVHFWrapper:
 
 
     @torch.no_grad()
+    def _dkv_reset_graph_step(self) -> None:
+        """Restart the routing-refresh cycle at the top of every generate()."""
+        self._dkv_step_idx = 0
+
     def _dkv_apply_pending_mutation(self, session_id: str) -> None:
         """Perform the decode step's state mutation OUTSIDE the forward.
 
@@ -1051,7 +1061,13 @@ class PyTorchDKVHFWrapper:
                 mgr.ingest_streaming(sid, layer_idx, k, v)
             except Exception:                                    # noqa: BLE001
                 pass
-        pend.clear()
+        # DO NOT clear. The entries are REFERENCES into the graph's fixed-address
+        # buffers, and the line that records them lives inside the forward -- which
+        # replay does not execute. Clearing them made every token after the first
+        # replay ingest nothing at all, silently freezing the KV store while the
+        # text stayed fluent. Keeping them is the whole point: each replay
+        # rewrites those same addresses, so re-reading them here ingests the token
+        # this step actually produced. Eager steps simply overwrite the same keys.
 
         ws = mgr.decode_workspace.setdefault(session_id, {})
         lens = ws.setdefault("dense_len_dev", {})
@@ -1947,7 +1963,25 @@ class PyTorchDKVHFWrapper:
                                       f"continuing in eager decode.",
                                       file=sys.stderr, flush=True)
                     
-                    if self._cuda_graph_runner.is_captured():
+                    # ROUTING REFRESH. Replay executes no Python, so the routed
+                    # set pinned in _stabilise_routed_set's buffers would never
+                    # advance. Running ONE EAGER step every N tokens lets the real
+                    # forward re-route and rewrite those buffers in place, which
+                    # every subsequent replay then reads -- no re-capture, and no
+                    # second router implementation to drift from the first.
+                    #
+                    # N is the remat interval, so routing staleness under replay is
+                    # exactly the staleness DKV_REMAT_INTERVAL already ships and
+                    # accepts (the remat cache freezes the routed set for the same
+                    # window). Not a new trade -- the same one, made explicit.
+                    if not hasattr(self, "_dkv_step_idx"):
+                        self._dkv_step_idx = 0
+                    _mo = getattr(_dkv_attn_mod, "_MUTATION_OUT", False)
+                    _refresh_every = _dkv_remat_interval() if _mo else 0
+                    _force_eager = (_refresh_every > 0
+                                    and (self._dkv_step_idx % _refresh_every) == 0)
+                    self._dkv_step_idx += 1
+                    if self._cuda_graph_runner.is_captured() and not _force_eager:
                         try:
                             outputs = self._cuda_graph_runner.run(input_ids, pos_tensor)
                         except Exception:
