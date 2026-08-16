@@ -1150,8 +1150,12 @@ class PyTorchDKVHFWrapper:
                 _after = sum(int(b.active_k.shape[2]) for b in _b1
                              if b.active_k is not None)
                 _d = _after - _before
+                _src = "graphrefs" if getattr(self, "_dkv_last_was_replay", False) else "pending"
+                _k0v = (pend or {}).get(0)
+                _ksum = "-" if _k0v is None else f"{float(_k0v[1].float().abs().sum()):.2f}"
                 print(f"[INGEST] step={getattr(self,'_dkv_step_idx',-1):3d} "
                       f"replay={int(bool(getattr(self,'_dkv_last_was_replay',False)))} "
+                      f"src={_src:9s} Ksum={_ksum} "
                       f"L0 {_before}->{_after} delta={_d}"
                       f"{'  <-- EXPECTED 1' if _d != 1 else ''}",
                       flush=True, file=_s3.stderr)
@@ -2079,8 +2083,57 @@ class PyTorchDKVHFWrapper:
                             # stale one. Never set it in a serving path.
                             _force_routed = os.environ.get(
                                 "DKV_GRAPH_FORCE_ROUTED", "0") == "1"
+                            # ROUTED CAPTURE IS EXACT ONLY WHERE ROUTING IS
+                            # NON-SELECTIVE, and that is checkable rather than
+                            # hoped for. Replay cannot re-run the Python router,
+                            # so the routed set it captured is frozen for the
+                            # whole replay. When the router would have selected
+                            # every block anyway -- n_blocks <= K -- freezing it
+                            # is a NO-OP and replay is exact by construction.
+                            #
+                            # Measured both sides of that line on Qwen2.5-1.5B:
+                            #   16k, 15 blocks, K=16 (non-selective)
+                            #       byte-identical at 48/64/96 tokens, and
+                            #       15.7 -> 10.6 s wall at 96 (1.48x)
+                            #   32k, 31 blocks, K=16 (selective)
+                            #       drifts: 7c291f42 against eager 9a9cbc07,
+                            #       coherent text, i.e. staleness not corruption
+                            #
+                            # Refreshing it does not rescue the selective case.
+                            # Eager alternation CORRUPTS (interval 2/4/8 breaks
+                            # after ~1/~8/~14 tokens) and frequent re-capture is
+                            # both inexact at length and slower than eager (288 ms
+                            # per capture against 14.7 ms/token saved: at
+                            # recapture=2, 25.5 s vs eager's 17.9 s and a
+                            # different md5 by 64 tokens). So the gate is the
+                            # honest ship, not a placeholder for a refresh.
+                            _routing_selective = False
+                            if _force_routed:
+                                try:
+                                    _blocks = self.manager.get_streaming_blocks(
+                                        session_id, 0) or []
+                                    _ncomp = sum(1 for _b in _blocks
+                                                 if getattr(_b, "state", "") == "COMPRESSED")
+                                    _pool = getattr(self.manager, "native_pool", None)
+                                    _K = int(os.environ.get(
+                                        "DKV_TOPK_BLOCKS",
+                                        getattr(_pool, "routing_topk_default", 16) or 16))
+                                    _routing_selective = (_K > 0 and _ncomp > _K)
+                                    if _routing_selective and not getattr(
+                                            self, "_graph_sel_logged", False):
+                                        self._graph_sel_logged = True
+                                        print(f"[DKV] routed CUDA graph declined: "
+                                              f"{_ncomp} compressed blocks > K={_K}, "
+                                              f"so routing is selective and a frozen "
+                                              f"routed set would drift. "
+                                              f"DKV_GRAPH_ALLOW_SELECTIVE=1 to override.",
+                                              file=sys.stderr, flush=True)
+                                except Exception:                    # noqa: BLE001
+                                    _routing_selective = False
+                            if os.environ.get("DKV_GRAPH_ALLOW_SELECTIVE") == "1":
+                                _routing_selective = False
                             self.model._dkv_cuda_graph_safe = bool(
-                                _force_routed or (
+                                (_force_routed and not _routing_selective) or (
                                     _dkv_cache is not None
                                     and os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"))
                             self._cuda_graph_runner.capture(
