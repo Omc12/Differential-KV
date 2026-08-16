@@ -1130,8 +1130,24 @@ class PyTorchDKVHFWrapper:
                 dense_blocks = [b for b in (blocks or []) if b.state == "ACCUMULATING"]
                 if not dense_blocks:
                     continue
+                # Use the dtype the WORKSPACE already has, not the model's.
+                # assemble_dense_window_kv reallocates when the dtype differs,
+                # which would rebind dense_workspace_k to a NEW tensor and leave
+                # a captured graph reading the old address forever.
+                _existing = (ws.get("dense_workspace_k") or {}).get(layer_idx)
+                _dt = _existing.dtype if _existing is not None else self.model.dtype
+                _ptr_before = None if _existing is None else _existing.data_ptr()
                 _dk, _dv, dlen, _ = mgr.assemble_dense_window_kv(
-                    session_id, layer_idx, dense_blocks, self.model.dtype)
+                    session_id, layer_idx, dense_blocks, _dt)
+                if (os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1"
+                        and layer_idx == 0 and _ptr_before is not None):
+                    import sys as _s2
+                    _after = (ws.get("dense_workspace_k") or {}).get(layer_idx)
+                    print(f"[DT] L0 dt={_dt} model_dt={self.model.dtype} "
+                          f"ptr {hex(_ptr_before)} -> "
+                          f"{'same' if _after is not None and _after.data_ptr() == _ptr_before else 'REALLOC'} "
+                          f"dirty={[getattr(b,'dirty',None) for b in dense_blocks][:3]} "
+                          f"dlen={dlen}", flush=True, file=_s2.stderr)
                 cur = lens.get(layer_idx)
                 if cur is None:
                     lens[layer_idx] = _t.tensor(int(dlen), device=_dk.device,
