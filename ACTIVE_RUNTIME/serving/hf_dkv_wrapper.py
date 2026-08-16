@@ -1061,6 +1061,20 @@ class PyTorchDKVHFWrapper:
         routed = (ws.get("_routed_buf") or {}).get(L)
         remat = (ws.get("_remat_pin") or {}).get(L)
         cos = ws.get("rope_cos")
+        # Compare against what CAPTURE bound, not the last eager forward.
+        fwd = ((mgr.__dict__.get("_graph_fwd_ptrs")
+                or mgr.__dict__.get("_fwd_ptrs") or {}).get(L)) or {}
+        def _cmp(name, cur):
+            f = fwd.get(name)
+            if f is None or cur is None:
+                return f"{name}:?"
+            return f"{name}:{'SAME' if f == cur else 'DIFFERENT'}"
+        print(
+            f"[BIND] step={getattr(self, '_dkv_step_idx', -1):3d} "
+            f"{_cmp('dense', None if dwk is None else dwk.data_ptr())} "
+            f"{_cmp('bi', None if routed is None else routed[0].data_ptr())} "
+            f"{_cmp('Km', None if remat is None else remat[0].data_ptr())}",
+            flush=True, file=_s.stderr)
         print(
             f"[DUMP] step={getattr(self, '_dkv_step_idx', -1):3d} "
             f"replay={int(bool(getattr(self, '_dkv_last_was_replay', False)))} "
@@ -2054,6 +2068,14 @@ class PyTorchDKVHFWrapper:
                             _pi = self.manager.__dict__.get("_pending_ingest")
                             if _pi:
                                 self.manager.__dict__["_graph_ingest_refs"] = dict(_pi)
+                            # Snapshot WHAT THE FORWARD BOUND DURING CAPTURE.
+                            # Comparing against the live _fwd_ptrs only compares
+                            # the last EAGER forward, which says nothing about the
+                            # graph -- this is the pair that actually matters.
+                            _fp = self.manager.__dict__.get("_fwd_ptrs")
+                            if _fp:
+                                self.manager.__dict__["_graph_fwd_ptrs"] = {
+                                    k: dict(v) for k, v in _fp.items()}
                         except Exception as _cap_err:
                             # Log ONCE. A bare `pass` here makes a failed capture
                             # indistinguishable from eager decode, so a benchmark

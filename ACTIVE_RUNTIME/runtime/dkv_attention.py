@@ -629,6 +629,18 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                 _nd = int(_drop.sum().item()) if _drop is not None else 0
                 print(f"[DKV] dual-scale ACTIVE — {_cK.shape[0]} coarse blocks "
                       f"replace {_nd} of {_Km.shape[0]} fine", flush=True)
+    # Record what the FORWARD actually binds. This is the one view the
+    # wrapper-side probes could not give: if these addresses differ from the dict
+    # entries the wrapper updates between steps, the graph is reading tensors
+    # nothing refreshes -- which no amount of wrapper-side checking can reveal.
+    if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+        _fp = kv_manager.__dict__.setdefault("_fwd_ptrs", {})
+        _fp[captured_layer_idx] = {
+            "Km": _Km.data_ptr(),
+            "dense": None if dense_k is None else dense_k.data_ptr(),
+            "bi": None if block_indices is None else block_indices.data_ptr(),
+            "mask": None if dense_mask is None else dense_mask.data_ptr(),
+        }
     out = _awr(q, _Km, _Vm, _seq_cached, dense_k, dense_v, dense_len,
                num_key_value_groups, trace_row=_trace_row, trace_tok=_trace_tok,
                extra=_extra, curr_kv=curr_kv, dense_mask=dense_mask)
@@ -2717,6 +2729,30 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 dense_k_assembled, dense_v_assembled, dense_len, dense_blocks =                                     kv_manager.assemble_dense_window_kv(
                                         sid, captured_layer_idx, dense_blocks,
                                         query_states.dtype)
+                                # Publish the length and build the MASK here too.
+                                # Leaving dense_mask None on this branch made
+                                # attend_with_remat slice with a Python int, which
+                                # a captured graph bakes in -- so if capture landed
+                                # on this branch the window was frozen at its
+                                # capture width for every later replay, while every
+                                # buffer the wrapper updated looked perfectly
+                                # healthy. That is exactly the symptom that
+                                # survived four rounds of wrapper-side probing.
+                                if dense_k_assembled is not None:
+                                    _lens = _ws.setdefault("dense_len_dev", {})
+                                    _cur = _lens.get(captured_layer_idx)
+                                    if _cur is None:
+                                        _cur = torch.tensor(
+                                            int(dense_len),
+                                            device=dense_k_assembled.device,
+                                            dtype=torch.long)
+                                        _lens[captured_layer_idx] = _cur
+                                    else:
+                                        _cur.fill_(int(dense_len))
+                                    dense_len = int(dense_k_assembled.shape[2])
+                                    _dense_mask = (torch.arange(
+                                        dense_len,
+                                        device=dense_k_assembled.device) < _cur)
                             else:
                                 dense_k_assembled = dense_v_assembled = None
                                 dense_len = 0
