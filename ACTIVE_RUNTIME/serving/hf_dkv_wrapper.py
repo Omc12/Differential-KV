@@ -1021,6 +1021,60 @@ class PyTorchDKVHFWrapper:
 
 
     @torch.no_grad()
+    def _dkv_apply_pending_mutation(self, session_id: str) -> None:
+        """Perform the decode step's state mutation OUTSIDE the forward.
+
+        Only active under DKV_GRAPH_MUTATION_OUT. The forward has been made
+        read-only with respect to KV state so a CUDA graph can replay it; the
+        two mutations it used to do are performed here instead, between forwards,
+        where Python actually runs.
+
+        Order matters and mirrors what the forward used to do:
+          1. ingest the token the forward just produced, from the K/V references
+             the forward stashed. Under replay those references point into the
+             graph's fixed-address buffers and hold the values this replay
+             produced, which is what makes this work at all.
+          2. rebuild each layer's dense window and publish its length as a DEVICE
+             tensor, so the next forward can mask by it instead of slicing with a
+             host int a captured graph would bake in.
+        """
+        import runtime.dkv_attention as _da
+        if not getattr(_da, "_MUTATION_OUT", False):
+            return
+        mgr = self.manager
+        pend = mgr.__dict__.get("_pending_ingest") or {}
+        if not pend:
+            return
+        import torch as _t
+        for layer_idx, (sid, k, v) in list(pend.items()):
+            try:
+                mgr.ingest_streaming(sid, layer_idx, k, v)
+            except Exception:                                    # noqa: BLE001
+                pass
+        pend.clear()
+
+        ws = mgr.decode_workspace.setdefault(session_id, {})
+        lens = ws.setdefault("dense_len_dev", {})
+        for layer_idx in range(mgr.num_layers):
+            try:
+                blocks = mgr.get_streaming_blocks(session_id, layer_idx)
+                dense_blocks = [b for b in (blocks or []) if b.state == "ACCUMULATING"]
+                if not dense_blocks:
+                    continue
+                _dk, _dv, dlen, _ = mgr.assemble_dense_window_kv(
+                    session_id, layer_idx, dense_blocks, self.model.dtype)
+                cur = lens.get(layer_idx)
+                if cur is None:
+                    lens[layer_idx] = _t.tensor(int(dlen), device=_dk.device,
+                                                dtype=_t.long)
+                else:
+                    # in place: the mask built in the forward reads THIS tensor,
+                    # and rebinding it would leave a captured graph reading the
+                    # old address forever.
+                    cur.fill_(int(dlen))
+            except Exception:                                    # noqa: BLE001
+                continue
+
     def generate(
         self,
         prompt: str,
@@ -1910,6 +1964,7 @@ class PyTorchDKVHFWrapper:
                             past_key_values=past_kv,
                             use_cache=True,
                         )
+                    self._dkv_apply_pending_mutation(session_id)
                 else:
                     outputs = self.model(
                         input_ids=input_ids,

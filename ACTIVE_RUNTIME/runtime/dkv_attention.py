@@ -149,6 +149,26 @@ _DECODE_CACHE_CUDA = os.environ.get("DKV_DECODE_CACHE_CUDA", "0") == "1"
 # consult it run per layer per decode step, and an environ lookup there is the
 # same host overhead the flag exists to eliminate.
 _GRAPH_SAFE_DECODE = os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"
+
+# DKV_GRAPH_MUTATION_OUT=1 — move the decode step's Python MUTATION out of the
+# forward so a captured CUDA graph replays correctly.
+#
+# Capture already succeeds and replay is already 1.41x; what makes replay WRONG
+# is that replay executes no Python, and the forward mutates state on every
+# token: it ingests the new K/V into the tail block and rebuilds the dense
+# window. Neither synchronises, so a clean sync probe does not reveal them.
+#
+# With this on, the forward becomes read-only with respect to that state:
+#   * the current token is attended from an explicit curr_kv row rather than by
+#     having been ingested into the window first (attend_with_remat);
+#   * the dense window is taken whole and masked by a DEVICE-resident length,
+#     rather than sliced by a host int that a graph would bake in;
+#   * ingest and window assembly are performed by the caller BETWEEN forwards,
+#     where Python is allowed to run.
+#
+# Default OFF. The three changes are only correct together -- with the curr row
+# but without the ingest move the current token is attended twice.
+_MUTATION_OUT = os.environ.get("DKV_GRAPH_MUTATION_OUT", "0") == "1"
 # Fixed-shape routing, for CUDA graph capture of the ROUTED decode path.
 # The two compactions in dkv_forward use torch.nonzero, whose output LENGTH
 # depends on its input values, so every shape downstream is data-dependent. A
@@ -331,7 +351,7 @@ def _coarse_scale_kv(kv_manager, sid, layer_idx, pool, cos_all, sin_all,
 def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                   pool, block_indices, anchor_indices, cos_all, sin_all,
                   layer_active_rank, q, dense_k, dense_v, dense_len,
-                  num_key_value_groups):
+                  num_key_value_groups, curr_kv=None, dense_mask=None):
     """MLX's decode form: materialise the routed blocks, then plain SDPA.
 
     MLX builds each routed block's real keys and values --
@@ -365,7 +385,11 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
     if block_indices is None or block_indices.numel() == 0:
         return None
     if dense_k is None or not dense_len:
-        return None
+        # Under DKV_GRAPH_MUTATION_OUT the caller has not assembled a window yet
+        # on the first decode token, but curr_kv still carries the current token,
+        # so there IS something to attend. Only decline when neither is present.
+        if curr_kv is None:
+            return None
     try:
         from native_core.sparse_decode.triton_fused_decode import (
             pool_stores_rotated_k as _psr,
@@ -521,7 +545,7 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                       f"replace {_nd} of {_Km.shape[0]} fine", flush=True)
     out = _awr(q, _Km, _Vm, _seq_cached, dense_k, dense_v, dense_len,
                num_key_value_groups, trace_row=_trace_row, trace_tok=_trace_tok,
-               extra=_extra)
+               extra=_extra, curr_kv=curr_kv, dense_mask=dense_mask)
     # Advance once per token, on the LAST DKV layer. _LAST_DKV_LAYER learns the
     # max layer index by watching layers go by, so on the FIRST token it equals
     # the current layer at every layer; only advance once it has stopped growing.
@@ -1954,7 +1978,17 @@ def apply_dkv_attention_patch(model, kv_manager):
                         curr_k = (key_states[b_idx:b_idx+1] if _pool_rotated_k()
                                   else unrot_key_states[b_idx:b_idx+1])
                         curr_v = value_states[b_idx:b_idx+1]
-                        kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
+                        if _MUTATION_OUT and q_len == 1:
+                            # Stash instead of ingesting. The REFERENCES are what
+                            # matter: under graph replay this line does not run,
+                            # but the tensors it recorded at capture time live at
+                            # fixed addresses inside the graph and hold the values
+                            # the replay just produced, so the caller can ingest
+                            # from them after the forward returns.
+                            _pend = kv_manager.__dict__.setdefault("_pending_ingest", {})
+                            _pend[captured_layer_idx] = (sid, curr_k, curr_v)
+                        else:
+                            kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
                         if captured_layer_idx == _first_dkv_layer:
                             srl_state = kv_manager.get_srl_state(sid)
                             if srl_state is not None:
@@ -2569,7 +2603,38 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # be caught. 0 is the correct "no routing yet" value and
                         # matches what the cache read at :1794 falls back to.
                         current_version = 0
-                        if dense_blocks:
+                        _dense_mask = None
+                        if _MUTATION_OUT and q_len == 1:
+                            # Read the workspace the CALLER assembled between
+                            # forwards; do not rebuild it here. dense_len becomes
+                            # the full buffer width and validity is carried by a
+                            # device mask, because a host-side length would be
+                            # baked into a captured graph and freeze the window.
+                            _ws = kv_manager.decode_workspace.get(sid, {})
+                            dense_k_assembled = (_ws.get("dense_workspace_k") or {}).get(captured_layer_idx)
+                            dense_v_assembled = (_ws.get("dense_workspace_v") or {}).get(captured_layer_idx)
+                            _dlen_dev = (_ws.get("dense_len_dev") or {}).get(captured_layer_idx)
+                            if dense_k_assembled is not None and _dlen_dev is not None:
+                                dense_len = int(dense_k_assembled.shape[2])
+                                _dense_mask = (torch.arange(dense_len, device=dense_k_assembled.device)
+                                               < _dlen_dev)
+                            elif dense_blocks:
+                                # FIRST decode token: the caller has not run yet,
+                                # so there is no published window or length. Fall
+                                # back to assembling in-forward for this one step.
+                                # Dropping the window instead would make the first
+                                # token attend only routed blocks and itself, which
+                                # silently changes the text -- it is what made the
+                                # first version of this path diverge from eager.
+                                # Capture happens after this step, so the one
+                                # non-capturable call costs nothing.
+                                dense_k_assembled, dense_v_assembled, dense_len, dense_blocks =                                     kv_manager.assemble_dense_window_kv(
+                                        sid, captured_layer_idx, dense_blocks,
+                                        query_states.dtype)
+                            else:
+                                dense_k_assembled = dense_v_assembled = None
+                                dense_len = 0
+                        elif dense_blocks:
                             dense_k_assembled, dense_v_assembled, dense_len, dense_blocks = kv_manager.assemble_dense_window_kv(
                                 sid, captured_layer_idx, dense_blocks, query_states.dtype
                             )
@@ -3952,7 +4017,11 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         _layer_active_rank,
                                         query_states[b_idx:b_idx+1],
                                         _dk_combined, _dv_combined, dense_len,
-                                        num_key_value_groups)
+                                        num_key_value_groups,
+                                        curr_kv=((key_states[b_idx:b_idx+1],
+                                                  value_states[b_idx:b_idx+1])
+                                                 if _MUTATION_OUT and q_len == 1 else None),
+                                        dense_mask=_dense_mask)
 
                                     attn_out_b = _remat_out if _remat_out is not None else \
                                         native_triton_sparse_attn_decode_combined(
@@ -3998,7 +4067,11 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _layer_active_rank,
                                     query_states[b_idx:b_idx+1],
                                     dense_k_assembled, dense_v_assembled,
-                                    dense_len, num_key_value_groups)
+                                    dense_len, num_key_value_groups,
+                                    curr_kv=((key_states[b_idx:b_idx+1],
+                                              value_states[b_idx:b_idx+1])
+                                             if _MUTATION_OUT and q_len == 1 else None),
+                                    dense_mask=_dense_mask)
                                 attn_out_b = _remat_out if _remat_out is not None else \
                                     native_triton_sparse_attn_decode(
                                     q=query_states[b_idx:b_idx+1],
