@@ -2081,6 +2081,31 @@ class PyTorchDKVHFWrapper:
                             # build and deciding whether to fund the device-
                             # resident rewrite needs a current number, not a
                             # stale one. Never set it in a serving path.
+                            # OPT-IN, and the measurement that decided it.
+                            # Enabling routed capture by default was tried and
+                            # REVERTED: it requires DKV_GRAPH_MUTATION_OUT, which
+                            # moves per-layer ingest and window assembly out of
+                            # the forward into a Python loop in the wrapper. That
+                            # loop costs one iteration PER ATTENDED LAYER, so its
+                            # price scales with layer count while the graph payoff
+                            # does not:
+                            #
+                            #   Qwen3.5-2B  (6 attended layers)  32k: 15.80 vs
+                            #       15.57 and 15.12 vs 14.79 tok/s -- slightly
+                            #       FASTER with mutation-out
+                            #   Qwen2.5-1.5B (28 attended layers) 32k: 11.74 vs
+                            #       12.94 and 12.07 vs 13.54 tok/s -- about 9%
+                            #       SLOWER, in both interleaved rounds
+                            #
+                            # At 32k the selectivity gate declines the graph, so
+                            # that cost buys nothing there. Enabling it globally
+                            # therefore speeds up 16k (17.3 -> 10.2 s wall,
+                            # byte-identical) while regressing long context on
+                            # wide models, which is not a trade to make silently.
+                            #
+                            # Turn BOTH on together for the win where routing is
+                            # non-selective: DKV_GRAPH_MUTATION_OUT=1 and
+                            # DKV_GRAPH_FORCE_ROUTED=1.
                             _force_routed = os.environ.get(
                                 "DKV_GRAPH_FORCE_ROUTED", "0") == "1"
                             # ROUTED CAPTURE IS EXACT ONLY WHERE ROUTING IS

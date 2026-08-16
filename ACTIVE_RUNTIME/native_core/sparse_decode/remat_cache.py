@@ -456,23 +456,32 @@ def attend_with_remat(
     # compression -- it is the reduction inside this attention, which splits
     # differently once the concatenated key set gets large enough.
     #
-    # DEFAULT ON. Greedy decoding that does not reproduce is a defect, not a
-    # tuning preference: it breaks evals, regression tests and any A/B, and it
-    # does so SILENTLY. Roughly fifteen 32k comparisons earlier in this work were
-    # run without it and were not measuring what they appeared to -- the cost of
-    # that vastly exceeded the cost of the flag.
+    # DEFAULT OFF, and the reason is a measured trade rather than a preference.
     #
-    # What it costs, measured with interleaved arms on Qwen3.5-2B at 32k:
-    # decode 17.17 -> 15.79 tok/s, about 8%, because the math backend
-    # materialises the score matrix. DKV still decodes far ahead of dense there.
+    # Greedy decoding here is not reproducible at long context: at 32k the same
+    # config produces a small set of recurring outputs across runs, while 16k is
+    # stable. The cause is this SDPA's reduction, which splits differently once
+    # the concatenated key set is large (~33k rows at 32k against ~15k at 16k).
+    # Compression is NOT involved -- post-prefill state is byte-identical run to
+    # run, and DKV_ASYNC_SVD=0, tiering off and a fixed cuBLAS workspace all fail
+    # to fix it.
     #
-    # What it does NOT cost: accuracy is unchanged -- needle sweep 28/28 checks
-    # PASS with 9/9 determinism, linkbench 20/24, both identical to the
-    # non-deterministic backend. It is the same arithmetic in a fixed order.
+    # Only SDPBackend.MATH actually fixes it, and it costs ~8% of decode
+    # (17.17 -> 15.79 tok/s on Qwen3.5-2B at 32k, interleaved arms) because it
+    # materialises the score matrix. EFFICIENT_ATTENTION was tried and is NOT
+    # deterministic -- 6 of 8 runs agreed, which looked clean at three runs and
+    # was not. Do not re-try it on a small sample.
     #
-    # DKV_DETERMINISTIC=0 restores the faster non-reproducible backend for anyone
-    # who would rather have the 8% and never compares two runs.
-    _det = os.environ.get("DKV_DETERMINISTIC", "1") == "1"
+    # It is OFF by default because at 32k the CUDA-graph path declines (routing
+    # is selective there), so the 8% would be paid with nothing to offset it --
+    # a straight regression for long-context users. At 16k determinism is not
+    # needed anyway, since that regime is already reproducible.
+    #
+    # SET DKV_DETERMINISTIC=1 FOR ANY RUN YOU WILL COMPARE. Roughly fifteen 32k
+    # md5 comparisons earlier in this work were made without it and were not
+    # measuring what they appeared to; that is what colab/graph_verify.py and
+    # every A/B should turn on.
+    _det = os.environ.get("DKV_DETERMINISTIC", "0") == "1"
 
     # A boolean mask rather than a float one built by masked_fill_ on a fresh
     # zeros tensor: SDPA takes bool directly (True = attend), so this is one
@@ -517,7 +526,15 @@ def attend_with_remat(
 
     if _det:
         from torch.nn.attention import SDPBackend, sdpa_kernel
-        with sdpa_kernel(SDPBackend.MATH):
+        # DKV_DET_BACKEND picks WHICH deterministic backend. MATH is certainly
+        # deterministic but materialises the score matrix; EFFICIENT may also be
+        # deterministic in forward and is much cheaper. Measured, not assumed --
+        # see the determinism sweep in the commit that introduced this.
+        _bk = {"math": SDPBackend.MATH,
+               "efficient": SDPBackend.EFFICIENT_ATTENTION,
+               "flash": SDPBackend.FLASH_ATTENTION}.get(
+                   os.environ.get("DKV_DET_BACKEND", "math"), SDPBackend.MATH)
+        with sdpa_kernel(_bk):
             return torch.nn.functional.scaled_dot_product_attention(
                 q, K_all, V_all, attn_mask=attn_mask)
     return torch.nn.functional.scaled_dot_product_attention(
