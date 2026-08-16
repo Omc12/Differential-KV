@@ -274,10 +274,36 @@ class CUDAGraphDecodeRunner:
         # A-D must land TOGETHER: with A alone the current token is attended
         # twice (window + curr row); with B alone it is attended zero times.
         #
-        # STATUS: A is IMPLEMENTED and inert -- attend_with_remat now accepts
-        # curr_kv and dense_mask, both defaulting to None, so nothing calls them
-        # yet and the default path is byte-identical (verified: bypass md5
-        # unchanged at 0fec68e15bdab8c6). B, C and D remain.
+        # STATUS 2026-08-16: A, B and C are IMPLEMENTED and VERIFIED behind
+        # DKV_GRAPH_MUTATION_OUT (default off). With the flag on and graphs off,
+        # generated text equals eager EXACTLY (md5 1c58b822b4983e8d), so the
+        # forward is genuinely read-only with respect to KV state now: ingest and
+        # window assembly happen in the wrapper between forwards, and the current
+        # token is attended from an in-graph curr_kv row.
+        #
+        # ROUTED REPLAY IS STILL WRONG, and the cause is now isolated. With the
+        # flag on, capture succeeds but replay gives 026be52c49f9f6c0 against
+        # eager's 1c58b822b4983e8d. Turning the remat cache OFF does not fix it
+        # (replay 4f31d5fb3ed271aa vs eager 3c5bdad12dd9e50d), which RULES OUT the
+        # remat materialisation as the cause and leaves exactly one thing:
+        #
+        #   block_indices / anchor_indices are produced by
+        #   get_cached_decode_blocks INSIDE the forward, in Python. Replay freezes
+        #   them at their capture-time values, so routing never updates.
+        #
+        # THE FIX, and it is smaller than it looks. Routing needs the QUERY to
+        # score blocks, and the query is computed inside the forward -- so the
+        # wrapper cannot route before the forward. It CAN route after: stash the
+        # query the same way K/V are stashed, and between forwards compute the
+        # routing for the NEXT step into fixed-address buffers the forward reads.
+        # Routing is then ONE STEP STALE, which is strictly less staleness than
+        # the DKV_REMAT_INTERVAL=4 freeze the system already ships and accepts.
+        #
+        # Then the same md5-vs-eager gate decides it, followed by the accuracy
+        # suite. Do not judge it on speed: replay is already 1.41x and wrong.
+        #
+        # (Superseded note: A is IMPLEMENTED and inert -- attend_with_remat now accepts
+        # curr_kv and dense_mask, both defaulting to None.)
         #
         # EDIT THE RIGHT FORWARD. There are two in dkv_attention.py and only one
         # is live: `dkv_forward` defined at ~1342 INSIDE apply_dkv_attention_patch
