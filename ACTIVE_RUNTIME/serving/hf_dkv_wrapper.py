@@ -1835,15 +1835,34 @@ class PyTorchDKVHFWrapper:
                             # "static-state ABI" this file originally called for,
                             # and it is a redesign.
                             #
-                            # The one design that avoids it: DEFER ingest by a
-                            # step. Replay the graph for token t, then read the
-                            # K/V back out of the graph's fixed-address buffers
-                            # and ingest token t-1 from Python, outside the
-                            # captured region. Attention semantics shift slightly
-                            # (the current token reaches the dense window one step
-                            # later, though it is still attended through the local
-                            # path), so it would need the full accuracy suite and
-                            # colab/graph_verify.py against eager.
+                            # DEFERRED INGEST WAS EVALUATED AND DOES NOT WORK.
+                            # The idea: replay for token t, then ingest from
+                            # Python outside the captured region. Two findings
+                            # killed it, both measured rather than argued.
+                            #
+                            # 1. Ingest runs BEFORE the attention dispatch, so the
+                            #    dense window supplies the SELF-attention term.
+                            #    Deferring drops it silently -- quality decays with
+                            #    nothing raising. Fixable, by giving
+                            #    attend_with_remat an explicit curr_k/curr_v row.
+                            #
+                            # 2. ROUTING is the real blocker, and arithmetic ends
+                            #    it. Routing is recomputed in Python from block
+                            #    lists, so a replayed graph freezes it and the
+                            #    graph must be re-captured whenever it changes.
+                            #    Capture costs 288 ms (measured). Replay saves
+                            #    ~14.7 ms/token of host. Break-even is ~20 tokens
+                            #    of replay per capture -- but DKV_REMAT_INTERVAL
+                            #    freezes routing for only 4. Re-capturing on every
+                            #    routing change is a 5x NET LOSS, and holding
+                            #    routing for 20 tokens is five times the staleness
+                            #    that interval was deliberately set to avoid.
+                            #
+                            # So the routed 1.41x requires routing itself to be
+                            # DEVICE-RESIDENT -- block selection computed inside
+                            # the graph from device-resident block metadata, so no
+                            # re-capture is ever needed. That is the original
+                            # "static-state ABI" call, now with numbers behind it.
                             # DKV_GRAPH_FORCE_ROUTED=1 is a MEASUREMENT-ONLY
                             # override: it lets the routed path capture and
                             # replay so the SPEED CEILING of a correct graph can

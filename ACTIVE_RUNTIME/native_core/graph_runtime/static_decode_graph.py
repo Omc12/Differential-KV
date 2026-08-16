@@ -196,6 +196,8 @@ class CUDAGraphDecodeRunner:
                           its own warmup writes, so it refuses rather than leave
                           the cache misaligned and produce silently wrong text.
         """
+        import time as _t
+        _t_cap0 = _t.perf_counter()
         if not self._capture_enabled:
             return
 
@@ -364,12 +366,14 @@ class CUDAGraphDecodeRunner:
             self._restore_cache(cache, _snap)
 
         self._captured_shape_sig = sig
+        self._last_capture_seconds = _t.perf_counter() - _t_cap0
         # POSITIVE confirmation. Capture is wrapped in `except Exception: pass`
         # by the caller, so a failure is silent and indistinguishable from eager
         # decode -- which means a benchmark can appear to measure graph replay
         # while measuring nothing of the sort. Say so explicitly.
         import sys as _sys
-        print(f"[DKV] CUDA graph CAPTURED for shape {sig} — replay active",
+        print(f"[DKV] CUDA graph CAPTURED for shape {sig} in "
+              f"{self._last_capture_seconds * 1000:.0f} ms — replay active",
               file=_sys.stderr, flush=True)
 
     def run(self, input_ids: torch.Tensor, position_ids: torch.Tensor):
