@@ -234,12 +234,45 @@ class CUDAGraphDecodeRunner:
         # is ~20 tokens of replay per capture, and DKV_REMAT_INTERVAL freezes
         # routing for 4. Re-capture on routing change is a 5x NET LOSS.
         #
-        # THE REAL SHAPE OF IT, and why it is bigger than "move a tensor":
-        # get_cached_decode_blocks says "Phase 29: metadata is now CPU-resident
-        # (zero CUDA syncs on write)". Block metadata lives on the HOST ON
-        # PURPOSE, so that ingest can write it without synchronising. Making
-        # routing device-resident INVERTS that decision, and every consumer of
-        # the metadata has to move with it or it will sync on read instead.
+        # THE ROUTER IS ALREADY DEVICE-RESIDENT -- scoped and confirmed, so do
+        # not spend time rebuilding it. query_router.route_blocks_relevance ends
+        # in `sel = torch.topk(relevance, k=k_eff).indices` and returns
+        # `block_indices[sel].to(torch.int32)`: device tensors throughout, no
+        # .cpu() and no .tolist() on that path. The decode step also has ZERO
+        # syncs inside model.forward (colab/decode_sync_probe.py), which is why
+        # capture succeeds at all.
+        #
+        # SO WHAT ACTUALLY BLOCKS REPLAY IS MUTATION, NOT SYNCS OR ROUTING.
+        # Replay executes no Python, and four things the forward mutates per
+        # token are Python:
+        #   1. ingest_streaming()          -- appends K/V to the tail block
+        #   2. assemble_dense_window_kv()  -- rebuilds the recent-token window
+        #   3. block_indices               -- built from CPU-resident metadata
+        #                                     ("Phase 29: metadata is now
+        #                                     CPU-resident, zero CUDA syncs on
+        #                                     write") and fed INTO the device router
+        #   4. block finalise + compression trigger
+        #
+        # None of these synchronise, which is exactly why the sync probe reports
+        # a clean forward while replay is still wrong. Sync-freedom was necessary
+        # and is not sufficient.
+        #
+        # THE DESIGN THAT WORKS, given the router is already device-side:
+        #   A. give attend_with_remat an explicit curr_k/curr_v row, so the
+        #      current token is attended from IN-GRAPH tensors and no longer
+        #      depends on having been ingested into the window first;
+        #   B. move ingest_streaming OUT of the forward -- the wrapper ingests
+        #      token t after the forward returns, reading K/V from the graph's
+        #      fixed-address buffers (references stashed at capture time);
+        #   C. move assemble_dense_window_kv out the same way, writing into the
+        #      already-preallocated per-layer workspace (fixed addresses);
+        #   D. make block_indices a fixed-address buffer the wrapper refreshes
+        #      between replays, so the in-graph router reads fresh candidates.
+        # Then the graph holds only tensor math and every mutation happens
+        # between replays, where Python is allowed to run.
+        #
+        # A-D must land TOGETHER: with A alone the current token is attended
+        # twice (window + curr row); with B alone it is attended zero times.
         #
         # WHY IT IS NEVERTHELESS SAFE TO ATTEMPT: routing output is DISCRETE.
         # A device router can be built alongside the CPU one and checked for
