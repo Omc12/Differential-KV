@@ -1027,6 +1027,51 @@ class PyTorchDKVHFWrapper:
 
 
     @torch.no_grad()
+    def _dkv_dump_attention_inputs(self, session_id, pend) -> None:
+        """Checksum every input the replayed attention reads, per step.
+
+        Probes from OUT here rather than inside the forward, because the forward
+        does not execute under replay -- an in-forward probe prints nothing on
+        exactly the steps in question, which is how two earlier faults stayed
+        hidden.
+
+        Read it by looking for a value that is FROZEN across replay steps and
+        moves only on the periodic eager step. That is the signature of an input
+        the graph is not re-reading, and it is what found the stale ingest refs.
+        Addresses matter as much as contents: a buffer that is REALLOCATED leaves
+        the graph reading the old address forever, and only ptr reveals that.
+        """
+        import sys as _s
+        import torch as _t
+
+        def _chk(t):
+            if t is None:
+                return "none"
+            try:
+                return f"0x{t.data_ptr():x}/{float(t.float().abs().sum()):.3f}"
+            except Exception:                                    # noqa: BLE001
+                return "err"
+
+        mgr = self.manager
+        ws = mgr.decode_workspace.get(session_id, {}) or {}
+        L = 0
+        k0 = (pend or {}).get(L)
+        dwk = (ws.get("dense_workspace_k") or {}).get(L)
+        dlen = (ws.get("dense_len_dev") or {}).get(L)
+        routed = (ws.get("_routed_buf") or {}).get(L)
+        remat = (ws.get("_remat_pin") or {}).get(L)
+        cos = ws.get("rope_cos")
+        print(
+            f"[DUMP] step={getattr(self, '_dkv_step_idx', -1):3d} "
+            f"replay={int(bool(getattr(self, '_dkv_last_was_replay', False)))} "
+            f"| ingestK {_chk(None if k0 is None else k0[1])} "
+            f"| window {_chk(dwk)} "
+            f"| dlen {'none' if dlen is None else int(dlen.item())} "
+            f"| routed {_chk(None if routed is None else routed[0])} "
+            f"| remat {_chk(None if remat is None else remat[0])} "
+            f"| cos {_chk(cos)}",
+            flush=True, file=_s.stderr)
+
     def _dkv_reset_graph_step(self) -> None:
         """Restart the routing-refresh cycle at the top of every generate()."""
         self._dkv_step_idx = 0
@@ -1060,13 +1105,7 @@ class PyTorchDKVHFWrapper:
         else:
             pend = mgr.__dict__.get("_pending_ingest") or {}
         if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
-            import sys as _s
-            _k0 = pend.get(0)
-            print(f"[PTR] mutation step={getattr(self,'_dkv_step_idx',-1)} "
-                  f"pend={len(pend)} "
-                  f"k0_ptr={'none' if _k0 is None else hex(_k0[1].data_ptr())} "
-                  f"k0_sum={'-' if _k0 is None else float(_k0[1].float().abs().sum()):.4f}",
-                  flush=True, file=_s.stderr)
+            self._dkv_dump_attention_inputs(session_id, pend)
         if not pend:
             return
         import torch as _t
