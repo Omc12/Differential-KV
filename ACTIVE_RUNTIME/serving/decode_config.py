@@ -24,6 +24,32 @@ BEST_DECODE_DEFAULTS = {
     "DKV_COMPRESSED_MIN_CTX": "8192",  # engage DKV sparse at 8k+ tokens
     "DKV_DECODE_CACHE": "1",           # decompress-and-cache fast decode (~2x tps when sparse; bit-exact)
     "DKV_SPARSE_BIAS": "auto",         # adaptive merge bias (multi-fact synthesis-safe AND NIAH-safe)
+
+    # ── CUDA graph decode ────────────────────────────────────────────────────
+    # Capture the decode forward as a CUDA graph and replay it, which removes the
+    # per-step kernel-launch and Python dispatch cost. Decode is ~39% GPU-idle
+    # without it (27.19 ms/token of kernels against 44.7 ms/token of wall), so
+    # this is launch overhead, not compute.
+    #
+    # Enabled for the BYPASS path only -- the capture site additionally requires
+    # a dense StaticCache to exist, which is true exactly while DKV has not
+    # engaged. Verified BIT-EXACT there: same prompt, graphs on vs off, identical
+    # md5 of the generated text (0fec68e15bdab8c6), wall 3.7 -> 1.7 s.
+    #
+    # The ROUTED path is deliberately NOT enabled. Capture succeeds and replay
+    # measures 1.41x (16.59 -> 23.38 tok/s wall at 16k), but the dense window of
+    # recently generated tokens is assembled with a HOST write index, so replay
+    # freezes it and the text diverges. See the note in hf_dkv_wrapper.
+    #
+    # DKV_GRAPH_SAFE_DECODE also removes two device->host syncs from the ROUTED
+    # step (a torch.equal and an SRL key-trail .cpu()), which changes routed
+    # behaviour slightly even with graphs off: the routed-set comparison becomes
+    # conservative (assume changed) and the SRL recent-key trail is not
+    # collected. Gated on the accuracy suite rather than assumed safe -- needle
+    # sweep 9/9 with 9/9 determinism on Qwen3.5-2B and linkbench 20/24, both
+    # unchanged.
+    "DKV_DISABLE_CUDA_GRAPH": "0",     # 1 disables capture entirely
+    "DKV_GRAPH_SAFE_DECODE": "1",      # sync-free decode step (bypass capture)
 }
 
 # ── k-transformers feature knobs ─────────────────────────────────────────────
