@@ -1134,6 +1134,21 @@ class PyTorchDKVHFWrapper:
                 # assemble_dense_window_kv reallocates when the dtype differs,
                 # which would rebind dense_workspace_k to a NEW tensor and leave
                 # a captured graph reading the old address forever.
+                # FORCE the copy. assemble_dense_window_kv only writes a block
+                # when blk.dirty is set, or when its growth check sees the cached
+                # per-block active_len differ from the current one. Both of those
+                # are bookkeeping the FORWARD maintains, and under replay the
+                # forward does not run -- so the function walked the blocks,
+                # recomputed a LARGER dlen from the live views, and copied
+                # nothing. Measured: each eager step added ~6400 to the window
+                # abs-sum (one token's |K|), each replay step added exactly 0
+                # while dlen still incremented.
+                #
+                # Marking the tail block dirty here is the caller taking
+                # responsibility for the invariant instead of inheriting it from
+                # a path that no longer executes.
+                for _b in dense_blocks:
+                    _b.dirty = True
                 _existing = (ws.get("dense_workspace_k") or {}).get(layer_idx)
                 _dt = _existing.dtype if _existing is not None else self.model.dtype
                 _ptr_before = None if _existing is None else _existing.data_ptr()
