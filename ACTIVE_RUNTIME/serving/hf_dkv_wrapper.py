@@ -1052,7 +1052,21 @@ class PyTorchDKVHFWrapper:
         if not getattr(_da, "_MUTATION_OUT", False):
             return
         mgr = self.manager
-        pend = mgr.__dict__.get("_pending_ingest") or {}
+        # After a REPLAY the eager stash is stale by construction (see the
+        # snapshot at capture). Prefer the capture-time refs whenever the last
+        # step was replayed.
+        if getattr(self, "_dkv_last_was_replay", False):
+            pend = mgr.__dict__.get("_graph_ingest_refs") or {}
+        else:
+            pend = mgr.__dict__.get("_pending_ingest") or {}
+        if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+            import sys as _s
+            _k0 = pend.get(0)
+            print(f"[PTR] mutation step={getattr(self,'_dkv_step_idx',-1)} "
+                  f"pend={len(pend)} "
+                  f"k0_ptr={'none' if _k0 is None else hex(_k0[1].data_ptr())} "
+                  f"k0_sum={'-' if _k0 is None else float(_k0[1].float().abs().sum()):.4f}",
+                  flush=True, file=_s.stderr)
         if not pend:
             return
         import torch as _t
@@ -1950,6 +1964,19 @@ class PyTorchDKVHFWrapper:
                                     and os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"))
                             self._cuda_graph_runner.capture(
                                 self.model, input_ids, pos_tensor, cache=_dkv_cache)
+                            # SNAPSHOT the ingest references produced DURING
+                            # capture. This is the whole trick, and getting it
+                            # wrong is why replay produced degenerate text:
+                            # _pending_ingest is rewritten by every EAGER step
+                            # with ordinary torch tensors, which replay never
+                            # touches, so draining it after a replay re-ingested
+                            # the last eager token again and again. The refs
+                            # recorded during capture point into the GRAPH's own
+                            # memory pool, which replay does rewrite -- those are
+                            # the ones that carry fresh values.
+                            _pi = self.manager.__dict__.get("_pending_ingest")
+                            if _pi:
+                                self.manager.__dict__["_graph_ingest_refs"] = dict(_pi)
                         except Exception as _cap_err:
                             # Log ONCE. A bare `pass` here makes a failed capture
                             # indistinguishable from eager decode, so a benchmark
@@ -1981,6 +2008,8 @@ class PyTorchDKVHFWrapper:
                     _force_eager = (_refresh_every > 0
                                     and (self._dkv_step_idx % _refresh_every) == 0)
                     self._dkv_step_idx += 1
+                    self._dkv_last_was_replay = (
+                        self._cuda_graph_runner.is_captured() and not _force_eager)
                     if self._cuda_graph_runner.is_captured() and not _force_eager:
                         try:
                             outputs = self._cuda_graph_runner.run(input_ids, pos_tensor)

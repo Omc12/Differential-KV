@@ -381,10 +381,18 @@ def _stabilise_routed_set(kv_manager, sid, layer_idx, block_indices, anchor_indi
         # step; a size change also means any existing graph is stale, which the
         # caller handles by invalidating on shape change.
         bufs[layer_idx] = (block_indices.clone(), anchor_indices.clone())
+        if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1" and layer_idx == 0:
+            import sys as _s
+            print(f"[PTR] routed L{layer_idx} (RE)ALLOC n={n} -> returning ORIGINAL "
+                  f"0x{block_indices.data_ptr():x}", flush=True, file=_s.stderr)
         return block_indices, anchor_indices
     bi_buf, ai_buf = ent
     bi_buf.copy_(block_indices)
     ai_buf.copy_(anchor_indices)
+    if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+        import sys as _s
+        print(f"[PTR] routed L{layer_idx} buf=0x{bi_buf.data_ptr():x} "
+              f"src=0x{block_indices.data_ptr():x} n={n}", flush=True, file=_s.stderr)
     return bi_buf, ai_buf
 
 
@@ -420,6 +428,11 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
     unrotated dense keys -- it declines instead of silently attending garbage.
     """
     global _REMAT_UNROTATED_WARNED
+    if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+        import sys as _s
+        print(f"[PTR] _remat_attend ENTER L{captured_layer_idx} "
+              f"enabled={_REMAT_ENABLED} bi={None if block_indices is None else int(block_indices.numel())} "
+              f"dlen={dense_len}", flush=True, file=_s.stderr)
     if not _REMAT_ENABLED:
         return None
     if block_indices is None or block_indices.numel() == 0:
@@ -565,14 +578,27 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
         _ws_pin = kv_manager.decode_workspace.setdefault(sid, {})
         _pin = _ws_pin.setdefault("_remat_pin", {})
         _ent = _pin.get(captured_layer_idx)
+        # _ent is (K, V, seq_lens). Comparing _ent[1] -- which is V -- against
+        # _seq_cached.shape made this test ALWAYS true, so the buffers were
+        # reallocated on every call and the pin never took effect: the graph kept
+        # binding whichever fresh tensor existed at capture. Found by dumping
+        # data_ptr per layer, not by reading the code.
         if (_ent is None or _ent[0].shape != _Km.shape
-                or _ent[1].shape != _seq_cached.shape):
+                or _ent[2].shape != _seq_cached.shape):
             _pin[captured_layer_idx] = (_Km.clone(), _Vm.clone(), _seq_cached.clone())
+            if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+                import sys as _s
+                print(f"[PTR] remat L{captured_layer_idx} (RE)ALLOC shape={tuple(_Km.shape)} "
+                      f"-> ORIGINAL 0x{_Km.data_ptr():x}", flush=True, file=_s.stderr)
         else:
             _kb, _vb, _sb = _ent
             _kb.copy_(_Km)
             _vb.copy_(_Vm)
             _sb.copy_(_seq_cached)
+            if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+                import sys as _s
+                print(f"[PTR] remat L{captured_layer_idx} buf=0x{_kb.data_ptr():x} "
+                      f"src=0x{_Km.data_ptr():x} shape={tuple(_Km.shape)}", flush=True, file=_s.stderr)
             _Km, _Vm, _seq_cached = _kb, _vb, _sb
 
     # Dual-scale: attend the union of both block scales in ONE softmax.
