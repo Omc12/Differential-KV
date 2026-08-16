@@ -274,6 +274,20 @@ class CUDAGraphDecodeRunner:
         # A-D must land TOGETHER: with A alone the current token is attended
         # twice (window + curr row); with B alone it is attended zero times.
         #
+        # STATUS: A is IMPLEMENTED and inert -- attend_with_remat now accepts
+        # curr_kv and dense_mask, both defaulting to None, so nothing calls them
+        # yet and the default path is byte-identical (verified: bypass md5
+        # unchanged at 0fec68e15bdab8c6). B, C and D remain.
+        #
+        # EDIT THE RIGHT FORWARD. There are two in dkv_attention.py and only one
+        # is live: `dkv_forward` defined at ~1342 INSIDE apply_dkv_attention_patch
+        # is what gets bound onto layer.self_attn.forward, and it is the one that
+        # calls _remat_attend. `_dkv_decode_forward_impl` (~4742) is a separate
+        # integration and is NOT the HF wrapper path -- an earlier revision of
+        # this note cited its line numbers by mistake. In the LIVE path the order
+        # is ingest (~1957) -> assemble_dense_window_kv (~2573) -> _remat_attend
+        # (~3948/3994), which is what makes the window supply the self term.
+        #
         # WHY IT IS NEVERTHELESS SAFE TO ATTEMPT: routing output is DISCRETE.
         # A device router can be built alongside the CPU one and checked for
         # EXACT INDEX EQUALITY, which is a far stronger gate than "the text still

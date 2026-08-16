@@ -347,6 +347,8 @@ def attend_with_remat(
     trace_row: Optional[int] = None,   # flat row index to report mass for
     trace_tok: int = -1,               # its absolute token index, for the log
     extra: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+    curr_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    dense_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """One plain attention over [materialised routed blocks | dense window].
 
@@ -394,9 +396,37 @@ def attend_with_remat(
                            (sl2.to(dev).view(N2, 1) + 1)).reshape(N2 * S2))
 
     if dense_k is not None and dense_len > 0:
-        k_parts.append(dense_k[0, :, :dense_len].permute(1, 0, 2))
-        v_parts.append(dense_v[0, :, :dense_len].permute(1, 0, 2))
-        mask_parts.append(torch.ones(dense_len, dtype=torch.bool, device=dev))
+        if dense_mask is not None:
+            # CUDA-graph form: take the WHOLE preallocated window and mask it,
+            # instead of slicing to a host-side dense_len. A Python slice bound is
+            # baked into a captured graph, so it would freeze the window at its
+            # capture-time length; a device mask is re-read on every replay.
+            _dl = dense_k.shape[2]
+            k_parts.append(dense_k[0, :, :_dl].permute(1, 0, 2))
+            v_parts.append(dense_v[0, :, :_dl].permute(1, 0, 2))
+            mask_parts.append(dense_mask[:_dl])
+        else:
+            k_parts.append(dense_k[0, :, :dense_len].permute(1, 0, 2))
+            v_parts.append(dense_v[0, :, :dense_len].permute(1, 0, 2))
+            mask_parts.append(torch.ones(dense_len, dtype=torch.bool, device=dev))
+
+    if curr_kv is not None:
+        # The CURRENT token, attended from tensors the graph itself produced.
+        #
+        # Normally the current token reaches attention because ingest_streaming()
+        # already appended it to the dense window BEFORE this call -- so the
+        # window supplies the self-attention term. Under graph replay no Python
+        # runs, so that append never happens and the token would attend
+        # everything except itself. Passing it explicitly here removes that
+        # dependency: the self term comes from in-graph tensors and ingest is
+        # free to move outside the captured region.
+        #
+        # MUST be paired with skipping the in-forward ingest. With both, the
+        # token is attended TWICE and its own key gets double weight.
+        _ck, _cv = curr_kv
+        k_parts.append(_ck[0].permute(1, 0, 2))
+        v_parts.append(_cv[0].permute(1, 0, 2))
+        mask_parts.append(torch.ones(_ck.shape[2], dtype=torch.bool, device=dev))
 
     K_all = torch.cat(k_parts, dim=0).to(dt)                     # [T, H_kv, D]
     V_all = torch.cat(v_parts, dim=0).to(dt)
