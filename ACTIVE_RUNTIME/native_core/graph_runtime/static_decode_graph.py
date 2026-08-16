@@ -220,6 +220,50 @@ class CUDAGraphDecodeRunner:
                 self._unsafe_capture_warned = True
             return
 
+        # ── HOW TO MAKE THE ROUTED PATH CAPTURABLE (scoped 2026-08-16) ───────
+        # Read this before attempting it. The remaining work is ONE thing --
+        # device-resident routing -- and the two cheaper designs are already
+        # eliminated by measurement, so do not re-derive them.
+        #
+        # RULED OUT, deferred ingest: ingest_streaming() runs BEFORE the attention
+        # dispatch, so the dense window supplies the SELF-attention term and
+        # deferring drops it silently. Fixable. What is not fixable is the
+        # arithmetic: routing is recomputed in Python every step, so replay
+        # freezes it and the graph must be re-captured whenever it changes.
+        # Capture costs 288 ms (measured); replay saves ~14.7 ms/token; break-even
+        # is ~20 tokens of replay per capture, and DKV_REMAT_INTERVAL freezes
+        # routing for 4. Re-capture on routing change is a 5x NET LOSS.
+        #
+        # THE REAL SHAPE OF IT, and why it is bigger than "move a tensor":
+        # get_cached_decode_blocks says "Phase 29: metadata is now CPU-resident
+        # (zero CUDA syncs on write)". Block metadata lives on the HOST ON
+        # PURPOSE, so that ingest can write it without synchronising. Making
+        # routing device-resident INVERTS that decision, and every consumer of
+        # the metadata has to move with it or it will sync on read instead.
+        #
+        # WHY IT IS NEVERTHELESS SAFE TO ATTEMPT: routing output is DISCRETE.
+        # A device router can be built alongside the CPU one and checked for
+        # EXACT INDEX EQUALITY, which is a far stronger gate than "the text still
+        # looks fine" -- and it is the gate that catches the failure mode that
+        # matters here, silently attending the wrong blocks.
+        #
+        # ORDER, and do not reorder it:
+        #   1. Build the device router beside the CPU one. Do not wire it in.
+        #   2. Assert exact equality of the selected indices, per layer per token,
+        #      across the full needle sweep and linkbench 48 seeds. Any mismatch
+        #      is a bug in the device router, not a tolerance to widen.
+        #   3. Only then switch the read path over, and re-verify with
+        #      colab/graph_verify.py -- md5 of generated text must equal eager.
+        #   4. Only then allow capture on the routed path.
+        #
+        # Expected payoff, measured on the current build: 1.41x
+        # (16.59 -> 23.38 tok/s wall at 16k). Decode is ~39% GPU-idle, so this is
+        # launch overhead, not compute, and the ceiling is real.
+        #
+        # NEVER measure replay with DKV_TIME_ATTN. Under replay the DKV Python
+        # does not run, so it reports a fictional ~1449 tok/s. Use
+        # colab/decode_wall_vs_timer.py.
+        #
         # A full DKV model is not a static CUDA-graph workload yet.  Its
         # attention interception updates Python/session state (KV blocks,
         # routing slots, dense-window membership and SRL state) on every
