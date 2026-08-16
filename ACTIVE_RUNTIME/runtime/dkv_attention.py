@@ -4773,6 +4773,17 @@ def _dkv_decode_forward_impl(
             kv_manager._contig_prefill.pop(_sid, None)
 
     # ── Ingest new decode token into pool ─────────────────────────────────────
+    # ORDER MATTERS, and it constrains the CUDA-graph work. This runs BEFORE the
+    # sparse attention dispatch below, so token t is already inside its own dense
+    # window when it attends -- i.e. the self-attention term is supplied by the
+    # window, not by a separate current-token path.
+    #
+    # Consequence for graph replay (see hf_dkv_wrapper's note): the obvious fix
+    # of "defer ingest by one step so it can happen outside the captured region"
+    # would silently DROP the self term, which degrades quality without raising
+    # anything. Deferring requires first giving attend_with_remat an explicit
+    # curr_k/curr_v row, and the two changes must land together -- with only the
+    # explicit row, token t is attended TWICE.
     for b_idx in range(bsz):
         sid = session_ids[b_idx]
         if sid == "dummy_session":
