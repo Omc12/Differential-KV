@@ -446,6 +446,22 @@ def attend_with_remat(
         K_all = K_all.repeat_interleave(num_key_value_groups, dim=1)
         V_all = V_all.repeat_interleave(num_key_value_groups, dim=1)
 
+    # DKV_DETERMINISTIC=1 -- force SDPA's math backend for this call.
+    #
+    # This path is NOT reproducible at long context on its default backend:
+    # greedy decoding at 32k produced three recurring distinct outputs across
+    # runs, while the Triton kernel path (DKV_REMAT_CACHE=0) was byte-stable and
+    # 16k was byte-stable on both. The post-prefill KV state is identical run to
+    # run (same block states, same rank sum), so the divergence is not
+    # compression -- it is the reduction inside this attention, which splits
+    # differently once the concatenated key set gets large enough.
+    #
+    # Off by default because the math backend materialises the score matrix and
+    # is slower; on when a run has to be reproducible, which includes ANY md5
+    # comparison. Roughly 15 such comparisons earlier in this work were made at
+    # 32k without this and were not measuring what they appeared to.
+    _det = os.environ.get("DKV_DETERMINISTIC") == "1"
+
     # A boolean mask rather than a float one built by masked_fill_ on a fresh
     # zeros tensor: SDPA takes bool directly (True = attend), so this is one
     # allocation and one fill less per layer per token for the same result. A
@@ -487,6 +503,11 @@ def attend_with_remat(
                   f"top_row={_top} top_share={float(_row_w[_top]):.3e} "
                   f"dense_rows={dense_len}", flush=True)
 
+    if _det:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        with sdpa_kernel(SDPBackend.MATH):
+            return torch.nn.functional.scaled_dot_product_attention(
+                q, K_all, V_all, attn_mask=attn_mask)
     return torch.nn.functional.scaled_dot_product_attention(
         q, K_all, V_all, attn_mask=attn_mask)                    # [1, H_q, 1, D]
 
