@@ -1104,8 +1104,7 @@ class PyTorchDKVHFWrapper:
             pend = mgr.__dict__.get("_graph_ingest_refs") or {}
         else:
             pend = mgr.__dict__.get("_pending_ingest") or {}
-        if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
-            self._dkv_dump_attention_inputs(session_id, pend)
+
         if not pend:
             return
         import torch as _t
@@ -1174,6 +1173,14 @@ class PyTorchDKVHFWrapper:
                     cur.fill_(int(dlen))
             except Exception:                                    # noqa: BLE001
                 continue
+
+        # AFTER the ingest and the reassembly, not before. Printing at the top
+        # reported the window as it stood BEFORE this step's assemble, which is a
+        # one-step lag -- and a lag reads exactly like a freeze if you are looking
+        # for one. Every conclusion drawn from the earlier placement has to be
+        # re-checked against this.
+        if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+            self._dkv_dump_attention_inputs(session_id, pend)
 
     def generate(
         self,
