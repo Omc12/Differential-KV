@@ -2133,9 +2133,28 @@ class PyTorchDKVHFWrapper:
                     if not hasattr(self, "_dkv_step_idx"):
                         self._dkv_step_idx = 0
                     _mo = getattr(_dkv_attn_mod, "_MUTATION_OUT", False)
-                    _refresh_every = _dkv_remat_interval() if _mo else 0
-                    _force_eager = (_refresh_every > 0
-                                    and (self._dkv_step_idx % _refresh_every) == 0)
+                    # NEVER alternate eager and replay. Running one eager forward
+                    # between replays was the original refresh design and it is
+                    # what corrupted the state -- proven by running the cases in
+                    # order: with NO eager step at all, replay reproduces eager
+                    # byte for byte, and every interval that introduces eager
+                    # steps degrades in proportion to how many it introduces.
+                    #
+                    # Routing is instead refreshed by RE-CAPTURING, which reruns
+                    # the real forward and rebuilds every pinned buffer from
+                    # scratch. Capture costs 288 ms and replay saves ~14.7
+                    # ms/token, so re-capturing every DKV_GRAPH_RECAPTURE tokens
+                    # costs 288/N ms/token against 14.7 saved -- net positive for
+                    # any N above ~20, and 64 leaves routing staleness bounded at
+                    # 64 tokens.
+                    _force_eager = False
+                    if _mo and self._cuda_graph_runner.is_captured():
+                        try:
+                            _recap = int(os.environ.get("DKV_GRAPH_RECAPTURE", "64"))
+                        except ValueError:
+                            _recap = 64
+                        if _recap > 0 and self._dkv_step_idx > 0                                 and (self._dkv_step_idx % _recap) == 0:
+                            self._cuda_graph_runner.invalidate()
                     self._dkv_step_idx += 1
                     self._dkv_last_was_replay = (
                         self._cuda_graph_runner.is_captured() and not _force_eager)
