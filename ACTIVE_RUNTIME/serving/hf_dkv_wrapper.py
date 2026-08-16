@@ -1122,9 +1122,39 @@ class PyTorchDKVHFWrapper:
         if not pend:
             return
         import torch as _t
+        # Assert the invariant this branch should have carried from the start:
+        # layer 0's block must grow by EXACTLY ONE token per generate step. A
+        # double-ingest and a missed ingest both produce fluent-but-wrong text and
+        # are indistinguishable from the output; they are trivially
+        # distinguishable here.
+        _dbg = os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1"
+        _before = None
+        if _dbg:
+            try:
+                _b0 = [b for b in (mgr.get_streaming_blocks(session_id, 0) or [])
+                       if b.state == "ACCUMULATING"]
+                _before = sum(int(b.active_k.shape[2]) for b in _b0
+                              if b.active_k is not None)
+            except Exception:                                    # noqa: BLE001
+                _before = None
         for layer_idx, (sid, k, v) in list(pend.items()):
             try:
                 mgr.ingest_streaming(sid, layer_idx, k, v)
+            except Exception:                                    # noqa: BLE001
+                pass
+        if _dbg and _before is not None:
+            import sys as _s3
+            try:
+                _b1 = [b for b in (mgr.get_streaming_blocks(session_id, 0) or [])
+                       if b.state == "ACCUMULATING"]
+                _after = sum(int(b.active_k.shape[2]) for b in _b1
+                             if b.active_k is not None)
+                _d = _after - _before
+                print(f"[INGEST] step={getattr(self,'_dkv_step_idx',-1):3d} "
+                      f"replay={int(bool(getattr(self,'_dkv_last_was_replay',False)))} "
+                      f"L0 {_before}->{_after} delta={_d}"
+                      f"{'  <-- EXPECTED 1' if _d != 1 else ''}",
+                      flush=True, file=_s3.stderr)
             except Exception:                                    # noqa: BLE001
                 pass
         # DO NOT clear. The entries are REFERENCES into the graph's fixed-address
