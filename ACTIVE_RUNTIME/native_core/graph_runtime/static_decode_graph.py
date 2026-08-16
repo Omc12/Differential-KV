@@ -299,6 +299,29 @@ class CUDAGraphDecodeRunner:
         # Routing is then ONE STEP STALE, which is strictly less staleness than
         # the DKV_REMAT_INTERVAL=4 freeze the system already ships and accepts.
         #
+        # WHAT THE WRAPPER WILL NEED, enumerated from the call site so the next
+        # attempt is mechanical rather than exploratory. route_blocks_relevance
+        # (dkv_attention ~2357) is called with:
+        #     Q              q_for_routing  -- stash per layer, as K/V already are
+        #     pool           kv_manager.native_pool
+        #     block_indices  from get_cached_decode_blocks(sid, layer, device)
+        #     anchor_indices same call
+        #     scale          the attention scale for this layer
+        #     cos, sin       session_dict["rope_cos"/"rope_sin"], already cached
+        #                    per session and grown to max(seq_len+1, pool.U.shape[1])
+        #     srl_state      kv_manager.get_srl_state(sid)
+        #     layer_idx      the layer
+        # Everything except q_for_routing is already reachable from the manager,
+        # so the only new plumbing is the query stash.
+        #
+        # THE TRAP TO AVOID: the forward wraps that call in conditions (router
+        # mode, the k_eff engage test, the legacy srl threshold). Calling
+        # route_blocks_relevance directly from the wrapper without them will
+        # diverge on exactly the configurations those guards exist for. Either
+        # replicate the guards or -- better -- extract the whole block into one
+        # manager method and have BOTH the forward and the wrapper call it, so
+        # they cannot drift apart.
+        #
         # Then the same md5-vs-eager gate decides it, followed by the accuracy
         # suite. Do not judge it on speed: replay is already 1.41x and wrong.
         #
