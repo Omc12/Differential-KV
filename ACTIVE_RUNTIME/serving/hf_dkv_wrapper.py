@@ -1766,21 +1766,71 @@ class PyTorchDKVHFWrapper:
                             # context frozen at capture time and the text diverges
                             # from eager.
                             #
-                            # It is also not faster. Replay skips ALL of the
-                            # forward's Python and still measured 85 ms/token
-                            # against eager's 79 at 32k, which says the host time
-                            # is mostly OUTSIDE the captured region -- so closing
-                            # the dense-window gap would buy correctness, not
-                            # speed. Enabling routed capture is therefore gated
-                            # off until the dense window becomes a device-resident
-                            # ring buffer AND the host cost is located.
+                            # CORRECTED 2026-08-16. This block used to say routed
+                            # replay "is also not faster -- 85 ms/token against
+                            # eager's 79", and concluded the host time was mostly
+                            # OUTSIDE the captured region. Both halves were wrong,
+                            # and the reason is instructive.
+                            #
+                            # The capture never succeeded. It raises
+                            # cudaErrorStreamCaptureInvalidated, and the caller
+                            # swallowed it with a bare `except Exception: pass`,
+                            # so the run silently fell back to eager. The "85 vs
+                            # 79" was eager-with-graph-overhead against eager --
+                            # replay was never measured. The except now logs once.
+                            #
+                            # The host time is INSIDE the forward, not outside:
+                            # 89.6% of decode wall is inside model.forward (41.94
+                            # of 46.81 ms/token on Qwen3.5-2B at 16k), and against
+                            # 27.19 ms/token of CUDA kernels that leaves ~14.7
+                            # ms/token of host INSIDE the capturable region
+                            # against 4.9 outside. So a working graph has
+                            # something real to win -- roughly 30% of decode.
+                            #
+                            # WHAT ACTUALLY BLOCKS CAPTURE, measured with
+                            # colab/decode_sync_probe.py: ~50 GPU syncs per token
+                            # inside model.forward, from exactly two sites --
+                            #   dkv_attention.py _sparse_prefill_filter_blocks
+                            #     (~33/token) topk(...).indices.tolist(), which
+                            #     pulls the routed block set to the host to build
+                            #     a Python list of block objects
+                            #   dkv_attention.py dkv_forward (~5/token, one per
+                            #     attended layer)
+                            # A sync inside a capture region is what produces
+                            # cudaErrorStreamCaptureInvalidated. Those two are the
+                            # whole device-resident-routing job: block selection
+                            # has to stay a device tensor and reach the kernel
+                            # without a host round-trip. The dense-window rewrite
+                            # is needed for REPLAY CORRECTNESS on top of that.
+                            # DKV_GRAPH_FORCE_ROUTED=1 is a MEASUREMENT-ONLY
+                            # override: it lets the routed path capture and
+                            # replay so the SPEED CEILING of a correct graph can
+                            # be measured, and it PRODUCES WRONG TEXT because the
+                            # dense window stays frozen at capture time. It exists
+                            # because the "not faster" note above is from an older
+                            # build and deciding whether to fund the device-
+                            # resident rewrite needs a current number, not a
+                            # stale one. Never set it in a serving path.
+                            _force_routed = os.environ.get(
+                                "DKV_GRAPH_FORCE_ROUTED", "0") == "1"
                             self.model._dkv_cuda_graph_safe = bool(
-                                _dkv_cache is not None
-                                and os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1")
+                                _force_routed or (
+                                    _dkv_cache is not None
+                                    and os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"))
                             self._cuda_graph_runner.capture(
                                 self.model, input_ids, pos_tensor, cache=_dkv_cache)
-                        except Exception:
-                            pass
+                        except Exception as _cap_err:
+                            # Log ONCE. A bare `pass` here makes a failed capture
+                            # indistinguishable from eager decode, so a benchmark
+                            # can report "graph replay" numbers while no graph
+                            # exists -- which is exactly what happened when the
+                            # routed-path speed ceiling was first measured.
+                            if not getattr(self, "_graph_capture_err_logged", False):
+                                self._graph_capture_err_logged = True
+                                print(f"[DKV] CUDA graph capture FAILED "
+                                      f"({type(_cap_err).__name__}: {_cap_err}); "
+                                      f"continuing in eager decode.",
+                                      file=sys.stderr, flush=True)
                     
                     if self._cuda_graph_runner.is_captured():
                         try:

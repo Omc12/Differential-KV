@@ -364,6 +364,13 @@ class CUDAGraphDecodeRunner:
             self._restore_cache(cache, _snap)
 
         self._captured_shape_sig = sig
+        # POSITIVE confirmation. Capture is wrapped in `except Exception: pass`
+        # by the caller, so a failure is silent and indistinguishable from eager
+        # decode -- which means a benchmark can appear to measure graph replay
+        # while measuring nothing of the sort. Say so explicitly.
+        import sys as _sys
+        print(f"[DKV] CUDA graph CAPTURED for shape {sig} — replay active",
+              file=_sys.stderr, flush=True)
 
     def run(self, input_ids: torch.Tensor, position_ids: torch.Tensor):
         """
