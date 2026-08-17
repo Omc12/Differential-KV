@@ -2333,6 +2333,18 @@ class PyTorchDKVHFWrapper:
                             _pi = self.manager.__dict__.get("_pending_ingest")
                             if _pi:
                                 self.manager.__dict__["_graph_ingest_refs"] = dict(_pi)
+                            # Record WHAT WAS ROUTABLE AT CAPTURE. The routed set
+                            # is pinned into fixed-address buffers, so a replay
+                            # attends whatever slots those buffers held when the
+                            # graph was recorded. That is exact while the block
+                            # set is unchanged -- and the selectivity gate makes
+                            # sure it starts that way -- but blocks keep being
+                            # COMPRESSED during decode, so a session that
+                            # captured at 15 blocks is attending 15 of 16 a few
+                            # tokens later, with the newest content the one thing
+                            # missing. See the invalidation below.
+                            self._graph_ncomp = self._dkv_block_counts(
+                                session_id)[0]
                             # Snapshot WHAT THE FORWARD BOUND DURING CAPTURE.
                             # Comparing against the live _fwd_ptrs only compares
                             # the last EAGER forward, which says nothing about the
@@ -2401,6 +2413,51 @@ class PyTorchDKVHFWrapper:
                             _recap = 64
                         if _recap > 0 and self._dkv_step_idx > 0                                 and (self._dkv_step_idx % _recap) == 0:
                             self._cuda_graph_runner.invalidate()
+                        # INVALIDATE WHEN THE BLOCK SET CHANGES. This is the
+                        # frozen-routing fix, and it is narrower than re-routing.
+                        #
+                        # The routed set is pinned to fixed addresses, so replay
+                        # attends the slots recorded at capture. The selectivity
+                        # gate guarantees that is EXACT at capture time -- routing
+                        # is non-selective, so "the routed set" is "every block".
+                        # What it cannot guarantee is that it stays true: blocks
+                        # keep getting compressed as decode proceeds, and the
+                        # moment block 16 appears, a graph captured over 15 is
+                        # attending everything EXCEPT the newest content. That is
+                        # a silent quality loss, not a crash.
+                        #
+                        # IT IS NOT, HOWEVER, WHY --fastdc DIVERGES FROM EAGER.
+                        # That was the hypothesis this was written to test and it
+                        # failed. Measured on Qwen2.5-1.5B with
+                        # DKV_DETERMINISTIC=1, eager against replayed: 4k and 16k
+                        # are byte-identical to their pre-fix md5s and this
+                        # invalidation never even fires there, while 8k fires
+                        # (6 -> 7 blocks), changes its md5, and still does not
+                        # match eager. So the divergence has a second cause that
+                        # is NOT the routed set going stale, and it is still
+                        # open. Kept anyway: attending 15 of 16 blocks with the
+                        # newest content missing is wrong on its own terms,
+                        # whatever else is also wrong.
+                        #
+                        # A count comparison is enough and costs 4.6 us: blocks
+                        # only ever move INTO the compressed set during decode.
+                        # Re-capture then rebuilds every pinned buffer from a
+                        # real forward, which is the refresh mechanism this
+                        # design already documents -- and unlike the eager
+                        # alternation that was tried and retracted, no step ever
+                        # runs against half-updated state.
+                        _now_ncomp = self._dkv_block_counts(session_id)[0]
+                        if (_now_ncomp is not None
+                                and getattr(self, "_graph_ncomp", None) is not None
+                                and _now_ncomp != self._graph_ncomp):
+                            self._cuda_graph_runner.invalidate()
+                            if not getattr(self, "_graph_ncomp_logged", False):
+                                self._graph_ncomp_logged = True
+                                print(f"[DKV] routed graph invalidated: compressed "
+                                      f"blocks {self._graph_ncomp} -> {_now_ncomp}, "
+                                      f"so the pinned routed set no longer covers "
+                                      f"the pool. Re-capturing.",
+                                      file=sys.stderr, flush=True)
                     self._dkv_step_idx += 1
                     self._dkv_last_was_replay = (
                         self._cuda_graph_runner.is_captured() and not _force_eager)
