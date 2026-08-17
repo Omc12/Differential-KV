@@ -68,20 +68,30 @@ class DKVConfig:
             # mean per-block rank of 35 against mid's 53. That is the memory-for-
             # fidelity trade the preset exists to make, working as intended.
             #
-            # The "mid scores 20/24" that used to sit here DOES NOT REPRODUCE,
-            # and neither does ultra's 47/48. Re-run at 48 seeds on Qwen3.5-2B
-            # at 32k: mid 21/48, ultra 23/48, DENSE 23/48.
+            # EVERY linkbench SCORE IN THIS FILE IS `QMODE=direct`. Write the
+            # mode down next to the number; it was not, and that cost an
+            # afternoon.
             #
-            # Dense halved too, and dense shares no DKV code -- that is what
-            # settles it. The benchmark got harder for every arm at once, so
-            # this is not a regression in the ladder. The ORDERING is intact
-            # (ultra == dense, mid below both) and ultra's parity with dense is
-            # exact. The cause is outside the repo, most likely a transformers
-            # or torch update; the harness itself has not changed since before
-            # those numbers were recorded.
+            # linkbench has two question modes and `chain` (multi-hop) is the
+            # DEFAULT. `direct` names the intermediate entity outright, which
+            # collapses the chain to one lookup over the same context. Re-run in
+            # `chain` every arm roughly halves:
             #
-            # DO NOT compare a score here against one recorded in another
-            # environment. Run a dense control alongside, every time.
+            #                   direct   chain
+            #   rotated          40/48   21/48
+            #   unrotated        47/48   23/48
+            #   dense            47/48   23/48
+            #
+            # The DENSE arm halves too, and dense shares no DKV code, so this was
+            # briefly read as an environment shift with a transformers/torch
+            # update as the suspect. It was not: packages are unchanged since
+            # 2026-08-10 (before these were recorded), the transformers 5.14.1
+            # bump predates them by three weeks, and the harness has not been
+            # touched since before them. It was two different benchmarks.
+            #
+            # The ladder's ordering holds in BOTH modes. Run a dense control
+            # alongside every time -- it is what distinguished "DKV regressed"
+            # from "these are different tasks".
             self.max_residual_tokens = 40
             # Spectral energy a block's low-rank form must retain, and the rank
             # ceiling that serves it. This -- not `rank` -- is what actually sets
@@ -416,14 +426,28 @@ class DKVConfig:
             # whether `mid` should take it is now a live question rather than a
             # settled no -- revisit with a decode-throughput target in hand.
             #
-            # SO: `mid` stays fast and `ultra` is where that content goes.
-            # `ultra` is now exactly `mid` plus the unrotated pool -- same rank,
-            # same energy, same residual budget -- so it costs the rotation and
-            # nothing else. Point any digit-, code- or table-heavy workload at
-            # `--preset ultra`; there is no longer a reason to reach for `high`
-            # for that, since `high` is rotated too and does not fix it.
+            # DECIDED 2026-08-17, on the post-fix numbers: `mid` TAKES IT.
             #
-            # To take it globally anyway: DKV_ROTATED_POOL=0 on any preset.
+            # This was declined once, at 43%/137%, and that decline was right for
+            # those numbers. It is not right for 11%/27%. What changed is that
+            # most of the old cost was _remat_attend refusing to serve an
+            # unrotated pool at all rather than the rotation itself; rotating the
+            # dense window there fixed it.
+            #
+            # The trade `mid` now makes: ~11% of decode on a hybrid model, ~27%
+            # on a dense-attention one, for EXACT dense parity on both metrics
+            # that can resolve anything -- digit-table 24/24 against dense's
+            # 24/24 where rotated scores 14/24, and linkbench 23/48 against
+            # dense's 23/48. A 42% loss of exact digit recall is not an exotic
+            # failure: it is invoices, logs, IDs, any table.
+            #
+            # `low` and `high` stay rotated, so a rotated pool is still one flag
+            # or one preset away for anyone whose decode budget cannot take it:
+            # DKV_ROTATED_POOL=1, or --preset low / high.
+            #
+            # `ultra` is now `mid` in every respect. It is kept because it is a
+            # documented name people have in scripts, not because it differs.
+            self.rotated_pool = False
 
         # 2. Individual options overrides (dict or env variables)
         self.decode_cache_enabled = self._get_bool(

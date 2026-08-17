@@ -1311,8 +1311,29 @@ class PyTorchDKVHFWrapper:
                 _existing = (ws.get("dense_workspace_k") or {}).get(layer_idx)
                 _dt = _existing.dtype if _existing is not None else self.model.dtype
                 _ptr_before = None if _existing is None else _existing.data_ptr()
-                _dk, _dv, dlen, _ = mgr.assemble_dense_window_kv(
+                _dk, _dv, dlen, _trimmed = mgr.assemble_dense_window_kv(
                     session_id, layer_idx, dense_blocks, _dt)
+                # PUBLISH THE TRIMMED BLOCK LIST. _remat_attend needs it to
+                # rotate the dense window when the pool is unrotated, and on this
+                # path it is the wrapper -- not the forward -- that assembles the
+                # window, so the forward has no other way to reach it.
+                #
+                # It must be the TRIMMED list the assembler returned, not the one
+                # passed in: the assembler drops blocks to fit the workspace, and
+                # the positions have to describe what was actually written.
+                #
+                # HONEST NOTE ON WHAT THIS DID AND DID NOT FIX. It was added to
+                # explain --fastdc diverging from eager at 16k on an unrotated
+                # pool (md5 0fec68e1 eager against 566e1b26 replayed, with
+                # DKV_DETERMINISTIC=1 on both), on the theory that remat was
+                # declining here for want of positions and falling back to the
+                # Triton kernel. Plumbing the list through changed NOTHING --
+                # both md5s are unchanged -- so that theory is wrong and the
+                # divergence lies in the replay itself, not in this path's
+                # attention dispatch. Kept because it is still correct (this path
+                # can now serve remat on an unrotated pool at all) but it is
+                # NOT the explanation for the --fastdc divergence.
+                ws.setdefault("dense_blocks_trimmed", {})[layer_idx] = _trimmed
                 if (os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1"
                         and layer_idx == 0 and _ptr_before is not None):
                     import sys as _s2

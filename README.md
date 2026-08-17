@@ -102,7 +102,7 @@ python ACTIVE_RUNTIME/serving/cli.py --api-url http://localhost:8000/v1
 | `--api-url` | `str` | `None` | API Gateway base URL. When provided, runs CLI in Client Mode |
 | `--serving-mode` | `choice` | `balanced` | KV Cache strategy: `lightweight`, `balanced`, `performance`, `long-context`, `fused-sparse` |
 | `--preset` | `choice` | `mid` | Fidelity preset: `low`, `mid`, `high`, `ultra` — see the ladder below |
-| `--fastdc` | `flag` | `False` | CUDA only. Prioritises decode over prefill (CUDA-graph decode path). Opt-in: worth ~1.2% at 16k and nothing at 32k |
+| `--fastdc` | `flag` | `False` | CUDA only. Routed CUDA-graph decode. **~49% faster at 16k, nothing at 32k — but NOT byte-exact against eager on an unrotated pool**, so it stays opt-in. See the note under the ladder. |
 | `--rank` | `int` | `32` | SVD rank for KV compression (capped at $d_{\text{head}}$) |
 | `--micro-block-size` | `int` | `256` | Number of tokens per compressed KV micro-block ($B_s = 256$) |
 | `--batch-size` | `int` | `4` | Maximum continuous batching size for engine |
@@ -120,22 +120,31 @@ python ACTIVE_RUNTIME/serving/cli.py --api-url http://localhost:8000/v1
 | preset | keys stored | energy / rank | residual $R$ | pick it when |
 |---|---|---|---|---|
 | `low` | rotated | 0.999 / 32 | 40 | memory is the binding constraint |
-| **`mid`** (default) | rotated | 0.9999 / 64 | 40 | general use — the fast default |
-| `high` | rotated | 0.99999 / 128 | 128 | you want the largest fidelity budget |
-| **`ultra`** | **unrotated** | 0.9999 / 64 | 40 | **digits, codes, tables, or confusable content** |
+| **`mid`** (default) | **unrotated** | 0.9999 / 64 | 40 | **general use — dense-parity accuracy** |
+| `high` | rotated | 0.99999 / 128 | 128 | largest fidelity budget, rotated (fast) |
+| `ultra` | unrotated | 0.9999 / 64 | 40 | identical to `mid`; kept as a stable name |
 
-**`ultra` is exactly `mid` plus one change: keys are stored un-rotated.** Same rank,
-same energy, same residual budget — so it costs the rotation and nothing else.
+**`mid` stores keys un-rotated, and that is what buys dense parity.** On the two
+metrics with power to resolve anything, `mid` now equals dense exactly:
+
+| benchmark (Qwen3.5-2B, 32k) | dense | `mid` | rotated |
+|---|---|---|---|
+| digit-table, 24 seeds | 24/24 | **24/24** | 14/24 |
+| linkbench `chain`, 48 seeds | 23/48 | **23/48** | 21/48 |
+| linkbench `direct`, 48 seeds | 47/48 | **47/48** | 40/48 |
+
+Storing keys rotated costs **42% of exact digit recall** — invoices, logs, IDs,
+any table — and nothing else recovers it (residual budget, attend-every-block and
+residual tiering are all measured inert).
 
 Two things worth knowing before choosing:
 
-* **For digit- or table-heavy work you want `ultra`, not `high`.** `high` stores
-  rotated keys like `mid` does and does not fix that class of error; its larger
-  rank and residual budget are not what is failing.
-* **`ultra` is not free, and its cost depends on your model.** Rotating at read
-  is paid on every *attended* layer, so a hybrid model (Qwen3.5-2B: 6 of 24
-  attended) pays ~11% of decode while a dense-attention model (Qwen2.5-1.5B: 28
-  of 28) pays ~27%. Check your model's attended-layer count before budgeting.
+* **It is not free, and the cost depends on your model.** Rotating at read is paid
+  on every *attended* layer: a hybrid model (Qwen3.5-2B, 6 of 24 attended) pays
+  ~11% of decode, a dense-attention one (Qwen2.5-1.5B, 28 of 28) ~27%. Check your
+  model's attended-layer count before budgeting.
+* **If you need that back, `low` and `high` still store rotated keys**, or set
+  `DKV_ROTATED_POOL=1` on any preset. You lose the digit accuracy above.
   `DKV_ROTATED_POOL=0` takes the same trade on any preset.
 
 ---
@@ -154,7 +163,7 @@ Differential-KV runtime behaviors can be fine-tuned using environment variables:
 | `DKV_MAX_RESIDUAL` | `128` MLX / `40` CUDA | Both engines | Exact residual token rows per block. CUDA `mid`/`ultra`/`low` use 40, `high` keeps 128; MLX is flat 128. The budget measured **inert** on four benchmarks including a digit-table one, and the pool allocates these slots on *every* block, so 40 is a straight saving. |
 | `DKV_ROTATED_POOL` | `1` (`0` on `ultra`) | Both engines | `1` stores POST-RoPE keys (fast reads). `0` stores PRE-RoPE and rotates at read: **exact dense parity on retrieval and digit recall**, at 43–137% of decode depending on attended-layer count. |
 | `DKV_DETERMINISTIC` | `0` | CUDA | `1` forces a deterministic SDPA backend. Greedy decode is **not** reproducible at long context without it — the cause is the decode attention's reduction, not compression. **Turn this on for any run you intend to compare.** |
-| `DKV_FAST_DECODE` | `0` | CUDA | Same as `--fastdc`. Routed CUDA-graph decode, gated per session to whether a graph will actually be captured. |
+| `DKV_FAST_DECODE` | `0` | CUDA | Same as `--fastdc`. Routed CUDA-graph decode, gated per session to whether a graph will actually be captured. **Output differs from eager on an unrotated pool** (16k, `DKV_DETERMINISTIC=1`: `0fec68e1` eager vs `566e1b26` replayed) — the replay freezes routing. Fine for throughput work, not for runs you intend to compare. |
 | `DKV_SVD_SEED` | `1234` | MLX | SVD random state seed for deterministic compression. |
 | `DKV_EARLY_LAYER_RANK_BOOST` | `0` | MLX | Set `1` to boost SVD rank ($2\times$) in early layers ($\le 15\%$ network depth) for syntactic protection. |
 | `DKV_MAX_RANK_EARLY` | `0` | MLX | Cap for early layer boosted rank ($0$ = auto-selects $2\times$ base rank). |

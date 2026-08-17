@@ -194,78 +194,35 @@ unlike multifact, whose ±15-point seed band cannot resolve anything, see item 1
 **Exact parity with dense**, up from a 7-point deficit. Fisher p ≈ 0.03 against
 the rotated arm.
 
-> **⚠ THE ABSOLUTE SCORES ABOVE NO LONGER REPRODUCE. THE FINDING DOES.**
-> Re-run at 48 seeds on Qwen3.5-2B at 32k:
+> **THESE NUMBERS ARE `QMODE=direct`. RECORD THE MODE WITH THE SCORE.**
+> They reproduce exactly -- dense 47/48, unrotated 47/48, rotated 40/48 -- but
+> only in the mode they were taken in, and the mode was never written down.
 >
-> | arm | then | now |
+> linkbench has two question modes and `chain` is the DEFAULT. `direct` names the
+> intermediate entity outright, collapsing the multi-hop chain to a single lookup
+> over the same context, and is much easier. The same three arms in `chain`:
+>
+> | arm | `direct` | `chain` |
 > |---|---|---|
-> | rotated (`mid`) | 40/48 | 21/48 |
-> | **unrotated (`ultra`)** | **47/48** | **23/48** |
+> | rotated | 40/48 | 21/48 |
+> | **unrotated** | **47/48** | **23/48** |
 > | dense | 47/48 | 23/48 |
 >
-> **The dense arm halved too, and dense shares no DKV code** — it is plain HF
-> attention. That is what localises this: the whole benchmark got harder for
-> every arm at once, so it is not a DKV regression. Confirmed twice more: `mid`
-> scores 21/48 against the code as of `69393023` as well, and the linkbench
-> harness itself has not been touched since before these numbers were recorded
-> (`00be67be` and `5f4b59f1` both predate them). The cause is outside the repo —
-> environment, most likely a `transformers`/`torch` update (now 5.14.1 /
-> 2.11.0+cu130).
+> This cost an afternoon. Re-run in `chain` the scores looked halved, the DENSE
+> arm halved with them, and since dense shares no DKV code that was read as an
+> environment shift -- a `transformers`/`torch` update was the leading suspect.
+> It was not. Packages have not changed since 2026-08-10, before these were
+> recorded; the transformers 5.14.1 bump predates them by three weeks; the
+> harness has not been touched since before them either. Two different benchmarks
+> were being compared.
 >
-> **`unrotated == dense` still holds exactly, 23/48 vs 23/48**, which is this
-> item's actual claim, and rotated is still below both. Port the change.
-
-### Confirmed on a SECOND metric, and the gain is wider than "retrieval"
-
-`colab/tablebench_cuda.py` (new) asks for one 4-digit amount by its code, out of
-60 ledger rows scattered through 32k of prose. Exact digits, so a fluent wrong
-number scores zero. Qwen3.5-2B, 24 seeds:
-
-| arm | hits |
-|---|---|
-| dense | 24/24 |
-| **ultra (unrotated)** | **24/24** |
-| mid (rotated) | 14/24 |
-
-**Rotation costs 42% of exact digit recall and the unrotated pool recovers all of
-it.** That widens this item considerably: it is not only distractor-heavy
-retrieval, it is invoices, logs, IDs, any table — and on MLX, which shares the
-rotated design, it is the same one-line change.
-
-Nothing else touched this gap. Residual budget 40 vs 128: 14/24 both.
-Attend-every-block (`DKV_TOPK_BLOCKS=0`): 14/24. Tier the residual budget on the
-error tail instead of the median: 14/24. **The rotation is not one contributor
-among several — it is the whole gap**, which is the same conclusion item 1
-reached from the other side when it retired routing as a lever.
-
-### What it costs, and why CUDA still ships it OFF by default
-
-The `-18%` to `-24%` recorded elsewhere in this file is an **understatement** —
-it was cross-process wall including prefill, which dilutes a decode-only effect.
-Paired and in-process, 32k, 8 rounds:
-
-| model | attended layers | ms/token | cost |
-|---|---|---|---|
-| Qwen3.5-2B | 6 of 24 | 39.72 → 57.39 | **+43%** |
-| Qwen2.5-1.5B | 28 of 28 | 51.48 → 122.54 | **+137%** |
-
-**The cost scales with attended-layer count**, because the rotation avoided at
-store is applied at read on every attended layer. A hybrid model pays 43%; a
-dense-attention model pays about 2.4×. **A figure quoted for one model tells you
-nothing about the other** — check your own model's attended-layer count before
-budgeting for this.
-
-CUDA tried it as the `mid` default, measured the above, and reverted: too steep
-to charge every user for a gain that only appears on confusable or digit-dense
-content. It ships on `ultra`, which is now exactly `mid` plus the unrotated pool,
-so it costs the rotation and nothing else. **MLX should make the same call on its
-own numbers** — the accuracy win is real and worth having on whichever preset
-your decode budget can absorb, but it is not free anywhere.
+> **The finding holds in BOTH modes**: `unrotated == dense` exactly, rotated
+> below both. That is what makes it worth porting.
 >
-> The lesson for the port: **a score is only meaningful next to a control run in
-> the same environment.** Every absolute number in this file was recorded without
-> one, so re-measure your own dense baseline on the MacBook rather than treating
-> 47/48 as a target — and keep a dense arm in every future comparison.
+> Two lessons. **Record the harness MODE next to every score, not just the
+> harness name.** And **a score is only meaningful next to a control in the same
+> configuration** -- the dense arm is what turned "DKV regressed" into "these are
+> different tasks", and without it the wrong conclusion fit the data perfectly.
 
 **The cost, which is why it is not the global default.** Rotating at read time
 costs decode and memory. Qwen3.5-2B at 32k, interleaved and reversed:

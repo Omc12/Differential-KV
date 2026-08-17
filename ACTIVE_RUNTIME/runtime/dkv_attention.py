@@ -572,8 +572,16 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             from native_core.sparse_decode.triton_fused_decode import (
                 _partial_rope_apply as _pra,
             )
+            _dbs = dense_blocks
+            if not _dbs:
+                # Mutation-out path: the WRAPPER assembled the window, so the
+                # forward was not handed the block list. It publishes the trimmed
+                # list here for exactly this reason.
+                _dbs = (kv_manager.decode_workspace.get(sid, {})
+                        .get("dense_blocks_trimmed", {})
+                        .get(captured_layer_idx))
             _pos = []
-            for _blk in (dense_blocks or []):
+            for _blk in (_dbs or []):
                 _pos.extend(getattr(_blk, "token_indices", ()) or ())
             _ok = (dense_k is not None and dense_len and dense_len > 0
                    and cos_all is not None and sin_all is not None
