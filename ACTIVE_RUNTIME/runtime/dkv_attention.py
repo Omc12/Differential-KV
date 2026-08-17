@@ -472,7 +472,8 @@ def _stabilise_routed_set(kv_manager, sid, layer_idx, block_indices, anchor_indi
 def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                   pool, block_indices, anchor_indices, cos_all, sin_all,
                   layer_active_rank, q, dense_k, dense_v, dense_len,
-                  num_key_value_groups, curr_kv=None, dense_mask=None):
+                  num_key_value_groups, curr_kv=None, dense_mask=None,
+                  dense_blocks=None):
     """MLX's decode form: materialise the routed blocks, then plain SDPA.
 
     MLX builds each routed block's real keys and values --
@@ -553,15 +554,58 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
         # the other direction: a dense window rotated at the wrong positions, or
         # left unrotated, produces confident garbage rather than an error.
         if not _psr():
-            if not _REMAT_UNROTATED_WARNED:
-                _REMAT_UNROTATED_WARNED = True
-                print("[DKV] DKV_REMAT_CACHE ignored: the pool holds UNROTATED "
-                      "keys (DKV_ROTATED_POOL=0), and this path's dense window "
-                      "is only rotated inside the sparse kernel. Declining "
-                      "rather than attending unrotated dense keys. THIS, not the "
-                      "rotation, is what the unrotated pool costs.",
-                      file=sys.stderr, flush=True)
-            return None
+            # ROTATE THE DENSE WINDOW HERE instead of declining. The compressed
+            # side is already handled -- _gather_routed_blocks_for_kernel rotates
+            # anchors and V_K when the pool is unrotated -- so the dense window
+            # was the only reason this path could not serve an unrotated pool.
+            #
+            # Positions come from dense_blocks[].token_indices, the SAME source
+            # the sparse path uses, laid out in the same order the assembler
+            # writes (anchor then active, packed from row 0). They are not
+            # derivable from a start offset: the assembler's trim loop protects
+            # block 0 and drops the SECOND-oldest, which leaves a real gap.
+            #
+            # Rotate into a persistent per-layer buffer, never in place. dense_k
+            # is the assembler's CACHED workspace, reused across steps, so an
+            # in-place rotate would compound every step -- rotating a key twice
+            # does not raise, it just returns confident nonsense.
+            from native_core.sparse_decode.triton_fused_decode import (
+                _partial_rope_apply as _pra,
+            )
+            _pos = []
+            for _blk in (dense_blocks or []):
+                _pos.extend(getattr(_blk, "token_indices", ()) or ())
+            _ok = (dense_k is not None and dense_len and dense_len > 0
+                   and cos_all is not None and sin_all is not None
+                   and cos_all.dim() == 3 and len(_pos) >= dense_len)
+            if not _ok:
+                # Same decline as before, for the cases this cannot serve --
+                # notably mutation-out, where the caller assembles the window and
+                # does not hand back the block list. Correctness first: attending
+                # an unrotated dense window is silently wrong, not slow.
+                if not _REMAT_UNROTATED_WARNED:
+                    _REMAT_UNROTATED_WARNED = True
+                    print("[DKV] DKV_REMAT_CACHE declined for this step: pool is "
+                          "UNROTATED and the dense window's token positions are "
+                          "unavailable, so its keys could not be rotated.",
+                          file=sys.stderr, flush=True)
+                return None
+            _wsr = kv_manager.decode_workspace.setdefault(sid, {})
+            _rbuf_d = _wsr.setdefault("_dense_rot_buf", {})
+            _rbuf = _rbuf_d.get(captured_layer_idx)
+            if (_rbuf is None or _rbuf.shape != dense_k.shape
+                    or _rbuf.dtype != dense_k.dtype):
+                _rbuf = torch.empty_like(dense_k)
+                _rbuf_d[captured_layer_idx] = _rbuf
+            _rbuf.copy_(dense_k)
+            _dp = torch.as_tensor(_pos[:dense_len], dtype=torch.long,
+                                  device=dense_k.device)
+            _cosd = cos_all[0, _dp.clamp(max=cos_all.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+            _sind = sin_all[0, _dp.clamp(max=sin_all.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+            _rbuf[:, :, :dense_len] = _pra(dense_k[:, :, :dense_len],
+                                           _cosd.to(dense_k.dtype),
+                                           _sind.to(dense_k.dtype))
+            dense_k = _rbuf
     except Exception:                                            # noqa: BLE001
         return None
 
@@ -4273,7 +4317,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         curr_kv=((key_states[b_idx:b_idx+1],
                                                   value_states[b_idx:b_idx+1])
                                                  if _MUTATION_OUT_ACTIVE and q_len == 1 else None),
-                                        dense_mask=_dense_mask)
+                                        dense_mask=_dense_mask,
+                                    dense_blocks=dense_blocks)
 
                                     attn_out_b = _remat_out if _remat_out is not None else \
                                         native_triton_sparse_attn_decode_combined(
@@ -4327,7 +4372,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     curr_kv=((key_states[b_idx:b_idx+1],
                                               value_states[b_idx:b_idx+1])
                                              if _MUTATION_OUT_ACTIVE and q_len == 1 else None),
-                                    dense_mask=_dense_mask)
+                                    dense_mask=_dense_mask,
+                                    dense_blocks=dense_blocks)
                                 attn_out_b = _remat_out if _remat_out is not None else \
                                     native_triton_sparse_attn_decode(
                                     q=query_states[b_idx:b_idx+1],

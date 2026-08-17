@@ -134,8 +134,8 @@ Two things worth knowing before choosing:
   rank and residual budget are not what is failing.
 * **`ultra` is not free, and its cost depends on your model.** Rotating at read
   is paid on every *attended* layer, so a hybrid model (Qwen3.5-2B: 6 of 24
-  attended) pays ~43% of decode while a dense-attention model (Qwen2.5-1.5B: 28
-  of 28) pays ~137%. Check your model's attended-layer count before budgeting.
+  attended) pays ~11% of decode while a dense-attention model (Qwen2.5-1.5B: 28
+  of 28) pays ~27%. Check your model's attended-layer count before budgeting.
   `DKV_ROTATED_POOL=0` takes the same trade on any preset.
 
 ---
@@ -219,8 +219,8 @@ measured and is inert on `tablebench` (all 14/24, unchanged from `mid`):
 
 | model | attended layers | `mid` | `ultra` | cost |
 |---|---|---|---|---|
-| Qwen3.5-2B | 6 of 24 | 39.72 ms/tok | 57.39 ms/tok | **+43%** |
-| Qwen2.5-1.5B | 28 of 28 | 51.48 ms/tok | 122.54 ms/tok | **+137%** |
+| Qwen3.5-2B | 6 of 24 | 38.63 ms/tok | 43.02 ms/tok | **+11.5%** |
+| Qwen2.5-1.5B | 28 of 28 | 51.28 ms/tok | 65.10 ms/tok | **+26.5%** |
 
 The cost is the rotation applied at read on every attended layer, so it scales
 with attended-layer count — **a figure for one model tells you nothing about

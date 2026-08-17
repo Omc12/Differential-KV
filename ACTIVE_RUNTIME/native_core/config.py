@@ -399,22 +399,22 @@ class DKVConfig:
             #   digit-table  24 sd    14/24     24/24     24/24
             #   linkbench    48 sd    21/48     23/48     23/48
             #
-            # But the cost is far larger than the "-18% to -24%" that was on
-            # record, and it SCALES WITH ATTENDED-LAYER COUNT, because the
-            # rotation avoided at store has to be applied at read on every
-            # attended layer. Paired in-process, 32k, 8 rounds:
+            # The cost USED to be 43% / 137%, and most of it turned out to be a
+            # bug rather than a price: _remat_attend declined outright on an
+            # unrotated pool, which disabled the remat cache for the whole
+            # session. Rotating the dense window there instead (see that site)
+            # cut it to:
             #
-            #   Qwen3.5-2B   ( 6 of 24 attended)  39.72 -> 57.39 ms/tok   +43%
-            #                                     A/A control clean
-            #   Qwen2.5-1.5B (28 of 28 attended)  51.48 -> 122.54 ms/tok  +137%
-            #                                     A/A control biased 1.75 ms,
-            #                                     but the effect is 40x that
+            #   Qwen3.5-2B   ( 6 of 24 attended)  38.63 -> 43.02 ms/tok   +11.5%
+            #                                     CI [+2.643, +6.217]
+            #   Qwen2.5-1.5B (28 of 28 attended)  51.28 -> 65.10 ms/tok   +26.5%
+            #                                     CI [+9.360, +17.865]
             #
-            # The old figure understated it because it was cross-process wall
-            # INCLUDING prefill, which dilutes a decode-only effect. A dense
-            # attention model pays roughly 2.4x decode, and this is the DEFAULT
-            # preset -- too steep to charge every user for a gain that only
-            # appears on confusable or digit-dense content.
+            # What remains IS the rotation, and it still scales with attended-
+            # layer count because it is applied at read on every attended layer.
+            # 11-27% is a real price but no longer a disqualifying one, so
+            # whether `mid` should take it is now a live question rather than a
+            # settled no -- revisit with a decode-throughput target in hand.
             #
             # SO: `mid` stays fast and `ultra` is where that content goes.
             # `ultra` is now exactly `mid` plus the unrotated pool -- same rank,
