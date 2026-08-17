@@ -500,6 +500,24 @@ def _stabilise_routed_set(kv_manager, sid, layer_idx, block_indices, anchor_indi
     return bi_buf, ai_buf
 
 
+# Reason codes for every way _remat_attend can decline. DKV_REMAT_WHY=1 prints
+# each one ONCE. Added because the function has five exits and four of them were
+# indistinguishable from the outside: the caller only sees None and silently
+# falls back to the Triton kernel, which is a DIFFERENT attention implementation
+# -- so a decline does not fail, it quietly changes the numerics. Three separate
+# debugging passes were spent bisecting hypotheses that this would have answered
+# in one run.
+_REMAT_WHY_SEEN = set()
+
+
+def _remat_why(code, extra=""):
+    if os.environ.get("DKV_REMAT_WHY") != "1" or code in _REMAT_WHY_SEEN:
+        return
+    _REMAT_WHY_SEEN.add(code)
+    print(f"[REMAT-NO] {code}{(' ' + extra) if extra else ''}",
+          file=sys.stderr, flush=True)
+
+
 def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                   pool, block_indices, anchor_indices, cos_all, sin_all,
                   layer_active_rank, q, dense_k, dense_v, dense_len,
@@ -539,14 +557,17 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
               f"enabled={_REMAT_ENABLED} bi={None if block_indices is None else int(block_indices.numel())} "
               f"dlen={dense_len}", flush=True, file=_s.stderr)
     if not _REMAT_ENABLED:
+        _remat_why("disabled")
         return None
     if block_indices is None or block_indices.numel() == 0:
+        _remat_why("no-blocks")
         return None
     if dense_k is None or not dense_len:
         # Under DKV_GRAPH_MUTATION_OUT the caller has not assembled a window yet
         # on the first decode token, but curr_kv still carries the current token,
         # so there IS something to attend. Only decline when neither is present.
         if curr_kv is None:
+            _remat_why("no-window-no-curr")
             return None
     try:
         from native_core.sparse_decode.triton_fused_decode import (
@@ -614,9 +635,40 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             _pos = []
             for _blk in (_dbs or []):
                 _pos.extend(getattr(_blk, "token_indices", ()) or ())
-            _ok = (dense_k is not None and dense_len and dense_len > 0
-                   and cos_all is not None and sin_all is not None
-                   and cos_all.dim() == 3 and len(_pos) >= dense_len)
+            # Split into named conditions. As ONE boolean this reported
+            # "no-positions" for six different failures, which sent three
+            # debugging passes after the wrong one.
+            _why_parts = []
+            if dense_k is None:
+                _why_parts.append("dense_k=None")
+            if not dense_len or dense_len <= 0:
+                _why_parts.append(f"dense_len={dense_len}")
+            if cos_all is None:
+                _why_parts.append("cos_all=None")
+            if sin_all is None:
+                _why_parts.append("sin_all=None")
+            if cos_all is not None and cos_all.dim() != 3:
+                _why_parts.append(f"cos_dim={cos_all.dim()}")
+            # COMPARE AGAINST THE VALID EXTENT, NOT THE PADDED WIDTH.
+            #
+            # Under mutation-out `dense_len` is deliberately the FULL workspace
+            # width -- the caller assembles the window and carries validity in
+            # dense_mask instead, so shapes stay static for graph capture. The
+            # token positions describe only the REAL rows. Comparing the two
+            # asked "are there 3072 positions for 1462 tokens", which can never
+            # be true, so this guard declined on every single step and sent
+            # --fastdc to the Triton kernel forever. Measured: npos=1462 against
+            # dlen=3072.
+            #
+            # The valid count is what positions there are. Rotate exactly those
+            # rows; the mask already discards the rest.
+            _vlen = min(len(_pos), int(dense_len or 0))
+            if _vlen <= 0:
+                _why_parts.append(f"vlen=0 npos={len(_pos)} dlen={dense_len} "
+                                  f"nblk={len(_dbs or [])}")
+            _ok = not _why_parts
+            if _why_parts:
+                _remat_why("unrotated-guard", ",".join(_why_parts))
             # NOT GRAPH-SAFE, so refuse to run inside a capturable forward.
             # The rotation below builds its position tensor from a PYTHON LIST
             # and gathers cos/sin with it. A captured graph replays no Python, so
@@ -673,7 +725,9 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             # guard and not the publish. Reverted rather than left in because it
             # costs a copy-and-rotate per layer per step and, until that last
             # decline is found, buys nothing for it.
+            _prerot = None
             if _ok and _MUTATION_OUT_ACTIVE:
+                _remat_why("mutation-out-not-graph-safe")
                 _ok = False
             if _ok and _MUTATION_OUT_ACTIVE:
                 _ok = False
@@ -688,6 +742,7 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                           "UNROTATED and the dense window's token positions are "
                           "unavailable, so its keys could not be rotated.",
                           file=sys.stderr, flush=True)
+                _remat_why("unrotated-no-positions")
                 return None
             _wsr = kv_manager.decode_workspace.setdefault(sid, {})
             _rbuf_d = _wsr.setdefault("_dense_rot_buf", {})
@@ -697,15 +752,22 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                 _rbuf = torch.empty_like(dense_k)
                 _rbuf_d[captured_layer_idx] = _rbuf
             _rbuf.copy_(dense_k)
-            _dp = torch.as_tensor(_pos[:dense_len], dtype=torch.long,
+            _dp = torch.as_tensor(_pos[:_vlen], dtype=torch.long,
                                   device=dense_k.device)
             _cosd = cos_all[0, _dp.clamp(max=cos_all.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
             _sind = sin_all[0, _dp.clamp(max=sin_all.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
-            _rbuf[:, :, :dense_len] = _pra(dense_k[:, :, :dense_len],
-                                           _cosd.to(dense_k.dtype),
-                                           _sind.to(dense_k.dtype))
+            _rbuf[:, :, :_vlen] = _pra(dense_k[:, :, :_vlen],
+                                       _cosd.to(dense_k.dtype),
+                                       _sind.to(dense_k.dtype))
             dense_k = _rbuf
-    except Exception:                                            # noqa: BLE001
+    except Exception as _why_err:                                # noqa: BLE001
+        # THE ONE THAT HID EVERYTHING. This wraps the whole setup block, so any
+        # error in the gather, the reconstruction or the dense rotation returned
+        # None and looked exactly like a deliberate decline.
+        import traceback as _tb
+        _remat_why("exception",
+                   f"{type(_why_err).__name__}: {_why_err} | "
+                   + _tb.format_exc().strip().replace(chr(10), " ~ ")[-400:])
         return None
 
     from native_core.sparse_decode.remat_cache import (
