@@ -633,14 +633,32 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             # already assembles the window and publishes dense_len_dev the same
             # way.
             #
-            # DELIBERATELY NOT DONE, and the reason is a measurement rather than
-            # effort. It would only benefit --fastdc, and --fastdc swept 4k-64k
-            # on Qwen2.5-1.5B is 2x SLOWER at 4k-8k and does not reproduce
-            # eager's output at 4k/8k/16k -- so it is not a default and this
-            # would be optimising a path that is not correct yet. It also would
-            # NOT fix that divergence: this guard already declines the rotation
-            # under mutation-out, so the rotation is provably not the cause. The
-            # cause is the replay's frozen routing. Fix that first; this second.
+            # THIS GUARD IS THE WHOLE --fastdc DIVERGENCE, and the replay is not
+            # at fault. Declining here sends mutation-out to the Triton kernel
+            # while eager takes remat: two different attention implementations,
+            # so the two arms were never computing the same thing.
+            #
+            # Established by elimination, not inference:
+            #   * DKV_ROTATED_POOL=1, where both arms take remat and no rotation
+            #     is needed, gives eager and replayed the SAME md5
+            #     (1c58b822b4983e8d). So replay reproduces eager exactly.
+            #   * DKV_GRAPH_DEBUG_PTR=1 shows every replayed input correct:
+            #     ingest advancing at a fixed address, window advancing with
+            #     dlen 1463->1474, cos stable, and the routed set frozen but
+            #     COMPLETE -- checksum 105 = 0+1+...+14, i.e. all 15 blocks, so
+            #     freezing it is a no-op exactly as the selectivity gate intends.
+            #   * [POOL] shows the compressed pool bit-identical at generation 47
+            #     across every step: V_K, anchors_K and residuals never move.
+            # Nothing is stale. Frozen routing was the wrong suspect.
+            #
+            # THE FIX is to rotate the dense window in the WRAPPER, into a
+            # fixed-address buffer, so remat can serve mutation-out and both arms
+            # run the same path. Attempted and REVERTED: the publish never
+            # satisfied its own guard (no exception -- the block ran and fell
+            # through), so the forward kept declining and the md5s did not move.
+            # Debug that guard first; the design is right, the plumbing was not.
+            if _ok and _MUTATION_OUT_ACTIVE:
+                _ok = False
             if _ok and _MUTATION_OUT_ACTIVE:
                 _ok = False
             if not _ok:

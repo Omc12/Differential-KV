@@ -1085,6 +1085,25 @@ class PyTorchDKVHFWrapper:
             f"| remat {_chk(None if remat is None else remat[0])} "
             f"| cos {_chk(cos)}",
             flush=True, file=_s.stderr)
+        # THE POOL ITSELF. Everything above is state the WRAPPER republishes
+        # between forwards, so it advances under replay by construction. The
+        # compressed pool is not: the gather reads pool.V_K / anchors_K and a
+        # captured graph froze whatever it held at capture, so if these move
+        # while a graph is live, replay is attending stale compressed content.
+        _pool = getattr(mgr, "native_pool", None)
+        _smgr = getattr(mgr, "_streaming_mgr", None)
+        try:
+            _gen = (_smgr._metadata_versions.get(session_id, {}).get(L)
+                    if _smgr is not None else None)
+        except Exception:                                        # noqa: BLE001
+            _gen = None
+        print(
+            f"[POOL] step={getattr(self, '_dkv_step_idx', -1):3d} "
+            f"gen {_gen} "
+            f"| V_K {_chk(None if _pool is None else getattr(_pool, 'V_K', None))} "
+            f"| ancK {_chk(None if _pool is None else getattr(_pool, 'anchors_K', None))} "
+            f"| resK {_chk(None if _pool is None else getattr(_pool, 'residual_K_values', None))}",
+            flush=True, file=_s.stderr)
 
     def _dkv_reset_graph_step(self) -> None:
         """Clear per-session graph state. Called from prefill, once per session."""
