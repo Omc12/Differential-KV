@@ -760,12 +760,36 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             #     32k   dab29f7d == dab29f7d
             #     64k   42a41224 == 42a41224
             #
-            # 8k IS THE ONE LEFT, and it is the context where the compressed
-            # block count grows mid-generation (6 -> 7, logged by the
-            # invalidation added in a8e27bf0), forcing a re-capture. So the
-            # remaining fault is in the RE-capture transition rather than in
-            # capture or replay, both of which are now exact. 32k and 64k agree
-            # because the selectivity gate declines the graph there entirely.
+            # 8k IS THE ONE LEFT, and IT IS NOT ABOUT 8k. Measured:
+            #
+            #   8k,  8 tokens   invalidation FIRES (6 -> 7), output MATCHES
+            #   8k, 48 tokens   invalidation fires,          output DIFFERS
+            #   16k, 650 tokens no invalidation,             output MATCHES
+            #
+            # So the trigger is a block FINALISING during generation, and how
+            # many replays run after it -- not the context length. Whether that
+            # happens depends on where the prompt sits relative to a block
+            # boundary, so any context reaches it with a long enough generation;
+            # 16k is exact over 650 replayed steps only because it never gets
+            # there. 32k and 64k agree for a different reason again: the
+            # selectivity gate declines the graph, so nothing replays.
+            #
+            # TWO FIXES TRIED, NEITHER WORKS. Re-capturing into the new block set
+            # gives the same wrong md5. Retiring the graph and finishing in eager
+            # ALSO gives the same wrong md5, which is the more informative of the
+            # two: falling back cannot repair it, so the divergence is already
+            # present in the replays BEFORE the crossing -- and it is invisible
+            # at 8 tokens only because too few replays follow to accumulate.
+            # Switching mutation-out off mid-session is its own hazard as well,
+            # since the deferred ingest and the window assembly change owner
+            # while state is live.
+            #
+            # So the next question is not "how should re-capture work" but "what
+            # do the pre-crossing replays already get wrong that only shows after
+            # ~40 steps". The [DUMP]/[POOL] probes cover the wrapper-owned state
+            # and the pool; neither moves. Instrument the ATTENTION OUTPUT per
+            # step next -- compare replayed against eager logits directly, rather
+            # than the inputs, which are all now accounted for.
             _prerot = None
             if _ok and _MUTATION_OUT_ACTIVE:
                 _prerot = (kv_manager.decode_workspace.get(sid, {})
