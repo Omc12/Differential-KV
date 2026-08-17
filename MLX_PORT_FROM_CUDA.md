@@ -194,6 +194,16 @@ unlike multifact, whose ±15-point seed band cannot resolve anything, see item 1
 **Exact parity with dense**, up from a 7-point deficit. Fisher p ≈ 0.03 against
 the rotated arm.
 
+> **⚠ The 40/48 rotated figure does not reproduce.** Re-run at 48 seeds on
+> Qwen3.5-2B at 32k, `mid` (which is the rotated arm) scores **21/48**. That was
+> checked against the code as of `69393023`, three commits earlier, and is 21/48
+> there too — so it is a stale recorded number, not a regression, and something
+> outside these two commits moved it. The DIRECTION of this item is unaffected
+> and is the whole point of it: unrotated beats rotated, by more than was
+> claimed. But do not carry any absolute score from this generation of runs into
+> MLX as a target — re-measure the arm you actually ship. The same caution
+> applies to the 47/48 figures, which come from the same batch.
+
 **The cost, which is why it is not the global default.** Rotating at read time
 costs decode and memory. Qwen3.5-2B at 32k, interleaved and reversed:
 

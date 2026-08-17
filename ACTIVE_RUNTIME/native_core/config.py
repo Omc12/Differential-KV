@@ -56,10 +56,24 @@ class DKVConfig:
             # WAYS. So the residual budget is not what limits `low` -- 40 stays,
             # and it is now measured rather than assumed.
             #
+            # CONFIRMED AGAIN on `mid`, at 48 seeds: 21/48 at residual 128 and
+            # 21/48 at 40, on Qwen3.5-2B at 32k. Three independent measurements
+            # now say the exact-token budget is inert on prose, so `mid` is
+            # paying for 128 of them. The untested case is the one this ladder
+            # was written for -- table- and digit-dense documents, where the
+            # residuals carry exactly what the SVD reconstructs worst -- so
+            # lowering `mid` wants that measured first, not just these two.
+            #
             # What DOES limit `low` is its energy target: 0.999 gives a realised
-            # mean per-block rank of 35 against mid's 53, and `low` scores 18/24
-            # where mid scores 20/24 and ultra 47/48. That is the memory-for-
+            # mean per-block rank of 35 against mid's 53. That is the memory-for-
             # fidelity trade the preset exists to make, working as intended.
+            #
+            # The "mid scores 20/24" that used to sit here DOES NOT REPRODUCE.
+            # Re-run at 48 seeds, mid is 21/48 -- half of it. Checked against the
+            # code as it was three commits earlier and it is 21/48 there too, so
+            # this is a stale recorded number rather than a regression. Treat the
+            # ladder's ORDERING as measured and its absolute scores as not, until
+            # each is re-run; ultra's 47/48 is from the same generation of runs.
             self.max_residual_tokens = 40
             # Spectral energy a block's low-rank form must retain, and the rank
             # ceiling that serves it. This -- not `rank` -- is what actually sets
