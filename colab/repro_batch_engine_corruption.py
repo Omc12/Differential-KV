@@ -1,6 +1,49 @@
 """Repro for intermittent OUTPUT CORRUPTION in the ContinuousBatchEngine path.
 
-STATUS: OPEN. Component NOT established.
+STATUS: RESOLVED (2026-08-17). The component is the ENGINE, and the mechanism is
+below. Not fixed -- see "why not fixed" at the end.
+
+THE CAUSE: NOTHING THREADS A KV CACHE FOR SHORT PROMPTS.
+
+batch_engine calls the model with no past_key_values at all (:1112, :1136 for
+prefill, :1430-:1476 for decode) -- it passes only input_ids, position_ids and
+use_cache=True. So DKV's session-based interception is the ONLY thing that
+supplies a KV cache on this path. That much was already recorded here.
+
+What was missing is that DKV DECLINES TO ENGAGE below DKV_ENGAGE_THRESHOLD /
+DKV_COMPRESSED_MIN_CTX, and the failing tests use prompts of a few tokens
+("List the days of the week."). Below the threshold DKV correctly does nothing,
+the engine supplies nothing, and every decode step therefore sees ONE token with
+no history whatsoever. Word salad is the arithmetic result, not a corruption:
+the first token is fine because the prefill chunk carries the prompt, and every
+token after it is generated from nothing.
+
+PROVEN by forcing engagement so DKV threads the cache after all:
+
+    DKV_ENGAGE_THRESHOLD=0 DKV_COMPRESSED_MIN_CTX=0 DKV_COMPRESSED_DECODE=1
+    pytest tests/test_cancellation_and_isolation.py::test_cache_isolation
+
+    before:  'EASTbrief_RESP.. ## qed. drainage Pioneerichierutters'
+    after :  '-old, in- January, and then list the months of-the-majust'  PASSES
+
+The remaining roughness in the "after" text is the test's own config={"rank": 8},
+which is an extreme compression setting, not this bug.
+
+This also explains the two things that made it look intermittent and made
+UNPATCH=1 useless as a control: the corruption is deterministic given a
+sub-threshold prompt, and removing DKV removes the only cache there was.
+
+WHY NOT FIXED. The real fix is for the engine to own a KV cache instead of
+borrowing DKV's, and its decode step is BATCHED -- one forward over a bucket,
+logits[:, -1, :] sliced per request -- so that needs a batched cache with
+per-row lengths, which is a redesign rather than a patch. ContinuousBatchEngine
+is also documented as dead code by the repo's own migration notes
+(ACTIVE_RUNTIME/archive/phase20_batch_engine_survival.md: "Our Python-based
+batching loop is dead code"), and its only non-test consumer lives in archive/.
+Redesigning a cache for a component already scheduled for deletion is not worth
+it. If you DO revive the engine, this is the thing to fix first.
+
+--- original notes below, kept because the reasoning is still correct ---
 
 DO NOT TRUST UNPATCH=1 AS A CONTROL. It measured 10/10 corrupt and was briefly
 read as proving the bug is not DKV's. It proves nothing of the kind: batch_engine

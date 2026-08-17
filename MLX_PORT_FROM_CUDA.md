@@ -214,6 +214,29 @@ the rotated arm.
 >
 > **`unrotated == dense` still holds exactly, 23/48 vs 23/48**, which is this
 > item's actual claim, and rotated is still below both. Port the change.
+
+### Confirmed on a SECOND metric, and the gain is wider than "retrieval"
+
+`colab/tablebench_cuda.py` (new) asks for one 4-digit amount by its code, out of
+60 ledger rows scattered through 32k of prose. Exact digits, so a fluent wrong
+number scores zero. Qwen3.5-2B, 24 seeds:
+
+| arm | hits |
+|---|---|
+| dense | 24/24 |
+| **ultra (unrotated)** | **24/24** |
+| mid (rotated) | 14/24 |
+
+**Rotation costs 42% of exact digit recall and the unrotated pool recovers all of
+it.** That widens this item considerably: it is not only distractor-heavy
+retrieval, it is invoices, logs, IDs, any table — and on MLX, which shares the
+rotated design, it is the same one-line change.
+
+Nothing else touched this gap. Residual budget 40 vs 128: 14/24 both.
+Attend-every-block (`DKV_TOPK_BLOCKS=0`): 14/24. Tier the residual budget on the
+error tail instead of the median: 14/24. **The rotation is not one contributor
+among several — it is the whole gap**, which is the same conclusion item 1
+reached from the other side when it retired routing as a lever.
 >
 > The lesson for the port: **a score is only meaningful next to a control run in
 > the same environment.** Every absolute number in this file was recorded without

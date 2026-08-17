@@ -1339,8 +1339,51 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     rel_error_V_all = error_V_all / norm_V_all
 
     if T_active > 0:
-        med_K_all = torch.median(rel_error_K_all, dim=1).values   # [N]
-        med_V_all = torch.median(rel_error_V_all, dim=1).values
+        # TIER ON THE TAIL, NOT THE MEDIAN.
+        #
+        # The tier classifier below decides how many tokens are kept EXACT, and
+        # residuals exist precisely to correct the tokens the SVD reconstructs
+        # WORST. The median describes the typical token, so it answers a
+        # different question -- and it gets the important case backwards.
+        #
+        # A block that is 95% prose filler with one ledger line of digits has a
+        # LOW median: nearly every token is easy. It was therefore classified
+        # "easy" and capped at 8 residuals, discarding exactly the digits that
+        # needed keeping. That is not hypothetical -- it is why the residual
+        # budget measured INERT four separate times (linkbench 24 and 48 seeds,
+        # prose synthesis, and a digit-table benchmark): the tier capped at 8 or
+        # 16 long before max_residual_tokens of 40 or 128 could bind, so the
+        # "main quality dial" was not connected to anything.
+        #
+        # The 0.90 quantile asks "how bad are the worst tokens here", which is
+        # the question the budget is answering, and it costs no VRAM to act on:
+        # the slots are preallocated UNIFORMLY per block, so filling more of
+        # them is free apart from the writes.
+        #
+        # MEASURED, AND IT CHANGES NOTHING -- so the DEFAULT STAYS THE HISTORICAL
+        # MEDIAN. Digit-table benchmark, Qwen3.5-2B at 32k, 24 seeds:
+        #
+        #     median tiering (q=0.0)   14/24
+        #     tail tiering   (q=0.90)  14/24
+        #     dense                    24/24
+        #
+        # The reasoning above is still sound -- the median really does misfile a
+        # prose block carrying a few digits -- but fixing it does not recover the
+        # digits, so the tier was not what was losing them. Kept as a knob
+        # because it isolates one variable cleanly, not shipped as a change,
+        # since a default that alters compression for no measured gain is
+        # exactly what this project keeps having to retract.
+        _q = float(os.environ.get("DKV_RESIDUAL_TIER_Q", "0.0"))
+        if _q >= 1.0:
+            med_K_all = rel_error_K_all.max(dim=1).values
+            med_V_all = rel_error_V_all.max(dim=1).values
+        elif _q <= 0.0:
+            # Restores the historical median behaviour, for A/B.
+            med_K_all = torch.median(rel_error_K_all, dim=1).values
+            med_V_all = torch.median(rel_error_V_all, dim=1).values
+        else:
+            med_K_all = torch.quantile(rel_error_K_all.float(), _q, dim=1)
+            med_V_all = torch.quantile(rel_error_V_all.float(), _q, dim=1)
     else:
         med_K_all = torch.zeros(N_blocks, device=gpu_device)
         med_V_all = torch.zeros(N_blocks, device=gpu_device)
@@ -1403,13 +1446,18 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
             n_max_residual = min(int(_pool_max_res), T_active)
         else:
             n_max_residual = int(T_active * 0.15)
-        median_err_K = float(_meds_cpu[i, 0])
-        median_err_V = float(_meds_cpu[i, 1])
-        max_median_err = max(median_err_K, median_err_V)
-        if max_median_err < 0.05:
+        # These are the TAIL error per block now (see the quantile above), not
+        # the median, so "easy" means "even the worst tokens reconstruct well"
+        # rather than "most tokens do". The thresholds are unchanged, which
+        # deliberately moves mixed blocks -- prose carrying a few digits -- out
+        # of the 8-residual tier they were being misfiled into.
+        tail_err_K = float(_meds_cpu[i, 0])
+        tail_err_V = float(_meds_cpu[i, 1])
+        max_tail_err = max(tail_err_K, tail_err_V)
+        if max_tail_err < 0.05:
             # Easy block (prose filler / repeated text): cap at 8 residuals.
             n_max_residual = min(8, n_max_residual)
-        elif max_median_err < 0.15:
+        elif max_tail_err < 0.15:
             # Medium complexity: cap at 16 residuals.
             n_max_residual = min(16, n_max_residual)
         # Hard block (factual / code / numbers): keep full budget unchanged.

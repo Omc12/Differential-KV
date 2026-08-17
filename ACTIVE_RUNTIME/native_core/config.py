@@ -179,7 +179,30 @@ class DKVConfig:
             self.srl_age_penalty = 0.0
             self.kv_quant = "q8_0"
             self.max_active_dense_tokens = 2048
-            self.max_residual_tokens = 128
+            # LOWERED 128 -> 40 (2026-08-17). Measured inert FOUR times, the last
+            # of them on the content this dial was designed for:
+            #
+            #   linkbench @32k, 24 seeds, `low`, 40 vs 128      18/24 both
+            #   linkbench @32k, 48 seeds, `mid`, 40 vs 128      21/48 both
+            #   prose synthesis @13.4k,          40 vs 128      unchanged
+            #   digit-table @32k, 24 seeds, `mid`, 40 vs 128    14/24 both
+            #
+            # The last one is the one that unblocked this. The first three were
+            # all PROSE, and prose is not what residuals are for -- a low-rank
+            # approximation of flowing text is a good one. colab/tablebench_cuda.py
+            # was written to test the opposite: a ledger of unrelated 4-digit
+            # codes and amounts, where the block is near full-rank and the exact
+            # tokens are the only thing standing between the model and a corrupted
+            # digit. 40 and 128 score identically there too.
+            #
+            # The pool allocates these slots UNIFORMLY on every block, so this is
+            # a direct VRAM saving on every block in the session (A/B at 13.4k:
+            # res128 pool 2.8 GB, res40 1.5 GB) for no measured quality cost.
+            #
+            # This DIVERGES FROM MLX, which uses 128 flat at every preset. The
+            # divergence is deliberate and measured; `high` keeps 128 for anyone
+            # who wants the old behaviour.
+            self.max_residual_tokens = 40
             # ENERGY IS THE DIAL. RANK IS A CEILING THAT USUALLY DOES NOT BIND.
             #
             # This block previously claimed the opposite ("rank is the driver,
@@ -625,6 +648,28 @@ class DKVConfig:
         #     behalf of users who are not doing distractor-heavy retrieval;
         #   * the gain is specific to CONFUSABLE content. Ordinary needle recall
         #     is 9/9 either way on both models, so nothing is lost by default;
+        #     ── UPDATE 2026-08-17: "specific" is NARROWER THAN THE TRUTH. The
+        #     gain also covers EXACT DIGIT RECALL, which is not an exotic case --
+        #     invoices, logs, ledgers, IDs, any table. colab/tablebench_cuda.py,
+        #     Qwen3.5-2B at 32k, 24 seeds, asking for one 4-digit amount by its
+        #     code out of 60 scattered ledger rows:
+        #
+        #         dense                     24/24
+        #         ultra   (unrotated)       24/24   <- exact parity again
+        #         mid     (rotated)         14/24
+        #
+        #     So rotation costs 42% of exact digit recall, and the unrotated pool
+        #     recovers ALL of it. That is now the SECOND metric on which
+        #     unrotated == dense exactly and rotated sits well below.
+        #
+        #     The DECISION below is unchanged, because the ~24% decode and
+        #     +1.1 GB are unchanged and this project's stated priorities are
+        #     throughput and VRAM. What changes is the ADVICE: recommend `ultra`
+        #     for any digit-, code- or table-heavy workload, not just for
+        #     distractor-heavy retrieval. Also worth knowing that on this
+        #     benchmark NOTHING ELSE helped -- residual budget 40 vs 128 and
+        #     attend-every-block are both 14/24, so the rotation is not one
+        #     contributor among several, it is the whole gap;
         #   * `ultra` exists precisely to trade speed and memory for quality and
         #     already takes it.
         # Revisit if decode stops being host-bound (~39% GPU-idle today): the
