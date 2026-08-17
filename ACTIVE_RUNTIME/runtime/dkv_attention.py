@@ -784,12 +784,39 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             # since the deferred ingest and the window assembly change owner
             # while state is live.
             #
-            # So the next question is not "how should re-capture work" but "what
-            # do the pre-crossing replays already get wrong that only shows after
-            # ~40 steps". The [DUMP]/[POOL] probes cover the wrapper-owned state
-            # and the pool; neither moves. Instrument the ATTENTION OUTPUT per
-            # step next -- compare replayed against eager logits directly, rather
-            # than the inputs, which are all now accounted for.
+            # ANSWERED, by DKV_LOGIT_TRACE=1 on both arms at 8k:
+            #
+            #     first NUMERIC difference   step  1
+            #     first ARGMAX difference    step 32
+            #
+            # Step 1, replayed against eager: max 29.203125 vs 29.218750, i.e.
+            # 0.015625 = 2^-6, which at fp16 magnitude 29 is exactly ONE ULP. The
+            # replayed decode is not stale and is not attending the wrong thing;
+            # it is computing the same quantity to a slightly different rounding
+            # from the very first step. The argmax survives that for 31 tokens
+            # and flips on the 32nd, after which the two trajectories separate
+            # and the gap grows to 6.34.
+            #
+            # THAT EXPLAINS EVERY EARLIER OBSERVATION and retires the ones built
+            # on the wrong model. 8 tokens "matched" because the flip is at 32.
+            # 48 tokens "differed" because it is not. The 6 -> 7 block crossing
+            # was a coincidence of timing, which is why neither re-capturing nor
+            # retiring the graph changed the md5: there was nothing stale to
+            # repair.
+            #
+            # So BYTE-EXACT REPLAY IS THE WRONG GOAL. A captured graph does not
+            # promise bit-identical arithmetic -- kernel selection can differ
+            # between a capture-warmup and an eager call (Triton autotune,
+            # cuBLAS heuristics), and one ULP is all it takes. The honest
+            # question is whether a 1-ULP decode is acceptable, and this project
+            # already answers it elsewhere: DKV_DETERMINISTIC exists precisely
+            # because the decode attention's own reduction is not reproducible at
+            # long context either, and greedy decode there flips tokens for the
+            # same reason.
+            #
+            # Do not spend more time hunting staleness here. If --fastdc is to
+            # ship on, it ships as "same distribution, not same tokens", with the
+            # 4k-64k speed sweep as the argument.
             _prerot = None
             if _ok and _MUTATION_OUT_ACTIVE:
                 _prerot = (kv_manager.decode_workspace.get(sid, {})

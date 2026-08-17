@@ -2586,6 +2586,23 @@ class PyTorchDKVHFWrapper:
                 print(f"[DKV_TIME_ATTN] total_token={_token_ms:.2f}ms", flush=True)
 
             logits = outputs.logits[:, -1, :]
+            # DKV_LOGIT_TRACE=1 -- per-step logit fingerprint, for finding the
+            # FIRST step at which a replayed decode parts from an eager one.
+            #
+            # Every INPUT to the replayed attention has been accounted for
+            # ([DUMP] for the wrapper-owned state, [POOL] for the compressed
+            # pool) and none of them move, so the remaining question is where the
+            # OUTPUT first differs. Diff two runs line by line: the step where
+            # argmax changes is where the text splits, but sum/max move first and
+            # by how much says whether it is drift or a wrong read.
+            if os.environ.get("DKV_LOGIT_TRACE") == "1":
+                _lf = logits.float()
+                print(f"[LOGIT] step={getattr(self, '_dkv_step_idx', -1):3d} "
+                      f"replay={int(bool(getattr(self, '_dkv_last_was_replay', False)))} "
+                      f"argmax={int(_lf.argmax())} "
+                      f"max={float(_lf.max()):.6f} "
+                      f"sum={float(_lf.sum()):.4f}",
+                      file=sys.stderr, flush=True)
             past_kv = outputs.past_key_values
             cur_pos += 1
 
