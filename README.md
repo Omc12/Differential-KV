@@ -101,7 +101,8 @@ python ACTIVE_RUNTIME/serving/cli.py --api-url http://localhost:8000/v1
 | `--model` | `str` | `Qwen/Qwen2.5-0.5B-Instruct` | HuggingFace model ID or local directory path |
 | `--api-url` | `str` | `None` | API Gateway base URL. When provided, runs CLI in Client Mode |
 | `--serving-mode` | `choice` | `balanced` | KV Cache strategy: `lightweight`, `balanced`, `performance`, `long-context`, `fused-sparse` |
-| `--preset` | `choice` | `mid` | Hardware optimization preset: `low`, `mid`, `high` |
+| `--preset` | `choice` | `mid` | Fidelity preset: `low`, `mid`, `high`, `ultra` — see the ladder below |
+| `--fastdc` | `flag` | `False` | CUDA only. Prioritises decode over prefill (CUDA-graph decode path). Opt-in: worth ~1.2% at 16k and nothing at 32k |
 | `--rank` | `int` | `32` | SVD rank for KV compression (capped at $d_{\text{head}}$) |
 | `--micro-block-size` | `int` | `256` | Number of tokens per compressed KV micro-block ($B_s = 256$) |
 | `--batch-size` | `int` | `4` | Maximum continuous batching size for engine |
@@ -113,6 +114,29 @@ python ACTIVE_RUNTIME/serving/cli.py --api-url http://localhost:8000/v1
 | `--repetition-penalty` | `float` | `1.15` | Repetition penalty factor |
 | `--draft-model` | `str` | `None` | Optional draft model ID for speculative decoding |
 | `--max-resident-sessions` | `int` | `4` | Maximum active resident chat sessions held in VRAM |
+
+### 3. The Preset Ladder
+
+| preset | keys stored | energy / rank | residual $R$ | pick it when |
+|---|---|---|---|---|
+| `low` | rotated | 0.999 / 32 | 40 | memory is the binding constraint |
+| **`mid`** (default) | rotated | 0.9999 / 64 | 40 | general use — the fast default |
+| `high` | rotated | 0.99999 / 128 | 128 | you want the largest fidelity budget |
+| **`ultra`** | **unrotated** | 0.9999 / 64 | 40 | **digits, codes, tables, or confusable content** |
+
+**`ultra` is exactly `mid` plus one change: keys are stored un-rotated.** Same rank,
+same energy, same residual budget — so it costs the rotation and nothing else.
+
+Two things worth knowing before choosing:
+
+* **For digit- or table-heavy work you want `ultra`, not `high`.** `high` stores
+  rotated keys like `mid` does and does not fix that class of error; its larger
+  rank and residual budget are not what is failing.
+* **`ultra` is not free, and its cost depends on your model.** Rotating at read
+  is paid on every *attended* layer, so a hybrid model (Qwen3.5-2B: 6 of 24
+  attended) pays ~43% of decode while a dense-attention model (Qwen2.5-1.5B: 28
+  of 28) pays ~137%. Check your model's attended-layer count before budgeting.
+  `DKV_ROTATED_POOL=0` takes the same trade on any preset.
 
 ---
 
@@ -127,7 +151,10 @@ Differential-KV runtime behaviors can be fine-tuned using environment variables:
 | `DKV_HIGH_QUALITY_ROUTING` | `0` | Cross-runtime | `0` = Fast bounded-K pruning (attends top-$K$ blocks, context-independent speed). `1` = High-Quality routing (dynamic candidate routing). |
 | `DKV_CACHE_LIMIT_GB` | `1` | MLX | Buffer-cache allocation cap in GB (halves peak prefill RAM). |
 | `DKV_TOPK_BLOCKS` | `16` | Both engines | Number of compressed micro-blocks routed per decode step. |
-| `DKV_MAX_RESIDUAL` | `128` | Both engines | Number of exact residual token rows stored per block ($R = 128$). |
+| `DKV_MAX_RESIDUAL` | `128` MLX / `40` CUDA | Both engines | Exact residual token rows per block. CUDA `mid`/`ultra`/`low` use 40, `high` keeps 128; MLX is flat 128. The budget measured **inert** on four benchmarks including a digit-table one, and the pool allocates these slots on *every* block, so 40 is a straight saving. |
+| `DKV_ROTATED_POOL` | `1` (`0` on `ultra`) | Both engines | `1` stores POST-RoPE keys (fast reads). `0` stores PRE-RoPE and rotates at read: **exact dense parity on retrieval and digit recall**, at 43–137% of decode depending on attended-layer count. |
+| `DKV_DETERMINISTIC` | `0` | CUDA | `1` forces a deterministic SDPA backend. Greedy decode is **not** reproducible at long context without it — the cause is the decode attention's reduction, not compression. **Turn this on for any run you intend to compare.** |
+| `DKV_FAST_DECODE` | `0` | CUDA | Same as `--fastdc`. Routed CUDA-graph decode, gated per session to whether a graph will actually be captured. |
 | `DKV_SVD_SEED` | `1234` | MLX | SVD random state seed for deterministic compression. |
 | `DKV_EARLY_LAYER_RANK_BOOST` | `0` | MLX | Set `1` to boost SVD rank ($2\times$) in early layers ($\le 15\%$ network depth) for syntactic protection. |
 | `DKV_MAX_RANK_EARLY` | `0` | MLX | Cap for early layer boosted rank ($0$ = auto-selects $2\times$ base rank). |
@@ -153,6 +180,51 @@ Differential-KV runtime behaviors can be fine-tuned using environment variables:
 ## 📊 Measured Paper Benchmarks
 
 All benchmark results are empirically measured on a single host: **Apple M3 with 8.6 GB unified memory**, evaluating **Qwen2.5-1.5B-Instruct (int4)** using rank $r=32$, residual budget $R=128$, micro-block size $B_s=256$, top-$K=16$, and residual-key router (raw logs preserved in `benchmarks/results/results_latest.json`).
+
+### 0. CUDA Runtime — Preset Accuracy and the Cost of `ultra`
+
+Separate host and runtime from the MLX numbers below: **RTX-class CUDA GPU,
+Qwen3.5-2B, 32k context**, `transformers` 5.14.1 / `torch` 2.11.0+cu130. **A dense
+control was run in the same process generation as every DKV number** — absolute
+scores here are not comparable to scores taken in another environment, and this
+project has been burned by exactly that (see the note under the accuracy table).
+
+**Accuracy — `ultra` reaches dense exactly on both metrics that can resolve anything**
+
+| benchmark | dense | `ultra` | `mid` |
+|---|---|---|---|
+| linkbench (multi-hop retrieval), 48 seeds | 23/48 | **23/48** | 21/48 |
+| tablebench (exact 4-digit recall), 24 seeds | 24/24 | **24/24** | 14/24 |
+| needle sweep, 9 depths × 2 models | — | 9/9 | 9/9 |
+
+> **Do not compare these absolutes against older numbers in this repo.** An
+> environment change (most likely a `transformers`/`torch` update) roughly halved
+> *every* linkbench arm — **including dense, which shares no DKV code**. The
+> *relationships* are what hold, and they reproduce: `ultra == dense`, `mid` below
+> both. Always run a dense arm alongside, in the same environment.
+
+**What closes the gap — and what does not**
+
+The whole `mid`→`ultra` difference is the un-rotated pool. Everything else was
+measured and is inert on `tablebench` (all 14/24, unchanged from `mid`):
+
+| lever tried | result |
+|---|---|
+| residual budget $R$ = 40 vs 128 | no change (also no change on 3 prose benchmarks) |
+| attend **every** block (`DKV_TOPK_BLOCKS=0`) | no change → not a routing problem |
+| tier residuals on error tail, not median | no change |
+| **un-rotated pool (`ultra`)** | **14/24 → 24/24, i.e. dense parity** |
+
+**Speed — what `ultra` costs**, paired and in-process, 8 rounds, 32k:
+
+| model | attended layers | `mid` | `ultra` | cost |
+|---|---|---|---|---|
+| Qwen3.5-2B | 6 of 24 | 39.72 ms/tok | 57.39 ms/tok | **+43%** |
+| Qwen2.5-1.5B | 28 of 28 | 51.48 ms/tok | 122.54 ms/tok | **+137%** |
+
+The cost is the rotation applied at read on every attended layer, so it scales
+with attended-layer count — **a figure for one model tells you nothing about
+another.** That is why `mid` stays rotated by default and `ultra` is opt-in.
 
 ### 1. Context Length Sweep (DKV vs. Dense Baselines)
 

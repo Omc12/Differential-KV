@@ -1816,6 +1816,24 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     # convention), so every rotation below would be a SECOND rotation. Skipping
     # it is not an optimisation, it is required for correctness -- and it is
     # also strictly cheaper.
+    # MAKING THIS CHEAPER: the obvious lever is already taken, and lengthening it
+    # buys nothing. The rotation below is applied at each block's ANCHOR position,
+    # which is fixed per block, so its result does not depend on the decode step --
+    # it looks like something that should be computed once and reused. It already
+    # is: this whole gather sits behind the remat cache, whose key is
+    # `step // DKV_REMAT_INTERVAL`, so it recomputes once every 4 tokens rather
+    # than every token.
+    #
+    # Raising that interval 4 -> 16 under an UNROTATED pool, paired in-process,
+    # Qwen3.5-2B at 32k, 8 rounds: mean_diff +0.019 ms, 95% CI [-2.918, +2.956].
+    # No effect. So the unrotated pool's 43-137% is NOT recompute frequency, and
+    # caching the rotated basis harder will not recover it.
+    #
+    # Where to look next, in order: the residual exact-RoPE path below, which only
+    # runs when do_rot is set and grows the cos/sin gather from [N, D] to
+    # [N, MAX_RES, D]; and whether the rotated pool lets the kernel consume
+    # pool.V_K as a VIEW while this path must materialise a fresh tensor.
+    # Measure which, do not assume -- that is what this comment costs and saves.
     do_rot = (anchor_indices is not None and cos is not None and sin is not None
               and not pool_stores_rotated_k())
     cos_anc = sin_anc = None
