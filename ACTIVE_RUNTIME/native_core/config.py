@@ -179,29 +179,11 @@ class DKVConfig:
             self.srl_age_penalty = 0.0
             self.kv_quant = "q8_0"
             self.max_active_dense_tokens = 2048
-            # LOWERED 128 -> 40 (2026-08-17). Measured inert FOUR times, the last
-            # of them on the content this dial was designed for:
-            #
-            #   linkbench @32k, 24 seeds, `low`, 40 vs 128      18/24 both
-            #   linkbench @32k, 48 seeds, `mid`, 40 vs 128      21/48 both
-            #   prose synthesis @13.4k,          40 vs 128      unchanged
-            #   digit-table @32k, 24 seeds, `mid`, 40 vs 128    14/24 both
-            #
-            # The last one is the one that unblocked this. The first three were
-            # all PROSE, and prose is not what residuals are for -- a low-rank
-            # approximation of flowing text is a good one. colab/tablebench_cuda.py
-            # was written to test the opposite: a ledger of unrelated 4-digit
-            # codes and amounts, where the block is near full-rank and the exact
-            # tokens are the only thing standing between the model and a corrupted
-            # digit. 40 and 128 score identically there too.
-            #
-            # The pool allocates these slots UNIFORMLY on every block, so this is
-            # a direct VRAM saving on every block in the session (A/B at 13.4k:
-            # res128 pool 2.8 GB, res40 1.5 GB) for no measured quality cost.
-            #
-            # This DIVERGES FROM MLX, which uses 128 flat at every preset. The
-            # divergence is deliberate and measured; `high` keeps 128 for anyone
-            # who wants the old behaviour.
+            # 128 -> 40, tracking `mid`, which is what this preset is defined as
+            # plus the unrotated pool -- see the `mid` branch for the four
+            # measurements that showed the residual budget inert. Keeping ultra
+            # above mid here would reintroduce exactly the kind of unmeasured
+            # extra that 69393023 removed from this preset.
             self.max_residual_tokens = 40
             # ENERGY IS THE DIAL. RANK IS A CEILING THAT USUALLY DOES NOT BIND.
             #
@@ -383,7 +365,53 @@ class DKVConfig:
             #     3.3x (fixed in KVRuntimeManager).
             # Neither was a reason to keep 64 -- both were bugs 64 happened to
             # hide. See handoff §9u.
-            self.max_residual_tokens = 128
+            #
+            # LOWERED 128 -> 40 (2026-08-17). Measured inert FOUR times, the last
+            # on the content this dial was designed for:
+            #
+            #   linkbench @32k, 24 seeds, `low`, 40 vs 128      18/24 both
+            #   linkbench @32k, 48 seeds, `mid`, 40 vs 128      21/48 both
+            #   prose synthesis @13.4k,          40 vs 128      unchanged
+            #   digit-table @32k, 24 seeds, `mid`, 40 vs 128    14/24 both
+            #
+            # The first three were all PROSE, and prose is not what residuals are
+            # for -- a low-rank approximation of flowing text is a good one, so
+            # the dial was only ever measured where it could not matter.
+            # colab/tablebench_cuda.py tests the opposite (a ledger of unrelated
+            # 4-digit codes, near full-rank blocks, exact-match scored) and 40
+            # and 128 score identically there too.
+            #
+            # The pool allocates these slots UNIFORMLY on every block, so this is
+            # a saving on every block in the session (13.4k A/B on record: pool
+            # 2.8 GB -> 1.5 GB) for no measured quality cost.
+            #
+            # Diverges from MLX's flat 128 deliberately; `high` keeps 128.
+            self.max_residual_tokens = 40
+            # Store keys UNROTATED on `mid` (2026-08-17). This is the only change
+            # that has ever moved accuracy here, and it reaches dense EXACTLY on
+            # both metrics with the power to resolve it: linkbench 23/48 against
+            # dense's 23/48, and digit-table 24/24 against dense's 24/24, where
+            # rotated scores 14/24. Nothing else touched either -- residual
+            # budget, attend-every-block and residual tiering are all inert.
+            #
+            # IT IS EXPENSIVE, AND THE COST SCALES WITH ATTENDED-LAYER COUNT,
+            # because the rotation avoided at store must be applied at read on
+            # every attended layer. Paired, in-process, 32k, 8 rounds:
+            #
+            #   Qwen3.5-2B   ( 6 of 24 attended)  39.72 -> 57.39 ms/tok   +43%
+            #                                     A/A control clean
+            #   Qwen2.5-1.5B (28 of 28 attended)  51.48 -> 122.54 ms/tok  +137%
+            #                                     A/A control biased 1.75 ms,
+            #                                     but the effect is 40x that
+            #
+            # So a DENSE-ATTENTION model pays roughly 2.4x decode for it, and
+            # `mid` is the default preset. The previously recorded "-18% to -24%"
+            # understated the cost: that was cross-process wall INCLUDING
+            # prefill, which dilutes a decode-only effect.
+            #
+            # TO REVERT: delete this line, or set DKV_ROTATED_POOL=1. `low` and
+            # `high` still store rotated and are now the fast presets.
+            self.rotated_pool = False
 
         # 2. Individual options overrides (dict or env variables)
         self.decode_cache_enabled = self._get_bool(

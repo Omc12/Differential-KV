@@ -121,6 +121,19 @@ def set_arm(arm):
         if not hasattr(KVM, "_DENSE_RING"):
             raise SystemExit("dense_ring: append-only patch not present in tree")
         KVM._DENSE_RING = on
+    elif EXPERIMENT == "rotated_pool":
+        # A = UNROTATED (the candidate default), B = rotated (the historical one),
+        # so a POSITIVE mean_diff is what unrotated COSTS.
+        #
+        # Safe to flip in-process only because both sides read the flag at call
+        # time -- _ingest_k() picks which K prefill STORES and the decode gather
+        # picks whether to re-rotate, both via pool_stores_rotated_k(). run()
+        # clears the session and re-prefills on every call, so each arm stores
+        # and reads consistently. If either side had captured the flag at import
+        # this would store one way and read the other, which is not a slow
+        # config -- it is RoPE missing from all compressed content, and it would
+        # show up as a timing difference rather than as the garbage it is.
+        os.environ["DKV_ROTATED_POOL"] = "0" if on else "1"
     elif EXPERIMENT == "fastdc":
         # --fastdc could not be A/B'd in one process before, which is why its
         # worth was argued from cross-process walls that could not resolve it.
