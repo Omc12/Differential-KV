@@ -19,10 +19,26 @@ RoPE kernel appears in the delta at all. Unrotated makes FEWER attention calls
 that each cost 2.5x more, so the operand is bigger rather than the arithmetic on
 the way in. Anything aimed at making the rotation cheaper will measure zero.
 
-Open: why an unrotated pool hands SDPA more to chew on. The unrotated profile
-also shows _fused_sparse_decode_kernel at 144 calls where the rotated one does
-not, so the two configs may be taking different attention paths entirely rather
-than the same path at different sizes -- that is the next thing to establish.
+RESOLVED. It is a DISPATCH difference, and printing the interesting kernels
+unconditionally is what showed it -- a top-N list had hidden the fused kernel
+below its cutoff in one arm, making a size difference and a dispatch difference
+look alike:
+
+    rotated     fmha 520.47 ms / 342 calls,  fused kernel ABSENT
+    unrotated   fmha 751.69 ms / 198 calls,  fused kernel 62.61 ms / 144 calls
+
+342 - 198 = 144 = 24 tokens x 6 attended layers, i.e. exactly the DKV layers
+moving off the remat/SDPA path onto the Triton one. The cause is one line in
+dkv_attention._remat_attend: it DECLINES outright when the pool is unrotated,
+because that path's dense window is only rotated inside the sparse kernel. So
+`ultra` does not pay for rotation -- it pays for losing the remat cache, which
+remat_cache.py's own docstring measures at 6.95 -> 10.18 tok/s at 32k (~46%),
+almost exactly the observed 43%.
+
+The fix is specified at that decline site. Not applied here: it needs the dense
+window's absolute token positions plumbed through assemble_dense_window_kv, and
+a dense window rotated at guessed positions produces confident garbage rather
+than an error.
 
 Runs N decode steps under one setting and prints the top CUDA kernels by self
 time. Run it twice (ROT=1 and ROT=0) and diff the two lists.
@@ -66,7 +82,15 @@ with profile(activities=[ProfilerActivity.CUDA], record_shapes=False) as prof:
     torch.cuda.synchronize()
 
 ka = prof.key_averages()
-rows = sorted(ka, key=lambda e: -e.self_device_time_total)[:18]
+# Print the interesting kernels UNCONDITIONALLY, not just the top-N. A top-18
+# list cut off at 40 ms in one arm and 65 ms in the other, which made a kernel
+# that was merely BELOW THE CUTOFF look absent -- i.e. like a dispatch
+# difference rather than a size difference. Those need telling apart.
+for e in sorted(ka, key=lambda x: -x.self_device_time_total):
+    if any(t in e.key for t in ("fused_sparse", "fmha", "flash", "sdpa")):
+        print(f"  KEY {e.self_device_time_total / 1000.0:9.2f} ms  {e.count:6d}  "
+              f"{e.key[:70]}", flush=True)
+rows = sorted(ka, key=lambda e: -e.self_device_time_total)[:12]
 total = sum(e.self_device_time_total for e in ka) / 1000.0
 print(f"\nROT={os.environ['DKV_ROTATED_POOL']} total_self_cuda={total:.1f} ms "
       f"over {NEW} tokens ({total / NEW:.2f} ms/tok)", flush=True)

@@ -520,13 +520,47 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
         from native_core.sparse_decode.triton_fused_decode import (
             pool_stores_rotated_k as _psr,
         )
+        # THIS LINE IS WHAT `ultra` ACTUALLY COSTS. It is not the rotation.
+        #
+        # Declining here disables the remat cache for the WHOLE session, and
+        # remat is worth a lot: this module's own docstring records 6.95 -> 10.18
+        # tok/s at 32k on Qwen2.5-1.5B, ~46%. The unrotated pool measures 43%
+        # slower on Qwen3.5-2B and 137% on Qwen2.5-1.5B, which is that number,
+        # not a rotation bill.
+        #
+        # Confirmed by profile (colab/profile_rotated_pool.py), 24 steps at 32k:
+        #
+        #   rotated     fmha 520.47 ms / 342 calls,  fused kernel ABSENT
+        #   unrotated   fmha 751.69 ms / 198 calls,  fused kernel 62.61 / 144
+        #
+        # 342 - 198 = 144 = 24 tokens x 6 attended layers: exactly the DKV layers
+        # moving off this path onto the Triton one. And no RoPE kernel appears in
+        # the delta at all -- three separate rotation hypotheses each measured
+        # no-effect before this was found (see the do_rot site in
+        # triton_fused_decode.py).
+        #
+        # TO FIX, and it is worth fixing -- it would make dense-parity accuracy
+        # nearly free and let `ultra` become the default:
+        #   1. plumb the dense window's ABSOLUTE TOKEN POSITIONS into this
+        #      function. They exist on dense_blocks[].token_indices, which is
+        #      where the sparse path reads them; assemble_dense_window_kv builds
+        #      the workspace and would have to publish them alongside it.
+        #   2. rotate dense_k with _partial_rope_apply at those positions, the
+        #      same call the sparse path makes.
+        #   3. then delete this decline.
+        # Do NOT skip step 1 and rotate at a guessed position. Every comment in
+        # triton_fused_decode.py around this describes the same failure mode from
+        # the other direction: a dense window rotated at the wrong positions, or
+        # left unrotated, produces confident garbage rather than an error.
         if not _psr():
             if not _REMAT_UNROTATED_WARNED:
                 _REMAT_UNROTATED_WARNED = True
                 print("[DKV] DKV_REMAT_CACHE ignored: the pool holds UNROTATED "
                       "keys (DKV_ROTATED_POOL=0), and this path's dense window "
                       "is only rotated inside the sparse kernel. Declining "
-                      "rather than attending unrotated dense keys.", flush=True)
+                      "rather than attending unrotated dense keys. THIS, not the "
+                      "rotation, is what the unrotated pool costs.",
+                      file=sys.stderr, flush=True)
             return None
     except Exception:                                            # noqa: BLE001
         return None
