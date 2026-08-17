@@ -237,6 +237,30 @@ Attend-every-block (`DKV_TOPK_BLOCKS=0`): 14/24. Tier the residual budget on the
 error tail instead of the median: 14/24. **The rotation is not one contributor
 among several — it is the whole gap**, which is the same conclusion item 1
 reached from the other side when it retired routing as a lever.
+
+### What it costs, and why CUDA still ships it OFF by default
+
+The `-18%` to `-24%` recorded elsewhere in this file is an **understatement** —
+it was cross-process wall including prefill, which dilutes a decode-only effect.
+Paired and in-process, 32k, 8 rounds:
+
+| model | attended layers | ms/token | cost |
+|---|---|---|---|
+| Qwen3.5-2B | 6 of 24 | 39.72 → 57.39 | **+43%** |
+| Qwen2.5-1.5B | 28 of 28 | 51.48 → 122.54 | **+137%** |
+
+**The cost scales with attended-layer count**, because the rotation avoided at
+store is applied at read on every attended layer. A hybrid model pays 43%; a
+dense-attention model pays about 2.4×. **A figure quoted for one model tells you
+nothing about the other** — check your own model's attended-layer count before
+budgeting for this.
+
+CUDA tried it as the `mid` default, measured the above, and reverted: too steep
+to charge every user for a gain that only appears on confusable or digit-dense
+content. It ships on `ultra`, which is now exactly `mid` plus the unrotated pool,
+so it costs the rotation and nothing else. **MLX should make the same call on its
+own numbers** — the accuracy win is real and worth having on whichever preset
+your decode budget can absorb, but it is not free anywhere.
 >
 > The lesson for the port: **a score is only meaningful next to a control run in
 > the same environment.** Every absolute number in this file was recorded without

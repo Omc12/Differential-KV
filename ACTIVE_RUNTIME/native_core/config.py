@@ -387,16 +387,22 @@ class DKVConfig:
             #
             # Diverges from MLX's flat 128 deliberately; `high` keeps 128.
             self.max_residual_tokens = 40
-            # Store keys UNROTATED on `mid` (2026-08-17). This is the only change
-            # that has ever moved accuracy here, and it reaches dense EXACTLY on
-            # both metrics with the power to resolve it: linkbench 23/48 against
-            # dense's 23/48, and digit-table 24/24 against dense's 24/24, where
-            # rotated scores 14/24. Nothing else touched either -- residual
-            # budget, attend-every-block and residual tiering are all inert.
+            # `mid` KEEPS ROTATED KEYS. Decided 2026-08-17 with both halves of
+            # the trade finally measured, after trying the other way and
+            # reverting it.
             #
-            # IT IS EXPENSIVE, AND THE COST SCALES WITH ATTENDED-LAYER COUNT,
-            # because the rotation avoided at store must be applied at read on
-            # every attended layer. Paired, in-process, 32k, 8 rounds:
+            # The unrotated pool is the only change that has ever moved accuracy
+            # in this project, and it reaches dense EXACTLY on both metrics with
+            # the power to resolve anything, Qwen3.5-2B at 32k:
+            #
+            #                       rotated   UNROTATED   dense
+            #   digit-table  24 sd    14/24     24/24     24/24
+            #   linkbench    48 sd    21/48     23/48     23/48
+            #
+            # But the cost is far larger than the "-18% to -24%" that was on
+            # record, and it SCALES WITH ATTENDED-LAYER COUNT, because the
+            # rotation avoided at store has to be applied at read on every
+            # attended layer. Paired in-process, 32k, 8 rounds:
             #
             #   Qwen3.5-2B   ( 6 of 24 attended)  39.72 -> 57.39 ms/tok   +43%
             #                                     A/A control clean
@@ -404,14 +410,20 @@ class DKVConfig:
             #                                     A/A control biased 1.75 ms,
             #                                     but the effect is 40x that
             #
-            # So a DENSE-ATTENTION model pays roughly 2.4x decode for it, and
-            # `mid` is the default preset. The previously recorded "-18% to -24%"
-            # understated the cost: that was cross-process wall INCLUDING
-            # prefill, which dilutes a decode-only effect.
+            # The old figure understated it because it was cross-process wall
+            # INCLUDING prefill, which dilutes a decode-only effect. A dense
+            # attention model pays roughly 2.4x decode, and this is the DEFAULT
+            # preset -- too steep to charge every user for a gain that only
+            # appears on confusable or digit-dense content.
             #
-            # TO REVERT: delete this line, or set DKV_ROTATED_POOL=1. `low` and
-            # `high` still store rotated and are now the fast presets.
-            self.rotated_pool = False
+            # SO: `mid` stays fast and `ultra` is where that content goes.
+            # `ultra` is now exactly `mid` plus the unrotated pool -- same rank,
+            # same energy, same residual budget -- so it costs the rotation and
+            # nothing else. Point any digit-, code- or table-heavy workload at
+            # `--preset ultra`; there is no longer a reason to reach for `high`
+            # for that, since `high` is rotated too and does not fix it.
+            #
+            # To take it globally anyway: DKV_ROTATED_POOL=0 on any preset.
 
         # 2. Individual options overrides (dict or env variables)
         self.decode_cache_enabled = self._get_bool(

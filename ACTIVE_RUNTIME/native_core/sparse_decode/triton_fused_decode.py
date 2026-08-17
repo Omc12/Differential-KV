@@ -340,6 +340,20 @@ def pool_stores_rotated_k() -> bool:
     (-18% to -24%), and device VRAM 5.21 -> 6.31 GB. So the DEFAULT stays
     rotated and the `ultra` preset sets rotated_pool=False, which is where a
     speed-for-accuracy trade of that size belongs.
+
+    THAT -18% TO -24% IS AN UNDERSTATEMENT, corrected 2026-08-17. It was
+    cross-process wall INCLUDING prefill, which dilutes a decode-only effect.
+    Measured paired and in-process (EXPERIMENT=rotated_pool), 32k, 8 rounds:
+
+        Qwen3.5-2B   ( 6 of 24 attended)  39.72 -> 57.39 ms/tok    +43%
+        Qwen2.5-1.5B (28 of 28 attended)  51.48 -> 122.54 ms/tok   +137%
+
+    THE COST SCALES WITH ATTENDED-LAYER COUNT -- the rotation avoided at store
+    is applied at read on every attended layer -- so a dense-attention model
+    pays about 2.4x decode where a hybrid pays 43%. Any figure quoted for one
+    model tells you nothing about the other. The conclusion is unchanged and now
+    rests on the real number: rotated by default, `ultra` for content that needs
+    otherwise.
     """
     # DEFAULT 0. This shipped as "1" while EVERY prefill capture site stored
     # `unrot_key_states` unconditionally, so the pool held PRE-RoPE keys and this
