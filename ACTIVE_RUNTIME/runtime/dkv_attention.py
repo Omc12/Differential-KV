@@ -725,7 +725,8 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             # guard and not the publish. Reverted rather than left in because it
             # costs a copy-and-rotate per layer per step and, until that last
             # decline is found, buys nothing for it.
-            # CAPTURE ORDERING: SOLVED, and it was not enough on its own.
+            # CAPTURE ORDERING: SOLVED. --fastdc reproduces eager at 4 of 5
+            # contexts, where before it matched at NONE that engaged the graph.
             #
             # The sequencing bug was real and is now understood.
             # _dkv_apply_pending_mutation runs AFTER a forward AND returns early
@@ -744,19 +745,35 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             # With both, "prerot-missing" stops firing: the buffer exists before
             # anything is captured.
             #
-            # NOT COMMITTED, because remat still declines afterwards for a
-            # FURTHER reason and the md5 does not move off the Triton-path value
-            # (566e1b26cf578c92). Shipping the ordering fix alone would add a
-            # copy-and-rotate per layer per step that nothing reads. The next
-            # run should print which code fires once "prerot-missing" is gone --
-            # it is neither that nor "unrotated-guard", which narrows it to the
-            # remaining exits.
+            # A THIRD bug hid behind those two: a leftover unconditional
+            # `_ok = False` sat directly after the pre-rotation check, so _ok was
+            # always false and NO reason code fired -- the guard printed
+            # "no-positions" while the split conditions it was built from all
+            # passed. That contradiction is what exposed it. Removing it is what
+            # finally let remat serve.
+            #
+            # Qwen2.5-1.5B, DKV_DETERMINISTIC=1, eager against replayed:
+            #
+            #      4k   a98e5634 == a98e5634    and 8.8 -> 5.5 s
+            #      8k   3b03a854 != 90d1e9e0    STILL DIFFERS
+            #     16k   0fec68e1 == 0fec68e1    and 11.5 -> 10.8 s
+            #     32k   dab29f7d == dab29f7d
+            #     64k   42a41224 == 42a41224
+            #
+            # 8k IS THE ONE LEFT, and it is the context where the compressed
+            # block count grows mid-generation (6 -> 7, logged by the
+            # invalidation added in a8e27bf0), forcing a re-capture. So the
+            # remaining fault is in the RE-capture transition rather than in
+            # capture or replay, both of which are now exact. 32k and 64k agree
+            # because the selectivity gate declines the graph there entirely.
             _prerot = None
             if _ok and _MUTATION_OUT_ACTIVE:
-                _remat_why("mutation-out-not-graph-safe")
-                _ok = False
-            if _ok and _MUTATION_OUT_ACTIVE:
-                _ok = False
+                _prerot = (kv_manager.decode_workspace.get(sid, {})
+                           .get("dense_rot_dev", {}).get(captured_layer_idx))
+                if _prerot is None or _prerot.shape != dense_k.shape:
+                    _remat_why("prerot-missing",
+                               f"have={_prerot is not None} L{captured_layer_idx}")
+                    _ok = False
             if not _ok:
                 # Same decline as before, for the cases this cannot serve --
                 # notably mutation-out, where the caller assembles the window and
@@ -770,22 +787,25 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                           file=sys.stderr, flush=True)
                 _remat_why("unrotated-no-positions")
                 return None
-            _wsr = kv_manager.decode_workspace.setdefault(sid, {})
-            _rbuf_d = _wsr.setdefault("_dense_rot_buf", {})
-            _rbuf = _rbuf_d.get(captured_layer_idx)
-            if (_rbuf is None or _rbuf.shape != dense_k.shape
-                    or _rbuf.dtype != dense_k.dtype):
-                _rbuf = torch.empty_like(dense_k)
-                _rbuf_d[captured_layer_idx] = _rbuf
-            _rbuf.copy_(dense_k)
-            _dp = torch.as_tensor(_pos[:_vlen], dtype=torch.long,
-                                  device=dense_k.device)
-            _cosd = cos_all[0, _dp.clamp(max=cos_all.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
-            _sind = sin_all[0, _dp.clamp(max=sin_all.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
-            _rbuf[:, :, :_vlen] = _pra(dense_k[:, :, :_vlen],
-                                       _cosd.to(dense_k.dtype),
-                                       _sind.to(dense_k.dtype))
-            dense_k = _rbuf
+            if _prerot is not None:
+                dense_k = _prerot
+            else:
+                _wsr = kv_manager.decode_workspace.setdefault(sid, {})
+                _rbuf_d = _wsr.setdefault("_dense_rot_buf", {})
+                _rbuf = _rbuf_d.get(captured_layer_idx)
+                if (_rbuf is None or _rbuf.shape != dense_k.shape
+                        or _rbuf.dtype != dense_k.dtype):
+                    _rbuf = torch.empty_like(dense_k)
+                    _rbuf_d[captured_layer_idx] = _rbuf
+                _rbuf.copy_(dense_k)
+                _dp = torch.as_tensor(_pos[:_vlen], dtype=torch.long,
+                                      device=dense_k.device)
+                _cosd = cos_all[0, _dp.clamp(max=cos_all.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+                _sind = sin_all[0, _dp.clamp(max=sin_all.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+                _rbuf[:, :, :_vlen] = _pra(dense_k[:, :, :_vlen],
+                                           _cosd.to(dense_k.dtype),
+                                           _sind.to(dense_k.dtype))
+                dense_k = _rbuf
     except Exception as _why_err:                                # noqa: BLE001
         # THE ONE THAT HID EVERYTHING. This wraps the whole setup block, so any
         # error in the gather, the reconstruction or the dense rotation returned

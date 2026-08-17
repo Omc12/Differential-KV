@@ -1109,6 +1109,7 @@ class PyTorchDKVHFWrapper:
         """Clear per-session graph state. Called from prefill, once per session."""
         self._dkv_step_idx = 0
         self._dkv_capture_giveup = False
+        self._dkv_primed = False
         # One-shot logs are per session too, otherwise the first session's
         # verdict is the only one ever reported and a later session that
         # declines for a DIFFERENT reason looks like it never happened.
@@ -1251,7 +1252,17 @@ class PyTorchDKVHFWrapper:
             pend = mgr.__dict__.get("_pending_ingest") or {}
 
         if not pend:
-            return
+            _owed = False
+            try:
+                from native_core.sparse_decode.triton_fused_decode import (
+                    pool_stores_rotated_k as _psr_e)
+                _owed = (not _psr_e()) and not (
+                    (mgr.decode_workspace.get(session_id, {}) or {})
+                    .get("dense_rot_dev"))
+            except Exception:                                    # noqa: BLE001
+                _owed = False
+            if not _owed:
+                return
         import torch as _t
         # Assert the invariant this branch should have carried from the start:
         # layer 0's block must grow by EXACTLY ONE token per generate step. A
@@ -1353,6 +1364,40 @@ class PyTorchDKVHFWrapper:
                 # can now serve remat on an unrotated pool at all) but it is
                 # NOT the explanation for the --fastdc divergence.
                 ws.setdefault("dense_blocks_trimmed", {})[layer_idx] = _trimmed
+                try:
+                    from native_core.sparse_decode.triton_fused_decode import (
+                        pool_stores_rotated_k as _psr_w,
+                        _partial_rope_apply as _pra_w,
+                    )
+                    if _dk is not None and dlen and not _psr_w():
+                        _pw = []
+                        for _b in (_trimmed or []):
+                            _pw.extend(getattr(_b, "token_indices", ()) or ())
+                        _vw = min(len(_pw), int(dlen))
+                        if _vw > 0:
+                            import runtime.dkv_attention as _da_w
+                            _cw, _sw = _da_w._history_cos_sin(
+                                self.model, _dk, int(max(_pw[:_vw])) + 1, _dk.device)
+                            _rotd = ws.setdefault("dense_rot_dev", {})
+                            _bufw = _rotd.get(layer_idx)
+                            if (_bufw is None or _bufw.shape != _dk.shape
+                                    or _bufw.dtype != _dk.dtype):
+                                _bufw = torch.empty_like(_dk)
+                                _rotd[layer_idx] = _bufw
+                            _bufw.copy_(_dk)
+                            _dpw = torch.as_tensor(_pw[:_vw], dtype=torch.long,
+                                                   device=_dk.device)
+                            _cd = _cw[0, _dpw.clamp(max=_cw.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+                            _sd = _sw[0, _dpw.clamp(max=_sw.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+                            _bufw[:, :, :_vw] = _pra_w(
+                                _dk[:, :, :_vw], _cd.to(_dk.dtype), _sd.to(_dk.dtype))
+                except Exception as _rot_err:                    # noqa: BLE001
+                    (ws.get("dense_rot_dev") or {}).pop(layer_idx, None)
+                    if not getattr(self, "_rot_pub_err_logged", False):
+                        self._rot_pub_err_logged = True
+                        print(f"[DKV] dense-window pre-rotation failed "
+                              f"({type(_rot_err).__name__}: {_rot_err})",
+                              file=sys.stderr, flush=True)
                 if (os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1"
                         and layer_idx == 0 and _ptr_before is not None):
                     import sys as _s2
@@ -2090,6 +2135,13 @@ class PyTorchDKVHFWrapper:
                     # later would let the captured graph and the replayed steps
                     # disagree about whether the forward mutates state.
                     self._dkv_publish_mutation_out(session_id)
+                    if (getattr(_dkv_attn_mod, "_MUTATION_OUT_ACTIVE", False)
+                            and not getattr(self, "_dkv_primed", False)):
+                        self._dkv_primed = True
+                        try:
+                            self._dkv_apply_pending_mutation(session_id)
+                        except Exception:                        # noqa: BLE001
+                            pass
                     if (not self._cuda_graph_runner.is_captured()
                             and not getattr(self, "_dkv_capture_giveup", False)):
                         try:
