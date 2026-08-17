@@ -121,6 +121,32 @@ def set_arm(arm):
         if not hasattr(KVM, "_DENSE_RING"):
             raise SystemExit("dense_ring: append-only patch not present in tree")
         KVM._DENSE_RING = on
+    elif EXPERIMENT == "fastdc":
+        # --fastdc could not be A/B'd in one process before, which is why its
+        # worth was argued from cross-process walls that could not resolve it.
+        # Three things have to move together, and each for a different reason:
+        #
+        #   DKV_FAST_DECODE / DKV_GRAPH_FORCE_ROUTED are re-read from the
+        #   environment on every decode step, so setting them here is enough.
+        #
+        #   _MUTATION_OUT is captured into a module constant at import. The
+        #   wrapper's _dkv_publish_mutation_out reads it each step to decide
+        #   _MUTATION_OUT_ACTIVE, so rebinding it here really does switch the
+        #   forward's behaviour -- setting only the environment would leave both
+        #   arms identical and the harness would truthfully report "no effect"
+        #   for a change it never made (the same trap as the `remat` arm).
+        #
+        #   The CAPTURED GRAPH must not outlive the switch. Replay executes no
+        #   Python, so replaying arm A's graph while arm B expects a mutating
+        #   forward advances no state -- wrong text and a meaningless time.
+        on_ = "1" if on else "0"
+        os.environ["DKV_FAST_DECODE"] = on_
+        os.environ["DKV_GRAPH_FORCE_ROUTED"] = on_
+        DA._MUTATION_OUT = on
+        _w = globals().get("_WRAPPER")
+        if _w is not None and getattr(_w, "_cuda_graph_runner", None) is not None:
+            _w._cuda_graph_runner.invalidate()
+            _w._dkv_capture_giveup = False
     elif EXPERIMENT == "graph_safe_routed":
         # DKV_GRAPH_SAFE_DECODE=1 was shipped after an accuracy check but no
         # speed check. On the routed path it forces `changed = True` every step,
@@ -147,6 +173,7 @@ def clocks():
 def main():
     w = PyTorchDKVHFWrapper(model_id=MODEL, config={"mode": "fp16"}, device="cuda")
     w.ensure_loaded()
+    globals()["_WRAPPER"] = w      # set_arm needs it to invalidate the graph
     tok = w.tokenizer
     ctx = "The archive records a long sequence of unremarkable events. " * REP
     prompt = tok.apply_chat_template(

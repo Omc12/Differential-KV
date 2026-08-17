@@ -1087,9 +1087,14 @@ class PyTorchDKVHFWrapper:
             flush=True, file=_s.stderr)
 
     def _dkv_reset_graph_step(self) -> None:
-        """Restart the routing-refresh cycle at the top of every generate()."""
+        """Clear per-session graph state. Called from prefill, once per session."""
         self._dkv_step_idx = 0
         self._dkv_capture_giveup = False
+        # One-shot logs are per session too, otherwise the first session's
+        # verdict is the only one ever reported and a later session that
+        # declines for a DIFFERENT reason looks like it never happened.
+        self._dkv_mo_off_logged = False
+        self._graph_sel_logged = False
 
     def _dkv_routing_selective(self, session_id: str) -> bool:
         """Would a frozen routed set be WRONG for this session right now?
@@ -1445,6 +1450,14 @@ class PyTorchDKVHFWrapper:
         # Invalidate CUDA graph runner — new prefill changes pool layout
         if hasattr(self, "_cuda_graph_runner") and self._cuda_graph_runner is not None:
             self._cuda_graph_runner.invalidate()
+        # …and clear the per-session graph decisions with it. _dkv_capture_giveup
+        # is sticky by design WITHIN a session, but it was being set on a wrapper
+        # that outlives the session: _dkv_reset_graph_step(), which is where it
+        # was cleared, is defined and never called. One context that cannot
+        # capture -- a short prompt, or a long one where routing is selective --
+        # therefore disabled mutation-out permanently for every LATER generate()
+        # on the same wrapper, which in a server is every subsequent request.
+        self._dkv_reset_graph_step()
 
         # ── Chunked prefill ──────────────────────────────────────────────────
         # Process the prompt in aligned chunks. Blocks remain dense through the
@@ -2405,8 +2418,20 @@ class PyTorchDKVHFWrapper:
                 )
 
             if _time_attn_flag and _time_token_start is not None:
+                # SYNCHRONISE BEFORE READING THE CLOCK, on CUDA as well as MPS.
+                # Without it this is a HOST timer, and the two things worth
+                # measuring here differ mostly in host cost -- so it flatters
+                # exactly what it is used to judge. A CUDA graph replay is one
+                # launch: the host returns while the GPU is still working, and
+                # this reported 4.63 ms/token (215 tok/s) for a path measured at
+                # ~11-13 tok/s end to end, an 87% "win" that was entirely the
+                # missing sync. Eager decode happened to read about right only
+                # because that path is host-bound.
                 if self.device == "mps":
                     try: torch.mps.synchronize()
+                    except Exception: pass
+                elif self.device == "cuda":
+                    try: torch.cuda.synchronize()
                     except Exception: pass
                 _token_ms = (_tw.perf_counter() - _time_token_start) * 1000
                 print(f"[DKV_TIME_ATTN] total_token={_token_ms:.2f}ms", flush=True)
