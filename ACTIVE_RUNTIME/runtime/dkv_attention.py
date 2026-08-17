@@ -653,10 +653,26 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             #
             # THE FIX is to rotate the dense window in the WRAPPER, into a
             # fixed-address buffer, so remat can serve mutation-out and both arms
-            # run the same path. Attempted and REVERTED: the publish never
-            # satisfied its own guard (no exception -- the block ran and fell
-            # through), so the forward kept declining and the md5s did not move.
-            # Debug that guard first; the design is right, the plumbing was not.
+            # run the same path. Built twice, reverted twice, and the second
+            # attempt got far enough to rule out everything obvious:
+            #
+            #   * the publish GUARD is fine. Instrumented at 16k layer 0:
+            #     rotated=False, dk=True, dlen=1463, npos=1463 -- token_indices
+            #     covers the assembled extent EXACTLY, over blocks of 1025 + 438.
+            #   * the publish ITSELF is fine. It writes shape (1, 2, 3072, 128)
+            #     to a pointer that never moves (0xbf4e55200) on every step.
+            #   * the READ is fine. With a MISS probe on the lookup, no miss is
+            #     ever reported after the first step -- the forward finds the
+            #     buffer it was given.
+            #   * and the md5 STILL does not move off the Triton-path value
+            #     (566e1b26cf578c92).
+            #
+            # So there is a FURTHER decline between finding the buffer and remat
+            # actually serving -- _remat_attend has several later `return None`
+            # paths, and one of them is firing. Instrument those next, not this
+            # guard and not the publish. Reverted rather than left in because it
+            # costs a copy-and-rotate per layer per step and, until that last
+            # decline is found, buys nothing for it.
             if _ok and _MUTATION_OUT_ACTIVE:
                 _ok = False
             if _ok and _MUTATION_OUT_ACTIVE:
