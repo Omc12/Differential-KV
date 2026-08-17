@@ -64,6 +64,37 @@ def _ingest_k(rot_k, unrot_k):
 # Falls back silently to the existing Python paths if the extension is absent
 # or built without the Phase 1 ops. No behavioral change on fallback.
 try:
+    # ── Windows: make the built extension FINDABLE before importing it ────────
+    # Two separate reasons this failed on Windows, and the error message only
+    # ever named the first:
+    #
+    #   1. build_ext --inplace leaves dkv_core.cp313-win_amd64.pyd in
+    #      native_core/dkv_core/, which is not on sys.path. Reported as
+    #      "No module named 'dkv_core'", which reads as "not built".
+    #   2. Once found, it raised "DLL load failed" instead: the extension links
+    #      cuSOLVER/cuBLAS from the CUDA TOOLKIT, while torch ships its own
+    #      (different) CUDA runtime. The toolkit's bin/ has to be on the DLL
+    #      search path, and since Python 3.8 that means add_dll_directory --
+    #      PATH alone is not enough.
+    #
+    # Both are best-effort: any failure here just leaves the import to fail as
+    # before and the Python fallbacks take over, which is the documented
+    # behaviour when the extension is absent.
+    if os.name == "nt":
+        import glob as _glob
+        _ext_dir = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "native_core", "dkv_core")
+        if os.path.isdir(_ext_dir) and _ext_dir not in sys.path:
+            if _glob.glob(os.path.join(_ext_dir, "dkv_core*.pyd")):
+                sys.path.append(_ext_dir)      # APPEND: never outrank a real install
+        for _cuda_bin in sorted(_glob.glob(
+                r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*\bin"),
+                reverse=True):
+            try:
+                os.add_dll_directory(_cuda_bin)
+            except Exception:                                # noqa: BLE001
+                pass
+
     import dkv_core as _dkv_core
 
     # ── Stale-binary guard ────────────────────────────────────────────────────
@@ -586,6 +617,22 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             _ok = (dense_k is not None and dense_len and dense_len > 0
                    and cos_all is not None and sin_all is not None
                    and cos_all.dim() == 3 and len(_pos) >= dense_len)
+            # NOT GRAPH-SAFE, so refuse to run inside a capturable forward.
+            # The rotation below builds its position tensor from a PYTHON LIST
+            # and gathers cos/sin with it. A captured graph replays no Python, so
+            # every replayed step would rotate the dense window at the positions
+            # frozen at capture time -- and a wrongly-rotated key does not raise,
+            # it returns confident nonsense. Declining hands the step to the
+            # Triton sparse path, which rotates inside the kernel and is what
+            # served this case before the remat path could.
+            #
+            # Making it capturable means pinning _dp/cos/sin into fixed-address
+            # buffers written by the WRAPPER between forwards, the same pattern
+            # _remat_pin and _pending_ingest already use. Worth doing -- it is
+            # what would let --fastdc keep the remat speedup on an unrotated
+            # pool -- but it is not done, so this guard stands in for it.
+            if _ok and _MUTATION_OUT_ACTIVE:
+                _ok = False
             if not _ok:
                 # Same decline as before, for the cases this cannot serve --
                 # notably mutation-out, where the caller assembles the window and

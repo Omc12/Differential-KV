@@ -131,6 +131,20 @@ class DKVConfig:
             # record, MLX default) for table/factual-dense docs, accepting the
             # larger pool.  See the "mid" branch for the ladder rationale.
             self.max_residual_tokens = 128
+            # UNROTATED too, from 2026-08-17. `high` is the MAX-FIDELITY rung, and
+            # it made no sense for it to be the one preset that still lost 42% of
+            # exact digit recall -- the "table/factual-dense docs" this branch is
+            # written for are precisely the content the rotated pool damages, and
+            # its bigger rank and residual ceiling do not recover any of it
+            # (measured: residual 40 vs 128 is 14/24 either way while unrotated is
+            # 24/24). A fidelity preset that is beaten by the default on the
+            # metric it exists for is a mis-labelled preset.
+            #
+            # This leaves `low` as the only rotated preset, which is the right
+            # shape: rotated is now a SPEED choice, not a fidelity one, so it
+            # belongs on the memory/speed rung and on the DKV_ROTATED_POOL=1
+            # escape hatch rather than scattered across the ladder.
+            self.rotated_pool = False
             # Quality end: keep more of the spectrum. The supporting note here
             # used to be that DKV_RANK_BOOST=auto and DKV_REMAT_CACHE=0 "both
             # leave synthesis at 30.0"; those are single-seed numbers inside the

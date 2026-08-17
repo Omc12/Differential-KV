@@ -102,7 +102,7 @@ python ACTIVE_RUNTIME/serving/cli.py --api-url http://localhost:8000/v1
 | `--api-url` | `str` | `None` | API Gateway base URL. When provided, runs CLI in Client Mode |
 | `--serving-mode` | `choice` | `balanced` | KV Cache strategy: `lightweight`, `balanced`, `performance`, `long-context`, `fused-sparse` |
 | `--preset` | `choice` | `mid` | Fidelity preset: `low`, `mid`, `high`, `ultra` — see the ladder below |
-| `--fastdc` | `flag` | `False` | CUDA only. Routed CUDA-graph decode. **~49% faster at 16k, nothing at 32k — but NOT byte-exact against eager on an unrotated pool**, so it stays opt-in. See the note under the ladder. |
+| `--fastdc` | `flag` | `False` | CUDA only. Routed CUDA-graph decode. **~49% faster at 16k and byte-exact** against eager; no effect at 32k, where the selectivity gate declines the graph. Opt-in. |
 | `--rank` | `int` | `32` | SVD rank for KV compression (capped at $d_{\text{head}}$) |
 | `--micro-block-size` | `int` | `256` | Number of tokens per compressed KV micro-block ($B_s = 256$) |
 | `--batch-size` | `int` | `4` | Maximum continuous batching size for engine |
@@ -121,7 +121,7 @@ python ACTIVE_RUNTIME/serving/cli.py --api-url http://localhost:8000/v1
 |---|---|---|---|---|
 | `low` | rotated | 0.999 / 32 | 40 | memory is the binding constraint |
 | **`mid`** (default) | **unrotated** | 0.9999 / 64 | 40 | **general use — dense-parity accuracy** |
-| `high` | rotated | 0.99999 / 128 | 128 | largest fidelity budget, rotated (fast) |
+| `high` | **unrotated** | 0.99999 / 128 | 128 | largest fidelity budget |
 | `ultra` | unrotated | 0.9999 / 64 | 40 | identical to `mid`; kept as a stable name |
 
 **`mid` stores keys un-rotated, and that is what buys dense parity.** On the two
@@ -143,8 +143,12 @@ Two things worth knowing before choosing:
   on every *attended* layer: a hybrid model (Qwen3.5-2B, 6 of 24 attended) pays
   ~11% of decode, a dense-attention one (Qwen2.5-1.5B, 28 of 28) ~27%. Check your
   model's attended-layer count before budgeting.
-* **If you need that back, `low` and `high` still store rotated keys**, or set
+* **If you need that speed back, `low` still stores rotated keys**, or set
   `DKV_ROTATED_POOL=1` on any preset. You lose the digit accuracy above.
+  Rotated is now a *speed* choice rather than a fidelity one, which is why it
+  sits on the memory rung and the env flag instead of being scattered up the
+  ladder — `high` is the max-fidelity preset and should not be the one losing
+  42% of digit recall.
   `DKV_ROTATED_POOL=0` takes the same trade on any preset.
 
 ---
@@ -224,7 +228,7 @@ measured and is inert on `tablebench` (all 14/24, unchanged from `mid`):
 | tier residuals on error tail, not median | no change |
 | **un-rotated pool (`ultra`)** | **14/24 → 24/24, i.e. dense parity** |
 
-**Speed — what `ultra` costs**, paired and in-process, 8 rounds, 32k:
+**Speed — what the un-rotated pool costs**, paired and in-process, 8 rounds, 32k:
 
 | model | attended layers | `mid` | `ultra` | cost |
 |---|---|---|---|---|
