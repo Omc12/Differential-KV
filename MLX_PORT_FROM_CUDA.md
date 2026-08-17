@@ -757,6 +757,51 @@ Restored 8/8. **A boolean that answers two different questions with the same
 
 ---
 
+## 8f. Two lessons that are NOT about CUDA graphs — port these, skip the rest
+
+Most of 8d/8e is capture-and-replay machinery Metal does not have. These two are
+about how the code is *shaped*, and they cost four debugging passes here.
+
+### A decline that silently changes the algorithm is worse than a crash
+
+`_remat_attend` returns `None` for five different reasons and the caller falls
+back to a *different attention implementation* (the Triton sparse kernel). So a
+decline never fails — it quietly swaps the numerics. Three of those five reasons
+were indistinguishable from outside, and a bare `except Exception: return None`
+wrapped the whole setup block, so any error in the gather, the reconstruction or
+the rotation looked exactly like a deliberate decline.
+
+Three separate investigations went down the wrong path because of it. Fixed by
+giving every exit a reason code (`DKV_REMAT_WHY=1`). **MLX has the same
+shape** — a fast path that falls back to a slower, differently-rounded one — so
+if it has silent declines, label them. The one that mattered was invisible until
+labelled: a composite guard reported "no positions" while every condition it was
+built from passed, and that contradiction is what exposed a leftover
+unconditional `_ok = False` sitting underneath it.
+
+### Compare against the VALID extent, never the padded width
+
+The dense window is a fixed-size workspace whose validity is carried by a mask,
+so `dense_len` is the buffer width (3072) while the real token count is smaller
+(1462). A guard compared token positions against `dense_len` and asked whether
+1462 positions covered 3072 rows — never true, so it declined on every step for
+weeks. MLX builds its dense buffer fresh each step and masks with
+`arange(max_dense_len) < dense_len`, so it has both numbers in scope too: **be
+explicit about which one any comparison means.**
+
+### And one measurement lesson, which is the most portable thing here
+
+When a replayed decode disagreed with an eager one, four passes went into hunting
+stale state — every input probe came back clean and the hunt continued anyway,
+because the previous bugs in that area had all been staleness. A per-step
+*output* trace answered it in one run: the first difference is at **step 1**, by
+**one ULP**, and the argmax flips at step 32. There was never anything stale.
+
+**Probe the output before the inputs.** It bounds the problem in one run, and it
+cannot be misread the way a clean input probe can.
+
+---
+
 ## 9. Measure VRAM against the POOL, and check for slots nothing fills
 
 **Priority: high if you are trying to show a memory win — this is where CUDA's

@@ -102,7 +102,7 @@ python ACTIVE_RUNTIME/serving/cli.py --api-url http://localhost:8000/v1
 | `--api-url` | `str` | `None` | API Gateway base URL. When provided, runs CLI in Client Mode |
 | `--serving-mode` | `choice` | `balanced` | KV Cache strategy: `lightweight`, `balanced`, `performance`, `long-context`, `fused-sparse` |
 | `--preset` | `choice` | `mid` | Fidelity preset: `low`, `mid`, `high`, `ultra` — see the ladder below |
-| `--fastdc` | `flag` | `False` | CUDA only. Routed CUDA-graph decode. **Do not turn this on without measuring your own context and model** — swept 4k-64k it is 2x SLOWER at 4k-8k and changes the output wherever the graph engages. See the sweep in the benchmarks section. |
+| `--fastdc` | `flag` | **on** | CUDA only. Routed CUDA-graph decode, **now the default**: 25% faster at 4k, 9% at 8k, 5% slower at 16k, neutral at 32k+. Output is a 1-ULP *distribution* difference from eager, not a quality one. `DKV_FAST_DECODE=0` disables. |
 | `--rank` | `int` | `32` | SVD rank for KV compression (capped at $d_{\text{head}}$) |
 | `--micro-block-size` | `int` | `256` | Number of tokens per compressed KV micro-block ($B_s = 256$) |
 | `--batch-size` | `int` | `4` | Maximum continuous batching size for engine |
@@ -167,7 +167,7 @@ Differential-KV runtime behaviors can be fine-tuned using environment variables:
 | `DKV_MAX_RESIDUAL` | `128` MLX / `40` CUDA | Both engines | Exact residual token rows per block. CUDA `mid`/`ultra`/`low` use 40, `high` keeps 128; MLX is flat 128. The budget measured **inert** on four benchmarks including a digit-table one, and the pool allocates these slots on *every* block, so 40 is a straight saving. |
 | `DKV_ROTATED_POOL` | `1` (`0` on `ultra`) | Both engines | `1` stores POST-RoPE keys (fast reads). `0` stores PRE-RoPE and rotates at read: **exact dense parity on retrieval and digit recall**, at 43–137% of decode depending on attended-layer count. |
 | `DKV_DETERMINISTIC` | `0` | CUDA | `1` forces a deterministic SDPA backend. Greedy decode is **not** reproducible at long context without it — the cause is the decode attention's reduction, not compression. **Turn this on for any run you intend to compare.** |
-| `DKV_FAST_DECODE` | `0` | CUDA | Same as `--fastdc`. Routed CUDA-graph decode, gated per session to whether a graph will actually be captured. **Output differs from eager on an unrotated pool** (16k, `DKV_DETERMINISTIC=1`: `0fec68e1` eager vs `566e1b26` replayed) — the replay freezes routing. Fine for throughput work, not for runs you intend to compare. |
+| `DKV_FAST_DECODE` | **`1`** | CUDA | Routed CUDA-graph decode, gated per session to whether a graph will actually be captured. Set `0` to disable. Its output is not bit-identical to eager — the first difference is **one ULP at step 1** and the greedy argmax flips around step 32 — because a CUDA graph makes no bit-identity promise. Accuracy is unaffected (digit-table 24/24, linkbench 23/48, both equal to eager and to dense). Use `DKV_FAST_DECODE=0` with `DKV_DETERMINISTIC=1` for runs you intend to compare token-for-token. |
 | `DKV_SVD_SEED` | `1234` | MLX | SVD random state seed for deterministic compression. |
 | `DKV_EARLY_LAYER_RANK_BOOST` | `0` | MLX | Set `1` to boost SVD rank ($2\times$) in early layers ($\le 15\%$ network depth) for syntactic protection. |
 | `DKV_MAX_RANK_EARLY` | `0` | MLX | Cap for early layer boosted rank ($0$ = auto-selects $2\times$ base rank). |
@@ -227,6 +227,31 @@ measured and is inert on `tablebench` (all 14/24, unchanged from `mid`):
 | attend **every** block (`DKV_TOPK_BLOCKS=0`) | no change → not a routing problem |
 | tier residuals on error tail, not median | no change |
 | **un-rotated pool (`ultra`)** | **14/24 → 24/24, i.e. dense parity** |
+
+**Speed — what the un-rotated pool costs**, paired and in-process, 8 rounds, 32k:
+
+| model | attended layers | `mid` | `ultra` | cost |
+|---|---|---|---|---|
+| Qwen3.5-2B | 6 of 24 | 38.63 ms/tok | 43.02 ms/tok | **+11.5%** |
+| Qwen2.5-1.5B | 28 of 28 | 51.28 ms/tok | 65.10 ms/tok | **+26.5%** |
+
+**`--fastdc` is now the default.** Paired, in-process, Qwen2.5-1.5B, 6 rounds:
+
+| context | effect | 95% CI |
+|---|---|---|
+| 4k | **25.4% faster** | [−11.89, −10.55] ms |
+| 8k | **9.3% faster** | [−4.46, −3.87] ms |
+| 16k | 5.2% slower | [+2.51, +3.09] ms |
+| 32k | no effect | [−4.03, +4.29] ms |
+
+It was opt-in for a long time on two objections, both now answered. It *was* 2×
+slower at 4k — that was three chained bugs making it fall back to a slower kernel
+on every step, since fixed. And it does not reproduce eager token-for-token: the
+first difference is **one ULP at step 1**, and the greedy argmax flips around step
+32. A CUDA graph makes no bit-identity promise, so that is a *distribution*
+difference of the same kind `DKV_DETERMINISTIC` already exists to manage — not a
+quality one. Accuracy is unchanged: digit-table 24/24 and linkbench 23/48 with it
+on, both identical to off.
 
 **Speed — what the un-rotated pool costs**, paired and in-process, 8 rounds, 32k:
 

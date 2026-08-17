@@ -213,10 +213,36 @@ _GRAPH_SAFE_DECODE = os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"
 # with it, Qwen2.5-1.5B (28 layers) about 9% slower, because at 32k the
 # selectivity gate declines the graph so the loop buys nothing.
 #
-# So it is a win where the graph actually engages -- routing non-selective, i.e.
-# compressed blocks <= K -- and a small loss where it does not. At 16k on
-# Qwen2.5-1.5B that is 17.3 -> 10.2 s wall with byte-identical output.
-_FAST_DECODE = os.environ.get("DKV_FAST_DECODE", "0") == "1"
+# DEFAULT ON since 2026-08-17. It was opt-in for a long time on two objections,
+# and both are now answered by measurement rather than argument.
+#
+# OBJECTION 1, "it is slower at short context". It WAS -- 2.0x at 4k and 1.8x at
+# 8k -- because remat declined under mutation-out and every step fell back to
+# the Triton kernel. That was three chained bugs (a guard comparing positions
+# against the PADDED window width, a priming order that left step 1 without a
+# rotated window, and a leftover unconditional `_ok = False`), all fixed. Paired
+# in-process, Qwen2.5-1.5B, 6 rounds:
+#
+#      4k   -11.220 ms  CI [-11.893, -10.547]   25.4% FASTER
+#      8k    -4.168 ms  CI [ -4.464,  -3.873]    9.3% faster
+#     16k    +2.803 ms  CI [ +2.513,  +3.094]    5.2% slower
+#     32k    +0.128 ms  CI [ -4.030,  +4.287]    no effect
+#
+# One regression, 5.2% at 16k, against 25% and 9% gains below it and nothing
+# above. Worth taking.
+#
+# OBJECTION 2, "it does not reproduce eager". It does not, and it never can. The
+# first divergence is at STEP 1 and it is ONE ULP (fp16 max 29.203125 replayed
+# against 29.218750 eager); the argmax survives it for 31 tokens and flips on
+# the 32nd. A CUDA graph makes no bit-identity promise -- kernel selection can
+# differ between a capture warmup and an eager call -- so this is a DISTRIBUTION
+# difference, the same class DKV_DETERMINISTIC already exists to manage for the
+# decode attention's own reduction. Accuracy is unaffected where it can be
+# measured: digit-table 24/24 and linkbench 23/48 with it on, both identical to
+# off and both equal to dense.
+#
+# DKV_FAST_DECODE=0 turns it off for anyone who needs the old path.
+_FAST_DECODE = os.environ.get("DKV_FAST_DECODE", "1") == "1"
 _MUTATION_OUT = os.environ.get(
     "DKV_GRAPH_MUTATION_OUT", "1" if _FAST_DECODE else "0") == "1"
 
