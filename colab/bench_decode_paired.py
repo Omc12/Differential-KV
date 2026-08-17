@@ -121,6 +121,13 @@ def set_arm(arm):
         if not hasattr(KVM, "_DENSE_RING"):
             raise SystemExit("dense_ring: append-only patch not present in tree")
         KVM._DENSE_RING = on
+    elif EXPERIMENT == "graph_safe_routed":
+        # DKV_GRAPH_SAFE_DECODE=1 was shipped after an accuracy check but no
+        # speed check. On the routed path it forces `changed = True` every step,
+        # which discards the gather cache on every token. A is the RELAXED side
+        # (constant False = exact comparison restored), B is the shipped-broken
+        # side, so a NEGATIVE mean_diff means the fix is faster.
+        DA._GRAPH_SAFE_ROUTED = not on
     else:
         raise SystemExit(f"unknown EXPERIMENT={EXPERIMENT}")
 

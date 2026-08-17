@@ -612,6 +612,53 @@ to — that produced one full retraction.
 
 ---
 
+## 8d. A speed flag needs a speed measurement — two that shipped without one
+
+Both of these were gated on *correctness* checks, passed them, and shipped. Neither
+was ever timed. Both cost real throughput, and the second one cost it in a regime
+where it could not possibly help.
+
+**`DKV_GRAPH_SAFE_DECODE` — measured at last, −7.1%.** It removes device→host
+syncs so the forward can be captured. On the bypass path that machinery (a
+`StaticCache`, a full-buffer mask, a position-derived `cache_position`) is what
+makes capture possible at all. But it *also* forced `changed = True` on the routed
+path every step, which discards the gather cache on every token. Paired harness,
+Qwen3.5-2B at 32k, 10 rounds:
+
+    relaxed  80.28 ms/tok      forced  86.32 ms/tok
+    paired mean_diff -6.148 ms, 95% CI [-7.015, -5.281]  ->  A faster by 7.1%
+
+10/10 rounds the same sign. Fixed by splitting the flag: the bypass sites keep the
+broad one, the routed sites take `_GRAPH_SAFE_ROUTED = safe AND mutation_out`,
+which is only true when a graph is genuinely going to be captured over the routed
+forward. **If you port a "make it capturable" flag, check what it costs on the
+paths that are not being captured.**
+
+**Mutation-out is now PER SESSION, which is what made `--fastdc` safe.** Deferring
+the forward's mutation costs in proportion to attended-layer count. It buys a large
+win when a graph is captured (16k on Qwen2.5-1.5B: 17.3 → 10.2 s wall,
+byte-identical) and buys *nothing* when the selectivity gate declines one — where
+it was a ~9% loss on wide models at 32k. That asymmetry is why the flag could not
+simply be switched on for everybody.
+
+The fix is to ask the question the gate already answers — *will a graph engage for
+this session?* — and honour the request only when the answer is yes. Two
+consequences worth copying:
+
+* **Re-evaluate per step, not once per session.** Blocks keep getting compressed
+  during decode, so a session can start at 15 blocks with K=16 and cross the line
+  mid-generation. Cached, it keeps deferring after the graph has been declined.
+* **The gate must be cheap enough to sit on the hot path, and that needs a
+  number.** Measured 4.60 µs/call against an ~80 ms token — 0.006%, against the
+  ~9% it avoids.
+
+Verified at 32k with `DKV_DETERMINISTIC=1`: eager and gated-`--fastdc` both give
+`7c291f42ece7d897`, with the gate logging that it disabled mutation-out. The
+general lesson is portable even though CUDA graphs are not: **a knob whose payoff
+depends on a regime should be gated on that regime, not on the user remembering.**
+
+---
+
 ## 9. Measure VRAM against the POOL, and check for slots nothing fills
 
 **Priority: high if you are trying to show a memory win — this is where CUDA's
@@ -1013,8 +1060,11 @@ not for ultra-vs-dense.
 * **`gc.collect()` removals** (`48e6b844`, `fbfd25fe`) — CPython + PyTorch
   allocator interaction. Measured: the collect cost 4.3 s of prefill and freed
   **zero** bytes, because refcounting had already released the tensors.
-* **CUDA graphs** generally — bypass path works (1.25x, bit-exact); routed path
-  captures but replays stale state and is not faster.
+* **CUDA graphs** generally — bypass path works (1.25x, bit-exact). The routed
+  path captures and IS faster (1.48x), but only where routing is non-selective;
+  see 8d. Nothing here is portable — Metal has no capture/replay constraint — but
+  8d's *gating* idea is, because it is really about not paying a cost that only
+  pays off in one regime.
 
 ---
 

@@ -1089,6 +1089,84 @@ class PyTorchDKVHFWrapper:
     def _dkv_reset_graph_step(self) -> None:
         """Restart the routing-refresh cycle at the top of every generate()."""
         self._dkv_step_idx = 0
+        self._dkv_capture_giveup = False
+
+    def _dkv_routing_selective(self, session_id: str) -> bool:
+        """Would a frozen routed set be WRONG for this session right now?
+
+        Replay cannot re-run the Python router, so a captured routed set is
+        frozen for the whole replay. When the router would have selected every
+        block anyway -- n_blocks <= K -- freezing it is a no-op and replay is
+        exact by construction. Above that line it drifts.
+
+        Factored out of the capture block because two decisions need it and only
+        one of them is about capturing. Capture asks once, when it is about to
+        capture; mutation-out has to ask on EVERY step, because paying to defer
+        the forward's mutation is only worth it if a graph is going to exist.
+
+        Re-evaluated per step rather than cached per session on purpose: blocks
+        keep getting compressed during decode, so a session can start at 15
+        blocks with K=16 and cross the line mid-generation. Cached, it would keep
+        deferring after the graph had already been declined -- paying the cost
+        with nothing to show for it, which is the exact failure this gate exists
+        to prevent.
+        """
+        try:
+            blocks = self.manager.get_streaming_blocks(session_id, 0) or []
+            ncomp = sum(1 for b in blocks
+                        if getattr(b, "state", "") == "COMPRESSED")
+            pool = getattr(self.manager, "native_pool", None)
+            K = int(os.environ.get(
+                "DKV_TOPK_BLOCKS",
+                getattr(pool, "routing_topk_default", 16) or 16))
+            return bool(K > 0 and ncomp > K)
+        except Exception:                                        # noqa: BLE001
+            # Unknown -> assume selective. The conservative direction here is to
+            # DECLINE, because wrongly deferring costs correctness under replay
+            # while wrongly not deferring only costs speed.
+            return True
+
+    def _dkv_publish_mutation_out(self, session_id: str) -> None:
+        """Set the effective mutation-out flag for the step about to run.
+
+        --fastdc asks for mutation-out. Whether it is worth honouring depends on
+        the session: it is a large win where a graph will be captured and a ~9%
+        loss on wide models where the gate declines one. Deciding per session is
+        what lets the flag be requested globally without that loss.
+        """
+        import runtime.dkv_attention as _da
+        if not getattr(_da, "_MUTATION_OUT", False):
+            _da._MUTATION_OUT_ACTIVE = False
+            return
+
+        # GIVE-UP BEATS EVERY OTHER REASON, including the manual override.
+        # Selectivity is only ONE way to end up with no graph, and gating on it
+        # alone was wrong: measured at 16k on Qwen2.5-1.5B, routing is
+        # non-selective (15 blocks, K=16) so a selectivity-only gate keeps
+        # deferring -- while capture is refused anyway for a completely
+        # unrelated reason ("no decode cache supplied"), leaving --fastdc ~5%
+        # SLOWER than default with byte-identical output:
+        #
+        #     fastdc off  11.84 / 11.97 tok/s      fastdc on  11.33 / 11.13
+        #
+        # So the question is not "would a graph be exact here" but "did one
+        # actually take". After the first capture attempt the runner answers
+        # that directly, and it covers every failure reason at once --
+        # selectivity, missing decode cache, or a capture exception.
+        if getattr(self, "_dkv_capture_giveup", False):
+            _da._MUTATION_OUT_ACTIVE = False
+            return
+        if os.environ.get("DKV_GRAPH_ALLOW_SELECTIVE") == "1":
+            _da._MUTATION_OUT_ACTIVE = True
+            return
+        active = not self._dkv_routing_selective(session_id)
+        if not active and not getattr(self, "_dkv_mo_off_logged", False):
+            self._dkv_mo_off_logged = True
+            print("[DKV] mutation-out disabled for this session: routing is "
+                  "selective, so no routed graph will be captured and "
+                  "deferring the forward's mutation would cost without "
+                  "buying anything.", file=sys.stderr, flush=True)
+        _da._MUTATION_OUT_ACTIVE = active
 
     def _dkv_apply_pending_mutation(self, session_id: str) -> None:
         """Perform the decode step's state mutation OUTSIDE the forward.
@@ -1108,7 +1186,12 @@ class PyTorchDKVHFWrapper:
              host int a captured graph would bake in.
         """
         import runtime.dkv_attention as _da
-        if not getattr(_da, "_MUTATION_OUT", False):
+        # The EFFECTIVE flag, not the requested one. This must agree with what
+        # the forward that just ran actually did: if the forward did not defer
+        # (mutation-out inactive for this session) there is nothing to drain,
+        # and reading the requested flag here would have this run against a
+        # stale stash on exactly the sessions where the gate turned it off.
+        if not getattr(_da, "_MUTATION_OUT_ACTIVE", False):
             return
         mgr = self.manager
         # After a REPLAY the eager stash is stale by construction (see the
@@ -1925,7 +2008,13 @@ class PyTorchDKVHFWrapper:
                     self._cuda_graph_runner = CUDAGraphDecodeRunner() if _HAS_CUDA_GRAPH_RUNNER else None
 
                 if self._cuda_graph_runner is not None:
-                    if not self._cuda_graph_runner.is_captured():
+                    # Decide mutation-out for THIS step before anything runs a
+                    # forward. capture() runs the forward too, so publishing it
+                    # later would let the captured graph and the replayed steps
+                    # disagree about whether the forward mutates state.
+                    self._dkv_publish_mutation_out(session_id)
+                    if (not self._cuda_graph_runner.is_captured()
+                            and not getattr(self, "_dkv_capture_giveup", False)):
                         try:
                             # Hand capture() the cache the DKV bypass actually
                             # mutates so it can roll back its own warmup writes.
@@ -2126,8 +2215,17 @@ class PyTorchDKVHFWrapper:
                             #       byte-identical at 48/64/96 tokens, and
                             #       15.7 -> 10.6 s wall at 96 (1.48x)
                             #   32k, 31 blocks, K=16 (selective)
-                            #       drifts: 7c291f42 against eager 9a9cbc07,
-                            #       coherent text, i.e. staleness not corruption
+                            #       drifts under FORCED capture, coherent text,
+                            #       i.e. staleness not corruption
+                            #
+                            # The md5 pair originally recorded here (7c291f42
+                            # against "eager 9a9cbc07") did NOT show that. Both
+                            # arms ran without DKV_DETERMINISTIC, and at 32k the
+                            # decode attention's own reduction changes the answer
+                            # between two runs of the SAME config -- so that pair
+                            # measured the nondeterminism, not the drift. Rerun
+                            # with DKV_DETERMINISTIC=1, eager and the gated
+                            # decline both give 7c291f42ece7d897.
                             #
                             # Refreshing it does not rescue the selective case.
                             # Eager alternation CORRUPTS (interval 2/4/8 breaks
@@ -2137,29 +2235,25 @@ class PyTorchDKVHFWrapper:
                             # recapture=2, 25.5 s vs eager's 17.9 s and a
                             # different md5 by 64 tokens). So the gate is the
                             # honest ship, not a placeholder for a refresh.
+                            # ONE implementation of the gate, shared with
+                            # _dkv_publish_mutation_out. It was inlined here when
+                            # capture was its only consumer; mutation-out now asks
+                            # the same question every step, and two copies of a
+                            # correctness gate drifting apart is not a risk worth
+                            # taking for a dozen lines.
                             _routing_selective = False
                             if _force_routed:
-                                try:
-                                    _blocks = self.manager.get_streaming_blocks(
-                                        session_id, 0) or []
-                                    _ncomp = sum(1 for _b in _blocks
-                                                 if getattr(_b, "state", "") == "COMPRESSED")
-                                    _pool = getattr(self.manager, "native_pool", None)
-                                    _K = int(os.environ.get(
-                                        "DKV_TOPK_BLOCKS",
-                                        getattr(_pool, "routing_topk_default", 16) or 16))
-                                    _routing_selective = (_K > 0 and _ncomp > _K)
-                                    if _routing_selective and not getattr(
-                                            self, "_graph_sel_logged", False):
-                                        self._graph_sel_logged = True
-                                        print(f"[DKV] routed CUDA graph declined: "
-                                              f"{_ncomp} compressed blocks > K={_K}, "
-                                              f"so routing is selective and a frozen "
-                                              f"routed set would drift. "
-                                              f"DKV_GRAPH_ALLOW_SELECTIVE=1 to override.",
-                                              file=sys.stderr, flush=True)
-                                except Exception:                    # noqa: BLE001
-                                    _routing_selective = False
+                                _routing_selective = self._dkv_routing_selective(
+                                    session_id)
+                                if _routing_selective and not getattr(
+                                        self, "_graph_sel_logged", False):
+                                    self._graph_sel_logged = True
+                                    print(f"[DKV] routed CUDA graph declined: "
+                                          f"compressed blocks exceed K, so routing "
+                                          f"is selective and a frozen routed set "
+                                          f"would drift. "
+                                          f"DKV_GRAPH_ALLOW_SELECTIVE=1 to override.",
+                                          file=sys.stderr, flush=True)
                             if os.environ.get("DKV_GRAPH_ALLOW_SELECTIVE") == "1":
                                 _routing_selective = False
                             self.model._dkv_cuda_graph_safe = bool(
@@ -2201,7 +2295,18 @@ class PyTorchDKVHFWrapper:
                                       f"({type(_cap_err).__name__}: {_cap_err}); "
                                       f"continuing in eager decode.",
                                       file=sys.stderr, flush=True)
-                    
+                        # ONE attempt decides it for the session. capture() is
+                        # retried on every step while is_captured() is False, so
+                        # without this a session that can never capture pays the
+                        # attempt AND keeps deferring mutation for a graph that
+                        # is never coming. Whatever refused it -- selectivity, a
+                        # missing decode cache, an exception -- the answer will
+                        # not change mid-session.
+                        if not self._cuda_graph_runner.is_captured():
+                            self._dkv_capture_giveup = True
+                            self._dkv_publish_mutation_out(session_id)
+
+
                     # ROUTING REFRESH. Replay executes no Python, so the routed
                     # set pinned in _stabilise_routed_set's buffers would never
                     # advance. Running ONE EAGER step every N tokens lets the real
@@ -2215,7 +2320,7 @@ class PyTorchDKVHFWrapper:
                     # window). Not a new trade -- the same one, made explicit.
                     if not hasattr(self, "_dkv_step_idx"):
                         self._dkv_step_idx = 0
-                    _mo = getattr(_dkv_attn_mod, "_MUTATION_OUT", False)
+                    _mo = getattr(_dkv_attn_mod, "_MUTATION_OUT_ACTIVE", False)
                     # NEVER alternate eager and replay. Running one eager forward
                     # between replays was the original refresh design and it is
                     # what corrupted the state -- proven by running the cases in

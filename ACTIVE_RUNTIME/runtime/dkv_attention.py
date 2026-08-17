@@ -188,6 +188,45 @@ _GRAPH_SAFE_DECODE = os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"
 _FAST_DECODE = os.environ.get("DKV_FAST_DECODE", "0") == "1"
 _MUTATION_OUT = os.environ.get(
     "DKV_GRAPH_MUTATION_OUT", "1" if _FAST_DECODE else "0") == "1"
+
+# _GRAPH_SAFE_DECODE has TWO groups of use sites and they do not cost the same.
+#
+# On the BYPASS path it builds the StaticCache, its full-buffer mask, the
+# position-derived cache_position and the contiguous mask. That machinery is
+# what makes capture possible at all, and it is free when no graph is captured
+# because the bypass path only runs below the engage threshold.
+#
+# On the ROUTED path it also forces `changed = True` every step, which throws
+# away the gather cache on every token. That was shipped without a speed check
+# and it costs ~7% of routed decode -- measured interleaved on Qwen3.5-2B at
+# 32k, 10.49/10.07 tok/s with it on against 10.93/11.18 with it off.
+#
+# The routed relaxation only BUYS anything if a graph is going to be captured
+# over the routed forward, and that needs mutation-out. Without it the routed
+# forward mutates state the replay cannot reproduce, so capture is refused and
+# the sync removal purchases nothing at all -- it is pure cost. So the routed
+# sites take this narrower flag while the bypass sites keep the broad one.
+_GRAPH_SAFE_ROUTED = _GRAPH_SAFE_DECODE and _MUTATION_OUT
+
+# _MUTATION_OUT is what the USER ASKED FOR. _MUTATION_OUT_ACTIVE is what is
+# actually in force right now, and the decode path reads THIS one.
+#
+# Deferring the forward's mutation is not free: it moves per-layer work into the
+# host loop, so it costs in proportion to attended-layer count. That buys a large
+# win when a graph is captured (16k, Qwen2.5-1.5B: 17.3 -> 10.2 s wall, byte
+# identical) and buys NOTHING when the selectivity gate declines the graph -- at
+# which point it is a pure ~9% loss on wide models at 32k. That asymmetry is why
+# --fastdc could not simply be turned on for everyone.
+#
+# So the wrapper republishes this per session, per step, from the same gate that
+# decides whether to capture: request AND graph-will-engage. Non-selective
+# sessions get the win, selective ones stop paying for it, and --fastdc becomes
+# safe to leave on. The wrapper OWNS this value; nothing else should assign it.
+#
+# Rebound rather than read from the environment because the decode forward
+# resolves module globals at call time -- the same mechanism bench_decode_paired
+# relies on to flip a constant between arms inside one process.
+_MUTATION_OUT_ACTIVE = _MUTATION_OUT
 # Fixed-shape routing, for CUDA graph capture of the ROUTED decode path.
 # The two compactions in dkv_forward use torch.nonzero, whose output LENGTH
 # depends on its input values, so every shape downstream is data-dependent. A
@@ -593,7 +632,7 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
     # reconstruction never advanced even when routing did. Same fix, same reason
     # -- the graph needs a stable ADDRESS, and the periodic eager step rewrites
     # the contents in place.
-    if _MUTATION_OUT:
+    if _MUTATION_OUT_ACTIVE:
         _ws_pin = kv_manager.decode_workspace.setdefault(sid, {})
         _pin = _ws_pin.setdefault("_remat_pin", {})
         _ent = _pin.get(captured_layer_idx)
@@ -2095,7 +2134,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                         curr_k = (key_states[b_idx:b_idx+1] if _pool_rotated_k()
                                   else unrot_key_states[b_idx:b_idx+1])
                         curr_v = value_states[b_idx:b_idx+1]
-                        if _MUTATION_OUT and q_len == 1:
+                        if _MUTATION_OUT_ACTIVE and q_len == 1:
                             # Stash instead of ingesting. The REFERENCES are what
                             # matter: under graph replay this line does not run,
                             # but the tensors it recorded at capture time live at
@@ -2114,13 +2153,19 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # so coarse sampling is fine.
                                 # CUDA-graph stage 1: this .cpu() is the one host sync on the
                                 # SRL decode path (the base low/mid/high presets never enter
-                                # here — srl_state is None).  DKV_GRAPH_SAFE_DECODE=1 skips
-                                # it so the whole decode forward is provably sync-free and can
-                                # be captured; the only cost is the SRL re-routing heuristic
-                                # loses its recent-key trail (routing still works from anchors).
+                                # here — srl_state is None).  Skipping it makes the decode
+                                # forward provably sync-free so it can be captured; the only
+                                # cost is the SRL re-routing heuristic loses its recent-key
+                                # trail (routing still works from anchors). Gated on the
+                                # ROUTED flag: without mutation-out no graph is captured over
+                                # this forward, so dropping the trail would buy nothing.
+                                #
+                                # Read from the module constant, not os.environ. This line
+                                # runs per decode step, and an environ lookup here is the
+                                # same host-side cost the flag exists to remove.
                                 _step_ctr = getattr(srl_state, "_decode_step_ctr", 0)
                                 srl_state._decode_step_ctr = _step_ctr + 1
-                                if _step_ctr % 8 == 0 and os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") != "1":
+                                if _step_ctr % 8 == 0 and not _GRAPH_SAFE_ROUTED:
                                     k_avg = curr_k[0].mean(dim=0).squeeze(0).float().cpu() # [head_dim]
                                     srl_state.recent_decode_keys.append(k_avg)
                                     if len(srl_state.recent_decode_keys) > 512:
@@ -2662,7 +2707,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # step, so the slots are provably unchanged. Pure
                                 # identity check, no device read.
                                 changed = False
-                            elif _GRAPH_SAFE_DECODE:
+                            elif _GRAPH_SAFE_ROUTED:
                                 # torch.equal on CUDA tensors returns a PYTHON bool,
                                 # so it is a device->host sync -- one per decode step.
                                 # It is also what invalidated CUDA-graph capture:
@@ -2674,8 +2719,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # and otherwise assume changed. That is conservative
                                 # in the safe direction: treating an unchanged set as
                                 # changed only clears a cache early, while the reverse
-                                # would serve stale routing. Off by default so the
-                                # exact comparison remains the shipping behaviour.
+                                # would serve stale routing.
+                                #
+                                # But "clears a cache early" is not free -- it is the
+                                # gather cache, and forcing it every token costs ~7%
+                                # of routed decode. So this takes _GRAPH_SAFE_ROUTED,
+                                # which additionally requires mutation-out: the exact
+                                # comparison stays the shipping behaviour unless a
+                                # graph is actually going to be captured here.
                                 changed = (block_indices.shape != last_slots.shape) or True
                             else:
                                 changed = not torch.equal(block_indices, last_slots)
@@ -2721,7 +2772,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # matches what the cache read at :1794 falls back to.
                         current_version = 0
                         _dense_mask = None
-                        if _MUTATION_OUT and q_len == 1:
+                        if _MUTATION_OUT_ACTIVE and q_len == 1:
                             # Read the workspace the CALLER assembled between
                             # forwards; do not rebuild it here. dense_len becomes
                             # the full buffer width and validity is carried by a
@@ -4151,7 +4202,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         max_rank_early=getattr(_cfg, "max_rank_early", 0),
                                     )
                                     # MLX-parity decode form; see _remat_attend.
-                                    if _MUTATION_OUT and q_len == 1:
+                                    if _MUTATION_OUT_ACTIVE and q_len == 1:
                                         block_indices, anchor_indices = _stabilise_routed_set(
                                             kv_manager, sid, captured_layer_idx,
                                             block_indices, anchor_indices)
@@ -4165,7 +4216,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         num_key_value_groups,
                                         curr_kv=((key_states[b_idx:b_idx+1],
                                                   value_states[b_idx:b_idx+1])
-                                                 if _MUTATION_OUT and q_len == 1 else None),
+                                                 if _MUTATION_OUT_ACTIVE and q_len == 1 else None),
                                         dense_mask=_dense_mask)
 
                                     attn_out_b = _remat_out if _remat_out is not None else \
@@ -4205,7 +4256,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # under DKV_ROTATED_POOL (the default);
                                 # _remat_attend declines when they are not,
                                 # rather than attending unrotated keys.
-                                if _MUTATION_OUT and q_len == 1:
+                                if _MUTATION_OUT_ACTIVE and q_len == 1:
                                     block_indices, anchor_indices = _stabilise_routed_set(
                                         kv_manager, sid, captured_layer_idx,
                                         block_indices, anchor_indices)
@@ -4219,7 +4270,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     dense_len, num_key_value_groups,
                                     curr_kv=((key_states[b_idx:b_idx+1],
                                               value_states[b_idx:b_idx+1])
-                                             if _MUTATION_OUT and q_len == 1 else None),
+                                             if _MUTATION_OUT_ACTIVE and q_len == 1 else None),
                                     dense_mask=_dense_mask)
                                 attn_out_b = _remat_out if _remat_out is not None else \
                                     native_triton_sparse_attn_decode(
