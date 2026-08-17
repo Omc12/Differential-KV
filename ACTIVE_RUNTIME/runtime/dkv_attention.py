@@ -725,6 +725,32 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             # guard and not the publish. Reverted rather than left in because it
             # costs a copy-and-rotate per layer per step and, until that last
             # decline is found, buys nothing for it.
+            # CAPTURE ORDERING: SOLVED, and it was not enough on its own.
+            #
+            # The sequencing bug was real and is now understood.
+            # _dkv_apply_pending_mutation runs AFTER a forward AND returns early
+            # when `_pending_ingest` is empty, so before the first decode step
+            # nothing had assembled or pre-rotated the window. remat declined on
+            # step 1, the forward fell back to the Triton kernel, and capture
+            # froze THAT path into the graph -- after which no forward ever ran
+            # again, so nothing published later could be read.
+            #
+            # Two changes fix the ordering, both verified by the reason codes:
+            #   1. call _dkv_apply_pending_mutation once BEFORE the first
+            #      forward, to assemble and publish the window; and
+            #   2. let its `if not pend: return` fall through when the rotation
+            #      is still owed -- "nothing to ingest" is not "nothing to do",
+            #      and on the priming call pend is empty by definition.
+            # With both, "prerot-missing" stops firing: the buffer exists before
+            # anything is captured.
+            #
+            # NOT COMMITTED, because remat still declines afterwards for a
+            # FURTHER reason and the md5 does not move off the Triton-path value
+            # (566e1b26cf578c92). Shipping the ordering fix alone would add a
+            # copy-and-rotate per layer per step that nothing reads. The next
+            # run should print which code fires once "prerot-missing" is gone --
+            # it is neither that nor "unrotated-guard", which narrows it to the
+            # remaining exits.
             _prerot = None
             if _ok and _MUTATION_OUT_ACTIVE:
                 _remat_why("mutation-out-not-graph-safe")
