@@ -205,8 +205,23 @@ _MUTATION_OUT = os.environ.get(
 # over the routed forward, and that needs mutation-out. Without it the routed
 # forward mutates state the replay cannot reproduce, so capture is refused and
 # the sync removal purchases nothing at all -- it is pure cost. So the routed
-# sites take this narrower flag while the bypass sites keep the broad one.
-_GRAPH_SAFE_ROUTED = _GRAPH_SAFE_DECODE and _MUTATION_OUT
+# sites test the narrower condition while the bypass sites keep the broad one.
+#
+# NOT PRECOMPUTED INTO A CONSTANT, and that distinction is load-bearing. It was
+# a constant folded from _MUTATION_OUT -- the REQUESTED flag -- which meant that
+# under --fastdc it stayed True even on sessions where the per-session gate had
+# turned mutation-out off. Those sessions then took the relaxed branch anyway:
+# the gather cache was cleared every step and the SRL recent-key trail was
+# skipped, which changes routing and therefore the TEXT. Caught at 32k, where
+# --fastdc returned md5 9a9cbc07 against eager's 7c291f42 with
+# DKV_DETERMINISTIC=1 on both.
+#
+# The routed sites must therefore read _MUTATION_OUT_ACTIVE, which the wrapper
+# rebinds per session. Two module-global reads, no environment lookup, so this
+# is still cheap enough for a per-layer per-step site.
+def _graph_safe_routed() -> bool:
+    """Is the routed sync-removal in force for the step about to run?"""
+    return _GRAPH_SAFE_DECODE and _MUTATION_OUT_ACTIVE
 
 # _MUTATION_OUT is what the USER ASKED FOR. _MUTATION_OUT_ACTIVE is what is
 # actually in force right now, and the decode path reads THIS one.
@@ -2165,7 +2180,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # same host-side cost the flag exists to remove.
                                 _step_ctr = getattr(srl_state, "_decode_step_ctr", 0)
                                 srl_state._decode_step_ctr = _step_ctr + 1
-                                if _step_ctr % 8 == 0 and not _GRAPH_SAFE_ROUTED:
+                                if _step_ctr % 8 == 0 and not _graph_safe_routed():
                                     k_avg = curr_k[0].mean(dim=0).squeeze(0).float().cpu() # [head_dim]
                                     srl_state.recent_decode_keys.append(k_avg)
                                     if len(srl_state.recent_decode_keys) > 512:
@@ -2313,11 +2328,18 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             f"needs > {_route_min}")
                                 else:
                                     _why = None
+                                # stderr, like every other DKV probe. This one
+                                # printed ~one line per layer to STDOUT on every
+                                # run, which is the output stream the eval
+                                # harnesses parse -- the same trap that made an
+                                # earlier probe in this file look like it never
+                                # ran when the harness had redirected stdout.
                                 print(f"[DKV] ROUTE PROBE layer={captured_layer_idx} "
                                       f"session={sid} candidates={_n_blocks} "
                                       f"router={_router_mode_gate} "
                                       + ("ROUTING RUNS" if _why is None
-                                         else f"ROUTER SKIPPED: {_why}"), flush=True)
+                                         else f"ROUTER SKIPPED: {_why}"),
+                                      file=sys.stderr, flush=True)
 
                         if (
                             srl_enabled
@@ -2707,7 +2729,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # step, so the slots are provably unchanged. Pure
                                 # identity check, no device read.
                                 changed = False
-                            elif _GRAPH_SAFE_ROUTED:
+                            elif _graph_safe_routed():
                                 # torch.equal on CUDA tensors returns a PYTHON bool,
                                 # so it is a device->host sync -- one per decode step.
                                 # It is also what invalidated CUDA-graph capture:
@@ -2723,10 +2745,10 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 #
                                 # But "clears a cache early" is not free -- it is the
                                 # gather cache, and forcing it every token costs ~7%
-                                # of routed decode. So this takes _GRAPH_SAFE_ROUTED,
-                                # which additionally requires mutation-out: the exact
-                                # comparison stays the shipping behaviour unless a
-                                # graph is actually going to be captured here.
+                                # of routed decode. So this additionally requires
+                                # mutation-out to be ACTIVE for this session: the
+                                # exact comparison stays the shipping behaviour
+                                # unless a graph is really being captured here.
                                 changed = (block_indices.shape != last_slots.shape) or True
                             else:
                                 changed = not torch.equal(block_indices, last_slots)

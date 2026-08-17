@@ -202,19 +202,44 @@ class CUDAGraphDecodeRunner:
             return
 
         # The ROUTED path has no dense_cache to snapshot: its decode state is the
-        # block pool and the dense window, not a StaticCache. Warmup is safe
-        # there for a different reason -- every warmup pass and the capture run
-        # with the SAME input_ids and position_ids, so each writes the same token
-        # to the same slot rather than advancing, exactly as the bypass path
-        # relies on. Correctness is checked by comparing generated text against
-        # the eager path, not assumed.
-        _routed_ok = os.environ.get("DKV_GRAPH_SAFE_ROUTING", "0") == "1"
+        # block pool and the dense window, not a StaticCache. What makes warmup
+        # safe there is that the forward DOES NOT MUTATE -- mutation-out moves
+        # ingest and window assembly to the wrapper, between forwards -- so the
+        # three warmup passes and the capture run write nothing to roll back.
+        # Correctness is checked by comparing generated text against the eager
+        # path, not assumed.
+        #
+        # This used to read DKV_GRAPH_SAFE_ROUTING with a default of "0" while
+        # dkv_attention reads the SAME variable with a default of "1", and the
+        # variable is not in BEST_DECODE_DEFAULTS so it is normally unset. The
+        # two modules therefore disagreed: fixed-shape routing was on, and the
+        # capture that needs it refused anyway. That mismatch, not any missing
+        # machinery, is why the routed graph never captured in the wrapper path.
+        #
+        # Gating on mutation-out instead is also the CORRECT condition rather
+        # than merely a working one. Fixed-shape routing keeps shapes static,
+        # which capture needs, but says nothing about whether warmup writes
+        # state; mutation-out is exactly the property that makes a cache
+        # unnecessary. With it off the forward still ingests, and three warmup
+        # ingests of the same token are three appends -- which is what the
+        # rollback was protecting against.
+        _mutation_out = False
+        try:
+            import runtime.dkv_attention as _da_mod          # local: avoids a cycle
+            _mutation_out = bool(getattr(_da_mod, "_MUTATION_OUT_ACTIVE", False))
+        except Exception:                                    # noqa: BLE001
+            _mutation_out = False
+        _routed_ok = _mutation_out or os.environ.get(
+            "DKV_GRAPH_SAFE_ROUTING_CAPTURE", "0") == "1"
         if cache is None and not _routed_ok:
             if not self._unsafe_capture_warned:
                 import sys as _sys
                 print(
-                    "[DKV] CUDA graph capture skipped: no decode cache supplied, "
-                    "so capture's warmup writes could not be rolled back.",
+                    "[DKV] CUDA graph capture skipped: no decode cache supplied "
+                    "and mutation-out is not active, so capture's warmup writes "
+                    "could not be rolled back. On the routed path this means "
+                    "--fastdc / DKV_GRAPH_MUTATION_OUT is off, or the gate "
+                    "disabled it for this session.",
                     file=_sys.stderr,
                 )
                 self._unsafe_capture_warned = True

@@ -1111,20 +1111,27 @@ class PyTorchDKVHFWrapper:
         with nothing to show for it, which is the exact failure this gate exists
         to prevent.
         """
+        ncomp, K = self._dkv_block_counts(session_id)
+        return bool(ncomp is None or (K > 0 and ncomp > K))
+
+    def _dkv_block_counts(self, session_id: str):
+        """(compressed blocks, routing K) for this session, or (None, K) if unknown."""
+        pool = getattr(self.manager, "native_pool", None)
         try:
-            blocks = self.manager.get_streaming_blocks(session_id, 0) or []
-            ncomp = sum(1 for b in blocks
-                        if getattr(b, "state", "") == "COMPRESSED")
-            pool = getattr(self.manager, "native_pool", None)
             K = int(os.environ.get(
                 "DKV_TOPK_BLOCKS",
                 getattr(pool, "routing_topk_default", 16) or 16))
-            return bool(K > 0 and ncomp > K)
         except Exception:                                        # noqa: BLE001
-            # Unknown -> assume selective. The conservative direction here is to
-            # DECLINE, because wrongly deferring costs correctness under replay
-            # while wrongly not deferring only costs speed.
-            return True
+            K = 16
+        try:
+            blocks = self.manager.get_streaming_blocks(session_id, 0) or []
+            return sum(1 for b in blocks
+                       if getattr(b, "state", "") == "COMPRESSED"), K
+        except Exception:                                        # noqa: BLE001
+            # Unknown -> caller treats this as selective. The conservative
+            # direction is to DECLINE, because wrongly deferring costs
+            # correctness under replay while wrongly not deferring costs speed.
+            return None, K
 
     def _dkv_publish_mutation_out(self, session_id: str) -> None:
         """Set the effective mutation-out flag for the step about to run.
@@ -1156,16 +1163,33 @@ class PyTorchDKVHFWrapper:
         if getattr(self, "_dkv_capture_giveup", False):
             _da._MUTATION_OUT_ACTIVE = False
             return
-        if os.environ.get("DKV_GRAPH_ALLOW_SELECTIVE") == "1":
-            _da._MUTATION_OUT_ACTIVE = True
-            return
-        active = not self._dkv_routing_selective(session_id)
+        ncomp, K = self._dkv_block_counts(session_id)
+
+        # THREE cases, not two. "Not selective" is not the same question as
+        # "mutation-out is safe here", and conflating them broke the 4k gates
+        # (3/8, with output degenerating to "29dfulfulful"):
+        #
+        #   ncomp is None  state unreadable            -> off, conservatively
+        #   ncomp == 0     DKV NOT ENGAGED at all      -> off. This is the case
+        #                  that bit. A short prompt runs the dense/bypass
+        #                  forward, which mutates its cache the ordinary way;
+        #                  mutation-out defers nothing there, so claiming the
+        #                  forward is read-only let capture skip a rollback it
+        #                  genuinely needed.
+        #   0 < ncomp <= K engaged and non-selective   -> ON, the win case
+        #   ncomp > K      engaged and selective       -> off, frozen set drifts
+        active = ncomp is not None and 0 < ncomp <= K
         if not active and not getattr(self, "_dkv_mo_off_logged", False):
             self._dkv_mo_off_logged = True
-            print("[DKV] mutation-out disabled for this session: routing is "
-                  "selective, so no routed graph will be captured and "
-                  "deferring the forward's mutation would cost without "
-                  "buying anything.", file=sys.stderr, flush=True)
+            _why = ("state unreadable" if ncomp is None
+                    else "DKV routing is not engaged for this context"
+                    if ncomp == 0 else
+                    f"routing is selective ({ncomp} compressed blocks > K={K}), "
+                    f"so a frozen routed set would drift")
+            print(f"[DKV] mutation-out disabled for this session: {_why}. No "
+                  f"routed graph will be captured, and deferring the forward's "
+                  f"mutation would cost without buying anything.",
+                  file=sys.stderr, flush=True)
         _da._MUTATION_OUT_ACTIVE = active
 
     def _dkv_apply_pending_mutation(self, session_id: str) -> None:

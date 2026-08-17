@@ -659,6 +659,74 @@ depends on a regime should be gated on that regime, not on the user remembering.
 
 ---
 
+## 8e. The routed graph now captures — the blocker was a DEFAULT MISMATCH
+
+For most of this project the routed CUDA graph never captured in the wrapper
+decode path. The refusal said *"no decode cache supplied"*, which reads like
+missing machinery and sent two investigations looking for one. It was not.
+
+`DKV_GRAPH_SAFE_ROUTING` was read in two places with **two different defaults**:
+
+    dkv_attention.py       default "1"   (fixed-shape routing is ON)
+    static_decode_graph.py default "0"   (…so capture refuses)
+
+The variable is not in `BEST_DECODE_DEFAULTS`, so it is normally unset and the two
+modules simply disagreed: fixed-shape routing was on, and the capture that needs
+it declined anyway. **If one flag is read in two modules, read it in one place.**
+
+Fixing the default was not the right fix either, because fixed-shape routing is
+the wrong question. Capture wants a cache so it can roll back its warmup writes;
+what actually makes a cache unnecessary is that **the forward does not write** —
+which is exactly what mutation-out provides, and nothing else does. So the gate is
+now `_MUTATION_OUT_ACTIVE`. Fixed-shape routing keeps shapes static, which capture
+also needs, but says nothing about whether warmup mutates state.
+
+**Result: routed capture works and is byte-exact.** Qwen2.5-1.5B, every decode step
+replaying, `DKV_DETERMINISTIC=1` on both arms:
+
+    16k  eager and replay both 84b3e292c52be1bb   (and b5054d61 at 8 tokens)
+    32k  eager and gated-decline both 7c291f42ece7d897
+
+**On the speed, be careful — it does not reproduce the number in the old notes.**
+This file previously recorded 1.48x / "17.3 → 10.2 s". Measured properly, with
+prefill excluded and over the tokens actually generated, the gain at 16k is about
+**5%**, and the run-to-run spread of the method is larger than that:
+
+    fastdc off  86.06, 84.33 ms/token        fastdc on  85.05, 76.39
+
+So the honest statement is "byte-exact and not slower, with a small gain this
+method cannot resolve", not a speedup figure. `bench_decode_paired.py` cannot
+settle it either, because `_FAST_DECODE` is read at import and the wrapper
+republishes the effective flag every step.
+
+### Two bugs found while verifying this, both worth avoiding in the port
+
+**Do not fold a per-session flag into a module constant.** `_GRAPH_SAFE_ROUTED`
+was computed once at import from the *requested* mutation-out flag, so under
+`--fastdc` it stayed true on sessions where the gate had turned mutation-out off.
+Those sessions took the relaxed branch anyway — gather cache cleared every step,
+SRL recent-key trail skipped — which changes routing and therefore the text. It
+showed up as 32k `--fastdc` returning `9a9cbc07` against eager's `7c291f42` with
+determinism on. The routed sites must read the value the wrapper rebinds.
+
+**"Not selective" and "not engaged" are different questions.** The gate first
+asked only whether routing was selective, and answered "no" both when DKV was
+engaged with few blocks *and* when DKV was not engaged at all. The second case is
+a short prompt running the ordinary dense forward, which mutates its cache
+normally — so claiming the forward was read-only let capture skip a rollback it
+genuinely needed. Gates went to **3/8** with output degenerating to
+`29dfulfulfulful`. Three cases, not two:
+
+    ncomp is None    state unreadable        -> off, conservatively
+    ncomp == 0       DKV not engaged         -> off
+    0 < ncomp <= K   engaged, non-selective  -> ON, the win case
+    ncomp > K        engaged, selective      -> off, frozen set would drift
+
+Restored 8/8. **A boolean that answers two different questions with the same
+`False` will eventually be asked the one it gets wrong.**
+
+---
+
 ## 9. Measure VRAM against the POOL, and check for slots nothing fills
 
 **Priority: high if you are trying to show a memory win — this is where CUDA's
@@ -1061,7 +1129,7 @@ not for ultra-vs-dense.
   allocator interaction. Measured: the collect cost 4.3 s of prefill and freed
   **zero** bytes, because refcounting had already released the tensors.
 * **CUDA graphs** generally — bypass path works (1.25x, bit-exact). The routed
-  path captures and IS faster (1.48x), but only where routing is non-selective;
+  path captures and is byte-exact where routing is non-selective (a small gain,
   see 8d. Nothing here is portable — Metal has no capture/replay constraint — but
   8d's *gating* idea is, because it is really about not paying a cost that only
   pays off in one regime.
