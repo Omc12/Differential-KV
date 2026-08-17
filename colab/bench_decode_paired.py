@@ -121,6 +121,24 @@ def set_arm(arm):
         if not hasattr(KVM, "_DENSE_RING"):
             raise SystemExit("dense_ring: append-only patch not present in tree")
         KVM._DENSE_RING = on
+    elif EXPERIMENT in ("router_rope", "residual_exact_rope"):
+        # WHERE DOES THE UNROTATED POOL SPEND ITS 43-137%? Both of these run ONLY
+        # when the pool is unrotated, so run them with DKV_ROTATED_POOL=0. A is
+        # the CHEAP side (feature off), so a negative mean_diff is what that
+        # feature costs.
+        #
+        #   router_rope         the router rotates anchors before scoring, which
+        #                       a rotated pool skips entirely (it would be a
+        #                       second rotation).
+        #   residual_exact_rope rotates each exact residual at its TRUE position
+        #                       rather than the block anchor, growing the cos/sin
+        #                       gather from [N, D] to [N, MAX_RES, D].
+        #
+        # Both are read from the environment at call time, so setting them here
+        # is enough -- no module rebinding needed.
+        _var = ("DKV_ROUTER_ROPE" if EXPERIMENT == "router_rope"
+                else "DKV_RESIDUAL_EXACT_ROPE")
+        os.environ[_var] = "0" if on else "1"
     elif EXPERIMENT == "rotated_pool":
         # A = UNROTATED (the candidate default), B = rotated (the historical one),
         # so a POSITIVE mean_diff is what unrotated COSTS.

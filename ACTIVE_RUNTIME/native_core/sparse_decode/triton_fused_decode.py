@@ -1829,11 +1829,32 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     # No effect. So the unrotated pool's 43-137% is NOT recompute frequency, and
     # caching the rotated basis harder will not recover it.
     #
-    # Where to look next, in order: the residual exact-RoPE path below, which only
-    # runs when do_rot is set and grows the cos/sin gather from [N, D] to
-    # [N, MAX_RES, D]; and whether the rotated pool lets the kernel consume
-    # pool.V_K as a VIEW while this path must materialise a fresh tensor.
-    # Measure which, do not assume -- that is what this comment costs and saves.
+    # PROFILED. THE COST IS NOT THE ROTATION, AND NOT ANYWHERE NEAR IT.
+    #
+    # Four hypotheses were measured and all four are dead. Recompute frequency
+    # (remat interval 4 -> 16): +0.019 ms, CI [-2.918, +2.956]. The router's own
+    # rotation, which only runs unrotated (DKV_ROUTER_ROPE): +0.210 ms, CI
+    # [-4.111, +4.531]. The residual exact-RoPE gather, likewise unrotated-only
+    # (DKV_RESIDUAL_EXACT_ROPE): -0.641 ms, CI [-2.046, +0.764]. All no-effect.
+    #
+    # torch.profiler over 24 decode steps, Qwen3.5-2B at 32k, top CUDA kernels by
+    # self time. Total self-CUDA 4401 ms rotated against 4684 ms unrotated, and
+    # the delta is one kernel:
+    #
+    #   fmha_cutlassF_f16_aligned_32x128   rotated  501.95 ms / 342 calls
+    #                                      UNROTAT  729.07 ms / 198 calls
+    #
+    # +227 ms of a +283 ms total -- 80% of the whole regression -- inside SDPA
+    # itself. NO RoPE kernel appears in the delta. Note the direction: unrotated
+    # makes FEWER attention calls (198 vs 342) that each cost 2.5x more (3.68 vs
+    # 1.47 ms/call). The operand is bigger, not the arithmetic on the way in.
+    #
+    # So "make the rotation cheaper" is the wrong target and every version of it
+    # will keep measuring zero. The open question is why an unrotated pool hands
+    # SDPA more to chew on -- a longer materialised K/V, or a different mix of
+    # remat versus fused-kernel paths (the unrotated profile also shows
+    # _fused_sparse_decode_kernel at 144 calls where the rotated one does not).
+    # Start there, with the profiler, not here.
     do_rot = (anchor_indices is not None and cos is not None and sin is not None
               and not pool_stores_rotated_k())
     cos_anc = sin_anc = None
