@@ -102,7 +102,7 @@ python ACTIVE_RUNTIME/serving/cli.py --api-url http://localhost:8000/v1
 | `--api-url` | `str` | `None` | API Gateway base URL. When provided, runs CLI in Client Mode |
 | `--serving-mode` | `choice` | `balanced` | KV Cache strategy: `lightweight`, `balanced`, `performance`, `long-context`, `fused-sparse` |
 | `--preset` | `choice` | `mid` | Fidelity preset: `low`, `mid`, `high`, `ultra` — see the ladder below |
-| `--fastdc` | `flag` | `False` | CUDA only. Routed CUDA-graph decode. **~49% faster at 16k and byte-exact** against eager; no effect at 32k, where the selectivity gate declines the graph. Opt-in. |
+| `--fastdc` | `flag` | `False` | CUDA only. Routed CUDA-graph decode. **Do not turn this on without measuring your own context and model** — swept 4k-64k it is 2x SLOWER at 4k-8k and changes the output wherever the graph engages. See the sweep in the benchmarks section. |
 | `--rank` | `int` | `32` | SVD rank for KV compression (capped at $d_{\text{head}}$) |
 | `--micro-block-size` | `int` | `256` | Number of tokens per compressed KV micro-block ($B_s = 256$) |
 | `--batch-size` | `int` | `4` | Maximum continuous batching size for engine |
@@ -234,6 +234,23 @@ measured and is inert on `tablebench` (all 14/24, unchanged from `mid`):
 |---|---|---|---|---|
 | Qwen3.5-2B | 6 of 24 | 38.63 ms/tok | 43.02 ms/tok | **+11.5%** |
 | Qwen2.5-1.5B | 28 of 28 | 51.28 ms/tok | 65.10 ms/tok | **+26.5%** |
+
+**`--fastdc`, swept 4k-64k** (Qwen2.5-1.5B, `DKV_DETERMINISTIC=1`, eager vs replayed):
+
+| context | eager | `--fastdc` | output | verdict |
+|---|---|---|---|---|
+| 4k | 5.1 s | 10.1 s | **differs** | 2.0x SLOWER |
+| 8k | 6.2 s | 11.1 s | **differs** | 1.8x slower |
+| 16k | 9.0 s | 6.5 s | **differs** | 1.4x faster |
+| 32k | 14.9 s | 14.9 s | identical | no effect |
+| 64k | 30.4 s | 30.8 s | identical | no effect |
+
+**It is not a default, and the sweep is why.** It costs 2x at short context, and
+where it is faster it does not reproduce eager's output — the replay freezes
+routing. The 32k/64k rows are identical only because the selectivity gate
+declines the graph there, so nothing replays. It is also model-dependent: the
+same 16k point IS byte-exact on the hybrid Qwen3.5-2B. Measure your own model and
+context before enabling it.
 
 The cost is the rotation applied at read on every attended layer, so it scales
 with attended-layer count — **a figure for one model tells you nothing about

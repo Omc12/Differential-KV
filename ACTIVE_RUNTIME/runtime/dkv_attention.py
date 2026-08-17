@@ -628,9 +628,19 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             #
             # Making it capturable means pinning _dp/cos/sin into fixed-address
             # buffers written by the WRAPPER between forwards, the same pattern
-            # _remat_pin and _pending_ingest already use. Worth doing -- it is
-            # what would let --fastdc keep the remat speedup on an unrotated
-            # pool -- but it is not done, so this guard stands in for it.
+            # _remat_pin and _pending_ingest already use. The wrapper can do it:
+            # _history_cos_sin is module-level and _dkv_apply_pending_mutation
+            # already assembles the window and publishes dense_len_dev the same
+            # way.
+            #
+            # DELIBERATELY NOT DONE, and the reason is a measurement rather than
+            # effort. It would only benefit --fastdc, and --fastdc swept 4k-64k
+            # on Qwen2.5-1.5B is 2x SLOWER at 4k-8k and does not reproduce
+            # eager's output at 4k/8k/16k -- so it is not a default and this
+            # would be optimising a path that is not correct yet. It also would
+            # NOT fix that divergence: this guard already declines the rotation
+            # under mutation-out, so the rotation is provably not the cause. The
+            # cause is the replay's frozen routing. Fix that first; this second.
             if _ok and _MUTATION_OUT_ACTIVE:
                 _ok = False
             if not _ok:
