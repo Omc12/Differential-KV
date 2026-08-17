@@ -68,12 +68,20 @@ class DKVConfig:
             # mean per-block rank of 35 against mid's 53. That is the memory-for-
             # fidelity trade the preset exists to make, working as intended.
             #
-            # The "mid scores 20/24" that used to sit here DOES NOT REPRODUCE.
-            # Re-run at 48 seeds, mid is 21/48 -- half of it. Checked against the
-            # code as it was three commits earlier and it is 21/48 there too, so
-            # this is a stale recorded number rather than a regression. Treat the
-            # ladder's ORDERING as measured and its absolute scores as not, until
-            # each is re-run; ultra's 47/48 is from the same generation of runs.
+            # The "mid scores 20/24" that used to sit here DOES NOT REPRODUCE,
+            # and neither does ultra's 47/48. Re-run at 48 seeds on Qwen3.5-2B
+            # at 32k: mid 21/48, ultra 23/48, DENSE 23/48.
+            #
+            # Dense halved too, and dense shares no DKV code -- that is what
+            # settles it. The benchmark got harder for every arm at once, so
+            # this is not a regression in the ladder. The ORDERING is intact
+            # (ultra == dense, mid below both) and ultra's parity with dense is
+            # exact. The cause is outside the repo, most likely a transformers
+            # or torch update; the harness itself has not changed since before
+            # those numbers were recorded.
+            #
+            # DO NOT compare a score here against one recorded in another
+            # environment. Run a dense control alongside, every time.
             self.max_residual_tokens = 40
             # Spectral energy a block's low-rank form must retain, and the rank
             # ceiling that serves it. This -- not `rank` -- is what actually sets

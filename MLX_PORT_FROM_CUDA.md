@@ -194,15 +194,31 @@ unlike multifact, whose ±15-point seed band cannot resolve anything, see item 1
 **Exact parity with dense**, up from a 7-point deficit. Fisher p ≈ 0.03 against
 the rotated arm.
 
-> **⚠ The 40/48 rotated figure does not reproduce.** Re-run at 48 seeds on
-> Qwen3.5-2B at 32k, `mid` (which is the rotated arm) scores **21/48**. That was
-> checked against the code as of `69393023`, three commits earlier, and is 21/48
-> there too — so it is a stale recorded number, not a regression, and something
-> outside these two commits moved it. The DIRECTION of this item is unaffected
-> and is the whole point of it: unrotated beats rotated, by more than was
-> claimed. But do not carry any absolute score from this generation of runs into
-> MLX as a target — re-measure the arm you actually ship. The same caution
-> applies to the 47/48 figures, which come from the same batch.
+> **⚠ THE ABSOLUTE SCORES ABOVE NO LONGER REPRODUCE. THE FINDING DOES.**
+> Re-run at 48 seeds on Qwen3.5-2B at 32k:
+>
+> | arm | then | now |
+> |---|---|---|
+> | rotated (`mid`) | 40/48 | 21/48 |
+> | **unrotated (`ultra`)** | **47/48** | **23/48** |
+> | dense | 47/48 | 23/48 |
+>
+> **The dense arm halved too, and dense shares no DKV code** — it is plain HF
+> attention. That is what localises this: the whole benchmark got harder for
+> every arm at once, so it is not a DKV regression. Confirmed twice more: `mid`
+> scores 21/48 against the code as of `69393023` as well, and the linkbench
+> harness itself has not been touched since before these numbers were recorded
+> (`00be67be` and `5f4b59f1` both predate them). The cause is outside the repo —
+> environment, most likely a `transformers`/`torch` update (now 5.14.1 /
+> 2.11.0+cu130).
+>
+> **`unrotated == dense` still holds exactly, 23/48 vs 23/48**, which is this
+> item's actual claim, and rotated is still below both. Port the change.
+>
+> The lesson for the port: **a score is only meaningful next to a control run in
+> the same environment.** Every absolute number in this file was recorded without
+> one, so re-measure your own dense baseline on the MacBook rather than treating
+> 47/48 as a target — and keep a dense arm in every future comparison.
 
 **The cost, which is why it is not the global default.** Rotating at read time
 costs decode and memory. Qwen3.5-2B at 32k, interleaved and reversed:
