@@ -110,16 +110,37 @@ async def test_formatting():
     #      the graph is now kept off the cache-owning path. This test is 6/6
     #      green in ISOLATION as a result, where it used to be ~50/50.
     #
-    #   2. STILL OPEN, and it is suite ISOLATION, not this test. It fails inside
-    #      the full suite while passing alone, and bisecting says no single
-    #      earlier file is responsible: the first six preceding files pass with
-    #      it, the next seven pass with it, the engine tests pass with it, but
-    #      ALL FIFTEEN together fail. That is an accumulation across many model
-    #      loads in one process, not a poisoner. One real leak of that kind was
-    #      found and fixed on the way -- _MUTATION_OUT_ACTIVE is a module global
-    #      republished only inside the wrapper's decode loop, so anything calling
-    #      model() directly inherited the last generate()'s value; it is now
-    #      cleared at prefill.
+    #   2. STILL OPEN, and PROBABILISTIC rather than order-dependent. Measured:
+    #
+    #        alone                              6/6 pass
+    #        first 6 preceding files + it       pass
+    #        next 7 preceding files + it        pass
+    #        the two engine tests + it          pass
+    #        all 15 preceding files + it        FAILED once, PASSED once
+    #        the FULL suite (43 files)          failed 2/2
+    #
+    #      An earlier read of that table called it suite isolation, on the
+    #      strength of the one failing 15-file run. The rerun passed, so that
+    #      was over-read: no file set flips it deterministically, and the rate
+    #      simply rises with how much has run before.
+    #
+    #      What fits the shape is kernel selection. This asserts exact output
+    #      from GREEDY decode, and greedy decode is only reproducible while the
+    #      kernels are: cuBLAS and SDPA pick algorithms partly on available
+    #      workspace, so a process holding many loaded models can choose
+    #      differently, and one ULP is enough to move a token. The same runtime
+    #      hits this elsewhere -- see the --fastdc note in dkv_attention, where
+    #      replay diverges from eager at step 1 by exactly one ULP -- so it is a
+    #      known property of the stack rather than anything this test's path
+    #      does wrong.
+    #
+    #      One real leak WAS found on the way and is fixed: _MUTATION_OUT_ACTIVE
+    #      is a module global republished only inside the wrapper's decode loop,
+    #      so anything calling model() directly inherited the last generate()'s
+    #      value. Cleared at prefill now.
+    #
+    #      To make this deterministic the test would have to pin kernel
+    #      selection, not the model -- temperature is already 0.0.
     #
     # Do not "fix" this by loosening the assertions again. What it catches is
     # gone; what remains is the suite needing per-test isolation.
