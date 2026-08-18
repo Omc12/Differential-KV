@@ -802,6 +802,117 @@ cannot be misread the way a clean input probe can.
 
 ---
 
+## 8h. Three smaller CUDA fixes worth checking on MLX
+
+**Priority: low individually, but each is a class of bug rather than a one-off.**
+
+**A ZERO-BLOCK DECODE RETURNED EMPTY ATTENTION.** CUDA's
+`native_triton_sparse_attn_decode` delegated the N==0 case to a decoder that
+returns a ZERO-WIDTH tensor — `[1, H_q, 1, 0]` instead of `[1, H_q, 1, D]` — so a
+step that routed no compressed blocks silently attended nothing. Reachable
+whenever the context is shorter than one block. The *combined* entry point always
+had a dense-only fast path and was tested; the non-combined one did not and was
+not, and two entry points behaving differently on the same input is what let it
+sit. **Check MLX for the same split**, and check that whichever path can see
+N==0 attends the dense window rather than returning an empty tensor.
+
+**A MODULE GLOBAL LEAKED ACROSS SESSIONS.** `_MUTATION_OUT_ACTIVE` lives on the
+CUDA attention module and is republished per step by the wrapper's decode loop —
+so anything calling `model()` directly (the batch engine does) inherited whatever
+the previous `generate()` on ANY wrapper had left. That is a cross-session leak
+in a server, not merely a test artefact; it is cleared at prefill now. **MLX has
+module-level state of the same shape** — audit anything set per-step by one loop
+and read by another entry point.
+
+**A COMPOSITE GUARD HID ITS OWN CAUSE.** A single boolean built from six
+conditions reported one message for all six, and the one that was actually
+failing (a token-position count compared against the PADDED window width rather
+than the valid extent) stayed invisible through three debugging passes. Splitting
+it into named conditions found it in one run. **Where a guard ANDs several
+things together and the failure path is silent, name the condition that failed** —
+this file's own 8f makes the same point about declines that swap implementations.
+
+---
+
+## 8g. The engine corruption was a STREAM RACE — and MLX shares two of the three
+
+**Priority: read the sampler item before shipping any greedy path. It is verified
+in the MLX source, not inferred.**
+
+CUDA's `ContinuousBatchEngine` produced word salad, intermittently, for a long
+time. Six explanations were proposed and eliminated by measurement — SDPA
+reduction order, pool budget, sparse-vs-dense decode path, the engine's KV cache,
+NaN in the logits, and suite ordering. It was none of them. It was a **CUDA
+stream race**, in two places.
+
+### The bug
+
+```python
+with torch.cuda.stream(decode_stream):      # and prefill_stream
+    out = self.wrapper.model(...)
+# block exits — no synchronize(), no wait_stream(), no event
+logits = out.logits[:, -1, :]               # read on the DEFAULT stream
+```
+
+The default stream has no dependency on the side stream, so the read can observe
+memory the forward has not finished writing. Fixed with one line per stream:
+`torch.cuda.current_stream().wait_stream(decode_stream)`.
+
+Exact, not statistical — pytest against the same path in a bare script:
+
+| step | before | decode fixed | both fixed | standalone |
+|---|---|---|---|---|
+| prefill | `nan` | 3.408203 | **17.093750** | 17.093750 |
+| decode 1 | `nan` | 17.843750 | **16.515625** | 16.515625 |
+| decode 2 | `512.0` | 14.843750 | **18.562500** | 18.562500 |
+
+Suite 145 passed / 1 failed → **146 passed / 0 failed**.
+
+### What MLX should take from it
+
+**1. THE SAMPLER — VERIFIED, and MLX has the same gap.**
+`mlx_dkv_wrapper.py:5683`:
+
+```python
+if temp <= 0.01:
+    return int(np.argmax(logits))     # greedy: NO NaN guard
+scaled = logits / temp                # sampled path sanitises below
+```
+
+Identical shape to the CUDA bug: greedy — the one mode callers expect to be
+reproducible — is the one mode with no NaN guard, while the sampled path is
+protected. MLX clearly knows NaN reaches this runtime; it guards it inside the
+attention combine (`mx.where(mx.isnan(out_sparse), 0.0, ...)` at :818, :843, and
+the LSE clamps at :847-848). The sampler was just never given the same
+treatment. `np.argmax` over NaN returns the first NaN index, so it does not
+crash — it silently returns a garbage token.
+
+**Not changed here**, because MLX is the reference implementation and this file
+is a port list, not a patch. But if a greedy MLX run ever emits a plausible-
+looking wrong token, look here first.
+
+**2. THE ASYNC-ORDERING CLASS — LIKELY, and worth an audit.**
+Metal has no `torch.cuda.Stream`, so the literal fix does not port. The *class*
+does: work is enqueued asynchronously and a later read must be ordered behind it.
+MLX's equivalent boundary is `mx.eval()`, used 24 times in the wrapper. This
+runtime already has one recorded incident of exactly that kind — the batch
+engine's MPS path needs `mx.eval()` after every prefill chunk or MLX's lazy ops
+pile up until a `torch.mps.synchronize()` flushes 60s of work and trips Apple's
+GPU watchdog. **Audit every place a value crosses from MLX-land into
+NumPy/Python without an intervening `mx.eval()`** — the sampler above is one such
+crossing (`np.argmax` on a value produced by MLX).
+
+**3. THE DEBUGGING LESSON, which is the most transferable part.**
+All six failed explanations were CONFIGURATION questions — which flag, which
+preset, which budget, which path. A race answers to none of them, which is
+exactly why every one measured as no-effect and why six passes produced nothing.
+What found it in three steps was instrumenting the actual execution path: dump
+the logits, then the cache state beside them, then the stream boundaries.
+**When every knob measures as no-effect, stop turning knobs — the fault is
+structural, not configured.**
+
+---
+
 ## 9. Measure VRAM against the POOL, and check for slots nothing fills
 
 **Priority: high if you are trying to show a memory win — this is where CUDA's
