@@ -1,7 +1,16 @@
 """Repro for intermittent OUTPUT CORRUPTION in the ContinuousBatchEngine path.
 
-STATUS: RESOLVED (2026-08-17). The component is the ENGINE, and the mechanism is
-below. Not fixed -- see "why not fixed" at the end.
+STATUS: FIXED (2026-08-18). The engine now threads its own KV cache on the
+single-request decode path, and prefill threads one unconditionally. Output went
+from word salad ('EASTbrief_RESP ## qed drainage Pioneerichierutters') to real
+formatted prose:
+
+    '- Red: A vibrant, intense hue that symbolizes passion and energy.
+
+     - Blue: The color of the sky at sunrise or sunset, representing calmness...'
+
+All four engine tests pass. Mechanism and the dead ends are kept below because
+the reasoning is what makes the fix legible.
 
 THE CAUSE: NOTHING THREADS A KV CACHE FOR SHORT PROMPTS.
 
@@ -56,7 +65,24 @@ directly -- and all three fail, for two different reasons:
      `len(resp) > 0` instead. DKV_ENGAGE_THRESHOLD exists partly to keep the
      runtime out of exactly this state.
 
-So there are only two real fixes and both are feature work:
+BOTH OF THESE ARE NOW DONE. Kept as written because the ORDER mattered: (A) had
+to land first, since forcing engagement without it walked into empty attention,
+and (B) is what actually fixed the tests -- with a real cache, DKV bypasses at
+short context exactly as designed and the model gets EXACT history rather than
+history compressed at rank 8.
+
+  (A) shipped in a8ff6de4: _dense_only_attend in triton_fused_decode, with
+      test_dense_only_non_combined covering the entry point that lacked it.
+  (B) shipped here: BatchRequest.past_kv, threaded through prefill and through
+      decode when the bucket holds ONE request. Several requests still rely on
+      DKV, because each row is then at a different sequence length and one
+      past_key_values cannot describe them -- that needs a batched cache with
+      per-row lengths, and no test exercises it (test_cloning_decode_isolation
+      runs two concurrent requests and passed before and after).
+
+The original text follows.
+
+So there were only two real fixes and both were feature work:
 
   A. Give the sparse decoder a DENSE-ONLY path, so engaging with zero compressed
      blocks attends the dense window instead of returning an empty tensor. This

@@ -36,6 +36,19 @@ class BatchRequest:
         # and _emit_token terminates generation early.
         self.repetition_loop_detected: bool = False
         self._ngram_window: List[int] = []  # rolling window for n-gram counts
+        # THIS REQUEST'S OWN KV CACHE.
+        #
+        # The engine used to pass no past_key_values at all, which left DKV's
+        # session interception as the only thing supplying a cache -- and DKV
+        # declines below its engage threshold, so a short prompt decoded with NO
+        # history and degenerated after the first token. Forcing engagement is
+        # not the fix either: at the ranks these paths use it returns the history
+        # compressed hard enough to wreck the text ('Sure, we apologizeative
+        # severas Noorder.c...'), which is the same failure wearing a suit.
+        #
+        # Threading a real cache lets DKV bypass exactly as it is designed to at
+        # short context, and the model gets EXACT history.
+        self.past_kv = None
 
     @property
     def total_seq_len(self) -> int:
@@ -1136,8 +1149,10 @@ class ContinuousBatchEngine:
                     out = self.wrapper.model(
                         input_ids=input_ids,
                         position_ids=position_ids,
+                        past_key_values=req.past_kv,
                         use_cache=True
                     )
+                    req.past_kv = getattr(out, "past_key_values", None)
 
             req.prefill_offset += actual_len
 
@@ -1427,11 +1442,33 @@ class ContinuousBatchEngine:
                                 except Exception as _ge:
                                     runner.invalidate()
                             if not _ran_graph:
+                                # SINGLE-REQUEST DECODE OWNS ITS CACHE.
+                                #
+                                # Only when the bucket holds one real request:
+                                # with several, each row is at a different
+                                # sequence length and one shared past_key_values
+                                # cannot describe them -- that needs a batched
+                                # cache with per-row lengths, which is a redesign
+                                # this component does not justify. Batched decode
+                                # therefore keeps relying on DKV exactly as
+                                # before, which is correct wherever DKV engages.
+                                #
+                                # The single-request case is the one that was
+                                # broken (a short prompt decoding with no history
+                                # at all) and it is also the only one where the
+                                # cache is unambiguous, so it is the whole fix.
+                                _solo = (actual_batch_size == 1
+                                         and bucket_size == 1)
+                                _req0 = decode_reqs[0] if _solo else None
                                 out = self.wrapper.model(
                                     input_ids=input_ids,
                                     position_ids=position_ids,
+                                    past_key_values=(_req0.past_kv if _solo else None),
                                     use_cache=True,
                                 )
+                                if _solo:
+                                    _req0.past_kv = getattr(
+                                        out, "past_key_values", None)
                                 if runner is not None and not runner.is_captured():
                                     try:
                                         runner.capture(self.wrapper.model, input_ids, position_ids)
