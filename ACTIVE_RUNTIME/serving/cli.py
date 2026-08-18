@@ -887,8 +887,14 @@ async def run_direct_mode(args):
         args.model,
         config={
             'rank':             args.rank,
-            'micro_block_size': args.micro_block_size,
-            'block_size':       args.micro_block_size,
+            # Only pass a block size when the user actually asked for one. A
+            # hardcoded default here shadows the runtime's, and the runtime's is the
+            # one that was measured (MLX: 256 -> 1024 took linkbench 9/24 to 24/24 =
+            # dense, and the pool from 0.95x of the KV it replaces to 0.28x). See
+            # ACTIVE_RUNTIME/docs/cuda_port_record.md.
+            **({'micro_block_size': args.micro_block_size,
+                'block_size':       args.micro_block_size}
+               if args.micro_block_size else {}),
             'serving_mode':     args.serving_mode,
             'mode':             'fp16',
             'quantization':     'int4' if args.load_in_4bit else ('int8' if args.load_in_8bit else None),
@@ -905,8 +911,14 @@ async def run_direct_mode(args):
             args.draft_model,
             config={
                 'rank':             args.rank,
-                'micro_block_size': args.micro_block_size,
-                'block_size':       args.micro_block_size,
+                # Only pass a block size when the user actually asked for one. A
+                # hardcoded default here shadows the runtime's, and the runtime's is the
+                # one that was measured (MLX: 256 -> 1024 took linkbench 9/24 to 24/24 =
+                # dense, and the pool from 0.95x of the KV it replaces to 0.28x). See
+                # ACTIVE_RUNTIME/docs/cuda_port_record.md.
+                **({'micro_block_size': args.micro_block_size,
+                    'block_size':       args.micro_block_size}
+                   if args.micro_block_size else {}),
                 'serving_mode':     args.serving_mode,
                 'mode':             'fp16',
                 'quantization':     'int4' if args.load_in_4bit else ('int8' if args.load_in_8bit else None),
@@ -1277,8 +1289,8 @@ def main():
                         help="HuggingFace model ID or path.")
     parser.add_argument('--rank', type=int, default=32,
                         help="SVD rank for KV compression. Higher = better quality. CAP at head_dim.")
-    parser.add_argument('--micro-block-size', type=int, default=256,
-                        help="Tokens per compressed KV block. S=256.")
+    parser.add_argument('--micro-block-size', type=int, default=None,
+                        help="Tokens per compressed KV block. Unset = the runtime's own measured default (1024 on MLX). Do NOT hardcode a value here: passing one explicitly overrides the runtime default, which is how a measured default silently fails to reach the CLI and the server.")
     parser.add_argument('--batch-size', type=int, default=4,
                         help="Maximum batch size for engine.")
     parser.add_argument('--serving-mode', type=str,

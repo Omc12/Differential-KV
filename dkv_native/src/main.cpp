@@ -1521,6 +1521,51 @@ bool verify_attention_cpu(
     }
 }
 
+// ── Sanitise a logits vector before ANY selection runs over it ─────────────
+// Greedy selection is the mode callers expect to be reproducible, and on this
+// runtime it was the mode with no NaN guard. Two distinct hazards, both real:
+//
+//   * std::partial_sort / std::nth_element / std::sort with a `a > b`
+//     comparator require a STRICT WEAK ORDERING. NaN compares false against
+//     everything, so a single NaN breaks that contract and the standard
+//     library is free to run off the end of the range. This is undefined
+//     behaviour, not merely a wrong token -- libc++'s introsort has no bounds
+//     check on the partition loop.
+//   * The linear-scan argmax in sample_logits() skips NaN (NaN > x is false),
+//     so it silently returns the max of whatever was finite -- or index 0 when
+//     everything is NaN -- with no indication anything went wrong.
+//
+// Call this once where the logits are READ BACK from the backend, so every
+// downstream consumer (top-5 print, greedy argmax, nucleus sampler, the SRL/
+// factual bias adjustments) sees finite values. Constants match the MLX and
+// CUDA samplers (nan=-100, +/-inf=+/-100) so all three runtimes decode a
+// non-finite logit vector to the same token.
+//
+// This does not HIDE the NaN -- whatever produced it upstream is still wrong
+// and still worth finding, which is what the one-shot warning is for.
+static void dkv_sanitize_logits(std::vector<float>& logits, const char* where) {
+    static bool warned = false;
+    size_t n_nan = 0, n_inf = 0;
+    // One isfinite() per element on the common path rather than isnan() then
+    // isinf(): this runs over the whole ~152k vocab on EVERY decode token, and
+    // the sampler on this runtime has already been a measurable slice of
+    // wall-clock once (the full-vocab sort, ~9.5 ms/token). The write branch is
+    // taken only for the values that are actually bad, which is normally none.
+    for (float& v : logits) {
+        if (__builtin_expect(!std::isfinite(v), 0)) {
+            if (std::isnan(v)) { v = -100.0f; ++n_nan; }
+            else               { v = (v > 0.0f) ? 100.0f : -100.0f; ++n_inf; }
+        }
+    }
+    if ((n_nan || n_inf) && !warned) {
+        warned = true;
+        std::cerr << "[DKV] WARNING: non-finite logits at " << where
+                  << " (nan=" << n_nan << " inf=" << n_inf
+                  << "); sanitising so selection stays defined and greedy decode "
+                     "stays deterministic. This is an upstream bug.\n";
+    }
+}
+
 // Helper function to sample from logits
 int32_t sample_logits(const std::vector<float>& logits, float temp, float top_p, std::mt19937& rng) {
     const int n = (int)logits.size();
@@ -3831,6 +3876,7 @@ int main(int argc, char ** argv) {
 
             if (pos_start + chunk_len >= L && prefill_logits) {
                 ggml_backend_tensor_get(prefill_logits, prefill_output_logits.data(), 0, n_vocab * sizeof(float));
+                dkv_sanitize_logits(prefill_output_logits, "prefill");
             }
 
             pos_start += chunk_len;
@@ -6162,6 +6208,7 @@ int main(int argc, char ** argv) {
             } else {
                 output_logits.resize(n_vocab);
                 ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
+                dkv_sanitize_logits(output_logits, "decode");
                 t_after_logits = std::chrono::high_resolution_clock::now();
             }
 

@@ -543,7 +543,7 @@ class PyTorchDKVHFWrapper:
         # The real fix is dual-scale storage: the same content compressed at both
         # granularities with attention seeing both. Because routing is provably
         # irrelevant here, a multi-scale router would not help; both scales have
-        # to reach attention. See MLX_PORT_FROM_CUDA.md for the shape of it.
+        # to reach attention. See ACTIVE_RUNTIME/docs/cuda_port_record.md for the shape of it.
         self.micro_block_size = self.config.get("micro_block_size", 1024)
         
         self.local_files_only = (

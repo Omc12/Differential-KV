@@ -877,9 +877,8 @@ def main():
                         help='SVD rank for KV compression. Higher = better quality, more VRAM. '
                              'Must be strictly less than model head_dim (e.g. capped at 32 for head_dim 64 to prevent gibberish). '
                              'Recommended: 16 for balanced, 32 for quality, 8 for VRAM-constrained.')
-    parser.add_argument('--micro-block-size', type=int, default=256,
-                        help='Tokens per compressed KV block. S=256 gives 5.2x compression ratio. '
-                             'Lower values compress more frequently (more overhead). Must be >= rank.')
+    parser.add_argument('--micro-block-size', type=int, default=None,
+                        help="Tokens per compressed KV block. Unset = the runtime's own measured default (1024 on MLX). Do NOT hardcode a value here: passing one explicitly overrides the runtime default, which is how a measured default silently fails to reach the CLI and the server.")
     parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--serving-mode', type=str,
                         choices=['lightweight', 'balanced', 'performance', 'long-context', 'fused-sparse'],
@@ -986,7 +985,7 @@ def main():
 
     print(f'Loading DKV runtime with model: {args.model}...')
     print(f'[DKV Debug] settings: device={_best_device}, preset={args.preset}, serving_mode={args.serving_mode}, rank={args.rank}')
-    print(f'  rank={args.rank}  micro_block_size={args.micro_block_size}  serving_mode={args.serving_mode}')
+    print(f'  rank={args.rank}  micro_block_size={args.micro_block_size or 'runtime default'}  serving_mode={args.serving_mode}')
     print(f'  max_resident_sessions={args.max_resident_sessions}  quantization={"4bit" if args.load_in_4bit else ("8bit" if args.load_in_8bit else "none")}')
     print(f'  [Tip] Set DKV_TELEMETRY=1 to enable VRAM + block state logging')
     
@@ -1012,8 +1011,14 @@ def main():
         args.model,
         config={
             'rank':             args.rank,
-            'micro_block_size': args.micro_block_size,
-            'block_size':       args.micro_block_size,   # keep in sync
+            # Only pass a block size when the user actually asked for one. A
+            # hardcoded default here shadows the runtime's, and the runtime's is the
+            # one that was measured (MLX: 256 -> 1024 took linkbench 9/24 to 24/24 =
+            # dense, and the pool from 0.95x of the KV it replaces to 0.28x). See
+            # ACTIVE_RUNTIME/docs/cuda_port_record.md.
+            **({'micro_block_size': args.micro_block_size,
+                'block_size':       args.micro_block_size}
+               if args.micro_block_size else {}),
             'serving_mode':     args.serving_mode,
             'mode':             'fp16',
             'quantization':     'int4' if args.load_in_4bit else ('int8' if args.load_in_8bit else None),
@@ -1030,8 +1035,14 @@ def main():
             args.draft_model,
             config={
                 'rank':             args.rank,
-                'micro_block_size': args.micro_block_size,
-                'block_size':       args.micro_block_size,   # keep in sync
+                # Only pass a block size when the user actually asked for one. A
+                # hardcoded default here shadows the runtime's, and the runtime's is the
+                # one that was measured (MLX: 256 -> 1024 took linkbench 9/24 to 24/24 =
+                # dense, and the pool from 0.95x of the KV it replaces to 0.28x). See
+                # ACTIVE_RUNTIME/docs/cuda_port_record.md.
+                **({'micro_block_size': args.micro_block_size,
+                    'block_size':       args.micro_block_size}
+                   if args.micro_block_size else {}),
                 'serving_mode':     args.serving_mode,
                 'mode':             'fp16',
                 'quantization':     'int4' if args.load_in_4bit else ('int8' if args.load_in_8bit else None),

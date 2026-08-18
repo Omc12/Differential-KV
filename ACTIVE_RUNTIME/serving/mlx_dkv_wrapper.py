@@ -78,6 +78,92 @@ from serving.query_span import extract_query_token_ids as _extract_query_token_i
 from serving.query_span import pinned_blocks_from_prompt as _pinned_blocks_from_prompt
 
 
+def _rope_tables(max_pos: int, dims: int, base: float, scale: float = 1.0):
+    """cos/sin lookup tables for absolute positions 0..max_pos-1.
+
+    Reproduces `mx.fast.rope(..., traditional=False)` for the HALF-SPLIT (NeoX)
+    layout: of each head's `head_dim` values only the first `dims` are rotated,
+    as the pair (x[:dims/2], x[dims/2:dims]); the tail passes through untouched.
+
+    A table plus a gather is needed rather than `mx.fast.rope` because the keys
+    being rotated at read time sit at SCATTERED absolute positions (routed blocks
+    are not contiguous, and residual tokens are not contiguous inside a block),
+    and `mx.fast.rope` can only express one contiguous run per call. Verified
+    against it to ~4e-5 in fp32 on both contiguous and scattered position sets —
+    well inside the pool's fp16 storage epsilon.
+    """
+    half = dims // 2
+    inv = mx.exp(-mx.arange(0, half, dtype=mx.float32)
+                 * (mx.log(mx.array(float(base))) / half))
+    ang = mx.expand_dims(mx.arange(max_pos, dtype=mx.float32) * scale, 1) * mx.expand_dims(inv, 0)
+    return mx.cos(ang), mx.sin(ang)
+
+
+def _rope_at(x: mx.array, positions: mx.array, cos_t: mx.array, sin_t: mx.array,
+             dims: int) -> mx.array:
+    """Rotate x [..., L, D] so that row i carries absolute position positions[i].
+
+    To UN-rotate instead (turn a post-RoPE key back into a pre-RoPE one), pass
+    `-sin_t`: the transpose rotation is the same expression with the sine negated,
+    and the two round-trip to ~5e-7 in fp32. No caller needs that today — the pool
+    captures pre-RoPE keys at ingest rather than inverting rotated ones — so it is
+    left as a one-argument change instead of an unused flag.
+    """
+    half = dims // 2
+    c = mx.take(cos_t, positions, axis=0).astype(x.dtype)     # [L, half]
+    s = mx.take(sin_t, positions, axis=0).astype(x.dtype)
+    shape = [1] * (x.ndim - 2) + [x.shape[-2], half]
+    c = c.reshape(shape)
+    s = s.reshape(shape)
+    x1 = x[..., :half]
+    x2 = x[..., half:dims]
+    out1 = x1 * c - x2 * s
+    out2 = x1 * s + x2 * c
+    if x.shape[-1] > dims:
+        return mx.concatenate([out1, out2, x[..., dims:]], axis=-1)
+    return mx.concatenate([out1, out2], axis=-1)
+
+
+try:
+    from serving.decode_config import MLX_CONSTRUCTOR_DEFAULTS as _MLX_DEFAULTS
+except ImportError:                     # direct module use outside the package
+    from decode_config import MLX_CONSTRUCTOR_DEFAULTS as _MLX_DEFAULTS
+
+
+def _sanitize_logits(logits, warn_owner=None):
+    """Replace non-finite logits so SELECTION over them is well-defined.
+
+    SANITISE BEFORE THE GREEDY RETURN, not after it. The sampler used to argmax
+    the raw logits and guard only the sampled path, so greedy decoding -- the one
+    mode callers expect to be reproducible -- was the one mode with no NaN guard.
+    `np.argmax` over an array containing NaN returns the index of the FIRST NaN
+    rather than raising, so one NaN silently selects a garbage token, and which
+    token that is moves with wherever the NaN landed: the same logits decode
+    differently run to run.
+
+    DKV plainly knows NaN reaches this runtime -- the attention combine guards it
+    (`mx.where(mx.isnan(out_sparse), 0.0, ...)`) and so do the LSE clamps. The
+    sampler was just never given the same treatment. The constants match
+    batch_engine.py's `sample()` and the native runtime's `dkv_sanitize_logits`,
+    so all three runtimes decode a non-finite logit vector to the same token.
+
+    This does not HIDE the NaN -- whatever produces it upstream is still wrong and
+    still worth finding, which is what the one-shot warning is for.
+
+    Returns the input unchanged (no copy) on the overwhelmingly common all-finite
+    path, so the cost is one vectorised `isfinite` scan per token.
+    """
+    if np.isfinite(logits).all():
+        return logits
+    if warn_owner is not None and not getattr(warn_owner, "_nonfinite_logits_warned", False):
+        warn_owner._nonfinite_logits_warned = True
+        print(f"[DKV MLX] WARNING: non-finite logits at sampling "
+              f"(nan={int(np.isnan(logits).sum())} inf={int(np.isinf(logits).sum())}); "
+              f"sanitising so greedy decode stays deterministic. This is an "
+              f"upstream bug -- rerun with DKV_DBG_NAN=1 to find it.", flush=True)
+    return np.nan_to_num(logits, nan=-100.0, posinf=100.0, neginf=-100.0)
+
+
 def _normalize_references(text: str) -> str:
     """Normalise citation-list formatting inconsistencies produced by the model."""
     lines = text.split('\n')
@@ -1653,8 +1739,54 @@ class MLXKVBlockManager:
     def native_pool(self):
         return DummyMLXPool(self)
 
-    def __init__(self, num_layers: int, heads: int, kv_heads: int, head_dim: int, rank: int, block_size: int, recency_window: int = 512):
+    def __init__(self, num_layers: int, heads: int, kv_heads: int, head_dim: int, rank: int, block_size: int, recency_window: Optional[int] = None):
         self.num_layers = num_layers
+        # ── Which layers can actually hold a compressed block ──────────────────
+        # Hybrid architectures (Qwen3-Next / Qwen3.5) interleave linear-attention
+        # layers with full-attention ones, and only the full-attention layers own a
+        # KV cache DKV can compress. Sizing the pool by `num_hidden_layers` therefore
+        # reserved slots for layers that can never fill them: measured on
+        # Qwen3.5-2B-4bit at 11.4k, 6 of 24 layers hold blocks and 406.9 MB of the
+        # 542.5 MB session pool sat on the other 18 — 75% of it, untouched.
+        #
+        # `None` means "not published yet" and is treated as ALL layers, which is
+        # exactly right for dense-attention models (Qwen2.5, Llama, Mistral: every
+        # layer is attended, so this whole mechanism is a no-op there). The wrapper
+        # publishes the real list from _patch_attention_layers, which already walks
+        # the layers looking for `self_attn` and so knows the answer.
+        #
+        # Set DKV_POOL_ATTENDED_ONLY=0 to restore the old full-width allocation.
+        self._attended_layers: Optional[List[int]] = None
+        self._pool_attended_only = os.environ.get("DKV_POOL_ATTENDED_ONLY", "1") != "0"
+
+        # ── DKV_ROTATED_POOL — what POSITION the compressed pool bakes in ──────
+        # Default (1) stores POST-RoPE keys, so a block's representation carries the
+        # position it held at COMPRESSION time. That is fine for a unique needle in
+        # bland filler, and it is exactly what collapses near-identical distractors
+        # ("The X Institute is located in Y", sixteen times) at long context: the
+        # values were never wrong, the positions were.
+        #
+        # With 0 the pool stores keys UNROTATED and every read re-rotates them to
+        # their ABSOLUTE positions, which is the representation dense attention
+        # actually sees. On CUDA this took distractor retrieval from 40/48 to 47/48
+        # over 48 seeds -- exact parity with dense's 47/48 -- while no routing knob
+        # ever moved it at all, because it was never a selection problem.
+        #
+        # It costs decode (read-time rotation) and a second dense-window buffer, so
+        # it is a STANDALONE knob rather than a default: ordinary needle recall is
+        # unchanged either way, and only confusable-content retrieval gains.
+        #
+        # Read-time rotation needs the keys MATERIALISED, which only the decode-cache
+        # path does. The pure low-rank scorer never forms a key, so it cannot honour
+        # this; requesting both is refused loudly at engage time rather than silently
+        # scoring unrotated keys against a rotated query (see execute_decode_attention).
+        self.rotated_pool = os.environ.get("DKV_ROTATED_POOL", "1") != "0"
+        self._rope_dims = None          # published from the model by set_rope_params
+        self._rope_base = None
+        self._rope_scale = 1.0
+        self._rope_cos = None           # lazily built, grown on demand
+        self._rope_sin = None
+        self._rope_tab_len = 0
         self.heads = heads
         self.kv_heads = kv_heads
         self.head_dim = head_dim
@@ -1673,18 +1805,32 @@ class MLXKVBlockManager:
         # Qwen2.5-1.5B (28 layers, 128 head_dim): factor=0.25 → 896 → 1024.
         # DKV_ENGAGE_THRESHOLD hard-overrides; DKV_DENSE_WINDOW_FACTOR tunes
         # the factor only (lower it, e.g. 0.125, to trade recency for RAM).
+        #
+        # PRECEDENCE, and note the middle rung is new. This used to derive the value
+        # unconditionally whenever DKV_ENGAGE_THRESHOLD was unset, which silently
+        # DISCARDED the constructor argument: `MLXKVBlockManager(..., recency_window=64)`
+        # returned a manager with recency_window 512 and no warning. Callers that
+        # sized a test sequence off the value they passed got a manager that never
+        # compressed anything, and every assertion after that point was vacuous.
+        #   1. DKV_ENGAGE_THRESHOLD  — hard override, unchanged
+        #   2. an explicit constructor argument
+        #   3. derived from model capacity: round_to_512(num_layers*head_dim*factor)
+        # Qwen2.5-1.5B (28 layers, 128 head_dim): factor=0.25 -> 896 -> 1024.
         env_engage = os.environ.get("DKV_ENGAGE_THRESHOLD")
+        _from_env = None
         if env_engage is not None:
             try:
-                recency_window = int(env_engage)
+                _from_env = int(env_engage)
             except ValueError:
-                pass
-        else:
+                _from_env = None
+        if _from_env is not None:
+            recency_window = _from_env
+        elif recency_window is None:
             _factor = float(os.environ.get("DKV_DENSE_WINDOW_FACTOR", "0.25"))
             _raw = num_layers * head_dim * _factor
             # Round up to nearest 512 for stable compiled-kernel shapes.
             recency_window = max(512, (int(_raw) + 511) // 512 * 512)
-        self.recency_window = recency_window
+        self.recency_window = int(recency_window)
         
         # max_blocks: how many SVD-compressed blocks we can hold simultaneously.
         # 256 blocks × 256 tokens = 65536 compressed tokens — enough for 64k context.
@@ -1777,11 +1923,29 @@ class MLXKVBlockManager:
         # _execute_decode_cache for the buffer-dtype dial (DKV_DECODE_FUSED_FP32).
         # =0 restores the old concat-per-token path bit-for-bit.
         self._decode_fused = os.environ.get("DKV_DECODE_FUSED", "1") != "0"
-        # Re-route + re-materialise every N tokens. Higher N = faster (less materialisation) but
-        # staler block selection. Measured @32k: N=8→18, 16→20, 32→23 tps; NIAH exact + synthesis
-        # reads paper at all three. 16 balances speed vs staleness for varied (chat) generation;
-        # raise toward 32 for retrieval-heavy/long-answer workloads.
-        self._decode_cache_interval = max(1, int(os.environ.get("DKV_DECODE_CACHE_INTERVAL", "16")))
+        # Re-route + re-materialise every N tokens. Higher N = less materialisation
+        # but a STALER frozen block selection: the routed set cannot change for N
+        # tokens, so a needle whose block is routed late stays invisible that long.
+        #
+        # The old default of 16 was justified by "measured @32k: N=8->18, 16->20,
+        # 32->23 tps", i.e. a ~15% cost for the shorter interval. THAT DOES NOT
+        # REPRODUCE. Re-measured properly with colab/bench_decode_interval_mlx.py --
+        # one process, one model load, one prefill, arms interleaved with the order
+        # alternating every round, paired statistic, min per round -- on
+        # Qwen3.5-2B-4bit at 9.8k:
+        #
+        #     interval 16   22.764 ms/token
+        #     interval  4   22.669 ms/token
+        #     paired mean_diff +0.095 ms, 95% CI [-0.486, +0.677]  -> not resolvable
+        #
+        # and the harness's own A/A control correctly reports no effect
+        # (+0.023 ms, CI [-0.010, +0.056]), so it is calibrated to detect one. A 15%
+        # effect would be ~3.4 ms and could not have hidden inside that interval.
+        #
+        # Skipping reconstruction on 3 steps in 4 already captures nearly all of the
+        # saving, so 16 was paying staleness for nothing. 4 is the least staleness
+        # the speedup will pay for, and matches CUDA's DKV_REMAT_INTERVAL.
+        self._decode_cache_interval = max(1, int(os.environ.get("DKV_DECODE_CACHE_INTERVAL", "4")))
 
         # ── DKV_SPARSE_PREFILL=1 — DSA/NSA-style block-sparse PREFILL (HANDOFF §DSA). ──
         # Prefill is otherwise dense O(L^2): every chunk attends over ALL preceding tokens.
@@ -2012,6 +2176,85 @@ class MLXKVBlockManager:
         finally:
             self._prefill_kv_capture.pop(session_id, None)
 
+    def set_attended_layers(self, layer_indices):
+        """Publish which decoder layers own a compressible KV cache.
+
+        Called once by the wrapper after attention patching. Must run BEFORE any
+        session is created, since it decides how each session's pool is sized.
+        """
+        idx = sorted(set(int(i) for i in layer_indices))
+        self._attended_layers = idx if idx else None
+        if self._attended_layers is not None and len(idx) != self.num_layers:
+            print(f"[DKV MLX] pool sized for {len(idx)}/{self.num_layers} attended "
+                  f"layers (hybrid model): {idx}", flush=True)
+
+    def set_rope_params(self, dims: int, base: float, scale: float, traditional: bool):
+        """Publish the model's RoPE geometry so the pool can re-rotate on read.
+
+        Refuses the interleaved ("traditional") layout rather than approximating it:
+        _rope_at implements the half-split pairing only, and silently rotating the
+        wrong pairs would degrade retrieval in a way no needle test would catch.
+        """
+        if traditional:
+            if not self.rotated_pool:
+                raise RuntimeError(
+                    "DKV_ROTATED_POOL=0 is not supported on a model using the "
+                    "interleaved (traditional) RoPE layout — the read-time rotation "
+                    "implements the half-split layout only. Unset DKV_ROTATED_POOL.")
+            return
+        if dims is None or base is None:
+            # A rope module that does not expose its geometry. Harmless while the
+            # pool stores rotated keys; fatal if it is meant to rotate on read, so
+            # say which attribute was missing instead of raising a TypeError from
+            # int(None) three calls later.
+            if not self.rotated_pool:
+                raise RuntimeError(
+                    f"DKV_ROTATED_POOL=0 needs the model's RoPE geometry, but its "
+                    f"rope module exposes dims={dims!r} base={base!r}. Read-time "
+                    f"rotation cannot be reconstructed without both.")
+            return
+        self._rope_dims = int(dims)
+        self._rope_base = float(base)
+        self._rope_scale = float(scale) if scale else 1.0
+
+    def _rope_tabs(self, need_pos: int):
+        """cos/sin tables covering at least `need_pos` positions, grown in steps."""
+        if self._rope_dims is None:
+            raise RuntimeError(
+                "DKV_ROTATED_POOL=0 requires the model's RoPE parameters, which were "
+                "never published — the attention patch did not find a `rope` module.")
+        if self._rope_cos is None or self._rope_tab_len < need_pos:
+            new_len = max(4096, 1 << (max(1, need_pos - 1)).bit_length())
+            self._rope_cos, self._rope_sin = _rope_tables(
+                new_len, self._rope_dims, self._rope_base, self._rope_scale)
+            self._rope_tab_len = new_len
+        return self._rope_cos, self._rope_sin
+
+    def _rotate_to_abs(self, x: mx.array, positions: mx.array, max_pos: int) -> mx.array:
+        """Rotate unrotated pool keys x [..., L, D] to their absolute positions."""
+        cos_t, sin_t = self._rope_tabs(max_pos + 1)
+        return _rope_at(x, positions, cos_t, sin_t, self._rope_dims)
+
+    def _layer_attended(self, l: int) -> bool:
+        """True if layer `l` can ever hold compressed blocks / a dense window."""
+        if not self._pool_attended_only or self._attended_layers is None:
+            return True
+        return l in self._attended_layers
+
+    def _per_layer(self, full_shape, dtype, empty_shape=None):
+        """One array per decoder layer, but only ALLOCATED for attended layers.
+
+        Non-attended layers get a zero-row slab of the same rank and dtype rather
+        than being dropped, so every existing `session[key][layer_idx]` index stays
+        valid and in-bounds checking behaves the same — they simply hold nothing.
+        Nothing reads them: every read is guarded by that layer's num_blocks (0) or
+        dense_lens (0), both of which stay zero for a layer that never ingests.
+        """
+        if empty_shape is None:
+            empty_shape = (0,) + tuple(full_shape[1:])
+        return [mx.zeros(full_shape if self._layer_attended(l) else empty_shape, dtype=dtype)
+                for l in range(self.num_layers)]
+
     def _create_empty_session(self, max_blocks: int = None) -> Dict[str, Any]:
         if max_blocks is None:
             max_blocks = self.max_blocks
@@ -2019,36 +2262,65 @@ class MLXKVBlockManager:
         dtype = mx.float16
         return {
             "max_blocks": max_blocks,
-            "dense_keys":   [mx.zeros((1, self.kv_heads, self.max_dense_len, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "dense_values": [mx.zeros((1, self.kv_heads, self.max_dense_len, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
+            # NOTE: the dense window is the one slab whose empty variant zeroes the
+            # TOKEN axis (dim 2), not dim 0 — dim 0 is the batch axis and must stay 1
+            # so `dense_keys[l][0, :, :n]` keeps the same rank on every layer.
+            "dense_keys":   self._per_layer((1, self.kv_heads, self.max_dense_len, self.head_dim), dtype,
+                                            empty_shape=(1, self.kv_heads, 0, self.head_dim)),
+            "dense_values": self._per_layer((1, self.kv_heads, self.max_dense_len, self.head_dim), dtype,
+                                            empty_shape=(1, self.kv_heads, 0, self.head_dim)),
+            # UNROTATED shadow of the dense key window, allocated only when the pool
+            # stores pre-RoPE keys. The rotated window above stays exactly as it was:
+            # the dense recency half of decode attention scores a rotated query
+            # against it directly and must not change. This shadow exists purely as
+            # the SOURCE a block is compressed from, so the pool inherits unrotated
+            # keys without the dense path paying anything. One extra fp16 K buffer
+            # per attended layer — 4.7 MB on Qwen3.5-2B at the default window.
+            "dense_keys_unrot": (
+                self._per_layer((1, self.kv_heads, self.max_dense_len, self.head_dim), dtype,
+                                empty_shape=(1, self.kv_heads, 0, self.head_dim))
+                if not self.rotated_pool else None),
             "dense_lens":   [0 for _ in range(self.num_layers)],
             "dense_lens_mx": [mx.array(0, dtype=mx.int32) for _ in range(self.num_layers)],
             
             "prefill_K_chunks": [[] for _ in range(self.num_layers)],
             "prefill_V_chunks": [[] for _ in range(self.num_layers)],
+            # The unrotated twin of prefill_K_chunks, stashed only when the pool
+            # stores pre-RoPE keys. Declared here rather than setdefault'd at first
+            # use so it is cleared with the session and deep-copied by clone_session
+            # like every other per-layer list.
+            "prefill_K_unrot_chunks": ([[] for _ in range(self.num_layers)]
+                                       if not self.rotated_pool else None),
             
             "num_blocks": [0 for _ in range(self.num_layers)],
-            "comp_U":     [mx.zeros((max_blocks, self.block_size - 1, self.rank), dtype=mx.int8) for _ in range(self.num_layers)],
-            "comp_U_scale": [mx.zeros((max_blocks,), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_VK":    [mx.zeros((max_blocks, self.kv_heads, self.rank, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_VV":    [mx.zeros((max_blocks, self.kv_heads, self.rank, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_anc_k": [mx.zeros((max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_anc_v": [mx.zeros((max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
+            "comp_U":     self._per_layer((max_blocks, self.block_size - 1, self.rank), mx.int8),
+            "comp_U_scale": self._per_layer((max_blocks,), dtype),
+            "comp_VK":    self._per_layer((max_blocks, self.kv_heads, self.rank, self.head_dim), dtype),
+            "comp_VV":    self._per_layer((max_blocks, self.kv_heads, self.rank, self.head_dim), dtype),
+            "comp_anc_k": self._per_layer((max_blocks, self.kv_heads, self.head_dim), dtype),
+            "comp_anc_v": self._per_layer((max_blocks, self.kv_heads, self.head_dim), dtype),
             # Per-block element-wise key min/max — one of two signals the top-K
             # router uses: a Quest-style upper bound on the block's max q·k. It is
             # cheap but LOOSE (over-estimates at large block counts), so the router
             # also scores the exact residual keys to reliably rank needle blocks.
-            "comp_min_k": [mx.zeros((max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_max_k": [mx.zeros((max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_scale":    [mx.zeros((max_blocks,)) for _ in range(self.num_layers)],
-            "comp_seq_len": [mx.zeros((max_blocks,), dtype=mx.int32) for _ in range(self.num_layers)],
+            "comp_min_k": self._per_layer((max_blocks, self.kv_heads, self.head_dim), dtype),
+            "comp_max_k": self._per_layer((max_blocks, self.kv_heads, self.head_dim), dtype),
+            "comp_scale":    self._per_layer((max_blocks,), mx.float32),
+            "comp_seq_len": self._per_layer((max_blocks,), mx.int32),
             
-            "comp_res_k": [mx.zeros((max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_res_v": [mx.zeros((max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_res_n": [[0] * max_blocks for _ in range(self.num_layers)],
+            "comp_res_k": self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype),
+            "comp_res_v": self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype),
+            "comp_res_n": [[0] * (max_blocks if self._layer_attended(l) else 0) for l in range(self.num_layers)],
             # Per-block boolean mask of which delta positions (0..block_size-2) are kept
             # as EXACT residuals — used to exclude them from the SVD pool at decode.
-            "comp_res_mask": [mx.zeros((max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
+            "comp_res_mask": self._per_layer((max_blocks, self.block_size - 1), mx.bool_),
+            # BLOCK-RELATIVE position (1..S_comp) of each stored exact residual.
+            # comp_res_mask records WHICH positions were kept but not in which slot,
+            # so it cannot be inverted to a per-slot position — and read-time
+            # rotation needs exactly that, since residuals are scattered inside the
+            # block. Only allocated for the unrotated pool; int32, ~one page a block.
+            "comp_res_pos": (self._per_layer((max_blocks, self.max_residual), mx.int32)
+                             if not self.rotated_pool else None),
             
             "token_ids": [],
             "token_counts": Counter()
@@ -2089,10 +2361,15 @@ class MLXKVBlockManager:
             "comp_res_k":   ((self.max_residual, self.kv_heads, self.head_dim), f16),
             "comp_res_v":   ((self.max_residual, self.kv_heads, self.head_dim), f16),
             "comp_res_mask": ((self.block_size - 1,), mx.bool_),
+            "comp_res_pos":  ((self.max_residual,), mx.int32),
         }
         for l in range(self.num_layers):
+            # Layers that own no KV cache hold zero-row slabs (see _per_layer);
+            # growing them would hand back exactly the memory this sizing saves.
+            if not self._layer_attended(l):
+                continue
             for key, (tail, dt) in grown_tails.items():
-                if key not in session:
+                if session.get(key) is None:      # slab not allocated in this mode
                     continue
                 pad = mx.zeros((grow,) + tail, dtype=dt)
                 session[key][l] = mx.concatenate([session[key][l], pad], axis=0)
@@ -2258,6 +2535,8 @@ class MLXKVBlockManager:
                 # Zero out discarded dense tokens and blocks
                 session["dense_keys"][layer_idx][0, :, dense_len:] = 0.0
                 session["dense_values"][layer_idx][0, :, dense_len:] = 0.0
+                if session.get("dense_keys_unrot") is not None:
+                    session["dense_keys_unrot"][layer_idx][0, :, dense_len:] = 0.0
                 session["comp_U"][layer_idx][keep_blocks:] = 0
                 session["comp_U_scale"][layer_idx][keep_blocks:] = 0.0
                 session["comp_VK"][layer_idx][keep_blocks:] = 0.0
@@ -2280,6 +2559,8 @@ class MLXKVBlockManager:
                 session["dense_lens"][layer_idx] = dense_len
                 session["dense_keys"][layer_idx][0, :, dense_len:] = 0.0
                 session["dense_values"][layer_idx][0, :, dense_len:] = 0.0
+                if session.get("dense_keys_unrot") is not None:
+                    session["dense_keys_unrot"][layer_idx][0, :, dense_len:] = 0.0
             
             mx.eval(
                 session["dense_keys"][layer_idx],
@@ -2395,13 +2676,57 @@ class MLXKVBlockManager:
         if session is None:
             return
 
+        # ── ONLY THE ATTENDED LAYERS PARTICIPATE ──────────────────────────────
+        # This loop used to run `for l in range(self.num_layers)` and bail on the
+        # first layer with no stashed chunks. On a hybrid model (Qwen3.5: 6 of 24
+        # layers have `self_attn`) layer 0 is linear-attention and never stashes
+        # anything, so the very first iteration returned and this entire batched
+        # compressor never ran.
+        #
+        # That was invisible at the default DKV_STREAMING_COMPRESS=1, because the
+        # per-layer compressor inside the forward had already cleared every stash,
+        # so this path genuinely had nothing to do and returning was harmless.
+        #
+        # With DKV_STREAMING_COMPRESS=0 it is the ONLY compressor, and the early
+        # return meant NOTHING WAS EVER COMPRESSED: measured on Qwen3.5-2B, a 21,019
+        # token prompt ended with 0 blocks and a 2-token dense window — the whole
+        # context silently discarded, with no error anywhere.
+        #
+        # Below, the BATCH axis is indexed by each layer's ORDINAL among the attended
+        # layers while every session array stays indexed by the TRUE layer index.
+        # Keeping those two apart is the whole of this fix.
+        layers = [l for l in range(self.num_layers) if self._layer_attended(l)]
+        n_layers_b = len(layers)
+        if not layers:
+            return
+
+        # NOTHING STASHED -> NOTHING TO DO, and check that BEFORE refusing anything
+        # below. generate() calls this unconditionally after every prefill chunk, so
+        # at the default DKV_STREAMING_COMPRESS=1 the per-layer compressor inside the
+        # forward has already drained every stash and this is a no-op. Putting the
+        # refusal ahead of this check made it fire on the ordinary default path.
+        if not any(session["prefill_K_chunks"][l] for l in layers):
+            return
+
+        if not self.rotated_pool:
+            # Reached only when this path is genuinely about to compress, i.e.
+            # DKV_STREAMING_COMPRESS=0. The unrotated pool needs the PRE-RoPE stash
+            # and must record each residual's position; only the per-layer
+            # compressor does either. Compressing rotated keys into a pool the
+            # reader rotates a second time raises nothing — retrieval just quietly
+            # degrades — so refuse instead.
+            raise RuntimeError(
+                "DKV_ROTATED_POOL=0 requires DKV_STREAMING_COMPRESS=1 (the default): "
+                "the batched prefill compressor carries neither the unrotated key "
+                "stash nor the residual positions that read-time rotation needs.")
+
         # 1. Virtually concatenate [dense tail | stashed chunks] per layer.
         #    The tail is whatever survived the previous flush uncompressed;
         #    without it, per-chunk calls would clobber prior chunks (the
         #    2026-07-02 regression: only the last 512 tokens survived prefill).
         K_all_layers = []
         V_all_layers = []
-        for l in range(self.num_layers):
+        for l in layers:
             if not session["prefill_K_chunks"][l]:
                 return
             parts_k = list(session["prefill_K_chunks"][l])
@@ -2424,7 +2749,7 @@ class MLXKVBlockManager:
         # Session pool capacity guard (reused sessions can outgrow their
         # allocation): grow the pools first; clamp only at the global cap.
         max_b = session.get("max_blocks", self.max_blocks)
-        start_blocks = session["num_blocks"][0]
+        start_blocks = session["num_blocks"][layers[0]]
         if num_blocks > 0 and start_blocks + num_blocks > max_b:
             max_b = self._ensure_block_capacity(session, start_blocks + num_blocks)
         if num_blocks > 0 and start_blocks + num_blocks > max_b:
@@ -2436,17 +2761,17 @@ class MLXKVBlockManager:
             # Nothing clears the window yet: everything (tail + new) stays
             # dense. num_blocks<=0 implies L < recency_window + block_size,
             # so this always fits max_dense_len.
-            for l in range(self.num_layers):
+            for i, l in enumerate(layers):
                 L_dense = L
-                session["dense_keys"][l][0, :, :L_dense]   = K_all_layers[l].squeeze(0)
-                session["dense_values"][l][0, :, :L_dense] = V_all_layers[l].squeeze(0)
+                session["dense_keys"][l][0, :, :L_dense]   = K_all_layers[i].squeeze(0)
+                session["dense_values"][l][0, :, :L_dense] = V_all_layers[i].squeeze(0)
                 session["dense_lens"][l] = L_dense
                 session["dense_lens_mx"][l] = mx.array(L_dense, dtype=mx.int32)
             return
 
         N_comp = num_blocks * self.block_size
         S_comp = self.block_size - 1
-        B_batch = self.num_layers * num_blocks
+        B_batch = n_layers_b * num_blocks
         
         # 3. Build deltas for all blocks across all layers
         accum_deltas_k = []
@@ -2456,9 +2781,9 @@ class MLXKVBlockManager:
         accum_blocks_k = []
         accum_blocks_v = []
         
-        for l in range(self.num_layers):
-            K_all = K_all_layers[l]
-            V_all = V_all_layers[l]
+        for i, l in enumerate(layers):
+            K_all = K_all_layers[i]
+            V_all = V_all_layers[i]
             
             K_comp = K_all[:, :, :N_comp, :]
             V_comp = V_all[:, :, :N_comp, :]
@@ -2506,9 +2831,11 @@ class MLXKVBlockManager:
             recon_delta_v_list = []
             v_gain_list = []
 
-            for l in range(self.num_layers):
-                deltas_k_2d = accum_deltas_k[l]
-                deltas_v_2d = accum_deltas_v[l]
+            # `i` indexes the batch, `l` is the real layer index — get_layer_rank
+            # tapers by DEPTH, so it must see the true index, not the ordinal.
+            for i, l in enumerate(layers):
+                deltas_k_2d = accum_deltas_k[i]
+                deltas_v_2d = accum_deltas_v[i]
                 if v_scale_on:
                     eK = mx.sum(deltas_k_2d.astype(mx.float32)**2, axis=(1, 2))
                     eV = mx.sum(deltas_v_2d.astype(mx.float32)**2, axis=(1, 2))
@@ -2790,7 +3117,7 @@ class MLXKVBlockManager:
                               flush=True)
                 boost_rows.append(boost_multipliers)
             # b = layer*num_blocks + block  →  tile the per-block rows per layer
-            boost_np = np.tile(np.asarray(boost_rows, dtype=np.float32), (self.num_layers, 1))
+            boost_np = np.tile(np.asarray(boost_rows, dtype=np.float32), (n_layers_b, 1))
             boost_mx = mx.array(boost_np).astype(joint_errors.dtype)
             joint_errors = joint_errors * boost_mx
             
@@ -2883,7 +3210,7 @@ class MLXKVBlockManager:
                         continue
                     _midx = {i for i, m in enumerate(_marked) if m}
                     _hits = []
-                    for _ly in range(self.num_layers):
+                    for _ly in range(n_layers_b):
                         _b = _ly * num_blocks + _bi
                         _nr = int(n_res_batch[_b])
                         _hits.append(len(_midx & set(tk_dbg[_b, :_nr].tolist())))
@@ -2928,9 +3255,9 @@ class MLXKVBlockManager:
             res_mask = mx.zeros((B_batch, S_comp), dtype=mx.bool_)
             
         # 7. Scatter back to session layers
-        for l in range(self.num_layers):
+        for i, l in enumerate(layers):
             start_idx = session["num_blocks"][l]
-            l_slice = slice(l * num_blocks, (l + 1) * num_blocks)
+            l_slice = slice(i * num_blocks, (i + 1) * num_blocks)
             
             # Quantize U_batch[l_slice] to int8
             scale_u = mx.max(mx.max(mx.abs(U_batch[l_slice]), axis=2), axis=1)
@@ -2952,15 +3279,17 @@ class MLXKVBlockManager:
             session["comp_res_k"][l][start_idx:start_idx+num_blocks] = res_k_padded[l_slice]
             session["comp_res_v"][l][start_idx:start_idx+num_blocks] = res_v_padded[l_slice]
             for b_idx in range(num_blocks):
-                session["comp_res_n"][l][start_idx + b_idx] = n_res_batch[l * num_blocks + b_idx]
+                # n_res_batch is a BATCH-ordered list — index it by the ordinal `i`,
+                # not by the layer index `l`, which is sparse on a hybrid model.
+                session["comp_res_n"][l][start_idx + b_idx] = n_res_batch[i * num_blocks + b_idx]
             if "comp_res_mask" in session:
                 session["comp_res_mask"][l][start_idx:start_idx+num_blocks] = res_mask[l_slice]
                 
             session["num_blocks"][l] = start_idx + num_blocks
             
             # Copy remaining dense tokens
-            K_all = K_all_layers[l]
-            V_all = V_all_layers[l]
+            K_all = K_all_layers[i]
+            V_all = V_all_layers[i]
             K_dense = K_all[:, :, N_comp:, :]
             V_dense = V_all[:, :, N_comp:, :]
             L_dense = L - N_comp
@@ -2976,7 +3305,7 @@ class MLXKVBlockManager:
                 
         # 8. Parallel evaluate all targets
         eval_targets = []
-        for l in range(self.num_layers):
+        for l in layers:
             eval_targets.extend([
                 session["comp_U"][l],
                 session["comp_U_scale"][l],
@@ -3014,7 +3343,25 @@ class MLXKVBlockManager:
             parts_v.insert(0, mx.expand_dims(session["dense_values"][layer_idx][0, :, :tail], 0))
         K_layer = mx.concatenate(parts_k, axis=2) if len(parts_k) > 1 else parts_k[0]
         V_layer = mx.concatenate(parts_v, axis=2) if len(parts_v) > 1 else parts_v[0]
-        
+
+        # The UNROTATED twin of K_layer, assembled the same way from the unrotated
+        # stash plus the unrotated dense tail. Everything the pool stores on the K
+        # side is taken from this instead; K_layer itself still feeds the dense
+        # window, which must stay rotated. (DKV_ROTATED_POOL=0 only.)
+        K_layer_src = K_layer
+        if not self.rotated_pool:
+            u_chunks = session.get("prefill_K_unrot_chunks")
+            parts_u = list(u_chunks[layer_idx]) if u_chunks else []
+            if not parts_u:
+                raise RuntimeError(
+                    f"DKV_ROTATED_POOL=0: layer {layer_idx} has rotated prefill "
+                    f"chunks but no unrotated twin — an ingest path was missed.")
+            if tail > 0:
+                parts_u.insert(0, mx.expand_dims(
+                    session["dense_keys_unrot"][layer_idx][0, :, :tail], 0))
+            K_layer_src = mx.concatenate(parts_u, axis=2) if len(parts_u) > 1 else parts_u[0]
+            u_chunks[layer_idx] = []
+
         # Clear stashed chunks
         session["prefill_K_chunks"][layer_idx] = []
         session["prefill_V_chunks"][layer_idx] = []
@@ -3039,6 +3386,8 @@ class MLXKVBlockManager:
             L_dense = L
             session["dense_keys"][layer_idx][0, :, :L_dense]   = K_layer.squeeze(0)
             session["dense_values"][layer_idx][0, :, :L_dense] = V_layer.squeeze(0)
+            if not self.rotated_pool:
+                session["dense_keys_unrot"][layer_idx][0, :, :L_dense] = K_layer_src.squeeze(0)
             session["dense_lens"][layer_idx] = L_dense
             session["dense_lens_mx"][layer_idx] = mx.array(L_dense, dtype=mx.int32)
             return
@@ -3047,7 +3396,7 @@ class MLXKVBlockManager:
         S_comp = self.block_size - 1
         B_batch = num_blocks
 
-        K_comp = K_layer[:, :, :N_comp, :]
+        K_comp = K_layer_src[:, :, :N_comp, :]
         V_comp = V_layer[:, :, :N_comp, :]
 
         # Shape: (H_kv, num_blocks, block_size, D)
@@ -3350,6 +3699,14 @@ class MLXKVBlockManager:
             session["comp_res_n"][layer_idx][start_idx + b_idx] = n_res_batch[b_idx]
         if "comp_res_mask" in session:
             session["comp_res_mask"][layer_idx][start_idx:start_idx+num_blocks] = res_mask
+        # Slot -> block-relative position, for read-time rotation (see _compress_block).
+        # Slot i took the key at top_k[b, i] + 1, the same gather that built res_k_padded.
+        if session.get("comp_res_pos") is not None:
+            if top_k is not None:
+                pos_batch = (top_k + 1).astype(mx.int32) * active_mask.astype(mx.int32)
+            else:
+                pos_batch = mx.zeros((num_blocks, self.max_residual), dtype=mx.int32)
+            session["comp_res_pos"][layer_idx][start_idx:start_idx+num_blocks] = pos_batch
 
         session["num_blocks"][layer_idx] = start_idx + num_blocks
 
@@ -3360,6 +3717,9 @@ class MLXKVBlockManager:
 
         session["dense_keys"][layer_idx][0, :, :L_dense] = K_dense.squeeze(0)
         session["dense_values"][layer_idx][0, :, :L_dense] = V_dense.squeeze(0)
+        if not self.rotated_pool:
+            session["dense_keys_unrot"][layer_idx][0, :, :L_dense] = \
+                K_layer_src[:, :, N_comp:, :].squeeze(0)
         session["dense_lens"][layer_idx] = L_dense
         session["dense_lens_mx"][layer_idx] = mx.array(L_dense, dtype=mx.int32)
 
@@ -3434,11 +3794,22 @@ class MLXKVBlockManager:
             session = self.sessions[session_id] = self._create_empty_session(init_blocks)
         return session
 
-    def capture_prefill_kv(self, session_id: str, layer_idx: int, K: mx.array, V: mx.array):
-        """Write incoming prefill KV chunk into the stashed lists for deferred compression."""
+    def capture_prefill_kv(self, session_id: str, layer_idx: int, K: mx.array, V: mx.array,
+                           K_unrot: mx.array = None):
+        """Write incoming prefill KV chunk into the stashed lists for deferred compression.
+
+        `K` is POST-RoPE. `K_unrot` is the same chunk PRE-RoPE and is stashed
+        alongside only when the pool stores unrotated keys (DKV_ROTATED_POOL=0).
+        """
         session = self._get_or_create_session(session_id)
         session["prefill_K_chunks"][layer_idx].append(K)
         session["prefill_V_chunks"][layer_idx].append(V)
+        if not self.rotated_pool:
+            if K_unrot is None:
+                raise RuntimeError(
+                    "DKV_ROTATED_POOL=0 but capture_prefill_kv got no unrotated K — "
+                    "the caller has not been taught the unrotated pool.")
+            session["prefill_K_unrot_chunks"][layer_idx].append(K_unrot)
         if self._lego_prefill:
             self._lego_capture_stream(session, layer_idx, K, V)
 
@@ -3578,12 +3949,24 @@ class MLXKVBlockManager:
     def compress_prefill_kv(self, session_id: str):
         pass
 
-    def ingest_streaming(self, session_id: str, layer_idx: int, k: mx.array, v: mx.array):
+    def ingest_streaming(self, session_id: str, layer_idx: int, k: mx.array, v: mx.array,
+                         k_unrot: mx.array = None):
+        """Append one decode token's KV. `k` is POST-RoPE (what the dense window and
+        the dense half of decode attention need); `k_unrot` is the same key PRE-RoPE
+        and is required only when the pool stores unrotated keys."""
         session = self._get_or_create_session(session_id)
         dense_len = session["dense_lens"][layer_idx]
         
         session["dense_keys"][layer_idx][0, :, dense_len:dense_len + 1] = k.squeeze(0)
         session["dense_values"][layer_idx][0, :, dense_len:dense_len + 1] = v.squeeze(0)
+        if not self.rotated_pool:
+            if k_unrot is None:
+                raise RuntimeError(
+                    "DKV_ROTATED_POOL=0 but ingest_streaming got no unrotated key — "
+                    "the caller is a path that has not been taught the unrotated pool. "
+                    "Refusing rather than compressing rotated keys into a pool the "
+                    "reader will rotate a second time.")
+            session["dense_keys_unrot"][layer_idx][0, :, dense_len:dense_len + 1] = k_unrot.squeeze(0)
         session["dense_lens"][layer_idx] += 1
         session["dense_lens_mx"][layer_idx] = mx.array(session["dense_lens"][layer_idx], dtype=mx.int32)
         
@@ -3615,7 +3998,13 @@ class MLXKVBlockManager:
                 session["comp_res_mask"][layer_idx][:-1] = session["comp_res_mask"][layer_idx][1:]
             num_blocks = max_b - 1
 
-        block_k = session["dense_keys"][layer_idx][0, :, start:start + self.block_size]
+        # Which key space this block is compressed FROM. With DKV_ROTATED_POOL=0 the
+        # source is the unrotated shadow window, so anchor, deltas, residuals and the
+        # min/max router bounds are all pre-RoPE and the reader rotates them to their
+        # absolute positions. The V side is unaffected — values are never rotated.
+        _k_src = (session["dense_keys"] if self.rotated_pool
+                  else session["dense_keys_unrot"])
+        block_k = _k_src[layer_idx][0, :, start:start + self.block_size]
         block_v = session["dense_values"][layer_idx][0, :, start:start + self.block_size]
 
         anchor_k = block_k[:, 0, :]
@@ -3924,7 +4313,17 @@ class MLXKVBlockManager:
             if top_k is not None:
                 mask_val[top_k] = True
             session["comp_res_mask"][layer_idx][num_blocks] = mask_val
-        
+        # Per-SLOT residual position. The mask above says WHICH positions were kept
+        # but not in which slot, and read-time rotation needs the slot->position map
+        # because residuals are scattered inside the block. Slot i holds the key from
+        # block-relative position top_k[i]+1 (the +1 skips the anchor at 0), matching
+        # the `mx.take(block_k_t, top_k_indices + 1)` gather that filled it.
+        if session.get("comp_res_pos") is not None:
+            pos_val = mx.zeros((self.max_residual,), dtype=mx.int32)
+            if top_k is not None and n_res > 0:
+                pos_val[:n_res] = (top_k[:n_res] + 1).astype(mx.int32)
+            session["comp_res_pos"][layer_idx][num_blocks] = pos_val
+
         session["num_blocks"][layer_idx] = num_blocks + 1
         # Invalidate the cached residual gather for this layer: the block set
         # (and, at max_blocks, the block ordering via the shift above) changed.
@@ -3951,6 +4350,17 @@ class MLXKVBlockManager:
             session["dense_values"][layer_idx][0, :, :remaining] = session["dense_values"][layer_idx][0, :, self.block_size:dense_len]
         session["dense_keys"][layer_idx][0, :, remaining:dense_len]   = 0.0
         session["dense_values"][layer_idx][0, :, remaining:dense_len] = 0.0
+        # The unrotated shadow is the SOURCE the next block is compressed from, so it
+        # has to slide in lockstep with the rotated window. Shifting only the rotated
+        # one left every block after the first reading stale tokens: block 0 still
+        # came out right (nothing had shifted yet) and every later block was built
+        # from keys belonging to earlier positions, which read-time rotation then
+        # sent to the wrong place entirely.
+        _ku = session.get("dense_keys_unrot")
+        if _ku is not None:
+            if remaining > 0:
+                _ku[layer_idx][0, :, :remaining] = _ku[layer_idx][0, :, self.block_size:dense_len]
+            _ku[layer_idx][0, :, remaining:dense_len] = 0.0
         session["dense_lens"][layer_idx] = remaining
         session["dense_lens_mx"][layer_idx] = mx.array(remaining, dtype=mx.int32)
         # Materialise all pending ops immediately so the lazy graph of slice
@@ -3958,6 +4368,7 @@ class MLXKVBlockManager:
         mx.eval(
             session["dense_keys"][layer_idx],
             session["dense_values"][layer_idx],
+            *([_ku[layer_idx]] if _ku is not None else []),
         )
         mx.clear_cache()
 
@@ -4015,13 +4426,34 @@ class MLXKVBlockManager:
             res_n = mx.array(session["comp_res_n"][layer_idx][:nb], dtype=mx.int32)
             res_mask = session["comp_res_mask"][layer_idx][:nb] if "comp_res_mask" in session else None
 
+            # Absolute block index of each pool slot. Blocks tile the prompt from
+            # token 0, so slot b covers tokens [b*bs, (b+1)*bs) — that identity is
+            # what makes read-time rotation possible at all, and it is carried
+            # through the top-K gather below so the survivors keep their positions.
+            blk_abs = mx.arange(nb, dtype=mx.int32)
+            res_pos = (session["comp_res_pos"][layer_idx][:nb]
+                       if session.get("comp_res_pos") is not None else None)
+
             k_eff = self.topk_blocks
             if self.topk_blocks > 0 and self.topk_frac > 0.0:
                 k_eff = max(self.topk_blocks, int(nb * self.topk_frac))
             if self.topk_blocks > 0 and nb > k_eff:
                 R_route = min(self.route_residuals, self.max_residual)
                 rvld = mx.expand_dims(mx.arange(R_route), 0) < mx.expand_dims(mx.minimum(res_n, R_route), 1)
-                relevance = _block_relevance_residual(q, ak, rk[:, :R_route], rvld, scale, gpk)
+                # The router compares a ROTATED query against these keys, so with an
+                # unrotated pool they have to be rotated first or the scores are
+                # measured in the wrong space. Only the anchor and the routing
+                # residuals are needed here (nb*(1+R_route) keys), not the blocks.
+                ak_route, rk_route = ak, rk[:, :R_route]
+                if not self.rotated_pool:
+                    _mp = nb * bs + bs
+                    ak_route = self._rotate_to_abs(
+                        ak.transpose(1, 0, 2), blk_abs * bs, _mp).transpose(1, 0, 2)
+                    _rp = (blk_abs.reshape(nb, 1) * bs + res_pos[:, :R_route]).reshape(-1)
+                    rk_route = self._rotate_to_abs(
+                        rk[:, :R_route].transpose(2, 0, 1, 3).reshape(kv_heads, nb * R_route, D),
+                        _rp, _mp).reshape(kv_heads, nb, R_route, D).transpose(1, 2, 0, 3)
+                relevance = _block_relevance_residual(q, ak_route, rk_route, rvld, scale, gpk)
                 _er_on, _er_beta, _er_maxnb = _edge_routing_params()
                 if _er_on:
                     # Co-select chunks connected to high-relevance chunks (the edge
@@ -4032,6 +4464,9 @@ class MLXKVBlockManager:
                 ak = mx.take(ak, sel, 0); av = mx.take(av, sel, 0); sc = mx.take(sc, sel, 0)
                 csl = mx.take(csl, sel, 0); rk = mx.take(rk, sel, 0); rv = mx.take(rv, sel, 0)
                 res_n = mx.take(res_n, sel, 0)
+                blk_abs = mx.take(blk_abs, sel, 0)
+                if res_pos is not None:
+                    res_pos = mx.take(res_pos, sel, 0)
                 if res_mask is not None:
                     res_mask = mx.take(res_mask, sel, 0)
             K, R = U.shape[0], rk.shape[1]
@@ -4054,6 +4489,22 @@ class MLXKVBlockManager:
             full_v = mx.concatenate([av_e, av_e + delta_v], axis=2).transpose(1, 0, 2, 3).reshape(kv_heads, K * bs, D)
             res_k_all = rk.transpose(2, 0, 1, 3).reshape(kv_heads, K * R, D)
             res_v_all = rv.transpose(2, 0, 1, 3).reshape(kv_heads, K * R, D)
+
+            if not self.rotated_pool:
+                # THE READ-TIME ROTATION. Every key now goes to the position it
+                # actually holds in the sequence, not the one its block held when it
+                # was compressed. Slot t of block b is at b*bs + t (t=0 is the
+                # anchor); residual slot i is at b*bs + res_pos[b, i], which is why
+                # the per-slot position had to be stored — the residual mask records
+                # which positions were kept but not in which slot.
+                # Values are NOT rotated: RoPE only ever applied to keys.
+                _mp = nb * bs + bs
+                pos_full = (blk_abs.reshape(K, 1) * bs
+                            + mx.arange(bs, dtype=mx.int32).reshape(1, bs)).reshape(K * bs)
+                full_k = self._rotate_to_abs(full_k, pos_full, _mp)
+                if res_pos is not None and R > 0:
+                    pos_res = (blk_abs.reshape(K, 1) * bs + res_pos).reshape(K * R)
+                    res_k_all = self._rotate_to_abs(res_k_all, pos_res, _mp)
 
             pos = mx.arange(S_comp).reshape(1, S_comp)
             recon_valid = pos < csl.reshape(K, 1)
@@ -4165,6 +4616,21 @@ class MLXKVBlockManager:
         q   = q_rot.squeeze(2).squeeze(0)   # [H_q, D]
         gpk = num_key_value_groups
         nb  = session["num_blocks"][layer_idx]  # Python int — used for slicing
+
+        if not self.rotated_pool and nb > 0 and not self._decode_cache:
+            # A DECLINE THAT SILENTLY CHANGES THE ALGORITHM IS WORSE THAN A CRASH.
+            # The pure low-rank scorer below never materialises a key — it scores the
+            # query against U/V_K in rank space — so there is nowhere to apply the
+            # read-time rotation. Falling through would score UNROTATED pool keys
+            # against a ROTATED query: not an error, just quietly wrong retrieval that
+            # every needle test would still pass. Refuse instead, and name the fix.
+            raise RuntimeError(
+                "DKV_ROTATED_POOL=0 requires the decode-cache read path "
+                "(DKV_DECODE_CACHE=1, the default), which materialises the routed "
+                "blocks and can therefore rotate them to their absolute positions. "
+                "DKV_DECODE_CACHE is currently off, and the low-rank scorer it falls "
+                "back to cannot honour an unrotated pool. Set DKV_DECODE_CACHE=1 or "
+                "unset DKV_ROTATED_POOL.")
 
         if self._decode_cache and nb > 0:
             dk = session["dense_keys"][layer_idx][0]
@@ -4612,7 +5078,8 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                 manager.ingest_streaming(
                     sid, layer_idx,
                     keys_rot[b_idx:b_idx+1],
-                    values[ b_idx:b_idx+1]
+                    values[ b_idx:b_idx+1],
+                    k_unrot=(None if manager.rotated_pool else keys[b_idx:b_idx+1])
                 )
 
                 # ── Factual store query (MLX decode path, layer 0 only) ──────
@@ -5041,7 +5508,8 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
             manager.capture_prefill_kv(
                 sid, layer_idx,
                 keys_rot[b_idx:b_idx+1],
-                values[ b_idx:b_idx+1]
+                values[ b_idx:b_idx+1],
+                K_unrot=(None if manager.rotated_pool else keys[b_idx:b_idx+1])
             )
             # Stash UNROTATED K/V (layers 0 + middle only) for the optional factual
             # store — its descriptors must share the unrotated layer-0 space the
@@ -5245,9 +5713,25 @@ class MLXQwenModel:
 
         self._prev_was_prefill[cache_key] = is_prefill
 
-        # print(f"[DBG] __call__ mx.eval(logits_mx) starting...", flush=True)
+        # ── Convert only the row anybody reads ────────────────────────────────
+        # Every consumer of this output takes `logits[..., -1, :]` — generate(),
+        # the CAD prior stream, the batch engine, the HF wrapper. Prefill was
+        # nonetheless materialising the WHOLE sequence: measured shape
+        # (1, 512, 248320) on Qwen3.5-2B, i.e. 508 MB per prefill chunk copied to
+        # NumPy and again to torch, of which 511 of 512 rows were thrown away.
+        # Across the 15 chunks of a 7.6k prompt that is ~7.6 GB of allocation and
+        # copying, on a machine with 8 GB total.
+        #
+        # Slicing on the MLX side keeps the shape [B, 1, V], so `logits[0, -1]`
+        # and `logits[:, -1, :]` still mean exactly what they meant before.
+        #
+        # NOT done for decode, where L is already 1: measured there, the whole
+        # mx->np->torch->np round trip is 0.234 ms against a 55 ms/token forward
+        # (0.4%), and converting just the row saves 0.010 ms. Removing torch from
+        # that path would be churn for nothing — the cost was never in the copy.
+        if logits_mx.shape[1] > 1:
+            logits_mx = logits_mx[:, -1:, :]
         mx.eval(logits_mx)
-        # print(f"[DBG] __call__ mx.eval(logits_mx) completed.", flush=True)
 
         logits_np = np.array(logits_mx.astype(mx.float32))
         logits_py = torch.from_numpy(logits_np).to(device=input_ids.device)
@@ -5276,14 +5760,44 @@ class MLXDKVWrapper:
         self.lazy = lazy
         self.is_mlx = True
         
-        self.block_size = self.config.get("block_size", 256)
-        self.base_rank = self.config.get("rank", 32)
+        # ── BLOCK SIZE: 1024, measured on MLX ─────────────────────────────────
+        # This is the strongest single lever in the runtime and it moves four
+        # metrics at once. Qwen3.5-2B-4bit, linkbench at 16k over 24 seeds with a
+        # dense control in the same configuration, plus the needle sweep and the
+        # session pool at 11.4k:
+        #
+        #   block   linkbench      needles   pool      KV-side ratio
+        #   256      9/24          6/6       135.6 MB  0.95x  (1.05x smaller)
+        #   1024    24/24 = dense  6/6        60.0 MB  0.28x  (3.61x smaller)
+        #
+        # Retrieval tracks the NUMBER OF BLOCKS the context is split into, not
+        # fidelity and not routing: at 16k, 256 gives ~58 blocks and 1024 gives ~15.
+        # Splitting a document into more pieces destroys cross-piece associations
+        # however faithfully each piece is stored — which is why rank, residual
+        # budget, recency window and attend-every-block were all measured inert on
+        # this metric while block size closed the entire 15-point gap to dense.
+        #
+        # The memory result is the same mechanism seen from the other side. The
+        # residual budget is a FIXED 128 exact tokens per block, so at 256 (255
+        # delta rows) half of every block was stored verbatim and the "compressed"
+        # pool was 0.95x the dense KV it replaced — DKV was barely compressing. At
+        # 1024 the same budget covers 4x the tokens and real compression appears.
+        #
+        # Use 512 for synthesis-shaped work, where CUDA measured the finer
+        # granularity helps; 1024 is chosen for retrieval, which is the workload
+        # this system is for.
+        # The numbers live in serving/decode_config.MLX_CONSTRUCTOR_DEFAULTS so
+        # there is exactly one place that owns them; the reasoning stays here,
+        # next to where it applies. Entry points must not carry their own default
+        # for either — see that module for what went wrong when they did.
+        self.block_size = self.config.get("block_size", _MLX_DEFAULTS["block_size"])
+        self.base_rank = self.config.get("rank", _MLX_DEFAULTS["rank"])
         self.layer_adaptive_rank = (os.environ.get("DKV_LAYER_ADAPTIVE_RANK", "1") == "1") or self.config.get("layer_adaptive_rank", True)
         if self.layer_adaptive_rank:
             self.rank = int(round(self.base_rank * 1.5))
         else:
             self.rank = self.base_rank
-        self.micro_block_size = self.config.get("micro_block_size", 256)
+        self.micro_block_size = self.config.get("micro_block_size", self.block_size)
         self.device = "mps"
         
         self.tokenizer = None
@@ -5324,6 +5838,53 @@ class MLXDKVWrapper:
         if preset == "low" and not quant and not os.environ.get("DKV_QUANTIZATION"):
             quant = "int4"
             print("[DKV MLX] Low preset: auto-enabling 4-bit quantization")
+
+        # ── `ultra` = mid + an UNROTATED POOL, and nothing else ────────────────
+        # This is the configuration CUDA ships, and the "nothing else" is the
+        # measured part. CUDA first shipped ultra with rank 224 and an extra
+        # svd_energy rung as well, then removed both: against the version without
+        # them they cost 22% of decode and 2.9 GB and bought no difference on
+        # anything measurable -- distractor retrieval identical, needle sweep clean
+        # either way, synthesis unable to resolve it at all. The rank choice in
+        # particular came from a sweep that turned out to be randomised-SVD
+        # projection noise (a 30-point synthesis spread from the SVD seed alone, at
+        # a fixed config), so it was never a real result to port.
+        #
+        # What IS justified is the unrotated pool: 40/48 -> 47/48 on distractor
+        # retrieval over 48 seeds, exactly matching dense's 47/48, on a metric with
+        # the statistical power to say so.
+        #
+        # NOT PORTED: the svd_energy ladder (0.999 / 0.9999 / 0.99999). CUDA selects
+        # the smallest rank reaching an energy target and then clamps to the rank
+        # ceiling; MLX's compressor has no energy selection at all -- it truncates at
+        # a fixed rank, which is exactly the ceiling CUDA's own measurements say
+        # BINDS on real prose (realised rank tracked the ceiling and barely moved
+        # across the whole energy ladder). Adding energy selection here could
+        # therefore only ever lower the rank below today's, on a fixed-shape pool
+        # where the freed columns are zero-padded rather than saved. It would be
+        # cost with no upside, so the ladder stays a CUDA-side concept.
+        # ON MLX, `ultra` IS `mid`. Deliberately, and it is not a stub.
+        #
+        # CUDA's ultra is defined as mid + DKV_ROTATED_POOL=0, and that setting is
+        # implemented and correct here (see test_unrotated_pool.py). It simply does
+        # not pay on this runtime. Measured at 16k over 24 seeds against a dense
+        # control, linkbench is 9/24 with the pool rotated and 9/24 unrotated at
+        # block 256, and 24/24 both ways at block 1024 — the same score AND the same
+        # predicted answer on all 24 seeds, at both block sizes. It is not a no-op
+        # either: the stored anchors, the SVD basis and the decode logits all
+        # demonstrably change. It changes the numbers and changes no answers.
+        #
+        # It costs ~39% of decode and a second dense-window buffer per attended
+        # layer, which on unified memory is real system RAM rather than a separate
+        # VRAM budget. Shipping that as a preset would be paying a genuine cost for a
+        # measured-zero gain, so ultra does not set it — but it says so rather than
+        # quietly behaving as mid, which is what it did before the knob existed.
+        if preset == "ultra":
+            print("[DKV MLX] ultra preset == mid on this runtime. Its one "
+                  "distinguishing setting on CUDA (DKV_ROTATED_POOL=0) was measured "
+                  "inert on MLX — same linkbench score and same answers — while "
+                  "costing ~39% of decode. Set DKV_ROTATED_POOL=0 explicitly to "
+                  "opt in anyway.")
 
         # Quality presets opt into Context-Aware Decoding (CAD): contrast each
         # step's full-context logits against a prior-only stream to pull the
@@ -5428,6 +5989,7 @@ class MLXDKVWrapper:
                 attn_class.__call__ = attention_forward
                 patched_classes.add(attn_class)
 
+        attended = []
         for layer_idx, layer in enumerate(model.layers):
             attn = getattr(layer, "self_attn", None)
             if attn is None:
@@ -5435,6 +5997,37 @@ class MLXDKVWrapper:
             attn.layer_idx = layer_idx
             attn.kv_manager = self.manager
             attn.n_heads, attn.n_kv_heads, attn.head_dim = _resolve_attn_dims(attn)
+            attended.append(layer_idx)
+
+        # Publish the attended-layer set so the manager sizes each session's pool
+        # from the layers that can actually fill it rather than from the model's
+        # total layer count (MLX_PORT item 3). This loop is where the answer is
+        # already known, and it runs before any session exists, which is the
+        # ordering the sizing depends on.
+        if self.manager is not None:
+            self.manager.set_attended_layers(attended)
+
+        # Publish the model's RoPE geometry. Only DKV_ROTATED_POOL=0 consumes it
+        # (to rotate pool keys to their absolute positions at read time), but read
+        # it unconditionally so a model whose rope layout is unsupported is caught
+        # at load rather than mid-generation.
+        _rope = None
+        for layer in model.layers:
+            _a = getattr(layer, "self_attn", None)
+            if _a is not None and getattr(_a, "rope", None) is not None:
+                _rope = _a.rope
+                break
+        if _rope is not None and self.manager is not None:
+            self.manager.set_rope_params(
+                dims=getattr(_rope, "dims", None),
+                base=getattr(_rope, "base", None),
+                scale=getattr(_rope, "scale", 1.0),
+                traditional=bool(getattr(_rope, "traditional", False)),
+            )
+        elif not self.manager.rotated_pool:
+            raise RuntimeError(
+                "DKV_ROTATED_POOL=0 needs the model's RoPE module to rotate pool "
+                "keys on read, and no `rope` was found on any attention layer.")
 
         if not patched_classes:
             raise RuntimeError(
@@ -5679,6 +6272,7 @@ class MLXDKVWrapper:
 
         # Helper sampling
         def sample_logits(logits, temp, top_p):
+            logits = _sanitize_logits(logits, self)
             if temp <= 0.01:
                 return int(np.argmax(logits))
             scaled = logits / temp

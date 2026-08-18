@@ -1195,7 +1195,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_ARANGE:
         case GGML_OP_ROLL:
             return true;
-        case GGML_OP_DIFFKV_ATTN: // diffkv_native: fused compressed-KV decode attention
+        case GGML_OP_DKV_ATTN: // dkv_native: fused compressed-KV decode attention
             return true;
         case GGML_OP_FLASH_ATTN_EXT:
             // for new head sizes, add checks here
