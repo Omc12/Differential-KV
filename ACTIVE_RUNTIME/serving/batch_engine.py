@@ -1435,7 +1435,23 @@ class ContinuousBatchEngine:
                     if decode_stream is not None:
                         with torch.cuda.stream(decode_stream):
                             runner = getattr(self.wrapper, "_cuda_graph_runner", None)
-                            if runner is not None and runner.is_captured():
+                            # THE GRAPH DOES NOT CARRY OUR CACHE, so it must not
+                            # run on the path that owns one.
+                            #
+                            # capture() is handed only (model, input_ids,
+                            # position_ids) -- no past_key_values -- so a replay
+                            # reproduces a forward that had NO history, while the
+                            # eager branch below threads req.past_kv. Whether a
+                            # graph happened to be captured yet therefore decided
+                            # whether this request had history at all, and that
+                            # varies with warmup and timing. It is why
+                            # test_formatting stayed intermittent (3 of 4 green)
+                            # even at temperature 0.0, where greedy decode should
+                            # be perfectly reproducible -- the nondeterminism was
+                            # never the model's.
+                            _own_cache = (len(decode_reqs) == 1)
+                            if (runner is not None and runner.is_captured()
+                                    and not _own_cache):
                                 try:
                                     out = runner.run(input_ids, position_ids)
                                     _ran_graph = True
@@ -1469,7 +1485,8 @@ class ContinuousBatchEngine:
                                 if _solo:
                                     _req0.past_kv = getattr(
                                         out, "past_key_values", None)
-                                if runner is not None and not runner.is_captured():
+                                if (runner is not None and not runner.is_captured()
+                                        and not _own_cache):
                                     try:
                                         runner.capture(self.wrapper.model, input_ids, position_ids)
                                     except Exception:
