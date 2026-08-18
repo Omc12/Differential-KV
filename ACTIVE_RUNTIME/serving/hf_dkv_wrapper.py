@@ -1388,19 +1388,42 @@ class PyTorchDKVHFWrapper:
                                 # tail for the same reason.
                                 _bufw = torch.zeros_like(_dk)
                                 _rotd[layer_idx] = _bufw
-                            # Only the VALID prefix. Copying the whole workspace
-                            # moved 3072 rows to rotate ~1460 of them, every
-                            # layer every step, and that showed up as ~50 ms of
-                            # extra elementwise work in the 16k profile -- most
-                            # of the 5.6% that --fastdc was losing there. The
-                            # tail is never written and never read: it is zero
-                            # from allocation and the dense mask discards it.
-                            _dpw = torch.as_tensor(_pw[:_vw], dtype=torch.long,
-                                                   device=_dk.device)
-                            _cd = _cw[0, _dpw.clamp(max=_cw.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
-                            _sd = _sw[0, _dpw.clamp(max=_sw.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
-                            _bufw[:, :, :_vw] = _pra_w(
-                                _dk[:, :, :_vw], _cd.to(_dk.dtype), _sd.to(_dk.dtype))
+                            # INCREMENTAL. A row's rotation depends only on its
+                            # own absolute position, which never changes, so a
+                            # row rotated on an earlier step is still correct on
+                            # this one. Only the rows APPENDED since last step
+                            # need doing -- normally one.
+                            #
+                            # Rotating the whole valid prefix every step was
+                            # ~1460 rows per layer per step and showed up as
+                            # ~50 ms of extra elementwise work in the 16k
+                            # profile. Copying the whole 3072-row workspace on
+                            # top of that was worse again. Both are gone.
+                            #
+                            # The layout is only stable while the BLOCK SET is:
+                            # the assembler repacks from row 0 when a block
+                            # leaves (it protects block 0 and drops the
+                            # second-oldest), which moves every row. Its own
+                            # signature says when that happened, so key the
+                            # incremental state on it and rebuild in full when
+                            # it changes.
+                            _sig = tuple(getattr(b, "anchor_idx", -1)
+                                         for b in (_trimmed or []))
+                            _rstate = ws.setdefault("dense_rot_state", {})
+                            _prev_sig, _prev_len = _rstate.get(layer_idx,
+                                                               (None, 0))
+                            _from = _prev_len if (_prev_sig == _sig
+                                                  and _prev_len <= _vw) else 0
+                            _rstate[layer_idx] = (_sig, _vw)
+                            if _from < _vw:
+                                _dpw = torch.as_tensor(_pw[_from:_vw],
+                                                       dtype=torch.long,
+                                                       device=_dk.device)
+                                _cd = _cw[0, _dpw.clamp(max=_cw.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+                                _sd = _sw[0, _dpw.clamp(max=_sw.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+                                _bufw[:, :, _from:_vw] = _pra_w(
+                                    _dk[:, :, _from:_vw], _cd.to(_dk.dtype),
+                                    _sd.to(_dk.dtype))
                 except Exception as _rot_err:                    # noqa: BLE001
                     (ws.get("dense_rot_dev") or {}).pop(layer_idx, None)
                     if not getattr(self, "_rot_pub_err_logged", False):
