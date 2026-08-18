@@ -70,7 +70,9 @@ BEST_DECODE_DEFAULTS = {
 # `mlx_dkv_wrapper.MLXDKVWrapper.__init__`, with the measurements attached; this
 # dict is the single place that OWNS the number.
 MLX_CONSTRUCTOR_DEFAULTS = {
-    "block_size": 1024,   # linkbench 9/24 -> 24/24 (= dense), pool 0.95x -> 0.28x
+    "block_size": 1024,   # MLX-measured: pool 1.08x -> 0.48x of the KV it replaces.
+                          # Retrieval half is inherited from CUDA, not yet re-measured
+                          # on MLX -- see the comment in MLXDKVWrapper.__init__.
     "rank": 32,           # a CEILING, not a target; the rank sweep that suggested
                           # otherwise was randomised-SVD projection noise
 }

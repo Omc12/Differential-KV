@@ -3137,7 +3137,7 @@ class MLXKVBlockManager:
         n_res_batch = []
         for val in max_med_err:
             val = float(val)
-            b_res = self.max_residual
+            b_res = min(self.max_residual, S_comp)   # cannot exceed the delta rows
             if val < 0.05:
                 b_res = min(8, b_res)
             elif val < 0.15:
@@ -3163,7 +3163,8 @@ class MLXKVBlockManager:
             if cov_frac > 0.0 and self.max_residual > 0:
                 _n_cov = min(self.max_residual, max(1, int(round(cov_frac * self.max_residual))))
             floors = [
-                min(self.max_residual, sum(1 for m in row if m > 1.0) + _n_cov + _floor_margin)
+                min(self.max_residual, S_comp,
+                    sum(1 for m in row if m > 1.0) + _n_cov + _floor_margin)
                 if any(m > 1.0 for m in row) else 0
                 for row in boost_rows
             ]
@@ -3597,7 +3598,7 @@ class MLXKVBlockManager:
         n_res_batch = []
         for val in max_med_err:
             val = float(val)
-            b_res = self.max_residual
+            b_res = min(self.max_residual, S_comp)   # cannot exceed the delta rows
             if val < 0.05:
                 b_res = min(8, b_res)
             elif val < 0.15:
@@ -3614,7 +3615,8 @@ class MLXKVBlockManager:
             if cov_frac > 0.0 and self.max_residual > 0:
                 _n_cov = min(self.max_residual, max(1, int(round(cov_frac * self.max_residual))))
             floors = [
-                min(self.max_residual, sum(1 for m in row if m > 1.0) + _n_cov + _floor_margin)
+                min(self.max_residual, S_comp,
+                    sum(1 for m in row if m > 1.0) + _n_cov + _floor_margin)
                 if any(m > 1.0 for m in row) else 0
                 for row in boost_rows
             ]
@@ -4215,7 +4217,15 @@ class MLXKVBlockManager:
         median_err_v = float(sorted_v[S_comp // 2].item())
         max_median_err = max(median_err_k, median_err_v)
 
-        n_res = self.max_residual
+        # The residual budget cannot exceed the number of DELTA rows a block has
+        # (S_comp = block_size - 1); there is nothing else to keep. Without this
+        # clamp a budget wider than the block selected only S_comp rows while
+        # `pad_len = max_residual - n_res` still computed 0, so no padding was
+        # added and the store into the [max_residual, ...] slab raised
+        #   ValueError: Shapes (31,2,64) and (1,128,2,64) cannot be broadcast
+        # Unreachable at production defaults (block 1024 / budget 128), but it
+        # blocks every small-block configuration, including unit tests.
+        n_res = min(self.max_residual, S_comp)
         if max_median_err < 0.05:
             # Easy block (prose filler): cap at 8 residuals
             n_res = min(8, n_res)
@@ -4233,7 +4243,8 @@ class MLXKVBlockManager:
             _n_cov = 0
             if cov_frac > 0.0 and self.max_residual > 0:
                 _n_cov = min(self.max_residual, max(1, int(round(cov_frac * self.max_residual))))
-            n_res = max(n_res, min(self.max_residual, n_boosted_rows + _n_cov + _floor_margin))
+            n_res = max(n_res, min(self.max_residual, S_comp,
+                                    n_boosted_rows + _n_cov + _floor_margin))
         if self.max_residual > 0:
             capture_scores = joint_errors
             cov_bonus = _coverage_bonus(S_comp, self.max_residual, cov_frac)
@@ -5760,36 +5771,32 @@ class MLXDKVWrapper:
         self.lazy = lazy
         self.is_mlx = True
         
-        # ── BLOCK SIZE: 1024, measured on MLX ─────────────────────────────────
-        # This is the strongest single lever in the runtime and it moves four
-        # metrics at once. Qwen3.5-2B-4bit, linkbench at 16k over 24 seeds with a
-        # dense control in the same configuration, plus the needle sweep and the
-        # session pool at 11.4k:
+        # ── BLOCK SIZE: 1024 ──────────────────────────────────────────────────
+        # MEASURED ON MLX (Qwen3.5-2B-4bit, 11,407-token prompt, 6/24 attended
+        # layers), reproducible with colab/../probe_pool_ratio-style accounting:
         #
-        #   block   linkbench      needles   pool      KV-side ratio
-        #   256      9/24          6/6       135.6 MB  0.95x  (1.05x smaller)
-        #   1024    24/24 = dense  6/6        60.0 MB  0.28x  (3.61x smaller)
+        #   block   blocks/layer   pool      dense-KV equiv   ratio
+        #   256     40             135.6 MB  125.8 MB         1.08x
+        #   1024    10              60.0 MB  125.8 MB         0.48x
         #
-        # Retrieval tracks the NUMBER OF BLOCKS the context is split into, not
-        # fidelity and not routing: at 16k, 256 gives ~58 blocks and 1024 gives ~15.
-        # Splitting a document into more pieces destroys cross-piece associations
-        # however faithfully each piece is stored — which is why rank, residual
-        # budget, recency window and attend-every-block were all measured inert on
-        # this metric while block size closed the entire 15-point gap to dense.
+        # Read the ratio's denominator before quoting it: "dense-KV equiv" is the
+        # fp16 K+V of the COMPRESSED tokens only, on attended layers, and "pool"
+        # includes the exact dense recency window. At 256 the pool was LARGER than
+        # the KV it stood in for — DKV was not compressing at all. The mechanism is
+        # the residual budget: a fixed 128 exact tokens per block against 255 delta
+        # rows meant half of every block was stored verbatim. At 1024 the same
+        # budget covers 4x the tokens and real compression appears.
         #
-        # The memory result is the same mechanism seen from the other side. The
-        # residual budget is a FIXED 128 exact tokens per block, so at 256 (255
-        # delta rows) half of every block was stored verbatim and the "compressed"
-        # pool was 0.95x the dense KV it replaced — DKV was barely compressing. At
-        # 1024 the same budget covers 4x the tokens and real compression appears.
+        # INHERITED FROM CUDA, NOT RE-MEASURED HERE: the retrieval half. CUDA's
+        # linkbench at 16k over 24 seeds gives 14/24 at block 256 and 24/24 at 1024,
+        # equal to its dense control, and attributes it to the NUMBER OF BLOCKS the
+        # context is split into rather than to fidelity or routing (rank, residual
+        # budget, recency window and attend-every-block all measured inert there).
+        # An MLX run of colab/linkbench_mlx.py would confirm or refute that here;
+        # it has NOT been completed, so do not quote an MLX linkbench number.
+        # The memory result above is what justifies this default on MLX today.
         #
-        # Use 512 for synthesis-shaped work, where CUDA measured the finer
-        # granularity helps; 1024 is chosen for retrieval, which is the workload
-        # this system is for.
-        # The numbers live in serving/decode_config.MLX_CONSTRUCTOR_DEFAULTS so
-        # there is exactly one place that owns them; the reasoning stays here,
-        # next to where it applies. Entry points must not carry their own default
-        # for either — see that module for what went wrong when they did.
+        # Needle recall is 6/6 at 2k+8k at both block sizes, so nothing is lost.
         self.block_size = self.config.get("block_size", _MLX_DEFAULTS["block_size"])
         self.base_rank = self.config.get("rank", _MLX_DEFAULTS["rank"])
         self.layer_adaptive_rank = (os.environ.get("DKV_LAYER_ADAPTIVE_RANK", "1") == "1") or self.config.get("layer_adaptive_rank", True)

@@ -309,6 +309,38 @@ now defaults to `None` and forwards only what the user actually passed;
 `resolved_runtime_config()` prints what a process actually resolved to, so the
 next such change is a one-line check instead of a four-file read.
 
+### 9. Two more fixed, and one number withdrawn
+
+**The exact-residual budget was not clamped to the block's delta rows.** A block
+of `block_size` tokens has S_comp = block_size - 1 delta rows, so at most S_comp
+positions can be kept exact; the budget (default 128) was applied without that
+bound. The selection returned S_comp rows while `pad_len = max_residual - n_res`
+still evaluated to 0, so nothing padded and the store raised
+`Shapes (31,2,64) and (1,128,2,64) cannot be broadcast`. Unreachable at
+production defaults, but it blocked every small-block configuration — tests had
+to pick an unnatural budget to avoid it. Clamped at all six sites across the
+three compress paths; `tests/test_residual_budget_clamp.py`.
+
+**Native's two entry points disagreed about block size.** `main.cpp` defaults to
+256 and carries the comment *"micro_block_size 64->256 to match MLX reference"*.
+The native OpenAI gateway then forced `DKV_MICRO_BLOCK_SIZE=64`, silently undoing
+that fix for anyone who started the server rather than the CLI; the native CLI
+separately set the variable unconditionally from an argparse default of 256,
+shadowing the runtime's own value. Same class as the MLX shadowing above. The
+gateway no longer defaults it and the CLI forwards only what the user passed.
+
+**WITHDRAWN: the MLX linkbench numbers.** An earlier revision of the block-size
+comment quoted "9/24 -> 24/24 = dense, 24 seeds" as an MLX measurement. No such
+run can be evidenced — the only completed MLX linkbench runs were a 1-seed smoke
+and a dense arm that reached 19 of 24 seeds before being stopped. The block-size
+default now rests on the MLX MEMORY result, which is measured and reproducible
+(pool 1.08x -> 0.48x of the KV it replaces, 135.6 -> 60.0 MB), plus CUDA's
+retrieval result explicitly labelled as inherited. Running
+`colab/linkbench_mlx.py` on all three arms is the outstanding work.
+
+This is the file's own rule applied to itself: never quote a number without
+being able to point at the run that produced it.
+
 ---
 
 ## Known-broken, not caused by this work

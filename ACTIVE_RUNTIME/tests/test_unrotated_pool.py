@@ -44,10 +44,7 @@ def _mgr(rotated: bool):
     # is bigger than the sequence, nothing compresses and every assertion below
     # passes vacuously.
     m.max_blocks = 64
-    # Must be < block_size-1: _compress_block writes n_res = min(max_residual, S_comp)
-    # rows into a slab shaped [max_residual, ...], so a budget wider than the block
-    # has residual rows raises on the store. Production never hits it (256/128).
-    m.max_residual = 8
+    m.max_residual = 8          # small budget keeps the round-trip loop below quick
     m.set_attended_layers([0])
     m.set_rope_params(dims=ROPE_DIMS, base=ROPE_BASE, scale=1.0, traditional=False)
     return m
