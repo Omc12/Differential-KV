@@ -1195,6 +1195,25 @@ class ContinuousBatchEngine:
                     )
                     req.past_kv = getattr(out, "past_key_values", None)
 
+            # ORDER THE DEFAULT STREAM BEHIND THE PREFILL STREAM.
+            #
+            # The SAME race the decode path had. The prefill forward is enqueued
+            # inside `with torch.cuda.stream(prefill_stream)` and everything
+            # afterwards -- out.logits for the first token, the KV the session
+            # keeps -- is touched on the default stream, which has no dependency
+            # on it. Nothing synchronised the two.
+            #
+            # The decode fix alone left this behind, and the suite showed it: with
+            # decode ordered, the prefill logits were finite but still wrong,
+            # max=3.408203 sum=-259.834 against a standalone max=17.093750
+            # sum=-303740.188. A thousand-fold magnitude difference is a
+            # different computation, which is what reading half-written memory
+            # looks like once it is no longer producing outright NaN.
+            if torch.cuda.is_available():
+                _ps_sync = self.cuda_stream_manager.get_prefill_stream()
+                if _ps_sync is not None:
+                    torch.cuda.current_stream().wait_stream(_ps_sync)
+
             req.prefill_offset += actual_len
 
             if torch.backends.mps.is_available():
