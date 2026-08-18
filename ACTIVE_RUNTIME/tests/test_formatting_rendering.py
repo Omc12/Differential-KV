@@ -124,23 +124,32 @@ async def test_formatting():
     #      was over-read: no file set flips it deterministically, and the rate
     #      simply rises with how much has run before.
     #
-    #      What fits the shape is kernel selection. This asserts exact output
-    #      from GREEDY decode, and greedy decode is only reproducible while the
-    #      kernels are: cuBLAS and SDPA pick algorithms partly on available
-    #      workspace, so a process holding many loaded models can choose
-    #      differently, and one ULP is enough to move a token. The same runtime
-    #      hits this elsewhere -- see the --fastdc note in dkv_attention, where
-    #      replay diverges from eager at step 1 by exactly one ULP -- so it is a
-    #      known property of the stack rather than anything this test's path
-    #      does wrong.
+    #      WHAT THE FAILURE IS: not corruption. The generated text is coherent,
+    #      on-topic and punctuated -- it is simply not a LIST:
+    #
+    #        fails:  '连云港 united red, Beijing sky blue, Tokyo cherry blossom.'
+    #        passes: '- Red: A vibrant, intense hue that symbolizes passion...'
+    #
+    #      Same prompt, temperature 0.0, completely different continuation. The
+    #      only assertion that trips is has_newlines.
+    #
+    #      WHAT CAUSES IT: UNKNOWN. The obvious candidate was kernel selection --
+    #      greedy decode is only reproducible while the kernels are, and cuBLAS
+    #      and SDPA choose partly on free workspace, so a process holding many
+    #      models could choose differently. TESTED AND DISPROVEN:
+    #      DKV_DETERMINISTIC=1, which pins the SDPA backend for exactly this
+    #      class of problem, does NOT fix it (2/2 runs still fail) and
+    #      additionally breaks test_predictive_paging. So the SDPA reduction is
+    #      not the source and there is currently no knob that turns this off.
     #
     #      One real leak WAS found on the way and is fixed: _MUTATION_OUT_ACTIVE
     #      is a module global republished only inside the wrapper's decode loop,
     #      so anything calling model() directly inherited the last generate()'s
     #      value. Cleared at prefill now.
     #
-    #      To make this deterministic the test would have to pin kernel
-    #      selection, not the model -- temperature is already 0.0.
+    #      So do not reach for DKV_DETERMINISTIC here: it costs decode speed
+    #      (which is why it is not the default), it costs another test, and it
+    #      does not buy the thing it looks like it should buy.
     #
     # Do not "fix" this by loosening the assertions again. What it catches is
     # gone; what remains is the suite needing per-test isolation.
