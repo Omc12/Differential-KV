@@ -33,15 +33,49 @@ This also explains the two things that made it look intermittent and made
 UNPATCH=1 useless as a control: the corruption is deterministic given a
 sub-threshold prompt, and removing DKV removes the only cache there was.
 
-WHY NOT FIXED. The real fix is for the engine to own a KV cache instead of
-borrowing DKV's, and its decode step is BATCHED -- one forward over a bucket,
-logits[:, -1, :] sliced per request -- so that needs a batched cache with
-per-row lengths, which is a redesign rather than a patch. ContinuousBatchEngine
-is also documented as dead code by the repo's own migration notes
-(ACTIVE_RUNTIME/archive/phase20_batch_engine_survival.md: "Our Python-based
-batching loop is dead code"), and its only non-test consumer lives in archive/.
-Redesigning a cache for a component already scheduled for deletion is not worth
-it. If you DO revive the engine, this is the thing to fix first.
+WHY NOT FIXED, and the obvious workaround is a DEAD END (measured 2026-08-17).
+
+"Just force DKV to engage" looks like a one-line fix and is not one. Tried three
+ways -- from __init__, from start()/stop() with restore, and via the environment
+directly -- and all three fail, for two different reasons:
+
+  1. FROM __init__ IT LEAKS. Mutating os.environ there sets it for the life of
+     the PROCESS, so once any test builds an engine every later test inherits
+     forced engagement. That broke test_cloning_decode_isolation, which had been
+     passing. Cross-test contamination is worse than the bug being fixed.
+
+  2. SCOPED PROPERLY IT STILL BREAKS, and this is the real blocker. Engaging DKV
+     on a prompt shorter than one block means engaging with ZERO COMPRESSED
+     BLOCKS, and the sparse decoder has no dense-only path:
+
+       [DKV] WARNING: 0 compressed blocks routed and this decoder has no
+       dense-only path -- attention output will be EMPTY ([1, 14, 1, 0] instead
+       of [1, 14, 1, 64]). dense_window_present=True, layer=0.
+
+     Empty attention output, so empty responses, so the test fails on
+     `len(resp) > 0` instead. DKV_ENGAGE_THRESHOLD exists partly to keep the
+     runtime out of exactly this state.
+
+So there are only two real fixes and both are feature work:
+
+  A. Give the sparse decoder a DENSE-ONLY path, so engaging with zero compressed
+     blocks attends the dense window instead of returning an empty tensor. This
+     is worth doing on its own merits -- the warning above is a runtime state
+     that produces silently empty attention -- and it would make forced
+     engagement viable.
+  B. Give the ENGINE its own KV cache. Its decode is batched (one forward over a
+     bucket, logits[:, -1, :] sliced per request), so this means a batched cache
+     with per-row lengths.
+
+Neither is justified for this component: the repo's own migration notes call it
+dead code (ACTIVE_RUNTIME/archive/phase20_batch_engine_survival.md: "Our
+Python-based batching loop is dead code") and its only non-test consumer lives in
+archive/. (A) is the one worth doing anyway, for the runtime rather than for the
+engine. If you revive the engine, do (A) first, then reconsider (B).
+
+FOOTNOTE, so it is not re-investigated: the built dkv_core .pyd is NOT involved.
+Removing it from the tree entirely does not change test_cloning_decode_isolation's
+result. Both times that test broke, the engine change was the cause.
 
 --- original notes below, kept because the reasoning is still correct ---
 
