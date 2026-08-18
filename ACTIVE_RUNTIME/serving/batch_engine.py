@@ -304,11 +304,31 @@ def _sample_gpu_jit(
                 scores = torch.where(scores > 0.0, scores / repetition_penalty, scores * repetition_penalty)
                 logits[0].scatter_(0, penalty_ids, scores)
 
+    # SANITISE BEFORE THE GREEDY RETURN, not after it.
+    #
+    # This used to argmax the raw logits and only nan_to_num on the SAMPLED
+    # path below, so greedy decoding -- the one mode that is supposed to be
+    # reproducible -- was the one mode with no NaN guard. torch.argmax over a
+    # tensor containing NaN returns an implementation-defined index, and which
+    # index that is can move with reduction order, so the same NaN logits chose
+    # different tokens run to run.
+    #
+    # That is measurable here: DKV_ENGINE_LOGIT_TRACE=1 on test_formatting shows
+    # 'max=nan sum=nan' on the prefill logits in one run and a finite
+    # 'max=3.412109' in another, with completely different continuations
+    # following. It also explains why DKV_DETERMINISTIC=1 did not fix that test
+    # and broke another: the flag pins the SDPA backend, but the NaN is in the
+    # logits and argmax over NaN varies independently of it.
+    #
+    # Sanitising first does not hide the NaN -- whatever produces it upstream is
+    # still wrong and still worth finding -- but it makes greedy decode a
+    # FUNCTION of the logits again, which is what callers assume.
+    logits = torch.nan_to_num(logits, nan=-100.0, posinf=100.0, neginf=-100.0)
+
     if temperature <= 0.01:
         return torch.argmax(logits, dim=-1, keepdim=True)
 
     logits = logits / temperature
-    logits = torch.nan_to_num(logits, nan=-100.0, posinf=100.0, neginf=-100.0)
     
     probs = torch.softmax(logits, dim=-1)
     probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
@@ -355,6 +375,27 @@ class CUDAStreamManager:
 
     def get_prefill_stream(self):
         return self.prefill_stream if self.device_has_cuda else None
+
+
+def _eng_logit_trace(tag, req, logits):
+    """DKV_ENGINE_LOGIT_TRACE=1 -- fingerprint the engine's own logits.
+
+    The wrapper's DKV_LOGIT_TRACE never fires on this path: the engine calls
+    model() directly rather than going through the wrapper's decode loop. This
+    is the same instrument at the engine's two sampling sites, so a passing run
+    and a failing one can be diffed token by token.
+    """
+    import os as _o, sys as _s
+    if _o.environ.get("DKV_ENGINE_LOGIT_TRACE") != "1":
+        return
+    try:
+        _l = logits.float()
+        print(f"[ENGLOGIT] {tag} sess={getattr(req, 'session_id', '?')} "
+              f"n={len(getattr(req, 'generated_ids', []))} "
+              f"argmax={int(_l.argmax())} max={float(_l.max()):.6f} "
+              f"sum={float(_l.sum()):.3f}", file=_s.stderr, flush=True)
+    except Exception:                                            # noqa: BLE001
+        pass
 
 
 class ContinuousBatchEngine:
@@ -1227,6 +1268,7 @@ class ContinuousBatchEngine:
                     self.draft_wrapper.manager.compress_deferred_prefill_blocks(req.session_id + "_draft")
                     
                 logits = out.logits[:, -1, :]  # last token logits — first generated token
+                _eng_logit_trace("prefill", req, logits)
                 next_id = self._sample(logits, req)
                 req.generated_ids.append(next_id)
                 self._emit_token(req, next_id, step_start)
@@ -1539,6 +1581,7 @@ class ContinuousBatchEngine:
             for idx in range(actual_batch_size):
                 req = decode_reqs[idx]
                 req_logits = logits[idx : idx + 1]
+                _eng_logit_trace("decode", req, req_logits)
                 next_id = self._sample(req_logits, req)
                 req.generated_ids.append(next_id)
                 self._emit_token(req, next_id, step_start)
