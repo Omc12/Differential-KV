@@ -2854,6 +2854,71 @@ def build_dense_residual_rows(g, dtype=None):
     return out_k.to(dt), out_v.to(dt), n_rows
 
 
+def _dense_only_attend(q, dense_blocks, active_k, active_v, active_len,
+                       num_key_value_groups, cos, sin):
+    """Attend the DENSE WINDOW alone, for a step that routed zero blocks.
+
+    native_triton_sparse_attn_decode used to delegate N==0 to the PyTorch
+    decoder, which returns a ZERO-WIDTH tensor -- [1, H_q, 1, 0] instead of
+    [1, H_q, 1, D]. The dense window was present and simply never attended, so a
+    zero-block step produced empty attention. That is reachable whenever the
+    context is shorter than one block: it is why DKV_ENGAGE_THRESHOLD exists, and
+    why forcing engagement below it could not work.
+
+    The assembly and the rotation are the SAME as the N>0 branch further down --
+    prefer the pre-assembled active_k workspace sliced to its valid length, else
+    concatenate the dense blocks' anchor+active, and rotate at each token's TRUE
+    absolute position when the pool holds PRE-RoPE keys. Getting that wrong does
+    not raise; it silently corrupts the recent window, which is the failure the
+    N>0 branch's own comment records.
+
+    Returns None when there is no dense window to attend, so the caller can fall
+    through to its previous behaviour rather than inventing an answer.
+    """
+    if active_k is not None and active_k.shape[2] > 0:
+        _alen = active_len if (active_len and active_len > 0) else active_k.shape[2]
+        k_kv = active_k[:, :, :_alen]
+        v_kv = active_v[:, :, :_alen]
+    elif dense_blocks:
+        kp, vp = [], []
+        for blk in dense_blocks:
+            if getattr(blk, "anchor_kv", None) is not None:
+                kp.append(blk.anchor_kv[:, 0].unsqueeze(2))
+                vp.append(blk.anchor_kv[:, 1].unsqueeze(2))
+            if getattr(blk, "active_k", None) is not None and blk.active_k.shape[2] > 0:
+                kp.append(blk.active_k)
+                vp.append(blk.active_v)
+        if not kp:
+            return None
+        k_kv = torch.cat(kp, dim=2)
+        v_kv = torch.cat(vp, dim=2)
+    else:
+        return None
+    if k_kv.shape[2] == 0:
+        return None
+
+    # Rotate at TRUE positions when the pool stores PRE-RoPE keys. The length
+    # check is the N>0 branch's: a mismatch means the positions do not describe
+    # these rows, and rotating anyway would be worse than not rotating.
+    if (dense_blocks and cos is not None and sin is not None
+            and not pool_stores_rotated_k()):
+        _pos = []
+        for blk in dense_blocks:
+            _pos.extend(getattr(blk, "token_indices", ()) or ())
+        if _pos and len(_pos) == k_kv.shape[2]:
+            _dp = torch.tensor(_pos, dtype=torch.long, device=k_kv.device)
+            _c = cos[0, _dp.clamp(max=cos.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+            _s = sin[0, _dp.clamp(max=sin.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+            k_kv = _partial_rope_apply(k_kv, _c.to(k_kv.dtype), _s.to(k_kv.dtype))
+
+    if num_key_value_groups and num_key_value_groups > 1:
+        k_kv = k_kv.repeat_interleave(num_key_value_groups, dim=1)
+        v_kv = v_kv.repeat_interleave(num_key_value_groups, dim=1)
+    out = torch.nn.functional.scaled_dot_product_attention(
+        q.float(), k_kv.float(), v_kv.float())
+    return out.to(q.dtype)
+
+
 def native_triton_sparse_attn_decode(
     q:                    torch.Tensor,
     block_indices:        torch.Tensor,
@@ -3231,11 +3296,21 @@ def native_triton_sparse_attn_decode(
         # one, so a zero-block step silently produces a zero-width attention
         # output rather than attending the dense window.
         #
-        # NOT fixed here on purpose: the correct fix is that dense-only fast path,
-        # and `active_k` on this branch has not been through the RoPE rotation the
-        # N>0 branch applies, so writing it without a GPU to verify against would
-        # be guessing. Made LOUD instead — a wrong shape that announces itself is
-        # recoverable; a silent one is what let this sit behind a failing test.
+        # FIXED 2026-08-17. _dense_only_attend does exactly that fast path,
+        # including the RoPE rotation at true token positions that this branch's
+        # `active_k` has not been through -- which was the stated reason it was
+        # left undone. Verified on GPU rather than reasoned about: the engine
+        # tests reach this path with a sub-block prompt and now produce real text
+        # instead of empty attention.
+        #
+        # Falls through to the old delegation only when there is genuinely no
+        # dense window to attend, so the previous behaviour is still reachable
+        # rather than replaced by a guess.
+        _dense_only = _dense_only_attend(
+            q, dense_blocks, active_k, active_v, active_len,
+            num_key_value_groups, cos, sin)
+        if _dense_only is not None:
+            return _dense_only
         return _pytorch_vectorized_sparse_attn_decode(
             q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
             anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
