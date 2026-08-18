@@ -1109,6 +1109,22 @@ class PyTorchDKVHFWrapper:
         """Clear per-session graph state. Called from prefill, once per session."""
         self._dkv_step_idx = 0
         self._dkv_capture_giveup = False
+        # CLEAR THE MODULE GLOBAL TOO. _MUTATION_OUT_ACTIVE lives on
+        # runtime.dkv_attention, not on the wrapper, and it is republished per
+        # STEP by _dkv_publish_mutation_out -- which only runs inside this
+        # wrapper's decode loop. Anything that calls model() directly, as
+        # ContinuousBatchEngine does, never republishes it and therefore inherits
+        # whatever the last generate() on ANY wrapper left behind.
+        #
+        # That is a cross-session leak, and in a test process it is a cross-TEST
+        # one: it is why test_formatting passes 6/6 alone and fails after the
+        # engine tests have run. Prefill is the right place to clear it because
+        # it is the one point every session passes through.
+        try:
+            import runtime.dkv_attention as _da_reset
+            _da_reset._MUTATION_OUT_ACTIVE = False
+        except Exception:                                        # noqa: BLE001
+            pass
         self._dkv_primed = False
         # One-shot logs are per session too, otherwise the first session's
         # verdict is the only one ever reported and a later session that

@@ -98,6 +98,31 @@ async def test_formatting():
     # Include the OUTPUT in every message. Without it a failure here says only
     # "no newlines" and the text that caused it is gone, which is why this test
     # stayed intermittent-and-undiagnosed across several suite runs.
+    #
+    # UPDATE 2026-08-18, two causes found, one fixed:
+    #
+    #   1. FIXED. The engine had no KV cache, so a short prompt decoded with no
+    #      history and produced word salad that contained a list marker about
+    #      half the time. It now threads its own cache and the output is real
+    #      prose ('- Red: A vibrant, intense hue that symbolizes passion...').
+    #      A second, separate cause was the CUDA graph replaying a forward
+    #      captured WITHOUT that cache, which made it depend on warmup timing;
+    #      the graph is now kept off the cache-owning path. This test is 6/6
+    #      green in ISOLATION as a result, where it used to be ~50/50.
+    #
+    #   2. STILL OPEN, and it is suite ISOLATION, not this test. It fails inside
+    #      the full suite while passing alone, and bisecting says no single
+    #      earlier file is responsible: the first six preceding files pass with
+    #      it, the next seven pass with it, the engine tests pass with it, but
+    #      ALL FIFTEEN together fail. That is an accumulation across many model
+    #      loads in one process, not a poisoner. One real leak of that kind was
+    #      found and fixed on the way -- _MUTATION_OUT_ACTIVE is a module global
+    #      republished only inside the wrapper's decode loop, so anything calling
+    #      model() directly inherited the last generate()'s value; it is now
+    #      cleared at prefill.
+    #
+    # Do not "fix" this by loosening the assertions again. What it catches is
+    # gone; what remains is the suite needing per-test isolation.
     _ctx = f" | generated {len(generated_text)} chars: {generated_text[:300]!r}"
     assert has_newlines, "Formatting failure: No newlines generated!" + _ctx
     assert has_bullets, "Formatting failure: No list markers generated!" + _ctx
