@@ -80,7 +80,19 @@ try:
     # Both are best-effort: any failure here just leaves the import to fail as
     # before and the Python fallbacks take over, which is the documented
     # behaviour when the extension is absent.
-    if os.name == "nt":
+    # OPT-IN, via DKV_USE_CORE=1. Making the built extension auto-discoverable
+    # was a regression: it put dkv_core on sys.path for EVERY import site, and
+    # test_cloning_decode_isolation then failed with "DLL load failed while
+    # importing dkv_core" -- findable but not loadable in that context, where
+    # before it was simply not found and the Python fallback ran. Holding the
+    # add_dll_directory cookies for the process lifetime did not fix it either.
+    #
+    # The extension is an OPTIONAL accelerator and the Python paths are the
+    # supported route, so the default must be the one that always works. Build
+    # it with vcvars64 + `py setup.py build_ext --inplace` and set DKV_USE_CORE=1
+    # to use it; the CUDA-toolkit bin directory is registered here because the
+    # extension links cuSOLVER/cuBLAS from the toolkit while torch ships its own.
+    if os.name == "nt" and os.environ.get("DKV_USE_CORE") == "1":
         import glob as _glob
         _ext_dir = os.path.join(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))), "native_core", "dkv_core")

@@ -1382,9 +1382,19 @@ class PyTorchDKVHFWrapper:
                             _bufw = _rotd.get(layer_idx)
                             if (_bufw is None or _bufw.shape != _dk.shape
                                     or _bufw.dtype != _dk.dtype):
-                                _bufw = torch.empty_like(_dk)
+                                # ZEROS, not empty: only the valid prefix is
+                                # written below, so the tail must start defined
+                                # and stay that way. The assembler zeroes its own
+                                # tail for the same reason.
+                                _bufw = torch.zeros_like(_dk)
                                 _rotd[layer_idx] = _bufw
-                            _bufw.copy_(_dk)
+                            # Only the VALID prefix. Copying the whole workspace
+                            # moved 3072 rows to rotate ~1460 of them, every
+                            # layer every step, and that showed up as ~50 ms of
+                            # extra elementwise work in the 16k profile -- most
+                            # of the 5.6% that --fastdc was losing there. The
+                            # tail is never written and never read: it is zero
+                            # from allocation and the dense mask discards it.
                             _dpw = torch.as_tensor(_pw[:_vw], dtype=torch.long,
                                                    device=_dk.device)
                             _cd = _cw[0, _dpw.clamp(max=_cw.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
