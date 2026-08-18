@@ -31,7 +31,29 @@ plain script, and neither the NaN nor the decode path explains the failure.
 Whoever picks this up should start by diffing what pytest's environment does to
 the process that a script does not, rather than re-running the layer hunt.
 
-Usage: python colab/engine_nan_hunt.py   (env: DKV_MODEL)
+TWO MORE THINGS MEASURED AFTER THE ABOVE, both corrections.
+
+THE ENGINE'S past_kv IS INERT. DKV_ENGINE_LOGIT_TRACE=1 reports the cache length
+next to the logits, and it is ZERO on every decode step -- under pytest AND
+standalone:
+
+    prefill  cache=none
+    decode   cache=0     <- threaded, never accumulates
+
+DKV's attention patch intercepts and serves history from its own session state
+rather than populating the past_key_values it was handed. So the engine "owning
+a cache" does not do what it says. Confirmed from the other side: reverting
+batch_engine.py to before that change leaves the three engine tests at 4 PASSED.
+They pass because of the WRAPPER fixes -- the dense-only decode path and the
+_MUTATION_OUT_ACTIVE reset -- not because of the cache.
+
+AND THE STANDALONE PATH IS FINE. Same script, no pytest: logits finite
+(max=17.09, 16.51, 18.56), text correct, 4/4 identical. Under pytest the same
+code gives max=nan. So the NaN needs the pytest process and is not explained by
+the cache, the decode path, the pool budget, or the SDPA backend -- all four
+tested and eliminated.
+
+Usage: python colab/engine_nan_hunt.py   (env: DKV_MODEL, DKV_ENGINE_LOGIT_TRACE)
 """
 import asyncio
 import os
