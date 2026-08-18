@@ -1575,6 +1575,32 @@ class ContinuousBatchEngine:
                             use_cache=True,
                         )
 
+            # ORDER THE DEFAULT STREAM BEHIND THE DECODE STREAM.
+            #
+            # The forward above is enqueued inside `with
+            # torch.cuda.stream(decode_stream)`, but `out.logits` is read HERE,
+            # on the default stream, which has no dependency on it. Nothing
+            # synchronised the two: no synchronize(), no wait_stream(), no
+            # event. So the read could observe memory the decode had not
+            # finished writing -- a plain data race, and the reason the engine's
+            # logits came back NaN nondeterministically.
+            #
+            # It explains every symptom that survived the other explanations:
+            # timing-dependent (so it differs between a bare script and pytest,
+            # and gets likelier as more runs before it), immune to
+            # DKV_DETERMINISTIC / pool budget / decode path / the KV cache
+            # because none of those touch stream ordering, and confined to this
+            # engine because the wrapper's own generate() never uses a side
+            # stream.
+            #
+            # wait_stream, not synchronize: it makes the default stream wait on
+            # the decode stream's work without blocking the HOST, which is the
+            # cheap primitive for exactly this dependency.
+            if is_cuda:
+                _ds_sync = self.cuda_stream_manager.get_decode_stream()
+                if _ds_sync is not None:
+                    torch.cuda.current_stream().wait_stream(_ds_sync)
+
             logits = out.logits[:, -1, :]  # [bucket_size, vocab_size]
 
             # Extract and sample outputs ONLY for actual active requests
