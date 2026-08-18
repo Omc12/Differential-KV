@@ -76,6 +76,10 @@ def main():
     ap.add_argument("--dense", action="store_true", help="MLX dense control")
     ap.add_argument("--model", default="mlx-community/Qwen3.5-2B-4bit")
     ap.add_argument("--repeat", type=int, default=3)
+    ap.add_argument("--max-new", type=int, default=24, dest="max_new",
+                    help="Answer budget. 24 suits a non-thinking model; a model "
+                         "that emits a <think> preamble needs ~400 or it never "
+                         "reaches the answer (see the TRUNCATED note below).")
     args = ap.parse_args()
 
     print("=" * 62)
@@ -111,7 +115,14 @@ def main():
         w = W()
     else:
         from serving.mlx_dkv_wrapper import MLXDKVWrapper
-        w = MLXDKVWrapper(model_id=args.model, config={"preset": "mid"})
+        # block_size is a CONSTRUCTOR argument, not an environment knob the runtime
+        # re-reads, so a sweep that only exports BLOCK silently runs the default for
+        # every arm and returns identical numbers. Thread it explicitly.
+        _cfg = {"preset": os.environ.get("PRESET", "mid")}
+        if os.environ.get("BLOCK"):
+            _cfg["block_size"] = int(os.environ["BLOCK"])
+            _cfg["micro_block_size"] = int(os.environ["BLOCK"])
+        w = MLXDKVWrapper(model_id=args.model, config=_cfg)
 
     cases = [("2k", 200, 0.0), ("2k", 200, 0.5), ("2k", 200, 0.9)]
     if not args.quick:
@@ -131,7 +142,7 @@ def main():
 
         outs = []
         for _ in range(args.repeat):
-            r = w.generate(prompt=prompt, max_new_tokens=24, temperature=0.0,
+            r = w.generate(prompt=prompt, max_new_tokens=args.max_new, temperature=0.0,
                            top_p=1.0, repetition_penalty=1.0)
             outs.append(r.rsplit("assistant", 1)[-1].strip())
 
@@ -139,14 +150,34 @@ def main():
         distinct = len(set(outs))
         ok = hits == args.repeat
         det = distinct == 1
+        # A REASONING MODEL FAILS ON THE ANSWER BUDGET, NOT ON RECALL.
+        # Qwen3.5-9B (and any thinking model) emits a long <think> preamble before
+        # it answers. At a small --max-new the generation stops inside that
+        # preamble, having never reached the code -- which reads as total recall
+        # failure and has been mistaken for one. An UNCLOSED <think> in a failing
+        # case is the signature; say so, and name the budget to re-run at, instead
+        # of reporting a recall number that is not measuring recall.
+        truncated = [o for o in outs if "<think>" in o and "</think>" not in o]
         print(f"  [{'PASS' if ok else 'FAIL'}] {name} ({ntok} tok) recall "
               f"{hits}/{args.repeat}  distinct={distinct}  {outs[0][:58]!r}")
+        if not ok and truncated:
+            print(f"         ^ TRUNCATED MID-<think> in {len(truncated)}/"
+                  f"{args.repeat} runs at --max-new {args.max_new}. This is an "
+                  f"ANSWER-BUDGET failure, not a recall failure -- re-run with "
+                  f"--max-new 400 before reading it as one.")
         if not ok:
             failed.append(name)
         if not det:
             failed.append(f"{name} determinism")
 
     print("\n" + "=" * 62)
+    # RECORD THE CONFIGURATION NEXT TO THE SCORE, not just the harness name.
+    # A score compared against one taken in a different mode reads as a
+    # regression that is really two different benchmarks.
+    print(f"  config: rotated_pool={os.environ.get('DKV_ROTATED_POOL', '1')} "
+          f"block_size={getattr(getattr(w, 'manager', None), 'block_size', 'n/a')} "
+          f"max_new={args.max_new} repeat={args.repeat} "
+          f"engine={'dense' if args.dense else 'dkv'}")
     if failed:
         print(f"  FAILED ({len(failed)}): " + ", ".join(failed))
     else:

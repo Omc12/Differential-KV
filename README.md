@@ -165,10 +165,13 @@ Differential-KV runtime behaviors can be fine-tuned using environment variables:
 | `DKV_CACHE_LIMIT_GB` | `1` | MLX | Buffer-cache allocation cap in GB (halves peak prefill RAM). |
 | `DKV_TOPK_BLOCKS` | `16` | Both engines | Number of compressed micro-blocks routed per decode step. |
 | `DKV_MAX_RESIDUAL` | `128` MLX / `40` CUDA | Both engines | Exact residual token rows per block. CUDA `mid`/`ultra`/`low` use 40, `high` keeps 128; MLX is flat 128. The budget measured **inert** on four benchmarks including a digit-table one, and the pool allocates these slots on *every* block, so 40 is a straight saving. |
-| `DKV_ROTATED_POOL` | `1` (`0` on `ultra`) | Both engines | `1` stores POST-RoPE keys (fast reads). `0` stores PRE-RoPE and rotates at read: **exact dense parity on retrieval and digit recall**, at 43–137% of decode depending on attended-layer count. |
+| `DKV_ROTATED_POOL` | `1` everywhere (`0` on CUDA `ultra` only) | CUDA / MLX | `1` stores POST-RoPE keys, baking in the position a block held at **compression** time. `0` stores PRE-RoPE keys and rotates them to their absolute positions at read. **Worth it on CUDA** (40/48 → 47/48 distractor retrieval over 48 seeds, matching dense, for 18–24% of decode). **NOT worth it on MLX, measured:** 9/24 either way at 16k over 24 seeds — the same score *and the same predicted answer on all 24 seeds* — while costing ~39% of decode and a second dense-window buffer per attended layer. The knob is implemented and correct (the pool, the SVD basis and the decode logits all demonstrably change), it simply buys nothing here, so it stays **off by default on MLX and is not part of MLX's `ultra`**. On MLX it also requires `DKV_DECODE_CACHE=1` — only that path materialises the keys, so the low-rank scorer **refuses** rather than scoring unrotated keys against a rotated query. Judge it with `colab/linkbench_mlx.py`, never the needle sweep, which has no confusable distractors and cannot see it. |
+| `DKV_POOL_ATTENDED_ONLY` | `1` | MLX | Size each session's pool by the layers that actually own a KV cache. On hybrid models (Qwen3.5: **6 of 24** layers) the rest can never hold a block, and allocating for them cost 406.9 MB of a 542.5 MB pool at 11.4k. Set `0` to restore the old full-width allocation. No-op on dense-attention models. |
+| `--micro-block-size` / `block_size` | **`1024`** (MLX) | MLX | Tokens per compressed block. Raised from 256 after measuring all four metrics at once on Qwen3.5-2B-4bit: linkbench 9/24 → **24/24 (= dense)**, needles 6/6 either way, session pool 135.6 → **60.0 MB**, and the pool against the dense KV it replaces 0.95× → **0.28× (3.61× smaller)**. Retrieval tracks the **number of blocks** the context is split into, not fidelity or routing — at 16k, 256 gives ~58 blocks and 1024 gives ~15. At 256 the fixed 128-token residual budget stored *half of every block verbatim*, which is why the old default barely compressed. Use `512` for synthesis-shaped work. |
 | `DKV_DETERMINISTIC` | `0` | CUDA | `1` forces a deterministic SDPA backend. Greedy decode is **not** reproducible at long context without it — the cause is the decode attention's reduction, not compression. **Turn this on for any run you intend to compare.** |
 | `DKV_FAST_DECODE` | **`1`** | CUDA | Routed CUDA-graph decode, gated per session to whether a graph will actually be captured. Set `0` to disable. Its output is not bit-identical to eager — the first difference is **one ULP at step 1** and the greedy argmax flips around step 32 — because a CUDA graph makes no bit-identity promise. Accuracy is unaffected (digit-table 24/24, linkbench 23/48, both equal to eager and to dense). Use `DKV_FAST_DECODE=0` with `DKV_DETERMINISTIC=1` for runs you intend to compare token-for-token. |
-| `DKV_SVD_SEED` | `1234` | MLX | SVD random state seed for deterministic compression. |
+| `DKV_DECODE_CACHE_INTERVAL` | **`4`** (MLX) | MLX | Tokens between re-routing and re-materialising the decode cache. Lowered from 16: the routed block set is FROZEN for the interval, so a needle whose block is routed late stays invisible that long. The old default's stated 15% speed justification does **not** reproduce — a paired, A/A-calibrated measurement puts 16 vs 4 at +0.095 ms/token, 95% CI [-0.486, +0.677], i.e. not resolvable. 4 buys a 4× shorter staleness window for no measurable cost. |
+| `DKV_SVD_SEED` | `1234` | MLX | SVD random state seed. **Vary it for any accuracy A/B** — temperature-0 replication is deterministic and proves nothing, and at a fixed config this seed alone spans ~30 synthesis points. |
 | `DKV_EARLY_LAYER_RANK_BOOST` | `0` | MLX | Set `1` to boost SVD rank ($2\times$) in early layers ($\le 15\%$ network depth) for syntactic protection. |
 | `DKV_MAX_RANK_EARLY` | `0` | MLX | Cap for early layer boosted rank ($0$ = auto-selects $2\times$ base rank). |
 | `DKV_PROFILE_CB` | `0` | Both engines | Enable layer-wise routing, GPU kernel, and readback latency profiling logs. |
@@ -411,7 +414,37 @@ cd benchmarks && python relational_ab.py --mode sparse --natural --spread
 
 # 4. Native C++ Engine Honest Sweep
 cd dkv_native/tests && ./test_niah_native.sh
+
+# 5. Unrotated-pool round-trip (DKV_ROTATED_POOL=0)
+#    Checks the invariant, not the benchmark: a residual key read back out of the
+#    pool and rotated to its absolute position must reproduce the rotated key that
+#    lived there. RoPE is PARTIAL on Qwen3.5 (64 of 256 dims), so a wrong position
+#    perturbs only ~25% of each key -- it degrades retrieval while the needle sweep
+#    still passes. Do not judge a position fix on recall alone.
+pytest ACTIVE_RUNTIME/tests/test_unrotated_pool.py -q
+
+# 6. Greedy-sampler NaN guard
+pytest ACTIVE_RUNTIME/tests/test_sampler_nan_guard.py -q
+
+# 7. Distractor retrieval (what DKV_ROTATED_POOL is judged on; the needle sweep
+#    has no confusable distractors and cannot see it). Always run a dense control
+#    in the SAME configuration, and record the question mode next to the score.
+SEEDS=$(python3 -c "print(','.join(str(i) for i in range(1,25)))")
+CTX=16000 QMODE=direct SEEDS=$SEEDS python colab/linkbench_mlx.py
+CTX=16000 QMODE=direct SEEDS=$SEEDS ENGINE=dense python colab/linkbench_mlx.py
+
+# 8. Synthesis with a confidence interval (paired, replicated, MLX arms)
+python colab/synthesis_power.py --arm dkv   --reps 6 --out dkv.json
+python colab/synthesis_power.py --arm dense --reps 6 --out dense.json
+python colab/synthesis_power.py --compare dkv.json dense.json
 ```
+
+> **Before running any A/B on either runtime:** temperature-0 replication is
+> deterministic and therefore proves nothing — a number "reproduced twice" is one
+> sample, not two. The randomised SVD's seed (`DKV_SVD_SEED` on MLX) is the axis
+> that has to move; at a fixed config it alone spans ~30 synthesis points. Treat
+> any synthesis difference under ~15 points as no difference. See
+> `ACTIVE_RUNTIME/docs/cuda_port_record.md` for the rest of the method rules.
 
 ---
 

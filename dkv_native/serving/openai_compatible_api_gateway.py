@@ -736,8 +736,12 @@ if __name__ == '__main__':
     if "DKV_MPS_APPROXIMATE_ATTN" not in os.environ:
         os.environ["DKV_MPS_APPROXIMATE_ATTN"] = "1"
 
-    if "DKV_MICRO_BLOCK_SIZE" not in os.environ:
-        os.environ["DKV_MICRO_BLOCK_SIZE"] = "64"
+    # DKV_MICRO_BLOCK_SIZE is deliberately NOT defaulted here. This used to force
+    # 64, which silently undid the runtime's own "micro_block_size 64->256 to match
+    # the MLX reference" fix (main.cpp) for anyone who started the server rather
+    # than the CLI — two entry points to one runtime disagreeing about the single
+    # knob that most affects retrieval. Leave it unset and let main.cpp's default
+    # stand; an explicit env still wins.
 
     if "DKV_BINARY_PATH" not in os.environ:
         os.environ["DKV_BINARY_PATH"] = BINARY_PATH_DEFAULT

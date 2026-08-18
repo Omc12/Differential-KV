@@ -116,7 +116,7 @@ class NativeBlockPool:
         #
         # This was previously deferred as "<1% of the ~15 GB peak", and that
         # arithmetic was against the wrong denominator — the same denominator
-        # trap MLX_PORT_FROM_CUDA.md item 5c warns about. Measured against the
+        # trap ACTIVE_RUNTIME/docs/cuda_port_record.md warns about (report the KV-side ratio). Measured against the
         # POOL, which is the only line KV compression can move: on Qwen3.5-2B at
         # 32k the legacy slots are 52 MB of a 166 MB pool, i.e. 31% of it.
         #

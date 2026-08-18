@@ -847,8 +847,10 @@ async def run_direct_mode(args):
         if args.serving_mode != "lightweight":
             print_system(f"Adjusting serving_mode from '{args.serving_mode}' to 'lightweight' to prevent OOM")
             args.serving_mode = "lightweight"
-        if args.rank == 32:
-            print_system("Adjusting KV rank from 32 to 16")
+        # `is None` = the user left it alone. The old `== 32` could not tell that
+        # from an explicit --rank 32, so it silently overrode a deliberate choice.
+        if args.rank is None:
+            print_system("Adjusting KV rank to 16 (low preset)")
             args.rank = 16
 
     quantization_config = None
@@ -886,9 +888,15 @@ async def run_direct_mode(args):
     wrapper = DKVHFWrapper(
         args.model,
         config={
-            'rank':             args.rank,
-            'micro_block_size': args.micro_block_size,
-            'block_size':       args.micro_block_size,
+            **({'rank': args.rank} if args.rank else {}),
+            # Only pass a block size when the user actually asked for one. A
+            # hardcoded default here shadows the runtime's, and the runtime's is the
+            # one that was measured (MLX: 256 -> 1024 took linkbench 9/24 to 24/24 =
+            # dense, and the pool from 0.95x of the KV it replaces to 0.28x). See
+            # ACTIVE_RUNTIME/docs/cuda_port_record.md.
+            **({'micro_block_size': args.micro_block_size,
+                'block_size':       args.micro_block_size}
+               if args.micro_block_size else {}),
             'serving_mode':     args.serving_mode,
             'mode':             'fp16',
             'quantization':     'int4' if args.load_in_4bit else ('int8' if args.load_in_8bit else None),
@@ -904,9 +912,15 @@ async def run_direct_mode(args):
         draft_wrapper = DKVHFWrapper(
             args.draft_model,
             config={
-                'rank':             args.rank,
-                'micro_block_size': args.micro_block_size,
-                'block_size':       args.micro_block_size,
+                **({'rank': args.rank} if args.rank else {}),
+                # Only pass a block size when the user actually asked for one. A
+                # hardcoded default here shadows the runtime's, and the runtime's is the
+                # one that was measured (MLX: 256 -> 1024 took linkbench 9/24 to 24/24 =
+                # dense, and the pool from 0.95x of the KV it replaces to 0.28x). See
+                # ACTIVE_RUNTIME/docs/cuda_port_record.md.
+                **({'micro_block_size': args.micro_block_size,
+                    'block_size':       args.micro_block_size}
+                   if args.micro_block_size else {}),
                 'serving_mode':     args.serving_mode,
                 'mode':             'fp16',
                 'quantization':     'int4' if args.load_in_4bit else ('int8' if args.load_in_8bit else None),
@@ -1275,10 +1289,10 @@ def main():
     # Model configuration
     parser.add_argument('--model', type=str, default='Qwen/Qwen2.5-0.5B-Instruct',
                         help="HuggingFace model ID or path.")
-    parser.add_argument('--rank', type=int, default=32,
-                        help="SVD rank for KV compression. Higher = better quality. CAP at head_dim.")
-    parser.add_argument('--micro-block-size', type=int, default=256,
-                        help="Tokens per compressed KV block. S=256.")
+    parser.add_argument('--rank', type=int, default=None,
+                        help="SVD rank for KV compression. Unset = the runtime's own default (32). Do NOT hardcode a value here: passing one explicitly overrides the runtime default and makes 'user asked for 32' indistinguishable from 'left at the default'. CAP at head_dim.")
+    parser.add_argument('--micro-block-size', type=int, default=None,
+                        help="Tokens per compressed KV block. Unset = the runtime's own measured default (1024 on MLX). Do NOT hardcode a value here: passing one explicitly overrides the runtime default, which is how a measured default silently fails to reach the CLI and the server.")
     parser.add_argument('--batch-size', type=int, default=4,
                         help="Maximum batch size for engine.")
     parser.add_argument('--serving-mode', type=str,

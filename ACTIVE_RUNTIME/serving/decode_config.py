@@ -52,6 +52,59 @@ BEST_DECODE_DEFAULTS = {
     "DKV_GRAPH_SAFE_DECODE": "1",      # sync-free decode step (bypass capture)
 }
 
+
+# ── CONSTRUCTOR defaults (not environment variables) ─────────────────────────
+# These reach the runtime through the wrapper's `config` dict rather than the
+# environment, and they were the ones that actually drifted: `cli.py` and the
+# OpenAI gateway each carried `--micro-block-size default=256` and passed it
+# EXPLICITLY, so the runtime's measured default could never take effect through
+# either of them. A benchmark that constructs MLXDKVWrapper directly sees the
+# right value; the CLI and the server did not. That is invisible unless you
+# diff four files, which is exactly what this module exists to prevent.
+#
+# Rule: entry points MUST NOT carry their own default for anything listed here.
+# Argparse defaults to None and the value is forwarded only when the user
+# actually passed one.
+#
+# The justification for each value lives next to its use in
+# `mlx_dkv_wrapper.MLXDKVWrapper.__init__`, with the measurements attached; this
+# dict is the single place that OWNS the number.
+MLX_CONSTRUCTOR_DEFAULTS = {
+    "block_size": 1024,   # MLX-measured: pool 1.08x -> 0.48x of the KV it replaces.
+                          # Retrieval half is inherited from CUDA, not yet re-measured
+                          # on MLX -- see the comment in MLXDKVWrapper.__init__.
+    "rank": 32,           # a CEILING, not a target; the rank sweep that suggested
+                          # otherwise was randomised-SVD projection noise
+}
+
+
+def resolved_runtime_config(wrapper=None) -> dict:
+    """Everything that decides runtime behaviour, in one printable dict.
+
+    Point of this: after a default changes, `assert resolved_runtime_config()[k]`
+    is a one-line check that it actually reaches the process — rather than
+    reading the wrapper, the CLI, the gateway and native's env plumbing and
+    hoping they agree. Pass a constructed wrapper to include what it resolved to.
+    """
+    out = {f"env:{k}": os.environ.get(k) for k in
+           list(BEST_DECODE_DEFAULTS) + list(KTRANSFORMERS_DEFAULTS)}
+    out.update({f"default:{k}": v for k, v in MLX_CONSTRUCTOR_DEFAULTS.items()})
+    for k in ("DKV_ROTATED_POOL", "DKV_STREAMING_COMPRESS", "DKV_POOL_ATTENDED_ONLY",
+              "DKV_DECODE_CACHE_INTERVAL", "DKV_MAX_RESIDUAL", "DKV_TOPK_BLOCKS"):
+        out[f"env:{k}"] = os.environ.get(k)
+    if wrapper is not None:
+        out["effective:block_size"] = getattr(wrapper, "block_size", None)
+        out["effective:rank"] = getattr(wrapper, "base_rank", None)
+        mgr = getattr(wrapper, "manager", None)
+        if mgr is not None:
+            out["effective:recency_window"] = mgr.recency_window
+            out["effective:rotated_pool"] = mgr.rotated_pool
+            out["effective:attended_layers"] = (
+                len(mgr._attended_layers) if mgr._attended_layers is not None else "all")
+            out["effective:decode_cache_interval"] = mgr._decode_cache_interval
+    return out
+
+
 # ── k-transformers feature knobs ─────────────────────────────────────────────
 # All default to safe/off values — existing behaviour is 100% unchanged unless
 # a feature is explicitly enabled.  "auto" enables the feature when the hardware

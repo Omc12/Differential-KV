@@ -1040,7 +1040,11 @@ async def run_direct_mode(args):
 
     os.environ["DKV_MAX_TOKENS"] = str(args.max_tokens)
     os.environ["DKV_USE_GPU"] = "1" if args.use_gpu else "0"
-    os.environ["DKV_MICRO_BLOCK_SIZE"] = str(args.micro_block_size)
+    # Only when the user actually asked. Setting this unconditionally from an
+    # argparse default shadows the runtime's own value, which is how a measured
+    # default fails to reach the process it was measured for.
+    if args.micro_block_size:
+        os.environ["DKV_MICRO_BLOCK_SIZE"] = str(args.micro_block_size)
     os.environ["DKV_BINARY_PATH"] = os.path.abspath(args.binary_path)
     os.environ["DKV_MODEL_PATH"] = model_path
     if hasattr(args, 'context') and args.context is not None:
@@ -1311,7 +1315,7 @@ def main():
                         help="Path to built dkv_native C++ executable.")
     parser.add_argument('--use-gpu', type=int, choices=[0, 1], default=1,
                         help="Enable GPU/Metal execution in C++ binary.")
-    parser.add_argument('--micro-block-size', type=int, default=256,
+    parser.add_argument('--micro-block-size', type=int, default=None,
                         help="Micro block size for KV compression.")
     parser.add_argument('--preset', type=str, choices=['low', 'mid', 'high'], default='mid',
                         help="Optimization preset (influences chunk prefill size). Use --context to override token budget.")
