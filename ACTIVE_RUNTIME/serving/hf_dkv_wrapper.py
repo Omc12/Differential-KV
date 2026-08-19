@@ -1504,7 +1504,17 @@ class PyTorchDKVHFWrapper:
         #   1. Explicit query_text from caller (highest precision).
         #   2. Auto-extracted from _last_messages (set by API gateway).
         #   3. Full prompt fallback (safe — IDF filters downstream).
-        if getattr(self.manager, "_factual_enabled", False):
+        #
+        # NO LONGER GATED ON THE FACTUAL STORE. `_pending_query` is consumed by
+        # finalize_srl_index to set `current_query_tokens`, which is read as a
+        # LEXICAL QUERY by query_router's lexical lookup, the decode-time
+        # query_toks set, and the learned router's `lex` feature -- none of
+        # which are factual-store features. Behind `_factual_enabled` (off by
+        # default) the pin was never filled on the default path, so those three
+        # consumers silently fell back to "the question is the entire prompt",
+        # whose IDF is ~uniform and discriminates nothing. MLX has never gated
+        # it this way.
+        if True:
             try:
                 if query_text:
                     _q_ids = self.tokenizer.encode(

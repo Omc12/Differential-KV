@@ -631,6 +631,17 @@ class KVRuntimeManager:
 
         # Per-session SRL state (populated by finalize_srl_index)
         self._session_srl: dict = {}
+        # sid -> question-span token ids, set by the wrapper's generate() and
+        # consumed by finalize_srl_index.
+        #
+        # THIS ATTRIBUTE DID NOT EXIST ON CUDA. MLX declares it
+        # (mlx_dkv_wrapper.py:1900) and hf_dkv_wrapper.py has always written to
+        # it -- into a bare `except Exception: pass`, so every write raised
+        # AttributeError and was silently swallowed. The pin therefore never
+        # worked here at all, and `current_query_tokens` always fell back to the
+        # whole prompt. Nothing logged, nothing failed; the lexical signal was
+        # just uniformly wrong.
+        self._pending_query: dict = {}
         self._factual_stores: dict = {}
 
         # Per-session SRL custom configuration settings
@@ -1427,9 +1438,35 @@ class KVRuntimeManager:
             existing_srl = self._session_srl.get(session_id)
             nothing_found = getattr(existing_srl, "nothing_found", False)
 
-            # Extract latest query tokens
+            # ── Query tokens: the QUESTION span, not the whole prompt ────────
+            # MLX does this (mlx_dkv_wrapper.py:1978-1979):
+            #     pq = self._pending_query.pop(session_id, None)
+            #     current_query_tokens = pq if pq else token_ids[cached_len:]
+            # CUDA only ever did the fallback, so on a single-turn request
+            # (cached_len=0) `current_query_tokens` was the ENTIRE 8k prompt.
+            #
+            # That is not a harmless approximation. Every consumer of this field
+            # uses it as a LEXICAL query -- query_router's lexical lookup, the
+            # decode-time query_toks set, the learned router's `lex` feature.
+            # IDF over the whole prompt is ~uniform, so the field could not
+            # discriminate anything: it named every token in the document as
+            # part of the question. query_span.py exists precisely to extract
+            # the last user turn, and its own docstring says the full-prompt
+            # fallback "would pin nothing useful".
+            #
+            # `_pending_query` was previously populated on CUDA only when
+            # DKV_FACTUAL_STORE=1, which is off by default -- so the pin existed
+            # and was never filled on the default path. The wrapper now fills it
+            # unconditionally.
             current_query_tokens = getattr(existing_srl, "current_query_tokens", [])
-            if token_ids_cpu is not None:
+            _pq = None
+            try:
+                _pq = getattr(self, "_pending_query", {}).pop(session_id, None)
+            except Exception:                                    # noqa: BLE001
+                _pq = None
+            if _pq:
+                current_query_tokens = list(_pq)
+            elif token_ids_cpu is not None:
                 current_query_tokens = token_ids_cpu[cached_len:].tolist()
 
             # ── 5. Assemble SessionSRLState ──────────────────────────────
