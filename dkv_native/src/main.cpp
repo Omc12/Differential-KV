@@ -2086,9 +2086,25 @@ int main(int argc, char ** argv) {
     model.print_info();
     
     
-    // Bug 🅙 fix: micro_block_size 64→256 to match MLX reference.
-    // 256 gives dense anchors matching MLX.
-    int micro_block_size = 256;
+    // micro_block_size 64 -> 256 -> 1024, each step to match the MLX reference,
+    // and 1024 is now MEASURED HERE rather than inherited.
+    //
+    // Needle at ~13k on Qwen2.5-1.5B-Instruct-f16, sparse decode engaged, same
+    // prompt each time (code planted at depth 0.5 is ZEBRA-4471-QUARTZ):
+    //
+    //     256   ->  "ZEUS"                 total recall failure, reproducible
+    //     1024  ->  "ZEBR-4471-QUARTZ."    recovered, reproducible
+    //     dense ->  "ZEBR4471QUARTZ"       the control, at the same length
+    //
+    // The dense arm drops the same 'A', so that is tokenisation and not a DKV
+    // defect; at 1024 the sparse path matches its own dense control.
+    //
+    // This had been filed as a native-specific sparse-decode bug. It is not: it is
+    // the same block-count mechanism measured on MLX, where linkbench at 16k goes
+    // 9/21 -> 21/21 (= its dense control) across the same change. Two runtimes and
+    // two model families (Qwen3.5 hybrid, Qwen2.5 dense-attention) now agree that
+    // retrieval tracks the NUMBER of blocks the context is split into.
+    int micro_block_size = 1024;
     if (const char* env_mbs = std::getenv("DKV_MICRO_BLOCK_SIZE")) {
         micro_block_size = std::stoi(env_mbs);
     }

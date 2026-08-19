@@ -381,13 +381,26 @@ suite went green because nothing asserted on response content.
 
 ## Known-broken, not caused by this work
 
-**The native (C++/Metal) sparse decode loses the needle.** At ~13k on
-Qwen2.5-1.5B the engaged path answers `ZEUS` where the dense control at the same
-length answers `ZEBR4471QUARTZ`. Short prompts below the engage threshold recall
-correctly. Neither native change here is implicated: the logits sanitiser fired
-0 times on those runs, and the `GGML_OP_DIFFKV_ATTN`→`GGML_OP_DKV_ATTN` rename
-only makes `supports_op` name the enum everything else already used — before it
-the file did not compile, so there was no working binary to regress from.
+**RESOLVED: the native sparse-decode recall failure was the block-size default.**
+It had been filed as a native-specific defect. It is not. Needle at ~13k on
+Qwen2.5-1.5B-Instruct-f16 with sparse decode engaged, same prompt each time:
+
+| micro_block_size | native sparse output |
+|---|---|
+| 256 (old default) | `ZEUS` — total failure, reproducible |
+| **1024 (new default)** | **`ZEBR-4471-QUARTZ.`** — recovered, reproducible |
+| dense control | `ZEBR4471QUARTZ` |
+
+The dense arm drops the same `A`, so that character is tokenisation rather than a
+DKV defect; at 1024 the sparse path matches its own control. `main.cpp` now
+defaults to 1024 with the measurement attached.
+
+This is the same block-count mechanism measured on MLX (linkbench 9/21 -> 21/21 =
+dense at 16k). **Two runtimes and two model families — Qwen3.5 hybrid on MLX,
+Qwen2.5 dense-attention on native — now agree independently that retrieval tracks
+the NUMBER of blocks the context is split into**, not fidelity and not routing.
+That is a much stronger claim than either measurement alone, and it was only
+reachable because the native binary was actually run.
 
 **The native loader requires `wq/wk/wv/wo` in every layer**, so it cannot load
 Qwen3.5 at all ("Missing weights in layer 0"). Native testing needs a

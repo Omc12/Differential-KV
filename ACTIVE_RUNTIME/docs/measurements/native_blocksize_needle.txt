@@ -1,0 +1,11 @@
+# dkv_native, Qwen2.5-1.5B-Instruct-f16.gguf, ~13k prompt, needle at depth 0.5
+# planted code: ZEBRA-4471-QUARTZ ; sparse decode engaged (decode_use_sparse=1)
+
+DKV_MICRO_BLOCK_SIZE=256   [Response] ZEUS
+DKV_MICRO_BLOCK_SIZE=1024  [Response] ZEBR-4471-QUARTZ.
+DKV_MICRO_BLOCK_SIZE=1024  [Response] ZEBR-4471-QUARTZ.     (repeat, stable)
+built-in default (1024)    [Response] ZEBR-4471-QUARTZ.
+dense control              [Response] ZEBR4471QUARTZ
+  (DKV_ENGAGE_THRESHOLD=999999, decode_use_sparse=0)
+
+short prompt, dense path   [Response] ZEBA-4471-QUARTZ
