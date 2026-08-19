@@ -136,6 +136,8 @@ class NativeBlockPool:
         num_layers: int = 28,
         lazy: bool = False,
         max_residual_tokens: Optional[int] = None,
+        shared_basis: bool = False,
+        shared_basis_frac: float = 0.50,
     ):
         # ── Phase 1: Record config — NO GPU tensors allocated yet if lazy ────────────
         # Allocation is deferred to ensure_allocated(n_tokens), called by
@@ -204,13 +206,25 @@ class NativeBlockPool:
         # per block, and `basis_of` maps a slot to the row it reads.  See
         # native_core/compression/basis_group.py for the projection math and
         # the capacity contract.
+        # `shared_basis` / `shared_basis_frac` come from the preset (DKVConfig
+        # turns it on for `low`, the memory-priority rung) and are overridden by
+        # DKV_SHARED_BASIS / DKV_SHARED_BASIS_FRAC. The env check has to be for
+        # an EXPLICIT setting, not a truthy one: shared_basis_enabled() returns
+        # False when the variable is absent, so consulting it unconditionally
+        # would let "unset" silently override a preset that asked for it on.
         try:
             from native_core.compression.basis_group import (
                 shared_basis_enabled as _sb_on,
                 shared_basis_fraction as _sb_frac,
             )
-            self._shared_basis = bool(_sb_on())
-            self._basis_frac = float(_sb_frac())
+            if _os.environ.get("DKV_SHARED_BASIS") is not None:
+                self._shared_basis = bool(_sb_on())
+            else:
+                self._shared_basis = bool(shared_basis)
+            if _os.environ.get("DKV_SHARED_BASIS_FRAC") is not None:
+                self._basis_frac = float(_sb_frac())
+            else:
+                self._basis_frac = min(1.0, max(1e-3, float(shared_basis_frac)))
         except Exception:                                        # noqa: BLE001
             self._shared_basis = False
             self._basis_frac = 1.0
@@ -233,6 +247,31 @@ class NativeBlockPool:
                     self._shared_basis = False
             except Exception:                                    # noqa: BLE001
                 pass
+        # 4-bit KV quantisation and shared bases are ANTAGONISTIC, measured.
+        # The quantisation noise dominates the delta subspaces, so no two blocks
+        # clear the join threshold: on `low` (q4_0) the store fills with
+        # founders and every later block is FORCE-joined --
+        #
+        #     preset  kv_quant   groups     joined  forced  mean_kept
+        #     mid     f16        293/462       463       0      0.969
+        #     low     q4_0       462/462 FULL    0     294      0.685
+        #
+        # -- while the pool MB is IDENTICAL either way, because the saving comes
+        # from allocating fewer basis rows and not from successful grouping. So
+        # this degrades silently if you only watch memory. Say so at
+        # construction rather than leaving it to be found in basis_stats().
+        if self._shared_basis:
+            _q = str(getattr(getattr(self, "config", None), "kv_quant", "") or "")
+            if not _q:
+                _q = str(_os.environ.get("DKV_KV_QUANT", "") or "")
+            if _q.lower().startswith(("q4", "int4", "nf4")):
+                print(f"[DKV WARNING] shared bases with kv_quant={_q}: 4-bit KV "
+                      f"quantisation destroys the subspace agreement this "
+                      f"depends on. Expect ZERO voluntary joins and forced "
+                      f"lossy sharing (measured mean_kept 0.685 vs 0.969 at "
+                      f"f16). The VRAM saving is unchanged, which is why this "
+                      f"is easy to miss -- check pool.basis_stats()['joined'].",
+                      flush=True)
         self.basis_of = None          # [n_blocks] int32 device tensor, or None
         self.basis_registry = None
         self.basis_store = None       # _JointVAdapter over V_KV, or None

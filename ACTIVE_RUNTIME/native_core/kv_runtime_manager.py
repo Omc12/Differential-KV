@@ -900,6 +900,9 @@ class KVRuntimeManager:
             num_layers=self.num_layers,
             lazy=True,
             max_residual_tokens=self.config.max_residual_tokens,
+            # Preset-driven; DKV_SHARED_BASIS still overrides. On for `low`.
+            shared_basis=bool(getattr(self.config, "shared_basis", False)),
+            shared_basis_frac=float(getattr(self.config, "shared_basis_frac", 0.50)),
         )
         self.native_pool.config = self.config
         # Back-reference so decode-path hooks can reach k-transformers subsystems

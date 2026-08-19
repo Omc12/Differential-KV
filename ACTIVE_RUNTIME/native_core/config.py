@@ -554,6 +554,59 @@ class DKVConfig:
             alias_env="DKV_MAX_RESIDUAL",   # MLX's name for the same knob
         )
 
+        # ── Shared low-rank bases ────────────────────────────────────────────
+        # Blocks whose delta subspaces agree read ONE basis row instead of each
+        # storing its own V.  V is 39% of a pool slot and is the item adjacent
+        # blocks of a document most nearly agree on, so at frac 0.50 this is
+        # 91.4 -> 69.8 MB of pool (-23.6%) with retained delta energy 0.969 and
+        # ZERO forced joins -- every merge voluntary and above threshold.
+        # `_bytes_per_block` amortises V by the same fraction, so the budget
+        # holds proportionally MORE blocks rather than the same context in less
+        # memory.
+        #
+        # OFF IN EVERY PRESET, and the obvious guess is the one that is wrong.
+        #
+        # `low` is the memory-priority preset, so it looks like the natural home
+        # -- it is not, and measurably so. `low` sets kv_quant="q4_0", and 4-bit
+        # KV quantisation destroys the subspace agreement this depends on. Same
+        # document, same frac 0.50, same 756 written blocks:
+        #
+        #     preset  kv_quant   groups     joined  forced  mean_kept
+        #     mid     f16        293/462       463       0      0.969
+        #     low     q4_0       462/462 FULL    0     294      0.685
+        #
+        # On `low` NO TWO BLOCKS ever clear the join threshold. The store fills
+        # with founders, everything after is FORCE-joined, and the feature stops
+        # being opportunistic dedup and becomes lossy V-compression at 31.5%
+        # delta-energy loss. The VRAM number is identical either way (69.8 MB)
+        # because the saving comes from allocating fewer basis ROWS, not from
+        # successful grouping -- which is exactly why this failure is invisible
+        # if you only watch pool MB.
+        #
+        # `high` is the max-fidelity rung; spending reconstruction accuracy
+        # there contradicts what the preset means.
+        #
+        # `mid` is where the trade is genuinely good -- 2.58x sharing, 463
+        # voluntary joins, ZERO forced, kept 0.969 -- but it is also the
+        # default, so enabling it there IS a default change and the accuracy
+        # evidence does not carry one. First-step logit fidelity vs a dense
+        # control (colab/logit_fidelity.py, n=5) shows no measurable harm, but
+        # the ordering is not monotone in frac (0.50 -> KL 8.27, 0.25 -> 9.93,
+        # 0.125 -> 8.61), which is the signature of noise rather than a fidelity
+        # ordering, and that instrument's own baseline already sits far from
+        # dense here (KL 10.58, dense's top-1 at rank 1255) so it cannot resolve
+        # a small change on top.
+        #
+        # So: opt-in, for fp16-KV long-context sessions, via this config key or
+        # DKV_SHARED_BASIS. Not a preset default anywhere until an accuracy
+        # instrument that can actually resolve it says otherwise.
+        self.shared_basis = self._get_bool(
+            "shared_basis", "DKV_SHARED_BASIS", False, config_dict
+        )
+        self.shared_basis_frac = self._get_float(
+            "shared_basis_frac", "DKV_SHARED_BASIS_FRAC", 0.50, config_dict
+        )
+
         # ── CUDA-specific performance flags ──────────────────────────────────
         # These have no effect on MPS/CPU; they are documented here so that
         # DKV_TELEMETRY=1 output gives a complete picture of active defaults.

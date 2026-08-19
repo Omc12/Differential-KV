@@ -191,6 +191,26 @@ enable sharing when exact form is off and says so; MLX should do the same.
 **Measured on CUDA** (RTX 4070 SUPER, Qwen2.5-1.5B, 8k NIAH, `mid` preset,
 `colab/srl_tradeoffs.py`, seeds pinned): see the table in §3.
 
+**DO NOT PUT THIS ON THE MEMORY-PRIORITY PRESET.** That is the obvious move and
+it is measurably wrong. `low` sets `kv_quant="q4_0"`, and 4-bit KV quantisation
+destroys the subspace agreement the whole feature depends on. Same document,
+same `frac=0.50`, same 756 written blocks:
+
+| preset | kv_quant | groups | joined | forced | mean_kept | pool |
+|---|---|---|---|---|---|---|
+| `mid` | f16 | 293/462 | **463** | **0** | **0.969** | 69.8 MB |
+| `low` | **q4_0** | 462/462 full | **0** | 294 | **0.685** | 69.8 MB |
+
+On `low` **no two blocks ever clear the join threshold**. The store fills with
+founders, every later block is FORCE-joined, and the feature stops being
+opportunistic dedup and becomes lossy V-compression at 31.5% delta-energy loss.
+
+The trap is the last column: **pool MB is identical either way**, because the
+saving comes from allocating fewer basis ROWS, not from grouping succeeding. A
+run can therefore look like a clean 23.6% win while the fidelity has collapsed.
+CUDA warns at pool construction when `kv_quant` is 4-bit; MLX should too, and
+should report `joined` alongside `mean_kept` — `joined == 0` is the signature.
+
 **What to watch.** The fidelity cost is real and shows up as `mean_kept`. At
 `frac=0.25` on this document the basis store filled and blocks were
 FORCE-JOINED — capacity is a hard contract, so exhausting it degrades fidelity
