@@ -351,6 +351,32 @@ point at. The lesson stands unchanged —
 This is the file's own rule applied to itself: never quote a number without
 being able to point at the run that produced it.
 
+### 10. The batch engine returned EMPTY responses on MLX
+
+Found by finally running the serving tests rather than only the wrapper ones.
+
+`ContinuousBatchEngine` is written against the HF signature and calls
+`self.wrapper.model(..., past_key_values=req.past_kv, use_cache=True)` on every
+step. `MLXQwenModel.__call__` never accepted `past_key_values`, so the call raised
+`TypeError`, the engine caught it as `Error in batch step`, and the request came
+back with an empty response. Every request served through the engine on MLX.
+
+Pre-existing — `batch_engine.py` is untouched by this work and the signature had
+not changed. It stayed hidden because the wrapper tests call `generate()`
+directly and never go through the engine.
+
+Accepting and ignoring the argument is the correct fix rather than a workaround:
+DKV's attention patch serves history from its own per-session store and never
+fills the cache it is handed, which commit 20443474 measured directly — the
+handed-in cache reports length ZERO on every step, prefill and decode alike. The
+returned `ModelOutput` keeps `past_key_values = None`, so the engine's
+`req.past_kv` stays None and the two sides agree.
+
+**The lesson is the one already in this file, earned again:** a fast path that
+declines by exception, inside a caller that swallows exceptions, is
+indistinguishable from working. `Error in batch step:` printed to stdout and the
+suite went green because nothing asserted on response content.
+
 ---
 
 ## Known-broken, not caused by this work

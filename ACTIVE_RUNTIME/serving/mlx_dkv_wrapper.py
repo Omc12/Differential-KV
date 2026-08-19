@@ -5609,7 +5609,23 @@ class MLXQwenModel:
             self._prefill_caches[cache_key] = cache_list
         return self._prefill_caches[cache_key]
 
-    def __call__(self, input_ids: torch.Tensor, position_ids: torch.Tensor, use_cache: bool = True):
+    def __call__(self, input_ids: torch.Tensor, position_ids: torch.Tensor,
+                 use_cache: bool = True, past_key_values=None, **_unused):
+        """Forward one prefill chunk or decode step.
+
+        `past_key_values` is ACCEPTED AND IGNORED, deliberately. ContinuousBatchEngine
+        is written against the HF signature and passes `past_key_values=req.past_kv`
+        on every step; without this parameter the call raised TypeError, the engine
+        caught it as "Error in batch step", and every request served through the
+        engine came back EMPTY. That is the whole MLX serving path failing silently.
+
+        Ignoring it is the correct behaviour, not a patch over the symptom: DKV's
+        attention patch serves history from its own per-session store and never
+        fills the cache it is handed, which was measured directly in 20443474 —
+        the handed-in cache reports length ZERO on every decode step, prefill and
+        decode alike. The returned ModelOutput therefore keeps `past_key_values =
+        None`, so the engine's `req.past_kv` stays None and the two agree.
+        """
         inputs_np = input_ids.detach().cpu().numpy()
         inputs_mx = mx.array(inputs_np)
 
