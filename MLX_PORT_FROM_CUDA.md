@@ -244,3 +244,34 @@ where this is close to free; the deeper settings are lossy compression by
 another name, and should be argued for on that basis.
 
 
+
+---
+
+## 4. Nothing to port: CUDA caught up to MLX on the question-span pin
+
+**MLX status: MLX was already right.** This is recorded so the divergence is
+not re-introduced, not because MLX needs a change.
+
+`current_query_tokens` is read as a lexical query by the lexical router and the
+decode-time `query_toks` set. MLX sets it from the extracted question span
+(`mlx_dkv_wrapper.py:1978-1979`, `pq = self._pending_query.pop(...)`); CUDA only
+ever took the whole-prompt fallback, so a single-turn request named every token
+in an 8k document as part of the question.
+
+Two silent faults on the CUDA side, now fixed:
+
+1. `KVRuntimeManager` never declared `_pending_query`. `hf_dkv_wrapper` has
+   always written to it inside a bare `except Exception: pass`, so every write
+   raised `AttributeError` and was swallowed. MLX declares it at `:1900`.
+2. The write was gated on `_factual_enabled` (off by default), while the
+   consumers are routing, not the factual store.
+
+Measured after the fix, Qwen2.5-1.5B @8k NIAH: `current_query_tokens`
+7986 → 11, decoding to exactly the question, and per-block lexical overlap goes
+from std 0.0818 (near-uniform — every block matches the document) to 0.1264.
+
+**The lesson worth keeping**, since it generalises past this field: a pin
+written into a bare `except` and read through a fallback fails *completely
+silently*. Nothing errors, the fallback is plausible, and the only symptom is a
+signal that quietly discriminates nothing. If MLX grows a similar pin, assert
+the attribute exists rather than trusting the write.
