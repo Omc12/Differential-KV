@@ -1,7 +1,7 @@
 # Changes to port from CUDA to MLX
 
-Written 2026-08-19, from the CUDA work on branch `srl-adaptive-memory`
-(`552332ec..79342f4a`), merged as branch `srl-shared-basis`.
+Written 2026-08-19, from the CUDA work merged in `0bca51e8` (shared low-rank
+bases) and `0d3b12a9` (the question-span pin).
 
 **The previous edition of this file is retired**, and was deleted from `main`
 once that port landed; its record lives in
@@ -16,21 +16,65 @@ This edition starts the cycle again for a new batch of CUDA work.
 blocks, **off by default** (`DKV_SHARED_BASIS`). This file is what MLX needs to
 do to reach parity, and — as important — what it should NOT expect to gain.
 
-Three sibling features were built alongside it on `srl-adaptive-memory` and
-**deliberately not merged**, because measuring them said not to. They are not
-described here; the branch and its commit messages hold the full record. In
-short, so nobody re-derives them:
+### Three sibling features were built and deliberately NOT merged
 
-  * *Anchor-delta residual budget* — inert at the shipping config. Residual
-    fill is already 40.0 of a 40-slot budget on every block, so the tier the
-    override targets never binds.
-  * *Shared-basis chunk-graph edges* — adds ZERO edges when basis groups are
-    contiguous, which is what a real document produces.
-  * *Learned hybrid SRL router* — the scoring head reproduces the rule-based
-    ranking (val recall@16 0.599 vs 0.595). The K-head IS 14.3% faster at 32k
-    (paired, CI [-9.00, -6.91] ms) but drops >50% of attention mass on the
-    worst 5% of queries, and an oracle static-K sweep shows no K below 16 with
-    an acceptable tail on that workload — so it is not a training problem.
+Their code is gone; this section is the whole record, kept so nobody re-derives
+them. Each was tested for a workaround as well, and each workaround failed.
+
+**Anchor-delta residual budget.** The residual tier caps a block at 8/16 slots
+from its RELATIVE tail error, while selection within the budget already ranks
+ABSOLUTE — the two halves of one decision on different scales. The misfiling is
+demonstrable (|delta| ≈ 1 for prose vs ≈ 40 for a table, both at 4% relative
+error: the table perturbs logits 40× harder and gets the same 8 slots).
+*Measured inert:* residual fill is already at the full budget on every block, at
+`max_residual` 40 **and** 128, i.e. zero blocks land in the easy or medium tier
+on this content. The blocker is not budget size. It would need content with
+genuinely easy blocks — repetitive prose carrying a few dense rows — which NIAH
+filler is not, despite looking like it should be.
+
+**Shared-basis chunk-graph edges.** *Measured inert:* zero new edges when basis
+groups are contiguous, which is what a real document produces — co-members are
+already neighbours (graph degree is already 31–52 at N=32–128). Only adds edges
+when group members are scattered, and routing is not a quality lever anyway.
+
+**Learned hybrid SRL router.** Scoring head: val recall@16 **0.599–0.609 vs
+0.595** rule-based, i.e. nothing — expected, since the teacher label is derived
+from the same q·k the rule computes. K-head: genuinely **14.3% faster at 32k**
+(paired, CI [-9.00, -6.91] ms, 8/8 rounds, A/A control ±0.7%; no effect at 8.4k,
+where the dense window dominates). But it drops >50% of attention mass on the
+worst 5% of queries. Three ways that could not be fixed:
+
+  * a floor on the multiplier needs 0.90 to bound the worst case, which routes
+    90% of fixed K and returns essentially all the speed-up;
+  * retraining with an asymmetric loss makes it safe (worst 0.999) by predicting
+    **115% of fixed K** — safe and slower;
+  * an *oracle static-K sweep*, no model at all, bounds what any perfectly
+    trained head could do here: K=14 (88% of fixed) already has worst-case 0.406,
+    K=12 → 0.268, K=8 → 0.186. There is no K below 16 with an acceptable tail,
+    so it is not a training problem.
+
+  No guard exists either: every signal available at routing time (peakedness,
+  entropy, effective N, top-1 margin, score std, predicted K) separates the bad
+  queries by ≤0.38 sd, where a threshold needs several. *That last test is
+  underpowered — 1 bad case in 56 held-out steps — so the oracle sweep is the
+  result that actually closes it.*
+
+  The lexical feature deserves its own note, because it looked like a live lead
+  and is not: it stayed dead at 10/280 traces through two rounds of fixing the
+  query span, and counting (`none 0, allzero 54, live 2`) showed it was working
+  correctly the whole time. A question like "what is the secret passcode" shares
+  almost no vocabulary with an AI-history filler document, so the feature
+  correctly fires only on the block containing "passcode". The signal is real
+  but SPARSE, and a scorer trained where a feature is informative in 2 of 280
+  rows cannot learn from it. Exploiting it needs a corpus with varied
+  question/document overlap — or the rule-based lexical router, which uses it
+  directly and does not have to learn that it matters.
+
+  **Scope caveat on the K-head:** measured on NIAH filler, which is adversarial
+  for exactly this — a needle is a query where one distant block carries
+  everything. A prose-synthesis workload could have a benign tail. That is the
+  condition under which the 14.3% is worth revisiting, and it is a measurement,
+  not an argument.
 
 **Confidence labels.** `VERIFIED` means I read the MLX source and the construct
 is there; line numbers are from `ACTIVE_RUNTIME/serving/mlx_dkv_wrapper.py` at
