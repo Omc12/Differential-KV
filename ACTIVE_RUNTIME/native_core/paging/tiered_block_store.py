@@ -119,10 +119,20 @@ class TieredBlockStore:
             return False
 
         try:
-            # Read pool slot tensors
+            # Read pool slot tensors.
+            #
+            # V is DELIBERATELY NOT PAGED under shared bases. V_KV is then
+            # indexed by basis row, not by slot, so a row belongs to the GROUP
+            # and not to this block: copying it out and back would be copying
+            # bytes that other resident blocks are still reading, and restoring
+            # it could overwrite a basis the group has since re-founded. The
+            # basis store is also what stays small, so keeping it resident is
+            # the cheap half of the trade -- eviction exists to reclaim U,
+            # anchors and residuals, which are per-slot.
+            _shared = bool(getattr(self.pool, "shared_basis_active", False))
             u = self.pool.U[slot_id]
             u_scale = self.pool.U_scale[slot_id]
-            v_kv = self.pool.V_KV[slot_id]
+            v_kv = None if _shared else self.pool.V_KV[slot_id]
             anchors_kv = self.pool.anchors_KV[slot_id]
             seq_len = self.pool.seq_lens[slot_id].item()
 
@@ -130,12 +140,13 @@ class TieredBlockStore:
                 # Use pinned memory for faster CPU<->GPU transfers
                 cpu_u = torch.empty_like(u, device='cpu', pin_memory=True).copy_(u)
                 cpu_u_scale = torch.empty_like(u_scale, device='cpu', pin_memory=True).copy_(u_scale)
-                cpu_v_kv = torch.empty_like(v_kv, device='cpu', pin_memory=True).copy_(v_kv)
+                cpu_v_kv = (None if v_kv is None else
+                            torch.empty_like(v_kv, device='cpu', pin_memory=True).copy_(v_kv))
                 cpu_anchors_kv = torch.empty_like(anchors_kv, device='cpu', pin_memory=True).copy_(anchors_kv)
             else:
                 cpu_u = u.contiguous().cpu()
                 cpu_u_scale = u_scale.contiguous().cpu()
-                cpu_v_kv = v_kv.contiguous().cpu()
+                cpu_v_kv = None if v_kv is None else v_kv.contiguous().cpu()
                 cpu_anchors_kv = anchors_kv.contiguous().cpu()
 
             self._cpu_store[slot_id] = {
@@ -176,7 +187,8 @@ class TieredBlockStore:
             with torch.cuda.stream(self._h2d_stream):
                 self.pool.U[slot_id].copy_(store_data['U'], non_blocking=not blocking)
                 self.pool.U_scale[slot_id].copy_(store_data['U_scale'], non_blocking=not blocking)
-                self.pool.V_KV[slot_id].copy_(store_data['V_KV'], non_blocking=not blocking)
+                if store_data['V_KV'] is not None:      # None under shared bases
+                    self.pool.V_KV[slot_id].copy_(store_data['V_KV'], non_blocking=not blocking)
                 self.pool.anchors_KV[slot_id].copy_(store_data['anchors_KV'], non_blocking=not blocking)
                 self.pool.seq_lens[slot_id] = store_data['seq_len']
                 
@@ -193,7 +205,8 @@ class TieredBlockStore:
             # CPU/MPS synchronous copy
             self.pool.U[slot_id].copy_(store_data['U'].to(self.device))
             self.pool.U_scale[slot_id].copy_(store_data['U_scale'].to(self.device))
-            self.pool.V_KV[slot_id].copy_(store_data['V_KV'].to(self.device))
+            if store_data['V_KV'] is not None:          # None under shared bases
+                self.pool.V_KV[slot_id].copy_(store_data['V_KV'].to(self.device))
             self.pool.anchors_KV[slot_id].copy_(store_data['anchors_KV'].to(self.device))
             self.pool.seq_lens[slot_id] = store_data['seq_len']
             
