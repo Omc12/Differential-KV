@@ -1040,6 +1040,19 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         return _compress_layer_blocks_gpu_inner(blocks_list, rank, manager)
 
 
+def _batch_layer_idx(blocks_list) -> int:
+    """Layer these blocks belong to, or -1 if unknown.
+
+    `getattr(b, "layer_idx", -1) or -1` is wrong here: layer 0 is falsy, so
+    every layer-0 block reported -1 and shared a shared-basis search space with
+    genuinely unknown blocks. Grouping still worked, it just grouped the wrong
+    set -- the kind of thing that shows up as a fidelity number nobody can
+    explain.
+    """
+    v = getattr(blocks_list[0], "layer_idx", None) if blocks_list else None
+    return -1 if v is None else int(v)
+
+
 def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> bool:
 
     T_active = blocks_list[0].active_k.shape[2]
@@ -1324,6 +1337,65 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     U_masked = U_scaled * rank_mask.unsqueeze(1)           # zero cols ≥ k[i]
     V_masked = Vh_fp16 * rank_mask.unsqueeze(2)            # [N, r_proj, feat]
 
+    # ── Shared basis, assigned HERE and not at write time ────────────────────
+    # Residual selection below scores `delta - recon`, and under a shared basis
+    # the recon that decode rebuilds comes from the GROUP basis, not from this
+    # block's own SVD factor. Assigning inside write_blocks_batched would leave
+    # every residual chosen against a reconstruction that is not the one stored
+    # -- the budget would be spent repairing errors that do not exist and would
+    # miss the ones the shared basis actually introduced.
+    #
+    # So: assign, re-project, and let everything downstream (recon_all, the
+    # error/tier arithmetic, residual selection, the int8-exact recompute) see
+    # the real stored factorisation. The rows are handed to the pool, which then
+    # only records the map.
+    _basis_rows = None
+    _basis_kept = None
+    if pool is not None and getattr(pool, "shared_basis_active", False):
+        try:
+            from native_core.compression.basis_group import reproject_U
+            # The group basis is as wide as the STORE (pool rank), which is not
+            # the same as this batch's r_proj: r_proj is
+            # min(max_rank + oversamples, T_active, feat_dim), so a short block
+            # or a small rank schedule makes it NARROWER than the pool rank.
+            # U' comes back with one column per basis direction, i.e. r_store
+            # columns, which do not fit in an [N, T, r_proj] buffer. Rebuild at
+            # the store's width instead of slicing into the old one.
+            _rs = int(pool.V_KV.shape[2])
+            _pr = min(_rs, r_proj)
+            # Slots are normally allocated at WRITE time, ~600 lines below, so
+            # every block's pool_idx is still None here. A basis claim is
+            # refcounted PER SLOT, so the slot has to exist before the claim
+            # does -- allocate now and let the write-time block find nothing
+            # left to do. Only under shared bases: moving the allocation
+            # earlier for everyone would widen the window in which a failed
+            # compress leaks slots.
+            _need = [b for b in blocks_list if getattr(b, "pool_idx", None) is None]
+            if _need:
+                for _b, _s in zip(_need, pool.allocate_blocks(len(_need))):
+                    _b.pool_idx = _s
+            _slots = [b.pool_idx for b in blocks_list]
+            _U_in = U_masked[:, :, :_pr].float()
+            _V_in = V_masked[:, :_pr, :].float()
+            _basis_rows, _bases, _basis_kept = pool.assign_basis(
+                _U_in, _V_in,
+                layer_idx=_batch_layer_idx(blocks_list),
+                pool_indices=_slots)
+            U_masked = reproject_U(_U_in, _V_in, _bases.float()).to(U_masked.dtype)
+            V_masked = _bases.to(V_masked.dtype)
+            # U' occupies every column the group basis spans, so the per-block
+            # rank truncation no longer describes it. Columns past the group's
+            # own rank come out ~0 anyway (their basis rows are zero), so this
+            # widens the recorded rank without storing anything new.
+            ranks = [_rs] * N_blocks
+            Vh_fp16 = V_masked
+            U_scaled = U_masked
+        except Exception as _be:                                 # noqa: BLE001
+            print(f"[DKV] shared-basis assignment failed ({_be}); "
+                  f"blocks keep their own bases.", flush=True)
+            _basis_rows = None
+            _basis_kept = None
+
     # One batched recon over all blocks (replaces N per-block matmuls).
     recon_all = torch.bmm(U_masked.float(), V_masked.float())   # [N, T, feat]
     delta_K_all = deltas[:, :, :half_d]
@@ -1390,6 +1462,14 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     # One batched device→host transfer for every block's medians (was N).
     _meds_cpu = torch.stack((med_K_all, med_V_all), dim=1).float().cpu()   # [N, 2]
 
+    # Energy a block LOST to a shared basis, per block. This is a new error
+    # source the shared-basis change introduces, and residuals are the thing
+    # that repairs it, so the coupling is causal rather than a retune -- a
+    # force-joined block gets the full budget back.
+    _basis_loss_cpu = None
+    if _basis_kept is not None:
+        _basis_loss_cpu = (1.0 - _basis_kept.float()).cpu()           # [N] in [0, 1]
+
     # n_semantic per block (metadata parity only — dead on this path).  Computed
     # batched on the already-transferred CPU singular values: count values above
     # 5% of the per-block max.  Sorted-descending S makes this equal to the old
@@ -1454,6 +1534,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         tail_err_K = float(_meds_cpu[i, 0])
         tail_err_V = float(_meds_cpu[i, 1])
         max_tail_err = max(tail_err_K, tail_err_V)
+        _full_budget = n_max_residual
         if max_tail_err < 0.05:
             # Easy block (prose filler / repeated text): cap at 8 residuals.
             n_max_residual = min(8, n_max_residual)
@@ -1461,6 +1542,13 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
             # Medium complexity: cap at 16 residuals.
             n_max_residual = min(16, n_max_residual)
         # Hard block (factual / code / numbers): keep full budget unchanged.
+
+        # Energy this block lost to a shared basis is error the tier cannot see
+        # -- it was measured on a reconstruction the tier's own inputs describe
+        # correctly, but the LOSS is what residuals now have to carry. A block
+        # that was force-joined gets the full budget back.
+        if _basis_loss_cpu is not None and float(_basis_loss_cpu[i]) > 0.02:
+            n_max_residual = _full_budget
 
         # Content-aware residual capture (C10 remediation): the same token
         # boost + owner capture + table capture the MLX wrapper and lowrank.cpp
@@ -1961,6 +2049,13 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
             seq_len=T_active,
             res_K_positions=_rk_pos_pad, res_K_values=_rk_val_pad,
             res_V_positions=_rv_pos_pad, res_V_values=_rv_val_pad,
+            # Shared-basis grouping is keyed by layer: a block only searches
+            # bases founded by blocks of the same layer. Cross-layer subspaces
+            # are unrelated and the exact energy test would reject them anyway
+            # -- this just keeps the search small. Ignored when the feature is
+            # off. Every block in a compress batch belongs to one layer.
+            layer_idx=_batch_layer_idx(blocks_list),
+            basis_rows=_basis_rows,
         )
         # Clear local GPU tensors on blocks to prevent VRAM leak.
         for _b in blocks_list:

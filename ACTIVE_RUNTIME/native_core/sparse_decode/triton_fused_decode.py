@@ -1801,12 +1801,24 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     else:
         _G = lambda src, nm: src[indices]                            # noqa: E731
 
+    # V is indexed by BASIS ROW, everything else by slot. Under DKV_SHARED_BASIS
+    # several slots resolve to the same row, so the V gather MATERIALISES one
+    # copy per selected block -- the sharing saves resident VRAM in the pool,
+    # not transient bytes in the gather. basis_index is the identity when the
+    # feature is off, and _Gv is then the same call _G was.
+    _v_indices = (base_pool.basis_index(indices)
+                  if hasattr(base_pool, "basis_index") else indices)
+    if _reuse:
+        _Gv = lambda src, nm: _gather_into(src, _v_indices, _bufs, nm)   # noqa: E731
+    else:
+        _Gv = lambda src, nm: src[_v_indices]                            # noqa: E731
+
     # anchors_K / V_K are ROTATED below, which produces new tensors anyway; the
     # gather buffer only saves the pre-rotation copy.
     anchors_K = _G(pool_for_kernel.anchors_K, "anchors_K")   # [N, H_kv, D]
-    V_K       = _G(pool_for_kernel.V_K,       "V_K")         # [N, R, H_kv, D]
+    V_K       = _Gv(pool_for_kernel.V_K,      "V_K")         # [N, R, H_kv, D]
     g["anchors_V"] = _G(pool_for_kernel.anchors_V, "anchors_V")
-    g["V_V"]       = _G(pool_for_kernel.V_V,       "V_V")
+    g["V_V"]       = _Gv(pool_for_kernel.V_V,      "V_V")
     g["U"]         = _G(pool_for_kernel.U,         "U")
     g["U_scale"]   = _G(pool_for_kernel.U_scale,   "U_scale")
     g["scales"]    = _G(pool_for_kernel.scales,    "scales")
@@ -2060,8 +2072,10 @@ def fused_decode_mps(
     S_comp = U_a.shape[1]
     AncK_a = pool.anchors_K[idx].float()
     AncV_a = pool.anchors_V[idx].float()
-    VK_a   = pool.V_K[idx].float()
-    VV_a   = pool.V_V[idx].float()
+    # V is indexed by BASIS ROW (identity when DKV_SHARED_BASIS is off).
+    _v_idx = pool.basis_index(idx) if hasattr(pool, "basis_index") else idx
+    VK_a   = pool.V_K[_v_idx].float()
+    VV_a   = pool.V_V[_v_idx].float()
 
     if anchor_indices is not None and cos is not None and sin is not None:
         cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
@@ -2441,7 +2455,10 @@ def _pytorch_vectorized_sparse_attn_decode(
         else:
             U = reconstruct_batch_U(pool, indices).to(q.dtype)
             
-            V_K_raw = pool.V_K[indices]
+            # V is indexed by BASIS ROW, not by slot. With DKV_SHARED_BASIS off
+            # basis_index is the identity and this is the same gather as before.
+            _v_idx = pool.basis_index(indices) if hasattr(pool, "basis_index") else indices
+            V_K_raw = pool.V_K[_v_idx]
             anchors_K_raw = pool.anchors_K[indices]
             
             if anchor_indices is not None and cos is not None and sin is not None:
@@ -2464,7 +2481,7 @@ def _pytorch_vectorized_sparse_attn_decode(
                 anchors_K_raw = _partial_rope_apply(anchors_K_raw, cos_anc_2d, sin_anc_2d)
                 
             V_K = repeat_kv_at_dim(V_K_raw, num_key_value_groups, dim=2)
-            V_V = repeat_kv_at_dim(pool.V_V[indices], num_key_value_groups, dim=2)
+            V_V = repeat_kv_at_dim(pool.V_V[_v_idx], num_key_value_groups, dim=2)
             anchors_K = repeat_kv_at_dim(anchors_K_raw, num_key_value_groups, dim=1)
             anchors_V = repeat_kv_at_dim(pool.anchors_V[indices], num_key_value_groups, dim=1)
             scales = pool.scales[indices].view(N, 1, 1)

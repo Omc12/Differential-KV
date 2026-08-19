@@ -161,6 +161,25 @@ except Exception as e:
     _DKV_HAS_SRL_ROUTER    = False
     _DKV_HAS_METAL_ATTN    = False
 
+
+def _compiled_kernel_ok(pool) -> bool:
+    """False when a compiled kernel must NOT be handed this pool.
+
+    The dkv_core / Metal decode kernels take the WHOLE pool.V_K and pool.V_V and
+    index them by SLOT internally.  Under DKV_SHARED_BASIS that indexing is
+    wrong twice over: several slots share one basis row, and the V store is
+    SHORTER than the slot count, so a slot id past n_basis reads out of bounds.
+    Neither can be redirected from Python -- the map lives in `basis_of` and the
+    kernel signature has nowhere to put it.
+
+    So those paths decline and decode falls through to the Triton/PyTorch
+    gather, which resolves V through pool.basis_index().  Porting shared bases
+    to a compiled kernel means adding the map to its signature; until then this
+    is the guard that keeps the two features from silently corrupting each
+    other.
+    """
+    return not getattr(pool, "shared_basis_active", False)
+
 # ── SRL routing configuration ─────────────────────────────────────────────────
 # DKV_SRL_THRESHOLD: minimum N_blocks before SRL kicks in (default 50).
 # DKV_VALIDATE_SRL:  enable accuracy validation mode (0/1, default 0).
@@ -2192,8 +2211,14 @@ def apply_dkv_attention_patch(model, kv_manager):
 
                     # Gather block data from the pool
                     U_stack    = reconstruct_batch_U(pool, pool_indices_t).to(q.dtype)
-                    V_K_stack  = pool.V_K[pool_indices_t].to(q.dtype)        # [N, R, num_kv_heads, D]
-                    V_V_stack  = pool.V_V[pool_indices_t].to(q.dtype)        # [N, R, num_kv_heads, D]
+                    # V is indexed by BASIS ROW, not by slot -- under
+                    # DKV_SHARED_BASIS several slots share a row and the store
+                    # is SHORTER than the slot count, so a raw slot gather
+                    # reads out of bounds. Identity when the feature is off.
+                    _v_rows = (pool.basis_index(pool_indices_t)
+                               if hasattr(pool, "basis_index") else pool_indices_t)
+                    V_K_stack  = pool.V_K[_v_rows].to(q.dtype)               # [N, R, num_kv_heads, D]
+                    V_V_stack  = pool.V_V[_v_rows].to(q.dtype)               # [N, R, num_kv_heads, D]
                     anc_K      = torch.stack([b.anchor_kv[0, 0] for b in comp_blocks], dim=0).to(q.dtype)  # [N, num_kv_heads, D]
                     anc_V      = torch.stack([b.anchor_kv[0, 1] for b in comp_blocks], dim=0).to(q.dtype)  # [N, num_kv_heads, D]
                     scales_1d  = pool.scales[pool_indices_t]     # [N]
@@ -3829,7 +3854,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # Dense window tokens still receive exact pre-rotated attention.
                         _is_mps_decode = (query_states.device.type == "mps" and pool is not None and os.environ.get("DKV_MPS_APPROXIMATE_ATTN", "0") == "1")
                         if _is_mps_decode:
-                            if _DKV_CORE_AVAILABLE and hasattr(_dkv_core, "fused_decode_attention_combined"):
+                            if _DKV_CORE_AVAILABLE and hasattr(_dkv_core, "fused_decode_attention_combined") and _compiled_kernel_ok(pool):
                                 _scale = 1.0 / math.sqrt(head_dim)
                                 _q_val = query_states[b_idx, :, 0, :]
                                 _dk = dense_k_assembled if dense_k_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
@@ -4082,7 +4107,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _fact_val_K = pool.fact_anchors_K if pool.fact_anchors_K is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                     _fact_val_V = pool.fact_anchors_V if pool.fact_anchors_V is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
 
-                                    if _DKV_HAS_METAL_ATTN and pool is not None:
+                                    if _DKV_HAS_METAL_ATTN and pool is not None and _compiled_kernel_ok(pool):
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         # Binding grew 4 trailing dense-window args (dense_K/V +
                                         # cos/sin_dense); this caller merges dense separately, so
@@ -4115,7 +4140,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             _ed, _ed, _ed, _ed,
                                             _anchor_rotary_dim,
                                         )
-                                    elif _DKV_HAS_DECODE_ATTN and pool is not None and not has_residual:
+                                    elif _DKV_HAS_DECODE_ATTN and pool is not None and not has_residual and _compiled_kernel_ok(pool):
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         out_sparse = _decode_attention_aten(
                                             _Q_sq.contiguous(),
@@ -4192,7 +4217,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _fact_val_K = pool.fact_anchors_K if pool.fact_anchors_K is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                     _fact_val_V = pool.fact_anchors_V if pool.fact_anchors_V is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
 
-                                    if _DKV_HAS_METAL_ATTN and pool is not None:
+                                    if _DKV_HAS_METAL_ATTN and pool is not None and _compiled_kernel_ok(pool):
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         # Same 4 trailing dense-window args as above: dense is
                                         # merged separately here, pass empties to skip it.
@@ -4224,7 +4249,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             _ed, _ed, _ed, _ed,
                                             _anchor_rotary_dim,
                                         )
-                                    elif _DKV_HAS_DECODE_ATTN and pool is not None and not has_residual:
+                                    elif _DKV_HAS_DECODE_ATTN and pool is not None and not has_residual and _compiled_kernel_ok(pool):
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         out_sparse, lse_sparse = _decode_attention_aten_lse(
                                             _Q_sq.contiguous(),

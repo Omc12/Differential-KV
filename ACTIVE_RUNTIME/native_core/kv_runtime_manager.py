@@ -221,8 +221,11 @@ class KVBlock:
             pool = self.pool
             pool_idx = self.pool_idx
             rank = self.dynamic_rank if self.dynamic_rank > 0 else pool.V_KV.shape[2]
-            vk = pool.V_KV[pool_idx, 0, :rank]
-            vv = pool.V_KV[pool_idx, 1, :rank]
+            # V lives at a BASIS ROW, which equals pool_idx unless shared bases
+            # are on (native_core/compression/basis_group.py).
+            v_row = pool.basis_row(pool_idx) if hasattr(pool, "basis_row") else pool_idx
+            vk = pool.V_KV[v_row, 0, :rank]
+            vv = pool.V_KV[v_row, 1, :rank]
             vk_flat = vk.reshape(rank, -1)
             vv_flat = vv.reshape(rank, -1)
             return torch.cat([vk_flat, vv_flat], dim=1)
