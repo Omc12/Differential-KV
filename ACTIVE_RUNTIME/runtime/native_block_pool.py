@@ -498,7 +498,13 @@ class NativeBlockPool:
         s["frac"] = self._basis_frac
         n_slots = int(self.basis_of.shape[0]) if self.basis_of is not None else 0
         s["slots"] = n_slots
-        s["sharing_factor"] = (n_slots / max(1, s["groups"])) if s["groups"] else 0.0
+        # Sharing factor over slots that ACTUALLY hold a basis claim, not over
+        # pool capacity. Dividing capacity by group count reports 1/frac
+        # whenever the store is full regardless of how many blocks were
+        # written -- i.e. it reports the CONFIG back, not the outcome.
+        n_claimed = int(sum(self._basis_claimed)) if self.basis_of is not None else 0
+        s["claimed"] = n_claimed
+        s["sharing_factor"] = (n_claimed / s["groups"]) if s["groups"] else 0.0
         return s
 
     def _allocate_tensors(self, n_blocks: int) -> None:

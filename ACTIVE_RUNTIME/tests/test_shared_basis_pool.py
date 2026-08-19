@@ -330,6 +330,13 @@ def test_basis_index_clamps_out_of_range_slots(monkeypatch):
 
 
 def test_basis_stats_reports_the_sharing_factor(monkeypatch):
+    """Sharing factor must count slots that actually HOLD a claim.
+
+    Over pool capacity it would report 1/frac whenever the store is full no
+    matter how many blocks were written -- i.e. it would report the config back
+    as if it were a measurement. Here 8 of 16 slots are written onto 1 group,
+    so the honest answer is 8x, not 16x.
+    """
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.5")
     p = _pool(16)
@@ -339,7 +346,82 @@ def test_basis_stats_reports_the_sharing_factor(monkeypatch):
     assert st["enabled"] is True
     assert st["groups"] == 1
     assert st["slots"] == 16
-    assert st["sharing_factor"] == pytest.approx(16.0)
+    assert st["claimed"] == 8
+    assert st["sharing_factor"] == pytest.approx(8.0)
+
+
+# ── regressions found on real hardware, not by the CPU tests above ───────────
+
+def test_compiled_kernels_decline_under_shared_basis(monkeypatch):
+    """The dkv_core / Metal decode kernels take the WHOLE pool.V_K and index it
+    by SLOT internally. Under shared bases that is wrong twice: slots share
+    rows, and the store is SHORTER than the slot count, so a high slot id reads
+    out of bounds -- a CUDA device-side assert, not a Python error. Neither can
+    be redirected from Python, so those paths must decline.
+
+    This is the bug the CPU pool tests could not see: they drive the pool
+    directly and never reach a kernel dispatch.
+    """
+    from runtime.dkv_attention import _compiled_kernel_ok
+
+    monkeypatch.delenv("DKV_SHARED_BASIS", raising=False)
+    assert _compiled_kernel_ok(_pool(8)) is True
+
+    monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    assert _compiled_kernel_ok(_pool(8)) is False
+    # ...and anything that is not a pool at all must not crash the guard.
+    assert _compiled_kernel_ok(None) is True
+
+
+def test_every_compiled_kernel_dispatch_is_guarded():
+    """All five dispatch sites, not just the ones that happen to run here --
+    two of them are macOS-only and one needs an opt-in native build, so a
+    missing guard would stay invisible on this machine indefinitely."""
+    import runtime.dkv_attention as da
+    src = open(da.__file__, encoding="utf-8").read()
+    for marker in ("_dkv_core, \"fused_decode_attention_combined\"",
+                   "_DKV_HAS_METAL_ATTN and pool is not None",
+                   "_DKV_HAS_DECODE_ATTN and pool is not None"):
+        for line in src.splitlines():
+            if marker in line and line.strip().startswith(("if ", "elif ")):
+                assert "_compiled_kernel_ok(pool)" in line, line.strip()
+
+
+def test_reprojection_widens_U_to_the_store_rank():
+    """r_proj is min(max_rank + oversamples, T_active, feat_dim), so a short
+    block makes the SVD NARROWER than the pool rank. U' has one column per
+    BASIS direction, so it cannot be written back into the [N, T, r_proj]
+    buffer it came from -- the compress path must rebuild at the store width.
+    """
+    from native_core.compression.basis_group import reproject_U, row_orthonormalize
+    N, T, r_proj, r_store, F = 2, 10, 5, 12, 32
+    U = torch.randn(N, T, r_proj)
+    V = torch.randn(N, r_proj, F)
+    Vg = row_orthonormalize(torch.randn(N, r_store, F))
+    Up = reproject_U(U, V, Vg)
+    assert Up.shape == (N, T, r_store), Up.shape
+    # ...and it still reconstructs: r_store >= r_proj means the group basis can
+    # represent everything the block's own basis could, if it spans it.
+    Vg_full = row_orthonormalize(
+        torch.cat([V, torch.zeros(N, r_store - r_proj, F)], dim=1))
+    recon = torch.bmm(reproject_U(U, V, Vg_full), Vg_full)
+    assert torch.allclose(recon, torch.bmm(U, V), atol=1e-3)
+
+
+def test_layer_zero_is_not_reported_as_unknown():
+    """`getattr(b, 'layer_idx', -1) or -1` makes layer 0 falsy, so every
+    layer-0 block reported -1 and searched the same basis space as genuinely
+    unknown blocks. Grouping still worked -- it grouped the wrong set."""
+    from native_core.compression.lowrank import _batch_layer_idx
+
+    class _B:
+        def __init__(self, li):
+            self.layer_idx = li
+
+    assert _batch_layer_idx([_B(0)]) == 0
+    assert _batch_layer_idx([_B(7)]) == 7
+    assert _batch_layer_idx([_B(None)]) == -1
+    assert _batch_layer_idx([]) == -1
 
 
 # ── the V-layout adapter ─────────────────────────────────────────────────────

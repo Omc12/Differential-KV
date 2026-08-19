@@ -1040,6 +1040,19 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         return _compress_layer_blocks_gpu_inner(blocks_list, rank, manager)
 
 
+def _batch_layer_idx(blocks_list) -> int:
+    """Layer these blocks belong to, or -1 if unknown.
+
+    `getattr(b, "layer_idx", -1) or -1` is wrong here: layer 0 is falsy, so
+    every layer-0 block reported -1 and shared a shared-basis search space with
+    genuinely unknown blocks. Grouping still worked, it just grouped the wrong
+    set -- the kind of thing that shows up as a fidelity number nobody can
+    explain.
+    """
+    v = getattr(blocks_list[0], "layer_idx", None) if blocks_list else None
+    return -1 if v is None else int(v)
+
+
 def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> bool:
 
     T_active = blocks_list[0].active_k.shape[2]
@@ -1341,23 +1354,40 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     if pool is not None and getattr(pool, "shared_basis_active", False):
         try:
             from native_core.compression.basis_group import reproject_U
-            _pr = min(int(pool.U.shape[2]), r_proj)
+            # The group basis is as wide as the STORE (pool rank), which is not
+            # the same as this batch's r_proj: r_proj is
+            # min(max_rank + oversamples, T_active, feat_dim), so a short block
+            # or a small rank schedule makes it NARROWER than the pool rank.
+            # U' comes back with one column per basis direction, i.e. r_store
+            # columns, which do not fit in an [N, T, r_proj] buffer. Rebuild at
+            # the store's width instead of slicing into the old one.
+            _rs = int(pool.V_KV.shape[2])
+            _pr = min(_rs, r_proj)
+            # Slots are normally allocated at WRITE time, ~600 lines below, so
+            # every block's pool_idx is still None here. A basis claim is
+            # refcounted PER SLOT, so the slot has to exist before the claim
+            # does -- allocate now and let the write-time block find nothing
+            # left to do. Only under shared bases: moving the allocation
+            # earlier for everyone would widen the window in which a failed
+            # compress leaks slots.
+            _need = [b for b in blocks_list if getattr(b, "pool_idx", None) is None]
+            if _need:
+                for _b, _s in zip(_need, pool.allocate_blocks(len(_need))):
+                    _b.pool_idx = _s
             _slots = [b.pool_idx for b in blocks_list]
             _U_in = U_masked[:, :, :_pr].float()
             _V_in = V_masked[:, :_pr, :].float()
             _basis_rows, _bases, _basis_kept = pool.assign_basis(
                 _U_in, _V_in,
-                layer_idx=int(getattr(blocks_list[0], "layer_idx", -1) or -1),
+                layer_idx=_batch_layer_idx(blocks_list),
                 pool_indices=_slots)
-            U_masked = U_masked.clone()
-            V_masked = V_masked.clone()
-            U_masked[:, :, :_pr] = reproject_U(_U_in, _V_in, _bases.float()).to(U_masked.dtype)
-            V_masked[:, :_pr, :] = _bases.to(V_masked.dtype)
+            U_masked = reproject_U(_U_in, _V_in, _bases.float()).to(U_masked.dtype)
+            V_masked = _bases.to(V_masked.dtype)
             # U' occupies every column the group basis spans, so the per-block
             # rank truncation no longer describes it. Columns past the group's
             # own rank come out ~0 anyway (their basis rows are zero), so this
             # widens the recorded rank without storing anything new.
-            ranks = [_pr] * N_blocks
+            ranks = [_rs] * N_blocks
             Vh_fp16 = V_masked
             U_scaled = U_masked
         except Exception as _be:                                 # noqa: BLE001
@@ -2024,7 +2054,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
             # are unrelated and the exact energy test would reject them anyway
             # -- this just keeps the search small. Ignored when the feature is
             # off. Every block in a compress batch belongs to one layer.
-            layer_idx=int(getattr(blocks_list[0], "layer_idx", -1) or -1),
+            layer_idx=_batch_layer_idx(blocks_list),
             basis_rows=_basis_rows,
         )
         # Clear local GPU tensors on blocks to prevent VRAM leak.
