@@ -329,14 +329,24 @@ separately set the variable unconditionally from an argparse default of 256,
 shadowing the runtime's own value. Same class as the MLX shadowing above. The
 gateway no longer defaults it and the CLI forwards only what the user passed.
 
-**WITHDRAWN: the MLX linkbench numbers.** An earlier revision of the block-size
-comment quoted "9/24 -> 24/24 = dense, 24 seeds" as an MLX measurement. No such
-run can be evidenced — the only completed MLX linkbench runs were a 1-seed smoke
-and a dense arm that reached 19 of 24 seeds before being stopped. The block-size
-default now rests on the MLX MEMORY result, which is measured and reproducible
-(pool 1.08x -> 0.48x of the KV it replaces, 135.6 -> 60.0 MB), plus CUDA's
-retrieval result explicitly labelled as inherited. Running
-`colab/linkbench_mlx.py` on all three arms is the outstanding work.
+**RESTORED WITH EVIDENCE: the MLX linkbench result.** An earlier revision quoted
+"9/24 -> 24/24 = dense" as an MLX measurement that could not be evidenced, and it
+was withdrawn. It has now actually been run — `colab/linkbench_mlx.py` at 16k,
+`qmode=direct`, seeds 1-21, all three arms PAIRED on identical prompts:
+
+| arm | hits |
+|---|---|
+| dense control | 21/21 |
+| **DKV block 1024** | **21/21** — exact parity with dense |
+| DKV block 256 | 9/21 |
+
+Fisher p = 5.3e-05 for 1024 against 256; 1024 and dense are identical. Both the
+direction and the magnitude match CUDA's independent result, and the dense arm is
+what makes the comparison mean anything.
+
+Note the withdrawal was still correct at the time: the numbers quoted then (9/24,
+24/24) were not the numbers this run produced (9/21, 21/21), and no run existed to
+point at. The lesson stands unchanged —
 
 This is the file's own rule applied to itself: never quote a number without
 being able to point at the run that produced it.
