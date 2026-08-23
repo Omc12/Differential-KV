@@ -715,7 +715,26 @@ position-alignment change. Delete `/tmp/dkv_qprobe_*.pt` and re-run both passes.
   genuinely selective rather than degenerating to attend-all" is inferred from
   the recall result, not measured. Re-run with the trace if that distinction
   ever matters.
-* **Controlled prefill-throughput measurement.** Wall clock on the 3 8k cases was
+* **[CLOSED, as far as it can be] Controlled prefill-throughput measurement.**
+  The comparison this item asks for is no longer POSSIBLE: it wanted HEAD vs
+  fixed, both §0.5 fixes are now permanent, and the pre-fix HEAD's outputs
+  differ so the two runs were never comparing the same amount of work. What was
+  actually missing is an INSTRUMENT, and there now is one:
+  `colab/bench_prefill_paired.py` — same design as the decode harness (one
+  process, interleaved arms, alternating order, paired statistic, min
+  estimator).
+
+  Calibrated A/A at 8k on Qwen2.5-1.5B: mean_diff −25.2 ms, 95% CI
+  [−75.6, +25.3], **resolution ±1.8% of a prefill**, correctly reporting no
+  effect. Prefill throughput at that point is **~2915 tok/s**.
+
+  First real use, sizing shared bases' compress-time cost: **+36.0 ms, 95% CI
+  [−13.9, +85.9]** — not resolvable; point estimate +1.3%, upper bound +3.2%.
+
+  Original note kept below, because its reasoning about WHY the old number was
+  not a throughput result is the part worth remembering.
+
+  **[HISTORICAL]** Wall clock on the 3 8k cases was
   47.0s (HEAD) vs 48.7s (fixed), but the two runs emit different text once one of
   them starts answering correctly, so that number is not a throughput result. The
   RoPE fix strictly REMOVES work (no gather + rotate of dense history per chunk
