@@ -132,6 +132,10 @@ def main():
     ap.add_argument("--model", default="mlx-community/Qwen3.5-2B-4bit")
     ap.add_argument("--label", default="32k")
     ap.add_argument("--depth", type=float, default=0.9)
+    ap.add_argument("--save", default="",
+                    help="npz path: per-layer dense+dkv vectors, token ids and "
+                         "config, so a CUDA box can bisect against known-good "
+                         "MLX numbers instead of re-deriving them")
     ap.add_argument("--chunk", type=int, default=512,
                     help="dense prefill chunk; a single 32k forward needs a "
                          "32k x 32k attention matrix (17 GB) and blows Metal's "
@@ -205,6 +209,31 @@ def main():
         cos = dot / max(na * nb, 1e-9)
         rel = float(mx.sqrt(mx.sum((a - b) ** 2)).item()) / max(na, 1e-9)
         print(f"{i:>6}  {cos:9.5f}  {rel:9.5f}  {na:9.4f}  {nb:9.4f}")
+    if args.save:
+        # RAW VECTORS ARE ONLY CROSS-RUNTIME COMPARABLE ON A SHARED MODEL.
+        # This script's own header explains why it normally compares each
+        # runtime against ITS OWN dense baseline: the default model here is the
+        # 4-bit MLX build, so its weights differ from CUDA's fp16 and raw
+        # vectors mean nothing across the two. When --model names the SAME
+        # fp16 HF checkpoint both runtimes load (Qwen/Qwen2.5-1.5B-Instruct),
+        # the vectors ARE comparable and a direct per-layer diff becomes the
+        # sharper instrument. The stored `model` field is what tells the reader
+        # which of those two situations they are in -- check it before diffing
+        # raw vectors rather than assuming.
+        import numpy as _np
+        blob = {"__model": _np.array(args.model),
+                "__label": _np.array(args.label),
+                "__depth": _np.array(args.depth),
+                "__preset": _np.array("mid"),
+                "__token_ids": _np.array(ids, dtype=_np.int64),
+                "__layers": _np.array(common, dtype=_np.int64)}
+        for i in common:
+            blob[f"dense_{i}"] = _np.array(dense[i], copy=True)
+            blob[f"dkv_{i}"] = _np.array(dkv[i], copy=True)
+        _np.savez_compressed(args.save, **blob)
+        print(f"\n[probe] saved {len(common)} layers x2 vectors + {len(ids)} "
+              f"token ids -> {args.save}")
+
     print("\n[probe] Compare layer 3 against CUDA's 0.29126 (fail) / 0.27598 (pass).")
     print("        MLX also ~0.28 -> the deviation is inherent to DKV, not the bug.")
     print("        MLX ~0.9+      -> CUDA's decode is far coarser than MLX's, and")
