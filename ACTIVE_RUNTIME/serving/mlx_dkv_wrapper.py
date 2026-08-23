@@ -1616,8 +1616,7 @@ def _lego_prefill_attend(
     if _use_recon:
         U_scale = mx.take(session["comp_U_scale"][layer_idx], sel_abs, 0)
         U   = mx.take(session["comp_U"][layer_idx],     sel_abs, 0).astype(_fdt) * (mx.expand_dims(mx.expand_dims(U_scale, 1), 2) / 127.0)
-        VK  = mx.take(session["comp_VK"][layer_idx],    sel_abs, 0)
-        VV  = mx.take(session["comp_VV"][layer_idx],    sel_abs, 0)
+        VK, VV = manager._basis_rows(session, layer_idx, sel=sel_abs)
         sc  = mx.take(session["comp_scale"][layer_idx], sel_abs, 0)   # [K] fp32
         csl = mx.take(session["comp_seq_len"][layer_idx], sel_abs, 0) # [K]
         rmask = mx.take(session["comp_res_mask"][layer_idx], sel_abs, 0)  # [K, S_comp]
@@ -1734,6 +1733,24 @@ class DummyMLXPool:
     def W_proj(self):
         return getattr(self.manager, "W_proj", None)
 
+def _sb_enabled() -> bool:
+    """DKV_SHARED_BASIS. Imported lazily so a missing/renamed compression module
+    degrades to "feature off" rather than breaking every MLX import."""
+    try:
+        from native_core.compression.basis_group_mlx import shared_basis_enabled
+        return shared_basis_enabled()
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
+def _sb_fraction() -> float:
+    try:
+        from native_core.compression.basis_group_mlx import shared_basis_fraction
+        return shared_basis_fraction()
+    except Exception:                                            # noqa: BLE001
+        return 0.25
+
+
 class MLXKVBlockManager:
     @property
     def native_pool(self):
@@ -1781,6 +1798,48 @@ class MLXKVBlockManager:
         # this; requesting both is refused loudly at engage time rather than silently
         # scoring unrotated keys against a rotated query (see execute_decode_attention).
         self.rotated_pool = os.environ.get("DKV_ROTATED_POOL", "1") != "0"
+
+        # ── SHARED LOW-RANK BASES (DKV_SHARED_BASIS), off by default ──────────
+        # Adjacent blocks of one document are prose from the same source and
+        # very nearly span the same subspace of key/value space, so V -- the
+        # largest item in a slot after the residual store -- is largely
+        # duplicated across them. Sharing one basis between such blocks buys
+        # -23.6% pool on CUDA at retained delta energy 0.969 with zero FORCED
+        # joins (MLX_PORT_FROM_CUDA.md section 3).
+        #
+        # OFF BY DEFAULT because it changes the POOL LAYOUT: comp_VK/comp_VV get
+        # FEWER rows than there are blocks, reached through a per-layer
+        # block -> row map. With it off, `_basis_rows` is the identity, the
+        # stores allocate exactly as before, and every path below is dead.
+        self._shared_basis = _sb_enabled()
+        self._sb_frac = _sb_fraction()
+
+        # HARD PRECONDITION, not a preference. Residuals in CORRECTION form are
+        # a delta against a block's OWN reconstruction, so sharing a basis
+        # invalidates every one of them. Exact form (DKV_RESIDUAL_EXCLUDE_SVD,
+        # MLX default "1") stores the anchor-relative true K/V and is
+        # basis-independent. CUDA's pool refuses the combination and says so
+        # rather than silently producing residuals that repair errors which do
+        # not exist while missing the ones sharing introduced.
+        if self._shared_basis and os.environ.get("DKV_RESIDUAL_EXCLUDE_SVD", "1") == "0":
+            raise RuntimeError(
+                "DKV_SHARED_BASIS=1 requires exact-form residuals "
+                "(DKV_RESIDUAL_EXCLUDE_SVD=1). Correction-form residuals are a "
+                "delta against the block's OWN reconstruction, which a shared "
+                "basis invalidates.")
+        # 4-bit KV destroys the subspace agreement the feature depends on: on
+        # CUDA's `low` preset voluntary joins go to ZERO and retained energy to
+        # 0.685 AT IDENTICAL POOL MB, because the saving comes from allocating
+        # fewer basis rows rather than from grouping succeeding. A run then
+        # looks like a clean win while fidelity has collapsed, so warn loudly
+        # and make `joined == 0` the thing to look at.
+        if self._shared_basis and str(getattr(self, "kv_quant", "f16")).startswith("q4"):
+            print("[DKV MLX] WARNING: DKV_SHARED_BASIS with 4-bit KV "
+                  "(kv_quant=%s). On CUDA this took voluntary joins to ZERO and "
+                  "retained energy to 0.685 at identical pool MB. Check "
+                  "basis_stats()['joined'] -- 0 is the signature."
+                  % getattr(self, "kv_quant", "?"))
+        self._sb_registry: dict = {}
         self._rope_dims = None          # published from the model by set_rope_params
         self._rope_base = None
         self._rope_scale = 1.0
@@ -2255,11 +2314,177 @@ class MLXKVBlockManager:
         return [mx.zeros(full_shape if self._layer_attended(l) else empty_shape, dtype=dtype)
                 for l in range(self.num_layers)]
 
+    # ── shared-basis indirection ─────────────────────────────────────────────
+    #
+    # ONE accessor for every block-indexed read of comp_VK/comp_VV. With sharing
+    # off it returns the plain slice and is byte-for-byte what the code did
+    # before. With it on, comp_VK has FEWER rows than blocks and this composes
+    # the block -> row map into the gather.
+    #
+    # It exists as a single function because of trap 2 in
+    # MLX_PORT_FROM_CUDA.md: MLX has more slot-indexed reads than CUDA did, and
+    # MISSING ONE reads another group's basis. On CUDA that surfaced as a
+    # device-side assert; on MLX it is just wrong numbers, so the mistake has to
+    # be made structurally impossible rather than caught at runtime.
+
+    def _basis_rows(self, session, layer_idx, sel=None, nb=None):
+        """comp_VK/comp_VV rows for the given blocks, indexed BY BLOCK.
+
+        `sel` selects specific block ids; `nb` takes the first nb blocks; giving
+        neither returns every block's rows. The result always has one row PER
+        BLOCK, so callers and kernels are unchanged by sharing.
+        """
+        VK = session["comp_VK"][layer_idx]
+        VV = session["comp_VV"][layer_idx]
+        if not self._shared_basis:
+            if sel is not None:
+                return mx.take(VK, sel, axis=0), mx.take(VV, sel, axis=0)
+            if nb is not None:
+                return VK[:nb], VV[:nb]
+            return VK, VV
+
+        bof = session["basis_of"][layer_idx]
+        if sel is not None:
+            rows = mx.take(bof, sel, axis=0)
+        elif nb is not None:
+            rows = bof[:nb]
+        else:
+            rows = bof
+        self._assert_basis_indexable(session, layer_idx, rows)
+        return mx.take(VK, rows, axis=0), mx.take(VV, rows, axis=0)
+
+    def _assert_basis_indexable(self, session, layer_idx, rows) -> None:
+        """Bounds-check the block -> row map.
+
+        The port file is explicit that on MLX an out-of-range basis row does not
+        crash the way it did on CUDA -- it silently reads a neighbouring group's
+        basis and the model simply gets slightly wrong keys back. ASSERT, do not
+        rely on a crash. Disabled by DKV_SHARED_BASIS_NOCHECK=1 once a
+        configuration is trusted, since it forces an evaluation.
+        """
+        if os.environ.get("DKV_SHARED_BASIS_NOCHECK", "0") == "1":
+            return
+        n_rows = int(session["comp_VK"][layer_idx].shape[0])
+        if rows.size == 0:
+            return
+        hi = int(mx.max(rows).item())
+        lo = int(mx.min(rows).item())
+        if lo < 0 or hi >= n_rows:
+            raise RuntimeError(
+                f"shared-basis row index out of range: [{lo}, {hi}] against a "
+                f"store of {n_rows} rows (layer {layer_idx}). A block is "
+                f"pointing at a basis that does not exist; reading it would "
+                f"return another group's basis without raising.")
+
+    def _assign_shared_basis(self, session, layer_idx, start_idx, B, U_batch,
+                             VK_flat, VV_flat):
+        """Group this compress batch onto shared bases and re-express U in them.
+
+        Returns ``(U', Vh', VK_flat', VV_flat')`` where the primed factors are
+        expressed in the GROUP basis, so the caller's `recon_delta` -- and
+        therefore residual selection -- scores against exactly what the decoder
+        will rebuild.
+
+        The basis is JOINT over [K | V]: a slot stores both and both are being
+        deduplicated, and it is taken AFTER the v_scale undo so the group rows
+        live in the space the decoder actually reads.
+        """
+        from native_core.compression.basis_group_mlx import (
+            SharedBasisRegistryMLX, reproject_U)
+
+        F = int(VK_flat.shape[-1])
+        rank = int(VK_flat.shape[1])
+        n_rows = int(session["comp_VK"][layer_idx].shape[0])
+        kvh, hd = self.kv_heads, self.head_dim
+
+        reg = self._sb_registry.get(layer_idx)
+        if reg is None:
+            reg = SharedBasisRegistryMLX(capacity=n_rows, dtype=mx.float32)
+            self._sb_registry[layer_idx] = reg
+
+        # Present the two stores as ONE [n_rows, rank, 2F] basis store. The
+        # persistent allocation stays comp_VK/comp_VV -- this joint form is a
+        # compress-time transient, and at frac<1 it is a fraction of a
+        # full-block-sized array.
+        def _flat(store):
+            return store.transpose(0, 2, 1, 3).reshape(n_rows, rank, F)
+        joint = mx.concatenate([_flat(session["comp_VK"][layer_idx]),
+                                _flat(session["comp_VV"][layer_idx])], axis=-1)
+        joint = joint.astype(mx.float32)
+
+        Vcat = mx.concatenate([VK_flat, VV_flat], axis=-1).astype(mx.float32)
+
+        # TRAP 2: release BEFORE assigning. A slot being overwritten must give up
+        # its previous claim first, or the write decrements the group it has just
+        # joined. Only slots that actually HOLD a claim are released (trap 1) --
+        # an unwritten slot reads 0 in basis_of because 0 is the only valid row
+        # to point at, not because it owns row 0.
+        claimed = session["basis_claimed"][layer_idx]
+        bof_np = np.array(session["basis_of"][layer_idx])
+        for b in range(B):
+            slot = start_idx + b
+            if slot < claimed.shape[0] and claimed[slot]:
+                reg.release_row(int(bof_np[slot]))
+                claimed[slot] = False
+
+        assignments, gathered = reg.assign_batch(U_batch, Vcat, layer_idx, joint)
+
+        # Write the (possibly newly founded) bases back into the real stores.
+        newK = joint[:, :, :F].reshape(n_rows, rank, kvh, hd).transpose(0, 2, 1, 3)
+        newV = joint[:, :, F:].reshape(n_rows, rank, kvh, hd).transpose(0, 2, 1, 3)
+        session["comp_VK"][layer_idx][:] = newK.astype(session["comp_VK"][layer_idx].dtype)
+        session["comp_VV"][layer_idx][:] = newV.astype(session["comp_VV"][layer_idx].dtype)
+
+        for b, a in enumerate(assignments):
+            slot = start_idx + b
+            if slot < claimed.shape[0]:
+                bof_np[slot] = a.row
+                claimed[slot] = True
+        session["basis_of"][layer_idx] = mx.array(bof_np, dtype=mx.int32)
+
+        # TRAP 3: rebuild at the STORE width. r_proj can be narrower than the
+        # pool rank on a short block, so U' -- one column per BASIS direction --
+        # does not fit the buffer U came from.
+        U_new = reproject_U(U_batch, Vcat, gathered).astype(U_batch.dtype)
+        Vh_new = gathered.astype(U_batch.dtype)
+        return U_new, Vh_new, Vh_new[:, :, :F], Vh_new[:, :, F:]
+
+    def basis_stats(self, layer_idx: int = None) -> dict:
+        """Grouping diagnostics. `joined == 0` is the signature of a run where
+        the feature degenerated into lossy V-compression -- see the 4-bit
+        warning at construction. Always read it next to the memory number,
+        because pool MB is identical either way: the saving comes from
+        allocating fewer rows, not from grouping succeeding."""
+        if not self._shared_basis:
+            return {"enabled": False}
+        keys = ([layer_idx] if layer_idx is not None else list(self._sb_registry))
+        out = {"enabled": True, "frac": self._sb_frac, "founded": 0,
+               "joined": 0, "forced": 0, "groups": 0}
+        kept_sum, kept_n = 0.0, 0
+        for k in keys:
+            reg = self._sb_registry.get(k)
+            if reg is None:
+                continue
+            st = reg.stats()
+            for f in ("founded", "joined", "forced", "groups"):
+                out[f] += st[f]
+            kept_sum += reg.kept_sum
+            kept_n += reg.kept_count
+        out["mean_kept"] = kept_sum / kept_n if kept_n else 1.0
+        return out
+
     def _create_empty_session(self, max_blocks: int = None) -> Dict[str, Any]:
         if max_blocks is None:
             max_blocks = self.max_blocks
         # Use float16 explicitly to halve the RAM vs float32 defaults
         dtype = mx.float16
+        # Basis rows to allocate. This is a CAPACITY CONTRACT, not a prediction:
+        # when the store fills, blocks FORCE-JOIN their nearest group rather
+        # than failing a write, so a document that shares worse than the budget
+        # assumed degrades in FIDELITY, not in correctness. Report `forced` and
+        # `mean_kept` next to any memory number.
+        _n_basis_rows = (max(1, math.ceil(self._sb_frac * max_blocks))
+                         if self._shared_basis else max_blocks)
         return {
             "max_blocks": max_blocks,
             # NOTE: the dense window is the one slab whose empty variant zeroes the
@@ -2295,8 +2520,31 @@ class MLXKVBlockManager:
             "num_blocks": [0 for _ in range(self.num_layers)],
             "comp_U":     self._per_layer((max_blocks, self.block_size - 1, self.rank), mx.int8),
             "comp_U_scale": self._per_layer((max_blocks,), dtype),
-            "comp_VK":    self._per_layer((max_blocks, self.kv_heads, self.rank, self.head_dim), dtype),
-            "comp_VV":    self._per_layer((max_blocks, self.kv_heads, self.rank, self.head_dim), dtype),
+            # UNDER SHARING these hold ceil(frac * max_blocks) BASIS ROWS, not
+            # one row per block, and are indexed through session["basis_of"]
+            # rather than by block. Every read of them must go through
+            # `_basis_rows()`; indexing them by block id directly reads another
+            # group's basis, which on MLX produces WRONG NUMBERS rather than the
+            # device-side assert CUDA got. `_assert_basis_indexable()` is the
+            # substitute for that crash.
+            "comp_VK":    self._per_layer((_n_basis_rows, self.kv_heads, self.rank, self.head_dim), dtype),
+            "comp_VV":    self._per_layer((_n_basis_rows, self.kv_heads, self.rank, self.head_dim), dtype),
+            # block -> basis row. Identity when sharing is off.
+            #
+            # TRAP 1: an unwritten slot must resolve to a VALID row or any gather
+            # over it reads out of bounds -- hence 0, not -1. But "points at row
+            # 0" is then indistinguishable from "holds a refcount on row 0", so
+            # `basis_claimed` carries the difference explicitly. Releasing a
+            # claim never made would decrement the FOUNDING block's group,
+            # return the row to the free list while blocks are still reading it,
+            # and let a later block re-found it with a different basis --
+            # silently changing what earlier blocks decompress to.
+            "basis_of": ([mx.zeros((max_blocks,), dtype=mx.int32)
+                          for _ in range(self.num_layers)]
+                         if self._shared_basis else None),
+            "basis_claimed": ([np.zeros((max_blocks,), dtype=np.bool_)
+                               for _ in range(self.num_layers)]
+                              if self._shared_basis else None),
             "comp_anc_k": self._per_layer((max_blocks, self.kv_heads, self.head_dim), dtype),
             "comp_anc_v": self._per_layer((max_blocks, self.kv_heads, self.head_dim), dtype),
             # Per-block element-wise key min/max — one of two signals the top-K
@@ -2350,6 +2598,13 @@ class MLXKVBlockManager:
         grown_tails = {
             "comp_U":       ((self.block_size - 1, self.rank), mx.int8),
             "comp_U_scale": ((), f16),
+            # Under sharing these arrays have a DIFFERENT ROW COUNT
+            # (ceil(frac * max_blocks) basis rows, not one per block) and are
+            # meaningless without session["basis_of"]. A checkpoint written with
+            # sharing on must not load into a store expecting one row per block,
+            # or every block reads a basis belonging to some other group --
+            # shapes that broadcast, numbers that are wrong. See
+            # `checkpoint_layout_version`.
             "comp_VK":      ((self.kv_heads, self.rank, self.head_dim), f16),
             "comp_VV":      ((self.kv_heads, self.rank, self.head_dim), f16),
             "comp_anc_k":   ((self.kv_heads, self.head_dim), f16),
@@ -2539,8 +2794,23 @@ class MLXKVBlockManager:
                     session["dense_keys_unrot"][layer_idx][0, :, dense_len:] = 0.0
                 session["comp_U"][layer_idx][keep_blocks:] = 0
                 session["comp_U_scale"][layer_idx][keep_blocks:] = 0.0
-                session["comp_VK"][layer_idx][keep_blocks:] = 0.0
-                session["comp_VV"][layer_idx][keep_blocks:] = 0.0
+                if self._shared_basis:
+                    # keep_blocks is a BLOCK count; zeroing basis ROWS past it
+                    # would destroy bases that surviving blocks still read.
+                    # Release the rolled-back blocks' claims instead and leave
+                    # the store alone -- a row whose refcount reaches zero
+                    # returns to the free list on its own.
+                    _cl = session["basis_claimed"][layer_idx]
+                    _bo = np.array(session["basis_of"][layer_idx])
+                    _reg = self._sb_registry.get(layer_idx)
+                    for _slot in range(keep_blocks, _cl.shape[0]):
+                        if _cl[_slot]:
+                            if _reg is not None:
+                                _reg.release_row(int(_bo[_slot]))
+                            _cl[_slot] = False
+                else:
+                    session["comp_VK"][layer_idx][keep_blocks:] = 0.0
+                    session["comp_VV"][layer_idx][keep_blocks:] = 0.0
                 session["comp_anc_k"][layer_idx][keep_blocks:] = 0.0
                 session["comp_anc_v"][layer_idx][keep_blocks:] = 0.0
                 session["comp_min_k"][layer_idx][keep_blocks:] = 0.0
@@ -2567,8 +2837,7 @@ class MLXKVBlockManager:
                 session["dense_values"][layer_idx],
                 session["comp_U"][layer_idx],
                 session["comp_U_scale"][layer_idx],
-                session["comp_VK"][layer_idx],
-                session["comp_VV"][layer_idx],
+                *self._basis_rows(session, layer_idx),
                 session["comp_anc_k"][layer_idx],
                 session["comp_anc_v"][layer_idx],
                 session["comp_min_k"][layer_idx],
@@ -2674,6 +2943,22 @@ class MLXKVBlockManager:
         """
         session = self.sessions.get(session_id)
         if session is None:
+            return
+
+        # ── SHARED BASIS DECLINES THIS PATH ──────────────────────────────────
+        # This multi-layer batched compressor has no basis-assignment seam: it
+        # writes VK_batch straight into comp_VK[start:start+num_blocks], which
+        # under sharing is a BASIS-ROW-indexed store. Half-porting it -- writing
+        # the rows but not assigning -- would be silent, because the indices
+        # stay in range and only the CONTENTS are wrong.
+        #
+        # Declining sends the work to compress_deferred_prefill_blocks_for_layer,
+        # which does have the seam. That path is per layer rather than one batch
+        # across layers, so it is slower; the trade is deliberate while sharing
+        # is opt-in, and porting the seam here is the way to get it back.
+        if self._shared_basis:
+            for _l in [l for l in range(self.num_layers) if self._layer_attended(l)]:
+                self.compress_deferred_prefill_blocks_for_layer(session_id, _l)
             return
 
         # ── ONLY THE ATTENDED LAYERS PARTICIPATE ──────────────────────────────
@@ -3457,6 +3742,21 @@ class MLXKVBlockManager:
             v_gain_div = mx.expand_dims(mx.expand_dims(v_gain, 1), 2)
             VV_flat = VV_flat / v_gain_div
 
+        # ── SHARED BASIS: assign HERE, in compress, not at write time ────────
+        # Residual selection below scores `delta - recon`, and under a shared
+        # basis the recon the DECODER rebuilds comes from the GROUP basis, not
+        # from this block's own SVD factor. Assigning after the residuals were
+        # chosen would leave every one of them selected against a reconstruction
+        # that is not the one stored -- repairing errors that do not exist and
+        # missing the ones sharing introduced.
+        #
+        # The basis covers BOTH halves jointly, because a slot stores V_K and
+        # V_V and both are being deduplicated. It is taken AFTER the v_scale
+        # undo, so the group rows are in the same space the decoder reads.
+        if self._shared_basis and B_batch > 0:
+            U_batch, Vh_batch, VK_flat, VV_flat = self._assign_shared_basis(
+                session, layer_idx, start_idx, B_batch, U_batch, VK_flat, VV_flat)
+
         VK_batch = VK_flat.reshape(B_batch, self.rank, self.kv_heads, self.head_dim).transpose(0, 2, 1, 3)
         VV_batch = VV_flat.reshape(B_batch, self.rank, self.kv_heads, self.head_dim).transpose(0, 2, 1, 3)
 
@@ -3686,8 +3986,13 @@ class MLXKVBlockManager:
 
         session["comp_U"][layer_idx][start_idx:start_idx+num_blocks] = U_int8
         session["comp_U_scale"][layer_idx][start_idx:start_idx+num_blocks] = scale_u.astype(session["comp_U_scale"][layer_idx].dtype)
-        session["comp_VK"][layer_idx][start_idx:start_idx+num_blocks] = VK_batch
-        session["comp_VV"][layer_idx][start_idx:start_idx+num_blocks] = VV_batch
+        if not self._shared_basis:
+            # Under sharing these rows are indexed by BASIS ROW, not by block,
+            # and _assign_shared_basis has already written the founded bases.
+            # Repeating the block-indexed write would scribble block ids over
+            # basis rows -- in range, no error, wrong bases.
+            session["comp_VK"][layer_idx][start_idx:start_idx+num_blocks] = VK_batch
+            session["comp_VV"][layer_idx][start_idx:start_idx+num_blocks] = VV_batch
         session["comp_anc_k"][layer_idx][start_idx:start_idx+num_blocks] = batch_anchors_k
         session["comp_anc_v"][layer_idx][start_idx:start_idx+num_blocks] = batch_anchors_v
         session["comp_min_k"][layer_idx][start_idx:start_idx+num_blocks] = mx.min(batch_blocks_k, axis=2)
@@ -3764,8 +4069,12 @@ class MLXKVBlockManager:
             try:
                 targets = [
                     session["comp_U"][layer_idx][block_idx],
-                    session["comp_VK"][layer_idx][block_idx],
-                    session["comp_VV"][layer_idx][block_idx],
+                    # NOT [block_idx]: under sharing comp_VK is indexed by BASIS
+                    # ROW, so a block id can run past its end. This is an eval
+                    # target, so forcing the whole store is both correct and
+                    # cheaper than materialising a gathered view.
+                    session["comp_VK"][layer_idx],
+                    session["comp_VV"][layer_idx],
                     session["comp_anc_k"][layer_idx][block_idx],
                     session["comp_anc_v"][layer_idx][block_idx],
                 ]
@@ -3987,6 +4296,21 @@ class MLXKVBlockManager:
             # Safety: drop oldest compressed block by shifting (rare)
             session["comp_U"][layer_idx][:-1]     = session["comp_U"][layer_idx][1:]
             session["comp_U_scale"][layer_idx][:-1] = session["comp_U_scale"][layer_idx][1:]
+            if self._shared_basis:
+                # TRAP: `comp_VK[:-1] = comp_VK[1:]` shifts BASIS ROWS as if they
+                # were blocks. Under sharing one row backs MANY blocks, so this
+                # renumbers every group at once and every surviving block
+                # silently decompresses against its neighbour's basis. CUDA has
+                # no equivalent code path, so no CUDA test covers it. Shifting
+                # basis_of instead is not a fix either: the rows must NOT move,
+                # only the block -> row map, and evicted blocks must release
+                # their claims.
+                raise RuntimeError(
+                    "DKV_SHARED_BASIS=1 reached the sliding block eviction in "
+                    "_compress_block. Shifting comp_VK rows renumbers every "
+                    "basis group at once. Size the pool so eviction does not "
+                    "trigger, or teach this path to shift basis_of and release "
+                    "the evicted block's claim instead.")
             session["comp_VK"][layer_idx][:-1]    = session["comp_VK"][layer_idx][1:]
             session["comp_VV"][layer_idx][:-1]    = session["comp_VV"][layer_idx][1:]
             session["comp_anc_k"][layer_idx][:-1] = session["comp_anc_k"][layer_idx][1:]
@@ -4303,6 +4627,13 @@ class MLXKVBlockManager:
 
         session["comp_U"][layer_idx][num_blocks]     = U_int8
         session["comp_U_scale"][layer_idx][num_blocks] = scale_u.astype(session["comp_U_scale"][layer_idx].dtype)
+        if self._shared_basis:
+            raise RuntimeError(
+                "DKV_SHARED_BASIS=1 reached _compress_block, the streaming "
+                "single-block compress path, which has no basis-assignment "
+                "seam. Writing here would index the basis store by BLOCK and "
+                "silently corrupt another group's basis. Use deferred prefill "
+                "compression (DKV_STREAMING_COMPRESS=0, the default).")
         session["comp_VK"][layer_idx][num_blocks]    = VK
         session["comp_VV"][layer_idx][num_blocks]    = VV
         session["comp_anc_k"][layer_idx][num_blocks] = anchor_k
@@ -4426,8 +4757,7 @@ class MLXKVBlockManager:
         if need_route:
             U  = session["comp_U"][layer_idx][:nb]
             us = session["comp_U_scale"][layer_idx][:nb]   # int8 dequant scale for U (per block)
-            VK = session["comp_VK"][layer_idx][:nb]
-            VV = session["comp_VV"][layer_idx][:nb]
+            VK, VV = self._basis_rows(session, layer_idx, nb=nb)
             ak = session["comp_anc_k"][layer_idx][:nb]
             av = session["comp_anc_v"][layer_idx][:nb]
             sc = session["comp_scale"][layer_idx][:nb]
@@ -4703,8 +5033,7 @@ class MLXKVBlockManager:
                 q, dense_k, dense_v, dense_len,
                 session["comp_U"][layer_idx][:nb_padded],
                 session["comp_U_scale"][layer_idx][:nb_padded],
-                session["comp_VK"][layer_idx][:nb_padded],
-                session["comp_VV"][layer_idx][:nb_padded],
+                *self._basis_rows(session, layer_idx, nb=nb_padded),
                 session["comp_anc_k"][layer_idx][:nb_padded],
                 session["comp_anc_v"][layer_idx][:nb_padded],
                 session["comp_min_k"][layer_idx][:nb_padded],
@@ -4805,8 +5134,7 @@ class MLXKVBlockManager:
                 topk_sel     = sel
                 comp_U       = mx.take(session["comp_U"][layer_idx][:nb],       sel, axis=0)
                 comp_U_scale = mx.take(session["comp_U_scale"][layer_idx][:nb], sel, axis=0)
-                comp_VK      = mx.take(session["comp_VK"][layer_idx][:nb],      sel, axis=0)
-                comp_VV      = mx.take(session["comp_VV"][layer_idx][:nb],      sel, axis=0)
+                comp_VK, comp_VV = self._basis_rows(session, layer_idx, sel=sel)
                 comp_anc_k   = mx.take(session["comp_anc_k"][layer_idx][:nb],   sel, axis=0)
                 comp_anc_v   = mx.take(session["comp_anc_v"][layer_idx][:nb],   sel, axis=0)
                 comp_scale   = mx.take(session["comp_scale"][layer_idx][:nb],   sel, axis=0)
@@ -4815,8 +5143,7 @@ class MLXKVBlockManager:
                 topk_sel     = None  # attend all blocks (use the nb-keyed residual cache)
                 comp_U       = session["comp_U"][layer_idx][:nb]
                 comp_U_scale = session["comp_U_scale"][layer_idx][:nb]
-                comp_VK      = session["comp_VK"][layer_idx][:nb]
-                comp_VV      = session["comp_VV"][layer_idx][:nb]
+                comp_VK, comp_VV = self._basis_rows(session, layer_idx, nb=nb)
                 comp_anc_k   = session["comp_anc_k"][layer_idx][:nb]
                 comp_anc_v   = session["comp_anc_v"][layer_idx][:nb]
                 comp_scale   = session["comp_scale"][layer_idx][:nb]

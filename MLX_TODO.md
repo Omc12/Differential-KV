@@ -442,3 +442,126 @@ decision. A twelve-site change to the same file cannot need less.
 
 Deliberately left for the owner to decide, with the §1 result above as new
 input: the port's fidelity cost is now measurable rather than hidden.
+
+---
+
+# ITEM 2 — SHARED BASES: PORTED ON BRANCH `mlx-shared-basis`
+
+Done on a branch at the owner's direction, so `main`'s reference implementation
+is untouched until review. `main` has only the macOS fixes above.
+
+## What was built
+
+`native_core/compression/basis_group_mlx.py` — the `mx` twin of the torch
+`basis_group.py`. `tests/test_basis_group_mlx.py` (18) asserts the two AGREE on
+identical inputs rather than testing the port against itself, plus the
+properties that agreement cannot cover (orthonormal rows; kept == 1.0 against a
+block's own basis; U' Vg really is the CLOSEST point in span(Vg), not merely a
+point in it).
+
+Pool integration in `mlx_dkv_wrapper.py`: `comp_VK`/`comp_VV` allocate
+`ceil(frac * max_blocks)` BASIS ROWS, reached through a per-layer `basis_of`
+map, with `basis_claimed` carrying trap 1's distinction. Every block-indexed
+read goes through ONE accessor, `_basis_rows()`, so kernels and callers are
+unchanged. `tests/test_shared_basis_mlx_pool.py` (12).
+
+**The port file's line numbers are STALE** — it cites `:3605` for the sliding
+eviction, which now lives at `:4256`, and every other cited line has drifted
+similarly. Following them literally edits the wrong code.
+
+## Two measured MLX-specific constraints
+
+* `mx.linalg.qr` is **CPU-only** and raises on GPU, so `row_orthonormalize`
+  pins a CPU stream and runs once per compress batch, never per block.
+* mx `__setitem__` mutates the store in place and the caller sees it, same as
+  torch. This was written up as the OPPOSITE first and corrected against a
+  measurement; had it copied, every founded basis would land in a temporary and
+  blocks would decompress from a store of zeros — right shapes, finite numbers,
+  nothing raised.
+
+## Paths that REFUSE rather than half-work
+
+Three paths have no assignment seam, and in each an unguarded write stays IN
+RANGE with only the contents wrong — no exception, no shape error:
+
+* the **sliding eviction** (`_compress_block`) — `comp_VK[:-1] = comp_VK[1:]`
+  shifts basis ROWS as if they were blocks, renumbering every group at once.
+  MLX-only, exactly as the port file predicted; no CUDA test covers it.
+* the **streaming single-block compress** path.
+* the **multi-layer batched compressor**, which declines and hands off to the
+  per-layer one that does have the seam (slower; the trade is deliberate while
+  this is opt-in).
+
+Correction-form residuals are refused at construction, and 4-bit KV warns.
+
+## Measured — Qwen2.5-1.5B, 8k NIAH, `mid`, seeds pinned
+
+**Memory (deterministic), 28 layers, block 1024, 64 slots:**
+
+| arm | V-store | total pool | vs baseline |
+|---|---|---|---|
+| baseline | 88.08 MB | 412.79 MB | — |
+| `frac=0.50` | 44.04 MB | 368.75 MB | **−10.7%** |
+| `frac=0.25` | 22.02 MB | 346.73 MB | **−16.0%** |
+
+**Not CUDA's −23.6%, and the gap is structural rather than a porting defect.**
+MLX's `block_size` is 1024 against CUDA's 257, so `comp_U` (block_size−1 × rank
+per slot) dominates a slot here and V is a much smaller share of it. The V store
+itself halves exactly as designed.
+
+**Grouping — and this is the finding that matters:**
+
+| config | founded | joined | forced | mean_kept |
+|---|---|---|---|---|
+| MLX, block 1024, frac 0.50 | 140 | **0** | 28 | 0.934 |
+| MLX, block 256, frac 0.50 | 560 | **10** | 186 | 0.903 |
+| CUDA, block 257, frac 0.50 | — | **463** | **0** | 0.969 |
+
+`joined == 0` is precisely the degeneracy signature the port file names — but
+here it is NOT the 4-bit cause it documents. `kv_quant` is f16 throughout, and
+`DKV_V_SCALE=0` vs `1` changes nothing (10 joins either way), so the per-block
+v_scale undo is not destroying the alignment either.
+
+At MLX's own block size, **adjacent blocks essentially never clear the 0.90
+retained-energy bar**. Shrinking to CUDA's block size and reproducing its exact
+block count (756) recovers only 10 voluntary joins against CUDA's 463. So the
+premise the whole feature rests on — "adjacent blocks of one document share a
+subspace, so the saving is close to free" — **does not reproduce on MLX**. What
+the memory saving buys here is bought with FORCED lossy joins, not with dedup.
+
+**Fidelity cost — none that this instrument can resolve:**
+
+| arm | top-1 | KL(dense‖arm) | rank | top-5 | blocks | max\|Δlogit\| |
+|---|---|---|---|---|---|---|
+| baseline | 5/5 | 5.135e-12 | 0.00 | 5.0/5 | 168 | 3.125e-02 |
+| `frac=0.50` | 5/5 | 5.135e-12 | 0.00 | 5.0/5 | 168 | 3.125e-02 |
+| `frac=0.25` | 5/5 | 5.135e-12 | 0.00 | 5.0/5 | 168 | 3.125e-02 |
+
+Identical to every printed digit, which is the harness's own "arms are inert"
+warning condition — so it was checked directly rather than reported as a
+result. Same prompt, sharing off vs on, in one process: the logit SUMS agree to
+8 decimals but the **byte hashes differ**, and `basis_stats()` reports
+`enabled: true, founded 140, forced 28, mean_kept 0.9336`. Sharing really is
+running and really does move the logits; the movement is just smaller than one
+fp16 ULP, which is where `max|Δlogit|` saturates. **Read the table as "below
+this instrument's floor", not as "bit-identical".**
+
+## Open, and deliberately not done
+
+1. **The premise gap above is unexplained.** Same block count and same document
+   give CUDA 463 voluntary joins and MLX 10. Block size and v_scale are ruled
+   out. Until it is understood, `frac` on MLX is a lossy-compression dial, and
+   should be argued for on that basis rather than as free dedup.
+2. **Eviction, streaming compress and the batched multi-layer compressor** all
+   refuse instead of working. The pool must be sized so eviction never fires.
+3. **Checkpoint versioning is documented, not implemented.** A checkpoint
+   written with sharing on has a different `comp_VK` row count and is
+   meaningless without `basis_of`; loading it into a one-row-per-block store
+   would broadcast cleanly and be wrong. Needs a real version field before this
+   ships.
+4. **Peak-memory (as opposed to pool-size) effect is unmeasured.** `_basis_rows`
+   materialises one row per block at read time, so the transient is
+   full-size even though the persistent store is not. The pool numbers above
+   are exact; a peak-RSS claim is not supported by them.
+5. **No long-context or recall validation.** `mlx_needle_parity.py --long` and
+   `linkbench_mlx.py` have not been run against the sharing arm.

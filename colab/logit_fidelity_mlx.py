@@ -300,9 +300,13 @@ def main():
     print("A small MLX baseline KL means (a) this instrument works here, and")
     print("(b) CUDA's gap is a CUDA defect rather than the price of compression.")
     if any(a.startswith("basis") for a in per_arm):
-        print("\nNOTE: basis* arms are inert until shared bases are ported to")
-        print("MLX (MLX_PORT_FROM_CUDA.md section 1). Until then they reproduce")
-        print("`baseline` exactly -- which must NOT be read as 'no effect'.")
+        print("\nNOTE: shared bases ARE ported to MLX now, so basis* arms are")
+        print("live. Confirm with manager.basis_stats(): `joined == 0` means the")
+        print("feature degenerated into lossy V-compression rather than")
+        print("opportunistic dedup -- and pool MB looks the same either way,")
+        print("because the saving comes from allocating fewer basis ROWS, not")
+        print("from grouping succeeding. Read `joined` and `mean_kept` next to")
+        print("any memory number.")
 
 
 if __name__ == "__main__":
