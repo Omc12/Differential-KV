@@ -450,3 +450,105 @@ variants needs a sharper instrument than first-step logits at 8k.
 4. No long-context or recall validation of the sharing arm
    (`mlx_needle_parity.py --long`, `linkbench_mlx.py`).
 5. The decode cost of the unrotated pool has not been measured WITH sharing on.
+
+---
+
+# THE PORT WAS ALSO BROKEN — two defects the logit harness could not see
+
+The section above closed the 10-vs-463 grouping gap. Running the needle suite
+against the fixed port then found that the port ITSELF was defective, in ways
+that never showed up in any of the measurements taken up to that point.
+
+**Correction to the section above.** It reported "no fidelity cost that this
+instrument can resolve" and listed recall validation as owed. The recall
+validation, once run, showed a real regression. The fidelity table was not
+wrong — it was measuring below its own floor, which is exactly what it said.
+
+## Symptom
+
+With sharing on, `mlx_needle_parity.py` returned a TRUNCATED code at 8k depths
+0.5 and 0.9 — `ZEBRA-4471`, dropping `-QUARTZ` — deterministically, while 2k
+and 8k@0.0 passed.
+
+Two controls made it a port defect rather than a property of sharing:
+
+* it reproduced with sharing effectively DISABLED (`frac=1.0`, threshold 1.01,
+  so every block founds its own group), and
+* it reproduced at a second `DKV_SVD_SEED`, so it was not the ±15-point seed
+  noise this repo's rules warn about.
+
+The unrotated pool alone passed 6/6, so the rotation change was not the cause
+either.
+
+## Defect 1 — the registry lived on the MANAGER
+
+Basis groups are SESSION state. A group records a subspace of ONE document's
+keys, and its row is refcounted against that session's slots. Held on the
+manager, a request's groups outlived it, so a later request's blocks scored
+against a PREVIOUS DOCUMENT's bases and force-joined them once the store filled.
+
+**Every single-session probe said the port was fine, and they were all
+right — the bug needs two sessions to exist.** Prefill state was BYTE-IDENTICAL
+(md5 over every `comp_*` array, the dense window, all six attended layers)
+between a passing and a failing configuration. One case run alone passed with
+`forced=0, mean_kept=1.0`. Only the needle suite — six cases in ONE process —
+could see it, and it failed the LATER cases.
+
+The registry now lives in the session dict, so `clear_session` disposes of it.
+
+## Defect 2 — founders were not bit-exact
+
+A block that founds its own group stores its own V, so the projection is
+analytically the identity. Routing U through the solve returned it only to
+within floating-point noise, and that noise moved the int8 U quantisation by a
+couple of LSBs — enough to flip the needle. Founders are now returned
+untouched, so with nothing sharing the feature is bit-identical to being off.
+
+## Two corrections found on the way
+
+* **`reproject_U` needed the PSEUDO-INVERSE.** `U (V Vg^T)` is the projection
+  only when Vg's rows are ORTHONORMAL, and the joint `[K | V]` basis this pool
+  stores is not — measured row norms 0.78–0.83, because the halves are sliced
+  out of one orthonormal `Vh` and the V half is then divided by the per-block
+  `v_scale` gain. Founders store their RAW V for the same reason: a
+  unit-normalised basis leaves `U V` unchanged but rescales U and V against
+  each other, and the ROUTER reads them separately. That is also why the
+  failure was DEPTH-DEPENDENT — depth-invariant would have been reconstruction.
+* **The `v_scale` undo was applied twice.** The shared basis is necessarily
+  taken post-undo (one row backs many blocks; `v_gain` is per block), so
+  dividing again scored residual selection against a V reconstruction the
+  decoder never produces.
+
+Plus two found by inspection while fixing the above: `_ensure_block_capacity`
+grew `comp_VK` one row per NEW BLOCK (silently returning the store to one row
+per block while still claiming `frac`) and did not grow `basis_of` at all; and
+`snapshot_session` deep-copied mx arrays but let numpy fall through, so a
+snapshot SHARED `basis_claimed` with the live session.
+
+## Measured after the fixes — Qwen3.5-2B-4bit, unrotated pool
+
+| arm | needle | determinism |
+|---|---|---|
+| sharing off | **6/6** | 1 distinct output across 3 runs |
+| `frac=1.0` (no sharing) | **6/6** | 1 distinct |
+| `frac=0.50` (real sharing) | **6/6** | 1 distinct |
+
+Suite: 316 passed, 0 failed.
+
+## The method lesson, which is the reusable part
+
+**The instrument that could not resolve the change was not the instrument that
+found the bug.** First-step logit fidelity bottoms out at one fp16 ULP on this
+model and context; both defects lived far under that floor and it reported
+"identical" for every arm — correctly, and uselessly. The needle suite found
+both immediately.
+
+Two properties made it able to: it runs SIX CASES IN ONE PROCESS (which is the
+only reason the session leak was observable at all), and it asserts on an EXACT
+STRING rather than a distance. A distance metric would have shown a small
+number and been believed.
+
+Corollary worth keeping: a byte-identical state comparison is not proof of
+equivalence when the state you compared is not the state that differs. The
+prefill pool matched exactly while the defect lived in state that accumulates
+ACROSS sessions.

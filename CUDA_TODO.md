@@ -103,6 +103,44 @@ memory number that looks correct.
 
 ---
 
+## 2b. CUDA's shared-basis code has the SAME TWO DEFECTS the MLX port had
+
+Both were found by running the needle suite against the MLX port. CUDA has
+never run an equivalent check on this feature — its own recall validation
+scored 0/3 for the DENSE control at that operating point, and its logit
+instrument sits at KL 10.579, so neither could discriminate anything. **Shared
+bases on CUDA are therefore unvalidated against any working accuracy test**,
+not validated-and-clean.
+
+**(a) `reproject_U` assumes Vg has ORTHONORMAL ROWS, and it does not.**
+`basis_group.py`'s `U (V Vg^T)` is the projection onto span(Vg) only for
+orthonormal Vg. The joint `[K | V]` basis both pools store is not orthonormal:
+the halves are sliced out of one orthonormal `Vh` and the V half is then
+divided by the per-block `v_scale` gain — `lowrank.py:1260` does exactly that,
+**before** the assignment at `:1384`. Measured row norms on MLX: 0.78–0.83.
+The fix is the pseudo-inverse, `U' = U V Vg^+`, which also makes a founder
+exact by construction.
+
+**(b) Founders store the ORTHONORMALISED basis rather than their own V**
+(`basis_group.py:413`, `basis_store[row] = V_on[n]`). That keeps `U V`
+unchanged, so reconstruction stays exact and no distance metric notices — but
+it rescales U and V against each other, and **the ROUTER reads them
+separately**, so it retains a different set of blocks. On MLX the signature was
+a needle that passed at depth 0.0 and failed at 0.5 and 0.9. Depth-DEPENDENT is
+routing; depth-invariant would have been reconstruction.
+
+There is also a third, which CUDA appears to survive but should confirm:
+**basis groups are SESSION state.** On MLX the registry lived on the manager,
+so one request's groups outlived it and a later request's blocks force-joined a
+PREVIOUS DOCUMENT's bases once the store filled. CUDA's registry lives on the
+pool and is refcounted, with `release_basis` on slot free, so dead groups
+should be reclaimed — but that is only true if EVERY slot-free path calls it.
+Worth checking directly, because the MLX version of this bug was invisible to
+every single-session test: prefill state was byte-identical between a passing
+and a failing configuration, and only a six-cases-in-one-process run exposed it.
+
+---
+
 ## 3. Stop citing line numbers across runtimes; they are already stale.
 
 The retired `MLX_PORT_FROM_CUDA.md` §1 listed exact `mlx_dkv_wrapper.py` line numbers for
@@ -163,7 +201,9 @@ not execute. Listed so nobody re-derives them or "fixes" them back.
   order-dependent in the same way.
 
 **One MLX exception, on a branch, not merged.** `mlx-shared-basis` ports shared
-low-rank bases into `mlx_dkv_wrapper.py`. It exists because the owner directed
+low-rank bases into `mlx_dkv_wrapper.py`. Note that item 2b above IS CUDA
+work that came out of it — the two projection defects are in
+`basis_group.py`, which CUDA runs today. It exists because the owner directed
 it explicitly, and `main` is untouched. Suite on that branch: 307 passed, 0
 failed, with 295 of those passing with the feature OFF.
 
