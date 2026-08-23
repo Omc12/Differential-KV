@@ -766,10 +766,21 @@ position-alignment change. Delete `/tmp/dkv_qprobe_*.pt` and re-run both passes.
   unseeded `torch.randn` (the root cause) and `torch.set_float32_matmul_precision
   ("high")` being set globally on DKV import (an independent second trigger).
 * **Prefill router alignment** — section 2. Done; see §0.5.
-* **64k** — untested. Depth 0.9 there puts the needle in the same relative
-  position, so the same failure is *expected* but unverified. Re-check after the
-  fix. Note the routed-row count does not grow with context (K=16 regardless), so
-  "more context = more competitors" is NOT the mechanism.
+* **[CLOSED] 64k.** Tested 2026-08-23, RTX 4070 SUPER, Qwen3.5-2B, via the new
+  `validate_cuda_dkv.py --x64` flag:
+
+      64k @ 0.0 (65251 tok)   3/3, 1 distinct output across 3 runs
+      64k @ 0.5 (65454 tok)   3/3, 1 distinct output across 3 runs
+      64k @ 0.9 (65499 tok)   3/3, 1 distinct output across 3 runs
+      Triton kernel used, fallback_count=0
+
+  The note below expected `64k@0.9` to fail, on the reasoning that depth 0.9
+  puts the needle in the same RELATIVE position as the then-failing `32k@0.9`.
+  It passes. Both were fixed by the same §0.5 work, which is consistent with
+  the note's own caveat that the routed-row count does not grow with context
+  (K=16 regardless), so "more context = more competitors" was never the
+  mechanism. It fits in 12 GB, contrary to the concern that motivated putting
+  it behind its own flag.
 * **`DKV_RESIDUALS_IN_DENSE`** (commits `53d928d`, `6dab025`) — real MLX parity:
   exact residual rows belong in the DENSE half (`mlx_dkv_wrapper.py:1031`), and
   with them in the sparse half `DKV_SPARSE_BIAS=auto` had the wrong sign and was

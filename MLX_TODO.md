@@ -230,5 +230,19 @@ have a benign tail. That is a measurement, not an argument.
 | `0d3b12a9` | question-span pin — never worked on CUDA (see §3 above) |
 | `be2897a7` | shared bases become a config key; `low` preset is the *wrong* home |
 | `e6069eea` | README + port-file documentation |
+| `758e0c26` | four more prefill capture sites stored K in the wrong frame (§5) |
 
-CUDA suite at time of writing: **216 passed, 6 skipped, 0 failed**.
+CUDA suite at time of writing: **220 passed, 6 skipped, 0 failed**.
+
+CUDA validation, Qwen3.5-2B, RTX 4070 SUPER, 2026-08-23 — **ALL CHECKS PASSED**
+at every rung including the two the handoff listed as outstanding:
+
+    2k / 8k / 32k / 64k, depths 0.0 / 0.5 / 0.9   3/3 recall each
+    determinism at temperature 0                   1 distinct output across 3 runs
+    Triton kernel used                             fallback_count=0
+
+`32k@0.9` and `64k@0.9` — both previously expected to fail — now pass. **This
+is the bar MLX should be held to**: `benchmarks/niah_recall.py` and
+`colab/mlx_needle_parity.py` are the equivalents, and any MLX rung that does
+not reach 3/3 with deterministic output is a real gap rather than a tuning
+question.
