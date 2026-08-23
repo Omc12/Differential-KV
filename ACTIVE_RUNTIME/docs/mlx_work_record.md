@@ -552,3 +552,100 @@ Corollary worth keeping: a byte-identical state comparison is not proof of
 equivalence when the state you compared is not the state that differs. The
 prefill pool matched exactly while the defect lived in state that accumulates
 ACROSS sessions.
+
+---
+
+# CLOSING THE REMAINING OPEN ITEMS
+
+## Long-context recall — 9/9 WITH SHARING ON
+
+`mlx_needle_parity.py --long`, Qwen3.5-2B-4bit, `DKV_SHARED_BASIS=1`,
+`frac=0.50`, unrotated pool:
+
+    2k  @ 0.0 / 0.5 / 0.9    3/3 each, 1 distinct output across 3 runs
+    8k  @ 0.0 / 0.5 / 0.9    3/3 each, 1 distinct
+    32k @ 0.0 / 0.5 / 0.9    3/3 each, 1 distinct
+
+**ALL PASS, including `32k@0.9`** — the rung the work order named as the bar and
+which CUDA also passes. This is the validation that was owed, and it is the
+check that found both port defects in the first place.
+
+Incidentally it also shows the eviction guard never fires at these contexts: a
+32k prompt completed without hitting the `RuntimeError` that sliding eviction
+raises under sharing. The guard stays, but the pool is sized well enough that
+2k–32k does not reach it.
+
+## Peak memory — the pool saving does NOT reach peak, and that is the headline
+
+Qwen2.5-1.5B @8k, one process per arm, decode rate by DIFFERENCE (a 1-token and
+a 128-token call on identical fresh sessions, subtracted — a fresh session
+re-prefills the whole prompt, and dividing an N-token call by its wall time
+reports ~0.2 tok/s and charges prefill to decode):
+
+| arm | decode tok/s | MLX peak | pool (allocated) |
+|---|---|---|---|
+| baseline (rotated) | 17.53 | 6.81 GB | 412.79 MB |
+| unrotated | 15.49 | **7.12 GB** | 412.79 MB |
+| unrotated + `frac=0.50` | 11.96 | **7.12 GB** | 368.75 MB (−10.7%) |
+
+**Peak memory is IDENTICAL with and without sharing**, to two decimals, even
+though the pool allocates 10.7% less. That is open item 3 answered, and the
+answer is the unwelcome one: `_basis_rows` materialises one row PER BLOCK at
+read time, so the transient is full-size and the saving never reaches peak. The
+pool-size numbers remain exact and the peak-memory claim remains unsupported —
+now measured rather than merely flagged.
+
+**Decode cost, item 5:** the unrotated pool costs ~12% (17.53 → 15.49) and
+sharing costs ~23% more on top (15.49 → 11.96), so the configuration the feature
+requires runs at ~68% of baseline decode. These are SINGLE RUNS per arm, not
+paired or replicated, so treat the decode numbers as point estimates; the memory
+equality is the robust half, since the allocator peak is deterministic.
+
+### What that means for the feature
+
+As it stands on MLX, shared bases buy **pool bytes that do not become peak
+bytes**, at roughly a third of decode. The chain is:
+
+    shared bases --> unrotated pool --> no remat cache --> slower decode
+
+and the memory win is currently swallowed by eager gathers. Two things would
+change the verdict, in this order:
+
+1. **Make `_basis_rows` lazy** — compose `basis_of` into the kernels' own gather
+   instead of materialising a per-block view. That is what would turn the
+   allocated saving into a peak saving, and it is the difference between this
+   feature being worth its cost and not.
+2. **Fix the remat-cache decline** for unrotated pools, which
+   `dkv_attention.py` already sketches (plumb the dense window's absolute token
+   positions in and rotate with `_partial_rope_apply`). That would pay back most
+   of the 12%, and it benefits the unrotated pool's own retrieval win
+   (40/48 → 47/48 on distractor retrieval) quite apart from bases.
+
+Until at least (1) lands, `DKV_SHARED_BASIS` should stay opt-in on MLX — not
+because it is unsafe (9/9 says otherwise) but because it currently costs decode
+for a saving that does not show up where it matters.
+
+## Snapshot / restore — was BROKEN under sharing, now fixed
+
+`copy.deepcopy` cannot pickle an `mx.Dtype`, and the registry holds one. Both
+`snapshot_session` and `restore_session` raised `TypeError: cannot pickle
+'mlx.core.Dtype' object` the moment sharing was enabled — a crash, not a wrong
+answer, but on a path no shared-basis test touched. `SharedBasisRegistryMLX`
+now defines `__deepcopy__`, carrying the dtype by reference (it is an immutable
+singleton) and deep-copying everything mutable.
+
+This also closes the "checkpoint versioning" item from the earlier list, which
+was mis-stated: MLX has **no on-disk checkpoint**. What it has is in-memory
+`snapshot_session` / `restore_session`, and the shape concern the port file
+raised belongs to `_ensure_block_capacity`, which is fixed and tested.
+
+## Status of the port's open items
+
+| item | status |
+|---|---|
+| long-context / recall validation | **CLOSED** — 9/9 incl. 32k@0.9 |
+| checkpoint versioning | **CLOSED** — no on-disk path; snapshot/restore fixed |
+| peak-RSS unmeasured | **CLOSED** — measured, and it does NOT improve |
+| decode cost with sharing | **CLOSED** — ~68% of baseline, single-run estimate |
+| eviction / streaming / batched compress refuse | **OPEN** — never reached up to 32k, guards retained |
+| make `_basis_rows` lazy | **OPEN, and now the item that matters most** |

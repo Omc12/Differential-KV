@@ -334,3 +334,30 @@ def test_founders_are_left_bit_exact():
     # and the projection is the identity
     Up = reproject_U(U, V, gathered)
     _np.testing.assert_allclose(_np.array(Up), _np.array(U), atol=2e-4)
+
+
+def test_snapshot_and_restore_work_under_sharing():
+    """The registry lives in the session dict, and sessions are snapshotted by
+    DEEP-COPYING that dict.
+
+    `mx.Dtype` cannot be pickled, so a registry holding one made both
+    snapshot_session and restore_session raise `TypeError: cannot pickle
+    'mlx.core.Dtype' object` the moment sharing was enabled. A crash rather
+    than a wrong answer -- but on a path no shared-basis test touched until
+    this one.
+    """
+    m = _mgr(DKV_SHARED_BASIS="1", DKV_ROTATED_POOL="0")
+    m.sessions["s"] = m._create_empty_session(16)
+    from native_core.compression.basis_group_mlx import SharedBasisRegistryMLX
+    m.sessions["s"]["basis_registry"][0] = SharedBasisRegistryMLX(
+        capacity=4, dtype=mx.float16)
+
+    m.snapshot_session("s", "ck")          # raised before the __deepcopy__
+    m.restore_session("s", "ck")
+
+    reg = m.sessions["s"]["basis_registry"][0]
+    assert reg.capacity == 4
+    snap = m._session_checkpoints["ck"]["basis_registry"][0]
+    assert snap is not reg, (
+        "restore handed back the checkpoint's own registry -- mutating the "
+        "session would corrupt the checkpoint it was restored from")

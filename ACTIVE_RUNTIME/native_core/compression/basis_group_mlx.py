@@ -243,6 +243,30 @@ class SharedBasisRegistryMLX:
         self.kept_sum = 0.0
         self.kept_count = 0
 
+    def __deepcopy__(self, memo):
+        """`copy.deepcopy` cannot pickle an `mx.Dtype`.
+
+        Sessions are snapshotted and restored by deep-copying the session dict
+        (`snapshot_session` / `restore_session`), and this registry lives in it.
+        Without this, both raise `TypeError: cannot pickle 'mlx.core.Dtype'
+        object` the moment shared bases are on -- a crash rather than a silent
+        wrong answer, but only on the snapshot path, which no shared-basis test
+        exercised until one was written for it.
+
+        A dtype is an immutable singleton, so it is carried over by reference;
+        everything mutable is copied so a restored session cannot mutate the
+        checkpoint it came from.
+        """
+        import copy as _copy
+        new = self.__class__.__new__(self.__class__)
+        memo[id(self)] = new
+        for k, v in self.__dict__.items():
+            if k == "dtype":
+                new.dtype = v
+            else:
+                new.__dict__[k] = _copy.deepcopy(v, memo)
+        return new
+
     def reset(self) -> None:
         self.groups.clear()
         self._by_layer.clear()
