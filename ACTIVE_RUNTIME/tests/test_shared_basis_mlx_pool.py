@@ -209,3 +209,128 @@ def test_rotated_pool_can_be_forced_for_measurement():
 def test_unrotated_pool_is_accepted():
     m = _mgr(DKV_SHARED_BASIS="1", DKV_ROTATED_POOL="0")
     assert m._shared_basis is True and m.rotated_pool is False
+
+
+def test_capacity_growth_keeps_the_frac_contract():
+    """_ensure_block_capacity grew comp_VK one row per NEW BLOCK, which under
+    sharing silently undoes the whole saving -- the store ends up back at one
+    row per block while still claiming frac. The block -> row map, meanwhile,
+    did not grow at all, so every block past the old capacity indexed past its
+    end."""
+    m = _mgr(DKV_SHARED_BASIS="1", DKV_SHARED_BASIS_FRAC="0.25",
+             DKV_ROTATED_POOL="0")
+    sess = m._create_empty_session(16)
+    assert sess["comp_VK"][0].shape[0] == 4
+    assert sess["basis_of"][0].shape[0] == 16
+
+    m._ensure_block_capacity(sess, 32)
+    assert sess["max_blocks"] == 32
+    # 4 existing rows + ceil(0.25 * 16 grown) = 4 + 4
+    assert sess["comp_VK"][0].shape[0] == 8, (
+        f"basis store grew to {sess['comp_VK'][0].shape[0]} rows for 32 blocks; "
+        f"the frac=0.25 contract wants 8")
+    assert sess["comp_VV"][0].shape[0] == 8
+    # the MAP is block-indexed and must cover every block
+    assert sess["basis_of"][0].shape[0] == 32, (
+        "basis_of did not grow with the block count -- blocks past the old "
+        "capacity would index past its end")
+    assert sess["basis_claimed"][0].shape[0] == 32
+    assert not sess["basis_claimed"][0][16:].any(), (
+        "grown slots must hold NO claim, or releasing one that was never made "
+        "decrements a founding block's group")
+
+
+def test_growth_hands_the_new_rows_to_the_registry():
+    """Rows allocated but never added to the free list are unusable, so every
+    later block force-joins while the memory sits idle."""
+    from native_core.compression.basis_group_mlx import SharedBasisRegistryMLX
+    m = _mgr(DKV_SHARED_BASIS="1", DKV_SHARED_BASIS_FRAC="0.25",
+             DKV_ROTATED_POOL="0")
+    sess = m._create_empty_session(16)
+    sess["basis_registry"][0] = SharedBasisRegistryMLX(capacity=4, dtype=mx.float32)
+    sess["basis_registry"][0]._free_rows = []   # pretend the store filled
+    m._ensure_block_capacity(sess, 32)
+    reg = sess["basis_registry"][0]
+    assert reg.capacity == 8, f"registry capacity {reg.capacity}, expected 8"
+    assert sorted(reg._free_rows) == [4, 5, 6, 7], (
+        f"new rows {sorted(reg._free_rows)} were not offered to the allocator")
+
+
+def test_snapshot_does_not_alias_the_claim_flags():
+    """basis_claimed is numpy and fell through the deep-copy helper unchanged,
+    so a snapshot shared it with the live session."""
+    m = _mgr(DKV_SHARED_BASIS="1", DKV_ROTATED_POOL="0")
+    m.sessions["s"] = m._create_empty_session(16)
+    m.snapshot_session("s", "ckpt")
+    live = m.sessions["s"]["basis_claimed"][0]
+    snap = m._session_checkpoints["ckpt"]["basis_claimed"][0]
+    live[3] = True
+    assert not snap[3], (
+        "mutating the live session changed the snapshot -- basis_claimed is "
+        "aliased, so a rollback would restore state it had already corrupted")
+
+
+def test_basis_groups_do_not_leak_between_sessions():
+    """Groups are SESSION state and must not outlive the session that made them.
+
+    A group records a subspace of ONE document's keys and its row is refcounted
+    against that session's slots. Held on the manager, a request's groups
+    survived it, so a later request's blocks scored against a PREVIOUS
+    DOCUMENT's bases and force-joined them once the store filled.
+
+    This is why it has to be tested with TWO sessions: every single-session
+    check passed while it was broken. In the needle suite -- six cases in one
+    process -- 2k passed and 8k failed at depths 0.5 and 0.9, because by the
+    fourth case the store held another document's groups.
+    """
+    m = _mgr(DKV_SHARED_BASIS="1", DKV_SHARED_BASIS_FRAC="0.25",
+             DKV_ROTATED_POOL="0")
+    s1 = m._create_empty_session(16)
+    s2 = m._create_empty_session(16)
+    assert s1["basis_registry"] is not None
+    assert s1["basis_registry"] is not s2["basis_registry"], (
+        "two sessions share one registry -- one document's basis groups will "
+        "be offered to another's blocks")
+    assert not hasattr(m, "_sb_registry"), (
+        "the manager still owns a registry; basis groups must live in the "
+        "session so clear_session disposes of them")
+
+
+def test_clearing_a_session_disposes_of_its_groups():
+    m = _mgr(DKV_SHARED_BASIS="1", DKV_ROTATED_POOL="0")
+    m.sessions["a"] = m._create_empty_session(16)
+    m.sessions["a"]["basis_registry"][0] = object()
+    m.clear_session("a")
+    assert "a" not in m.sessions, "session survived clear_session"
+    st = m.basis_stats()
+    assert st["founded"] == 0 and st["joined"] == 0, (
+        "stats still count a cleared session's groups")
+
+
+def test_founders_are_left_bit_exact():
+    """A block that founds its own group stores its OWN V, so the projection is
+    the identity and U must come back UNCHANGED -- not merely to within the
+    solve's floating-point noise.
+
+    That noise is not harmless: it moved the int8 U quantisation by a couple of
+    LSBs, which flipped the 8k needle at depths 0.5 and 0.9 at two independent
+    SVD seeds. With nothing sharing, the feature has to be bit-identical to
+    having it off.
+    """
+    import numpy as _np
+    from native_core.compression.basis_group_mlx import (
+        SharedBasisRegistryMLX, reproject_U)
+    rng = _np.random.default_rng(11)
+    U = mx.array(rng.standard_normal((3, 20, 8)).astype(_np.float32))
+    # rows deliberately NOT unit-norm: the real joint [K|V] basis is not
+    V = mx.array((rng.standard_normal((3, 8, 32)) * 0.8).astype(_np.float32))
+    reg = SharedBasisRegistryMLX(capacity=8, threshold=1.01, dtype=mx.float32)
+    store = mx.zeros((8, 8, 32), dtype=mx.float32)
+    asg, gathered = reg.assign_batch(U, V, 0, store)
+
+    assert all(a.is_new for a in asg), "threshold 1.01 must make every block a founder"
+    # the stored basis is the block's own V, unmodified
+    _np.testing.assert_allclose(_np.array(gathered), _np.array(V), atol=1e-6)
+    # and the projection is the identity
+    Up = reproject_U(U, V, gathered)
+    _np.testing.assert_allclose(_np.array(Up), _np.array(U), atol=2e-4)

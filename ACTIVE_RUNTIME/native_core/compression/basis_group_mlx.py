@@ -89,11 +89,18 @@ def row_orthonormalize(V: mx.array) -> mx.array:
 def retained_energy(U: mx.array, V: mx.array, Vg: mx.array) -> mx.array:
     """Fraction of each block's delta energy surviving projection onto each group.
 
-    ``U: [N, T, k]``, ``V: [N, k, F]``, ``Vg: [G, r, F]`` row-orthonormal.
+    ``U: [N, T, k]``, ``V: [N, k, F]``, ``Vg: [G, r, F]``.
     Returns ``[N, G]`` in [0, 1].
+
+    Vg is orthonormalised HERE rather than being required orthonormal, because
+    the pool stores each group's RAW founding basis (see `reproject_U` for why
+    that is load-bearing). The projector onto span(Vg) is the same either way,
+    so this changes nothing about the score -- it just moves the requirement off
+    the caller.
     """
     if Vg.size == 0 or U.size == 0:
         return mx.zeros((U.shape[0], Vg.shape[0] if Vg.ndim == 3 else 0))
+    Vg = row_orthonormalize(Vg)
 
     Uf = U.astype(mx.float32)
     Vf = V.astype(mx.float32)
@@ -124,10 +131,25 @@ def retained_energy(U: mx.array, V: mx.array, Vg: mx.array) -> mx.array:
 
 
 def reproject_U(U: mx.array, V: mx.array, Vg: mx.array) -> mx.array:
-    """``U' = U (V Vg^T)``, so ``U' Vg`` is the projection of ``U V`` onto span(Vg).
+    """``U' = U V Vg^+``, so ``U' Vg`` is the projection of ``U V`` onto span(Vg).
 
     ``Vg`` is PER BLOCK here (``[N, r, F]``, already gathered by group id), not
-    the ``[G, r, F]`` store.
+    the ``[G, r, F]`` store, and it is NOT assumed to have orthonormal rows.
+
+    THE PSEUDO-INVERSE IS NOT PEDANTRY -- it is what makes a FOUNDER EXACT.
+    With ``Vg == V`` (a block that founded its own group, which is every block
+    when nothing shares) the right pseudo-inverse gives ``V V^+ == I`` and
+    therefore ``U' == U`` and ``U' Vg == U V`` bit-for-bit. The simpler
+    ``U (V Vg^T)`` only does that when Vg's rows are ORTHONORMAL, and the joint
+    ``[K | V]`` basis this pool stores is NOT: measured row norms 0.78-0.83,
+    because the two halves are sliced out of one orthonormal Vh and the V half
+    is then divided by the per-block v_scale gain.
+    That mattered in production, not in theory. Storing a unit-normalised basis
+    and pushing the scale into U leaves ``U V`` unchanged, so reconstruction
+    stays exact -- but the ROUTER reads U and V separately, so its per-block
+    scores shift and it retains a different set of blocks. The signature was a
+    needle that passed at depth 0.0 and failed at 0.5 and 0.9 (depth-dependent
+    is routing; depth-invariant would have been reconstruction).
 
     Trap 3 from the port file lives here: ``r_proj`` can be NARROWER than the
     store rank, because it is ``min(max_rank + oversamples, T_active, feat_dim)``
@@ -136,8 +158,19 @@ def reproject_U(U: mx.array, V: mx.array, Vg: mx.array) -> mx.array:
     r_proj]`` buffer it came from -- the caller must rebuild at the STORE width,
     which is ``Vg.shape[1]`` and is what this returns.
     """
-    Cmat = mx.matmul(V.astype(mx.float32), mx.swapaxes(Vg.astype(mx.float32), 1, 2))
-    Up = mx.matmul(U.astype(mx.float32), Cmat)                     # [N, T, r]
+    Vf = V.astype(mx.float32)
+    Gf = Vg.astype(mx.float32)
+    Cmat = mx.matmul(Vf, mx.swapaxes(Gf, 1, 2))                    # [N, k, r]
+    Gram = mx.matmul(Gf, mx.swapaxes(Gf, 1, 2))                    # [N, r, r]
+    # Ridge, because zero basis rows (a rank truncation left them) make Gram
+    # singular. It is tiny next to the row norms it regularises, and a zero row
+    # contributes nothing either way.
+    r = Gram.shape[-1]
+    Gram = Gram + mx.eye(r, dtype=mx.float32) * 1e-6
+    with mx.stream(mx.cpu):                       # solve is CPU-only, like qr
+        Cp = mx.linalg.solve(mx.swapaxes(Gram, 1, 2), mx.swapaxes(Cmat, 1, 2))
+        mx.eval(Cp)
+    Up = mx.matmul(U.astype(mx.float32), mx.swapaxes(Cp, 1, 2))    # [N, T, r]
     return mx.where(mx.isnan(Up) | mx.isinf(Up), mx.zeros_like(Up), Up)
 
 
@@ -277,7 +310,10 @@ class SharedBasisRegistryMLX:
         """Assign every block in a compress batch to a basis row.
 
         Returns the per-block assignments and the gathered per-block bases
-        ``[N, r, F]`` (row-orthonormal) to hand to `reproject_U`.
+        ``[N, r, F]`` to hand to `reproject_U`. A block whose `Assignment` has
+        ``is_new`` set FOUNDED its own group, so its gathered basis IS its own V
+        and the caller should leave U alone entirely rather than round-tripping
+        it through a solve -- see `_assign_shared_basis`.
 
         Blocks are processed IN ORDER, so a block can join a group founded by an
         earlier block of the same batch -- the common case inside one document,
@@ -337,7 +373,13 @@ class SharedBasisRegistryMLX:
 
             if self._free_rows:
                 row = self._free_rows.pop()
-                basis_store[row] = V_on[n].astype(basis_store.dtype)
+                # RAW, not orthonormalised. A founder must be reproducible
+                # EXACTLY, and `reproject_U`'s pseudo-inverse gives U' == U only
+                # when the stored basis is the block's own V. Storing a
+                # unit-normalised basis keeps U V exact but rescales U and V
+                # against each other, which the router -- reading them
+                # separately -- turns into a different set of retained blocks.
+                basis_store[row] = V_pad[n].astype(basis_store.dtype)
                 self.groups.append(BasisGroup(row=row, rank=k_use, members=1,
                                               layer=layer, top_dir=V_on[n, 0]))
                 self._by_layer.setdefault(layer, []).append(self.groups[-1])

@@ -1878,7 +1878,19 @@ class MLXKVBlockManager:
                   "retained energy to 0.685 at identical pool MB. Check "
                   "basis_stats()['joined'] -- 0 is the signature."
                   % getattr(self, "kv_quant", "?"))
-        self._sb_registry: dict = {}
+        # Deliberately NOT a manager-level dict. Basis groups are SESSION state:
+        # a group records a subspace of one document's keys, and its rows are
+        # refcounted against that session's slots. Keeping them on the manager
+        # let one request's groups outlive it, so a later request's blocks
+        # scored against a PREVIOUS DOCUMENT's bases and force-joined them once
+        # the store filled.
+        #
+        # It failed exactly the way that implies and nowhere else: each case
+        # passed when run alone, and the needle suite -- which runs six cases in
+        # ONE process -- passed 2k and failed 8k at depths 0.5 and 0.9, because
+        # by the fourth case the store was full of another document's groups.
+        # A single-session probe cannot see it at all.
+
         self._rope_dims = None          # published from the model by set_rope_params
         self._rope_base = None
         self._rope_scale = 1.0
@@ -2436,10 +2448,11 @@ class MLXKVBlockManager:
         n_rows = int(session["comp_VK"][layer_idx].shape[0])
         kvh, hd = self.kv_heads, self.head_dim
 
-        reg = self._sb_registry.get(layer_idx)
+        _regs = session["basis_registry"]
+        reg = _regs.get(layer_idx)
         if reg is None:
             reg = SharedBasisRegistryMLX(capacity=n_rows, dtype=mx.float32)
-            self._sb_registry[layer_idx] = reg
+            _regs[layer_idx] = reg
 
         # Present the two stores as ONE [n_rows, rank, 2F] basis store. The
         # persistent allocation stays comp_VK/comp_VV -- this joint form is a
@@ -2484,11 +2497,26 @@ class MLXKVBlockManager:
         # TRAP 3: rebuild at the STORE width. r_proj can be narrower than the
         # pool rank on a short block, so U' -- one column per BASIS direction --
         # does not fit the buffer U came from.
+        #
+        # FOUNDERS ARE LEFT BIT-EXACT. A block that founded its own group stores
+        # its OWN V, so the projection is the identity and U' == U analytically.
+        # Routing it through the solve anyway returns U to within fp noise, and
+        # that noise is NOT harmless here: it perturbs the int8 U quantisation
+        # by a couple of LSBs, which was enough to turn the 8k needle at depths
+        # 0.5 and 0.9 from 3/3 into a truncated code at two independent SVD
+        # seeds. With nothing sharing, this makes the whole feature bit-identical
+        # to having it off -- an invariant worth having rather than an accident
+        # worth hoping for.
         U_new = reproject_U(U_batch, Vcat, gathered).astype(U_batch.dtype)
         Vh_new = gathered.astype(U_batch.dtype)
+        _founded = [i for i, a in enumerate(assignments) if a.is_new]
+        if _founded:
+            _idx = mx.array(_founded, dtype=mx.int32)
+            U_new[_idx] = U_batch[_idx]
+            Vh_new[_idx] = Vcat[_idx].astype(U_batch.dtype)
         return U_new, Vh_new, Vh_new[:, :, :F], Vh_new[:, :, F:]
 
-    def basis_stats(self, layer_idx: int = None) -> dict:
+    def basis_stats(self, layer_idx: int = None, session_id: str = None) -> dict:
         """Grouping diagnostics. `joined == 0` is the signature of a run where
         the feature degenerated into lossy V-compression -- see the 4-bit
         warning at construction. Always read it next to the memory number,
@@ -2496,14 +2524,18 @@ class MLXKVBlockManager:
         allocating fewer rows, not from grouping succeeding."""
         if not self._shared_basis:
             return {"enabled": False}
-        keys = ([layer_idx] if layer_idx is not None else list(self._sb_registry))
+        regs = {}
+        for _sid in ([session_id] if session_id is not None else list(self.sessions)):
+            _s = self.sessions.get(_sid)
+            if _s is not None and _s.get("basis_registry"):
+                for _l, _r in _s["basis_registry"].items():
+                    regs.setdefault(_l, []).append(_r)
+        keys = ([layer_idx] if layer_idx is not None else list(regs))
         out = {"enabled": True, "frac": self._sb_frac, "founded": 0,
                "joined": 0, "forced": 0, "groups": 0}
         kept_sum, kept_n = 0.0, 0
         for k in keys:
-            reg = self._sb_registry.get(k)
-            if reg is None:
-                continue
+          for reg in regs.get(k, []):
             st = reg.stats()
             for f in ("founded", "joined", "forced", "groups"):
                 out[f] += st[f]
@@ -2584,6 +2616,8 @@ class MLXKVBlockManager:
             "basis_claimed": ([np.zeros((max_blocks,), dtype=np.bool_)
                                for _ in range(self.num_layers)]
                               if self._shared_basis else None),
+            # layer_idx -> SharedBasisRegistryMLX, scoped to THIS session.
+            "basis_registry": ({} if self._shared_basis else None),
             "comp_anc_k": self._per_layer((max_blocks, self.kv_heads, self.head_dim), dtype),
             "comp_anc_v": self._per_layer((max_blocks, self.kv_heads, self.head_dim), dtype),
             # Per-block element-wise key min/max — one of two signals the top-K
@@ -2657,6 +2691,18 @@ class MLXKVBlockManager:
             "comp_res_mask": ((self.block_size - 1,), mx.bool_),
             "comp_res_pos":  ((self.max_residual,), mx.int32),
         }
+        # Under sharing comp_VK/comp_VV are indexed by BASIS ROW, so they must
+        # NOT grow one row per new block -- that would silently undo the whole
+        # saving and leave the store disagreeing with the frac contract. They
+        # grow by ceil(frac * grow); the block -> row map grows by the full
+        # `grow` because it IS block-indexed.
+        _basis_tails = {}
+        _basis_grow = 0
+        if self._shared_basis:
+            for _k in ("comp_VK", "comp_VV"):
+                _basis_tails[_k] = grown_tails.pop(_k)
+            _basis_grow = max(1, math.ceil(self._sb_frac * grow))
+
         for l in range(self.num_layers):
             # Layers that own no KV cache hold zero-row slabs (see _per_layer);
             # growing them would hand back exactly the memory this sizing saves.
@@ -2668,6 +2714,26 @@ class MLXKVBlockManager:
                 pad = mx.zeros((grow,) + tail, dtype=dt)
                 session[key][l] = mx.concatenate([session[key][l], pad], axis=0)
             session["comp_res_n"][l] = session["comp_res_n"][l] + [0] * grow
+
+            if self._shared_basis:
+                for key, (tail, dt) in _basis_tails.items():
+                    pad = mx.zeros((_basis_grow,) + tail, dtype=dt)
+                    session[key][l] = mx.concatenate([session[key][l], pad], axis=0)
+                # Block-indexed, so full width. New slots point at row 0 holding
+                # NO claim -- the same trap-1 invariant a fresh session has.
+                session["basis_of"][l] = mx.concatenate(
+                    [session["basis_of"][l], mx.zeros((grow,), dtype=mx.int32)], axis=0)
+                session["basis_claimed"][l] = np.concatenate(
+                    [session["basis_claimed"][l], np.zeros((grow,), dtype=np.bool_)])
+                # Hand the new rows to the registry, or they are allocated but
+                # never allocatable and every later block force-joins instead.
+                _reg = session["basis_registry"].get(l)
+                if _reg is not None:
+                    _old_cap = _reg.capacity
+                    _reg.capacity = _old_cap + _basis_grow
+                    _reg._free_rows = (list(range(_reg.capacity - 1, _old_cap - 1, -1))
+                                       + _reg._free_rows)
+
         session["max_blocks"] = new_cap
         return new_cap
 
@@ -2694,6 +2760,11 @@ class MLXKVBlockManager:
                     if not isinstance(lst, list):
                         if isinstance(lst, mx.array):
                             return mx.array(lst)
+                        # numpy fell through here UNCHANGED, so a snapshot
+                        # shared basis_claimed with the live session and a
+                        # rollback would mutate the checkpoint it restored from.
+                        if isinstance(lst, np.ndarray):
+                            return lst.copy()
                         return lst
                     return [_copy_list(x) for x in lst]
                 dst[k] = _copy_list(v)
@@ -2739,6 +2810,11 @@ class MLXKVBlockManager:
                     if not isinstance(lst, list):
                         if isinstance(lst, mx.array):
                             return mx.array(lst)
+                        # numpy fell through here UNCHANGED, so a snapshot
+                        # shared basis_claimed with the live session and a
+                        # rollback would mutate the checkpoint it restored from.
+                        if isinstance(lst, np.ndarray):
+                            return lst.copy()
                         return lst
                     return [_copy_list(x) for x in lst]
                 dst[k] = _copy_list(v)
@@ -2841,7 +2917,7 @@ class MLXKVBlockManager:
                     # returns to the free list on its own.
                     _cl = session["basis_claimed"][layer_idx]
                     _bo = np.array(session["basis_of"][layer_idx])
-                    _reg = self._sb_registry.get(layer_idx)
+                    _reg = session["basis_registry"].get(layer_idx)
                     for _slot in range(keep_blocks, _cl.shape[0]):
                         if _cl[_slot]:
                             if _reg is not None:
@@ -2910,6 +2986,11 @@ class MLXKVBlockManager:
                     if not isinstance(lst, list):
                         if isinstance(lst, mx.array):
                             return mx.array(lst)
+                        # numpy fell through here UNCHANGED, so a snapshot
+                        # shared basis_claimed with the live session and a
+                        # rollback would mutate the checkpoint it restored from.
+                        if isinstance(lst, np.ndarray):
+                            return lst.copy()
                         return lst
                     return [_copy_list(x) for x in lst]
                 dst[k] = _copy_list(v)
@@ -3803,8 +3884,27 @@ class MLXKVBlockManager:
         recon_delta = mx.matmul(U_batch, Vh_batch) * mx.expand_dims(mx.expand_dims(scales_batch, 1), 2)
         recon_delta_k = recon_delta[:, :, :self.kv_heads * self.head_dim]
         recon_delta_v = recon_delta[:, :, self.kv_heads * self.head_dim:]
-        if v_scale_on:
+        if v_scale_on and not self._shared_basis:
             recon_delta_v = recon_delta_v / v_gain_broadcast
+        # `and not self._shared_basis` -- DOUBLE-UNDO GUARD.
+        #
+        # Normally this reconstruction is built from the PRE-undo Vh_batch, so
+        # the V half still carries the v_scale gain and has to be divided out
+        # here to match what is actually stored in comp_VV.
+        #
+        # Under sharing the basis MUST be taken post-undo: one row backs many
+        # blocks, and v_gain is per block, so a pre-undo shared row could not be
+        # unscaled per member. _assign_shared_basis therefore returns a Vh whose
+        # V half is ALREADY unscaled, and dividing again here undoes it twice.
+        #
+        # This is not cosmetic. recon feeds the residual ranking below, so a
+        # wrong V reconstruction selects residuals against a target the decoder
+        # never produces -- repairing errors that do not exist while missing the
+        # real ones. It cost the 8k needle at depths 0.5 and 0.9, which returned
+        # a TRUNCATED code (`ZEBRA-4471`, dropping `-QUARTZ`) deterministically:
+        # exactly the partial-value signature. It reproduced with sharing
+        # effectively DISABLED (frac 1.0, threshold unreachable), which is what
+        # identified it as a port defect rather than a cost of sharing.
 
         errors_k = mx.linalg.norm(batch_deltas_k - recon_delta_k, axis=-1)
         errors_v = mx.linalg.norm(batch_deltas_v - recon_delta_v, axis=-1)
