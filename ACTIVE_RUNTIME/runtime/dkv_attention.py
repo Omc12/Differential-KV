@@ -3860,7 +3860,27 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 _dk = dense_k_assembled if dense_k_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                 _dv = dense_v_assembled if dense_v_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                 
-                                if dense_k_assembled is not None:
+                                # `and not _pool_rotated_k()` -- DOUBLE-ROTATION GUARD.
+                                # dense_k_assembled comes from assemble_dense_window_kv,
+                                # i.e. the blocks' active_k. When the pool stores POST-RoPE
+                                # keys those rows are ALREADY in their true rotational
+                                # frame, and handing cos/sin to the shader rotates them a
+                                # second time.
+                                #
+                                # Reachable in production, not hypothetically: `low` is the
+                                # only preset that keeps rotated_pool=True (config.py:143)
+                                # and it also sets approximate_attn=True on macOS
+                                # (config.py:37), which is exactly the _is_mps_decode gate
+                                # above. So `low` on Apple silicon double-rotated its whole
+                                # dense window. CUDA cannot see it -- this branch needs MPS.
+                                #
+                                # Passing EMPTY cos/sin is the right disable: metal_runtime.mm
+                                # :453 derives has_dense_rope separately from has_dense, so
+                                # the dense window is still attended, just not rotated.
+                                #
+                                # Silent by construction: RoPE is orthogonal, so a second
+                                # rotation preserves every norm and only corrupts angles.
+                                if dense_k_assembled is not None and not _pool_rotated_k():
                                     # OPT (P1-7): reuse cached position tensor (shared with CUDA combined path)
                                     _cache_key = (session_dict.get("routing_version", 0), dense_len)
                                     _dp_cache  = session_dict.get("dense_pos_tensor_cache")
@@ -4125,7 +4145,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             pool.scales.contiguous(),
                                             _ca,
                                             _sa,
-                                            block_indices.contiguous(),
+                                            # int32: dkv_decode.metal reads slot_indices through a
+                                            # typed pointer, and the binding REJECTS Long rather than
+                                            # reading past the allocation (the guard added with the
+                                            # fp16-RoPE-table fix, 39a4a9d1). That commit converted
+                                            # anchor_indices here and left this one raw, so the
+                                            # conversion its own error message prescribes was never
+                                            # applied at the call site.
+                                            block_indices.to(torch.int32).contiguous(),
                                             _scale,
                                             num_heads,
                                             num_key_value_heads,
@@ -4154,7 +4181,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             pool.scales.contiguous(),
                                             _ca_true,
                                             _sa_true,
-                                            block_indices.contiguous(),
+                                            # int32: dkv_decode.metal reads slot_indices through a
+                                            # typed pointer, and the binding REJECTS Long rather than
+                                            # reading past the allocation (the guard added with the
+                                            # fp16-RoPE-table fix, 39a4a9d1). That commit converted
+                                            # anchor_indices here and left this one raw, so the
+                                            # conversion its own error message prescribes was never
+                                            # applied at the call site.
+                                            block_indices.to(torch.int32).contiguous(),
                                             _scale,
                                             num_heads,
                                             num_key_value_heads,
@@ -4234,7 +4268,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             pool.scales.contiguous(),
                                             _ca,
                                             _sa,
-                                            block_indices.contiguous(),
+                                            # int32: dkv_decode.metal reads slot_indices through a
+                                            # typed pointer, and the binding REJECTS Long rather than
+                                            # reading past the allocation (the guard added with the
+                                            # fp16-RoPE-table fix, 39a4a9d1). That commit converted
+                                            # anchor_indices here and left this one raw, so the
+                                            # conversion its own error message prescribes was never
+                                            # applied at the call site.
+                                            block_indices.to(torch.int32).contiguous(),
                                             _scale,
                                             num_heads,
                                             num_key_value_heads,
@@ -4263,7 +4304,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             pool.scales.contiguous(),
                                             _ca_true,
                                             _sa_true,
-                                            block_indices.contiguous(),
+                                            # int32: dkv_decode.metal reads slot_indices through a
+                                            # typed pointer, and the binding REJECTS Long rather than
+                                            # reading past the allocation (the guard added with the
+                                            # fp16-RoPE-table fix, 39a4a9d1). That commit converted
+                                            # anchor_indices here and left this one raw, so the
+                                            # conversion its own error message prescribes was never
+                                            # applied at the call site.
+                                            block_indices.to(torch.int32).contiguous(),
                                             _scale,
                                             num_heads,
                                             num_key_value_heads,
@@ -4743,7 +4791,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             seq_limit = cos_flat.shape[0]
                                             cos_dense = cos_flat[dense_positions.clamp(min=0, max=seq_limit - 1)].unsqueeze(0).unsqueeze(1)
                                             sin_dense = sin_flat[dense_positions.clamp(min=0, max=seq_limit - 1)].unsqueeze(0).unsqueeze(1)
-                                            dense_k_rot = _apply_rope_single(dense_k_valid, cos_dense, sin_dense)
+                                            # Same double-rotation guard as the production
+                                            # kernel path above, and it must agree with it or
+                                            # this validator reports a mismatch that is its
+                                            # own doing.
+                                            dense_k_rot = (dense_k_valid if _pool_rotated_k()
+                                                           else _apply_rope_single(
+                                                               dense_k_valid, cos_dense, sin_dense))
 
                                         _q_val = query_states[b_idx, :, 0, :]
                                         _full_bsizes = pool.seq_lens[_full_bi]

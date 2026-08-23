@@ -55,7 +55,17 @@ BENCH = os.path.join(REPO, "benchmarks")
 # they are inert and will silently reproduce `baseline` -- the harness says so
 # rather than letting that read as "shared bases change nothing".
 ARMS = {
-    "dense":      {"DKV_COMPRESSED_DECODE": "0"},
+    # `dense` is NOT an env flip on the DKV wrapper. DKV_COMPRESSED_DECODE=0
+    # forces exact full-KV attention at DECODE only; the prompt is still read
+    # through block-sparse PREFILL, which is gated on manager._sparse_prefill
+    # (default on) and context length alone -- see mlx_dkv_wrapper.py:5493.
+    # This harness measures the FIRST decode step, which is a pure function of
+    # what prefill produced, so that arm would have compared DKV-prefill
+    # against DKV-prefill and reported a reassuringly small KL for a reason
+    # unrelated to fidelity. The real control is plain mlx_lm with DKV never
+    # loaded, which is the convention every other MLX harness here uses
+    # (colab/mlx_needle_parity.py:104, colab/linkbench_mlx.py:70).
+    "dense":      {},
     "baseline":   {},
     "basis0.50":  {"DKV_SHARED_BASIS": "1", "DKV_SHARED_BASIS_FRAC": "0.50"},
     "basis0.25":  {"DKV_SHARED_BASIS": "1", "DKV_SHARED_BASIS_FRAC": "0.25"},
@@ -63,6 +73,53 @@ ARMS = {
 _ARM_KEYS = ("DKV_SHARED_BASIS", "DKV_SHARED_BASIS_FRAC", "DKV_COMPRESSED_DECODE")
 
 QUESTION = "What is the secret passcode? Repeat it exactly."
+
+
+def _run_dense_arm(args, np, build_prompt):
+    """True dense control: plain mlx_lm, DKV never imported or loaded.
+
+    Takes the FIRST-STEP next-token logits as the last row of a full-attention
+    forward over the prompt -- exactly the quantity the DKV arm's
+    `_sanitize_logits` spy captures, since at step 1 with temperature 0,
+    repetition_penalty 1.0 and CAD off (alpha default 0) every transform ahead
+    of that hook is the identity.
+
+    The prompt is fed through a KV cache in chunks because the lm_head is
+    applied to EVERY position: at 8k with a 151,936-token vocab a single-shot
+    forward materialises 8192*151936*2 B = 2.5 GB of logits on top of the
+    weights, which does not fit this 8 GB machine alongside everything else.
+    Chunking changes nothing numerically -- attention is causal, so the last
+    token attends over the identical set of keys either way.
+    """
+    import mlx.core as mx
+    from mlx_lm import load as mlx_load
+    from mlx_lm.models.cache import make_prompt_cache
+
+    model, tok = mlx_load(args.model)
+    print(f"[dense control] mlx_lm, DKV NOT loaded ({args.model})", flush=True)
+
+    rows = []
+    for depth in args.depths:
+        prompt = build_prompt(tok, args.ctx, depth)
+        ids = tok.encode(prompt)
+        cache = make_prompt_cache(model)
+        step = 512
+        logits = None
+        for i in range(0, len(ids), step):
+            chunk = mx.array([ids[i:i + step]])
+            logits = model(chunk, cache=cache)
+            mx.eval(logits)
+        # cast INSIDE mlx first: numpy cannot consume a bfloat16 buffer
+        lg = np.array(logits[0, -1].astype(mx.float32), copy=True).reshape(-1)
+        del cache, logits
+        mx.clear_cache()
+        rows.append({"arm": args.arm, "depth": depth,
+                     "logits": [float(x) for x in lg]})
+        print(f"dense d={depth}: {len(ids)} tok, captured {len(lg)} logits, "
+              f"top1={int(np.argmax(lg))}", flush=True)
+
+    with open(args.json, "w") as f:
+        json.dump(rows, f)
 
 
 def run_one_arm(args):
@@ -79,9 +136,13 @@ def run_one_arm(args):
     sys.path.insert(0, BENCH)
 
     import numpy as np
+    from niah_recall import build_prompt
+
+    if args.arm == "dense":
+        return _run_dense_arm(args, np, build_prompt)
+
     import serving.mlx_dkv_wrapper as W
     from serving.mlx_dkv_wrapper import MLXDKVWrapper
-    from niah_recall import build_prompt
 
     # Wrap the module-level sanitiser that generate()'s local sample_logits
     # closure calls. Captures every step; we keep the FIRST of each generate.
@@ -99,7 +160,7 @@ def run_one_arm(args):
 
     rows = []
     try:
-        w = MLXDKVWrapper(model_id=args.model)
+        w = MLXDKVWrapper(model_id=args.model, config={"preset": args.preset})
         w.ensure_loaded()
         tok = w.tokenizer
         for depth in args.depths:
@@ -118,10 +179,23 @@ def run_one_arm(args):
                 print(f"{args.arm} d={depth}: no logits captured -- did "
                       f"_sanitize_logits move?", flush=True)
                 continue
+            # ENGAGEMENT READOUT -- without it a KL of 0 is ambiguous between
+            # "DKV tracks dense" and "DKV never compressed anything". On CUDA
+            # the 4k arm reported pool 0.0 MB for exactly that reason, so the
+            # model's working range and DKV's active range never overlapped.
+            nb = 0
+            try:
+                sess = w.manager.sessions.get(sid)
+                if sess is not None:
+                    nb = int(sum(sess["num_blocks"]))
+            except Exception:                                    # noqa: BLE001
+                nb = -1
             rows.append({"arm": args.arm, "depth": depth,
+                         "blocks": nb,
                          "logits": [float(x) for x in lg]})
             print(f"{args.arm} d={depth}: captured {len(lg)} logits, "
-                  f"top1={int(np.argmax(lg))}", flush=True)
+                  f"top1={int(np.argmax(lg))}, compressed_blocks={nb}",
+                  flush=True)
     finally:
         W._sanitize_logits = _orig
 
@@ -136,6 +210,7 @@ def main():
     ap.add_argument("--depths", type=float, nargs="+",
                     default=[0.1, 0.3, 0.5, 0.7, 0.9])
     ap.add_argument("--arms", nargs="+", default=["dense", "baseline"])
+    ap.add_argument("--preset", default="mid")
     ap.add_argument("--arm", default="")
     ap.add_argument("--json", default="")
     args = ap.parse_args()
@@ -149,19 +224,23 @@ def main():
 
     tmp = tempfile.mkdtemp(prefix="dkv-logit-mlx-")
     per_arm = {}
+    blocks = {}
     for arm in args.arms:
         if arm not in ARMS:
             raise SystemExit(f"unknown arm {arm}; have {list(ARMS)}")
         out = os.path.join(tmp, f"{arm}.json")
         cmd = [sys.executable, os.path.abspath(__file__), "--arm", arm,
                "--model", args.model, "--ctx", str(args.ctx), "--json", out,
+               "--preset", args.preset,
                "--depths"] + [str(d) for d in args.depths]
         p = subprocess.run(cmd, cwd=REPO)
         if p.returncode != 0 or not os.path.exists(out):
             print(f"{arm}: FAILED (exit {p.returncode}) -- no data", flush=True)
             continue
         with open(out) as f:
-            per_arm[arm] = {r["depth"]: r["logits"] for r in json.load(f)}
+            _data = json.load(f)
+        per_arm[arm] = {r["depth"]: r["logits"] for r in _data}
+        blocks[arm] = [r.get("blocks", -1) for r in _data]
 
     if "dense" not in per_arm:
         raise SystemExit("no dense control -- nothing to compare against")
@@ -175,16 +254,19 @@ def main():
     print(f"\n== MLX first-step logit fidelity vs DENSE "
           f"(n={len(args.depths)} prompts, ctx={args.ctx}) ==")
     print(f"{'arm':>12} {'top1 agree':>11} {'KL(dense||arm)':>15} "
-          f"{'dense-top1 rank':>16} {'top5 overlap':>13}")
+          f"{'dense-top1 rank':>16} {'top5 overlap':>13} {'blocks':>10} "
+          f"{'max|dlogit|':>12}")
     for arm in args.arms:
         if arm not in per_arm:
             continue
         agree, kls, ranks, ov, n = 0, [], [], [], 0
+        mx_abs = 0.0
         for d, dl in per_arm["dense"].items():
             al = per_arm[arm].get(d)
             if al is None:
                 continue
             n += 1
+            mx_abs = max(mx_abs, max(abs(x - y) for x, y in zip(dl, al)))
             pd, pa = _softmax(dl), _softmax(al)
             kls.append(sum(p * (math.log(p + 1e-12) - math.log(q + 1e-12))
                            for p, q in zip(pd, pa)))
@@ -197,8 +279,20 @@ def main():
             ov.append(len(set(top5d) & set(top5a)))
         if not n:
             continue
-        print(f"{arm:>12} {agree:>7}/{n:<3} {sum(kls)/n:>15.5f} "
-              f"{sum(ranks)/n:>16.2f} {sum(ov)/n:>12.1f}/5")
+        _b = blocks.get(arm) or []
+        _bs = "n/a" if arm == "dense" else (
+            f"{sum(_b)/len(_b):.0f}" if _b else "?")
+        print(f"{arm:>12} {agree:>7}/{n:<3} {sum(kls)/n:>15.3e} "
+              f"{sum(ranks)/n:>16.2f} {sum(ov)/n:>12.1f}/5 {_bs:>10} "
+              f"{mx_abs:>12.3e}")
+        if arm != "dense" and mx_abs == 0.0:
+            print(f"{'':>12} ^^ BIT-IDENTICAL to dense. Suspect the arm never "
+                  f"took the compressed path rather than reading this as "
+                  f"perfect fidelity.")
+        if arm != "dense" and _b and sum(_b) == 0:
+            print(f"{'':>12} ^^ INERT: zero compressed blocks -- this arm ran "
+                  f"DKV with nothing in the pool, so its KL says nothing "
+                  f"about compression fidelity.")
 
     print("\nRead the BASELINE row first -- it is the whole point of running")
     print("this on MLX. CUDA's baseline is KL 10.579 with dense's top-1 at rank")

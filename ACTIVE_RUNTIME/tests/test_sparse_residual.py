@@ -328,7 +328,13 @@ def test_metal_residual_and_fact_parity():
     )
     
     Q = torch.randn(num_heads, head_dim, device=device, dtype=torch.float16)
-    block_indices = torch.tensor([pool_idx], device=device, dtype=torch.long)
+    # int32, not long: this test drives dkv_core.decode_attention_metal DIRECTLY,
+    # and the shader reads slot_indices through a typed pointer. The binding grew
+    # an explicit dtype guard with the fp16-RoPE-table fix (39a4a9d1) and this
+    # test was not updated with it, so it has failed on every Mac since -- and
+    # CUDA never runs it, which is why it stayed unnoticed. The sibling
+    # test_decode_attention_metal_isolated.py already passes int32 here.
+    block_indices = torch.tensor([pool_idx], device=device, dtype=torch.int32)
     blk_sizes = torch.tensor([seq_len], device=device, dtype=torch.int32)
     anchor_indices = torch.tensor([0], device=device, dtype=torch.long)
     

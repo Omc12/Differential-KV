@@ -2962,6 +2962,23 @@ def native_triton_sparse_attn_decode(
     assert bsz == 1 and q_len == 1
     
     if not HAS_TRITON:
+        # SAME N==0 GUARD the Triton branch grew at the `else` further down.
+        # Without it this early return lands in
+        # _pytorch_vectorized_sparse_attn_decode, which returns a ZERO-WIDTH
+        # tensor ([1, H_q, 1, 0]) for a zero-block step: the dense window is
+        # present and simply never attended.
+        #
+        # CUDA cannot observe this. HAS_TRITON is always true there, so the
+        # 2026-08-17 dense-only fix was written into the Triton path alone and
+        # this branch -- the one taken on Apple silicon and CPU -- kept the
+        # original bug. Caught by test_triton_combined.py, which fails on a Mac
+        # and passes on CUDA for that reason.
+        if block_indices is None or block_indices.shape[0] == 0:
+            _dense_only = _dense_only_attend(
+                q, dense_blocks, active_k, active_v, active_len,
+                num_key_value_groups, cos, sin)
+            if _dense_only is not None:
+                return _dense_only
         return _pytorch_vectorized_sparse_attn_decode(
             q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
             anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,

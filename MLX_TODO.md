@@ -246,3 +246,199 @@ is the bar MLX should be held to**: `benchmarks/niah_recall.py` and
 `colab/mlx_needle_parity.py` are the equivalents, and any MLX rung that does
 not reach 3/3 with deterministic output is a real gap rather than a tuning
 question.
+
+---
+
+# MLX RESULTS — 2026-08-23, M3 (8 GB), mlx 0.32.0 / mlx_lm 0.31.3
+
+Run on Apple silicon against this file. Section numbers refer to the work order
+above. `transformers 5.14.1`, `torch 2.13.0`, venv `dkv_venv`.
+
+## 0. Baseline
+
+The four MLX-only files collect and pass (17 tests). The full suite did NOT
+start green:
+
+| stage | result |
+|---|---|
+| as pulled | **263 passed, 9 failed**, 1 skipped |
+| after the fixes below | **277 passed, 0 failed**, 1 skipped |
+
+The nine split into two groups, and the split is the useful part: four failed in
+ISOLATION (real defects, all of them macOS-only and therefore invisible to CUDA),
+five failed ONLY in the suite (cross-test pollution).
+
+**Four real, all unreachable from CUDA:**
+
+1. `test_triton_combined.py` ×3 — `native_triton_sparse_attn_decode` returns a
+   ZERO-WIDTH tensor for a zero-block step. The N==0 dense-only fix of
+   2026-08-17 was written into the Triton branch's `else`, but the function
+   short-circuits at its top on `if not HAS_TRITON:` and returns before ever
+   reaching it. CUDA always has Triton, so CUDA always skipped the broken
+   branch; Apple silicon and CPU always take it. Fixed by applying the same
+   `_dense_only_attend` guard in the non-Triton early return.
+2. `test_sparse_residual.py::test_metal_residual_and_fact_parity` — the test
+   passes `block_indices` as `torch.long` while the Metal binding requires
+   Int32 (the guard added with `39a4a9d1`, the fp16-RoPE-table fix). The test
+   predates the guard and CUDA never runs it. **The production call sites had
+   the same omission**: `39a4a9d1` converted `anchor_indices` and left
+   `block_indices` raw at all four `decode_attention_metal` sites, so the
+   conversion its own error message prescribes was never applied.
+   `_DKV_HAS_METAL_ATTN` is True on this machine, i.e. that branch is live here.
+   Fixed at the four call sites and in the test.
+
+**Five from pollution — `test_residual_budget_clamp.py`**, which passes alone
+and fails in the suite. Root cause is a global side effect, not a test bug:
+`native_core/config.py:814,819` EXPORT preset-derived values into the process
+environment with `setdefault()`, and `MLXKVBlockManager.__init__` resolves
+`self.rotated_pool` from that same `DKV_ROTATED_POOL` (`mlx_dkv_wrapper.py:1783`,
+default `"1"`). `setdefault` means the FIRST config built in the process wins for
+the whole process, so one test building a config on a preset whose
+`rotated_pool` is False silently flips the pool frame for every MLX manager
+constructed afterwards. Measured at the clamp test: env `DKV_ROTATED_POOL='0'`,
+`DKV_SVD_ENERGY='0.9999'`, and a freshly built manager reporting
+`rotated_pool=False`. Fixed in `tests/conftest.py` by restoring those two keys
+per test — the same isolation the `DKV_POOL_BUDGET_GB` pin already does, and for
+the same stated reason.
+
+*Method note:* the first two probes for this were change-detectors and printed
+nothing, which reads exactly like "no pollution". Only a probe that printed the
+VALUE (and built a manager to show what it resolved to) found it. State a
+check's coverage, not just its result.
+
+## 1. HIGHEST VALUE — logit fidelity. ANSWERED, and it is the first reading.
+
+**The harness as written could not have answered the question, for two reasons,
+both fixed in `colab/logit_fidelity_mlx.py`:**
+
+* `MLXDKVWrapper(model_id=...)` — `config` is a required positional argument, so
+  every arm died before loading. Nothing had run.
+* The `dense` arm was `DKV_COMPRESSED_DECODE=0`. On MLX that forces exact
+  full-KV attention **at decode only**; the prompt is still read through
+  block-sparse PREFILL, which gates on `manager._sparse_prefill` (default on)
+  and context length alone (`mlx_dkv_wrapper.py:5493`). This harness measures
+  the FIRST decode step, which is a pure function of what prefill produced, so
+  that arm would have compared DKV-prefill against DKV-prefill and reported a
+  reassuringly small KL for a reason having nothing to do with fidelity. The
+  real control is plain `mlx_lm` with DKV never loaded — the convention
+  `mlx_needle_parity.py:104` and `linkbench_mlx.py:70` already use.
+
+Two diagnostics were added because the headline number is otherwise ambiguous:
+`blocks` (compressed blocks actually in the pool — a KL of 0 from an empty pool
+means nothing) and `max|dlogit|` (which separates "very close" from
+"bit-identical", the latter meaning the compressed path never ran).
+
+**Qwen2.5-1.5B-Instruct, 5 depths, `mid` preset, dense = plain mlx_lm:**
+
+| ctx | arm | top-1 agree | KL(dense‖arm) | dense-top1 rank | top-5 overlap | blocks | max\|Δlogit\| |
+|---|---|---|---|---|---|---|---|
+| 8192 | dense (self-check) | 5/5 | 0.0 | 0.00 | 5.0/5 | n/a | 0.0 |
+| 8192 | **MLX DKV baseline** | **5/5** | **5.135e-12** | **0.00** | **5.0/5** | 168 | 3.125e-02 |
+| 4096 | dense (self-check) | 5/5 | 0.0 | 0.00 | 5.0/5 | n/a | 0.0 |
+| 4096 | **MLX DKV baseline** | **5/5** | **2.475e-13** | **0.00** | **5.0/5** | 56 | 3.125e-02 |
+
+Against CUDA's baseline row — 0/5 agreement, KL 10.579, dense's top-1 at rank
+1254.6 — on the same model, prompt and context.
+
+`max|Δlogit|` is 3.125e-02 = 2⁻⁵ at both contexts, which is **exactly one fp16
+ULP** at logit magnitude ~30. So the arms are not bit-identical (the compressed
+path genuinely ran and moved the numbers) but differ by the smallest step fp16
+can represent. 168 and 56 compressed blocks confirm the pool is not empty.
+
+**This is §1's first pre-decided reading, and it is not marginal — KL is twelve
+orders of magnitude below the "<1" bar that reading asks for.** Therefore:
+
+* The instrument has real resolving power on MLX. Anything measured on top of
+  this baseline is meaningful.
+* **CUDA's gap is a CUDA defect, not the price of compression.** By this file's
+  own §1, that makes it the highest-priority CUDA bug in the repo. Bisect CUDA
+  against MLX layer outputs (`colab/probe_mlx_layer_output_diff.py` and its CUDA
+  twin).
+* The 4k range OVERLAPS on MLX (56 blocks compressed), unlike CUDA where 4k had
+  an empty pool — the hypothesis in §1's last paragraph is confirmed, so 4k is a
+  usable operating point here.
+
+**Consequence for §2 that was not foreseeable when it was written:** shared bases
+scored "no measurable harm" on CUDA *because the baseline was already off the
+map*. On MLX the baseline is exact, so `mean_kept` 0.969 would be a MEASURABLE
+fidelity regression from a perfect starting point. The trade is now visible for
+the first time — which is an argument for measuring it, and against assuming it
+is free.
+
+## 3. The `_pending_query` gate — MEASURED, and MLX does NOT have the fault.
+
+§3 asked for a measurement before any decision. Run on a single-turn 8k
+`generate()`, default config:
+
+    prompt tokens              7986
+    _factual_enabled           False
+    _pending_query has sid     False
+    srl_state                  None
+    _sp_instr_pin              False
+
+The whole-prompt fallback **never executes**. The only writer of
+`current_query_tokens` is `finalize_srl_index`, which returns at its first line
+when the factual store is off (`mlx_dkv_wrapper.py:2113`), so `srl_state` is
+never built; `get_srl_state` returns None and the routing consumers at `:5128`
+and `:5176` cannot run either.
+
+CUDA's fault was a DESYNC — the consumers were live while the producer was
+gated. On MLX the producer and every consumer sit behind the same
+`_factual_enabled` flag, so there is nothing to desync. **§3's proposed edit is
+declined; the standing rule stands and `mlx_dkv_wrapper.py` was not touched.**
+
+## 4. MPS `_validate_this_step` double rotation — CONFIRMED REAL, and it was
+## never validation-only. FIXED.
+
+Not a validator quirk: the PRODUCTION `_is_mps_decode` path has the same defect.
+It hands `dense_k_assembled` to the Metal shader together with cos/sin and the
+shader rotates it — but `dense_k_assembled` comes from
+`assemble_dense_window_kv`, i.e. the blocks' `active_k`, which under
+`DKV_ROTATED_POOL=1` is ALREADY post-RoPE. Both the shader and the validator
+then rotate a second time.
+
+**Reachable in production, and on a shipped preset.** `low` is the only preset
+that keeps `rotated_pool=True` (`config.py:143`) and it also sets
+`approximate_attn=True` on macOS (`config.py:37`) — which is exactly the
+`_is_mps_decode` gate. So `low` on Apple silicon double-rotated its entire dense
+window. CUDA cannot observe any of it; the branch requires MPS.
+
+Fixed by guarding both sites on `_pool_rotated_k()`. Disabling rotation by
+passing EMPTY cos/sin is the correct mechanism: `metal_runtime.mm:453` derives
+`has_dense_rope` separately from `has_dense`, so the dense window is still
+attended, just not rotated.
+
+`tests/test_mps_dense_rope_guard.py` (5 tests) added as §4 requires. It asserts
+against the singly-rotated reference and pins the guard text at BOTH sites,
+because RoPE is orthogonal: a norm-based assertion passes while the bug is
+present. One of its tests demonstrates exactly that, so the trap is recorded
+rather than described. Negative control run: removing the guard fails the pin.
+
+## 5. Frame consistency — CONFIRMED, and it is stronger than an inference.
+
+MLX has exactly TWO K ingest sites — `capture_prefill_kv` (`:3799`) and
+`ingest_streaming` (`:3954`) — with exactly one caller each (`:5519`, `:5089`).
+Both callers pass `keys_rot` as the post-RoPE frame and `keys` as the pre-RoPE
+frame under the same `manager.rotated_pool` condition, and **both sinks raise a
+RuntimeError rather than storing the wrong frame** when the unrotated key is
+missing. MLX therefore cannot have CUDA's four-wrong-frame-capture-site problem
+structurally, not just by convention. (Those guards are what surfaced the §0
+pollution above — they were doing their job.)
+
+## 2. Shared low-rank bases — NOT STARTED. Blocked on a standing-rule decision.
+
+The math and CPU-side tests are already present and green on this Mac:
+`basis_group.py` plus `test_basis_group.py` (27), `test_shared_basis_pool.py`
+(26) and `test_shared_basis_preset.py` (14) — 67 passing. What does NOT exist is
+any MLX integration: `mlx_dkv_wrapper.py` contains **zero** references to shared
+bases.
+
+Everything remaining is inside `mlx_dkv_wrapper.py` — the allocation change at
+`:2033-2034`, the ~12 slot-indexed reads and writes §1 of the port file
+enumerates, the sliding-eviction trap at `:3605`, and the checkpoint version at
+`:2081-2082`. That is precisely the file HANDOFF §0 rule 2 forbids editing, and
+this work order's own §3 treats a ONE-LINE change to it as needing an explicit
+decision. A twelve-site change to the same file cannot need less.
+
+Deliberately left for the owner to decide, with the §1 result above as new
+input: the port's fidelity cost is now measurable rather than hidden.
