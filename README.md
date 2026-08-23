@@ -166,6 +166,8 @@ Differential-KV runtime behaviors can be fine-tuned using environment variables:
 | `DKV_TOPK_BLOCKS` | `16` | Both engines | Number of compressed micro-blocks routed per decode step. |
 | `DKV_MAX_RESIDUAL` | `128` MLX / `40` CUDA | Both engines | Exact residual token rows per block. CUDA `mid`/`ultra`/`low` use 40, `high` keeps 128; MLX is flat 128. The budget measured **inert** on four benchmarks including a digit-table one, and the pool allocates these slots on *every* block, so 40 is a straight saving. |
 | `DKV_ROTATED_POOL` | `1` everywhere (`0` on CUDA `ultra` only) | CUDA / MLX | `1` stores POST-RoPE keys, baking in the position a block held at **compression** time. `0` stores PRE-RoPE keys and rotates them to their absolute positions at read. **Worth it on CUDA** (40/48 → 47/48 distractor retrieval over 48 seeds, matching dense, for 18–24% of decode). **NOT worth it on MLX, measured:** 9/24 either way at 16k over 24 seeds — the same score *and the same predicted answer on all 24 seeds* — while costing ~39% of decode and a second dense-window buffer per attended layer. The knob is implemented and correct (the pool, the SVD basis and the decode logits all demonstrably change), it simply buys nothing here, so it stays **off by default on MLX and is not part of MLX's `ultra`**. On MLX it also requires `DKV_DECODE_CACHE=1` — only that path materialises the keys, so the low-rank scorer **refuses** rather than scoring unrotated keys against a rotated query. Judge it with `colab/linkbench_mlx.py`, never the needle sweep, which has no confusable distractors and cannot see it. |
+| `DKV_SHARED_BASIS` | `0` (opt-in) | CUDA | Blocks whose delta subspaces agree read **one** basis row instead of each storing its own $V$. $V$ is 39% of a pool slot and the item adjacent blocks of a document most nearly agree on. Measured on Qwen2.5-1.5B @8k, `mid`, `frac=0.50`: pool **91.4 → 69.8 MB (−23.6%)** with 2.58× sharing, 463 voluntary joins, **zero forced**, retained delta energy **0.969**. `_bytes_per_block` amortises $V$ by the same fraction, so the budget holds proportionally **more blocks** rather than the same context in less memory. **Requires fp16 KV — see `DKV_SHARED_BASIS_FRAC` for the q4_0 trap.** Not a preset default: the accuracy instrument that would justify one (`colab/logit_fidelity.py`) shows no measurable harm but cannot resolve a small change, because the DKV baseline already sits far from dense at this operating point (KL 10.58, dense's top-1 at rank 1255). Also requires exact-form residuals (the default); under `DKV_RESIDUAL_EXACT_KEYS=0` the pool **refuses** and says so, since correction-form residuals are defined against a block's own reconstruction. |
+| `DKV_SHARED_BASIS_FRAC` | `0.50` | CUDA | Basis rows allocated, as a fraction of block slots — a **capacity contract**, not a prediction. When the store fills, blocks force-join their nearest group, so a document that shares worse than assumed degrades in *fidelity*, never in correctness. Deeper settings are a different trade and should be argued for as one: retained energy `0.50 → 0.969`, `0.25 → 0.905`, `0.125 → 0.759`. **Do not pair with 4-bit KV.** On `low` (`kv_quant=q4_0`) quantisation noise destroys the subspace agreement entirely — **zero** voluntary joins, 294 forced, retained energy **0.685** — while pool MB is *identical*, because the saving comes from allocating fewer basis rows and not from grouping succeeding. That makes the failure invisible in memory numbers; the pool warns at construction, and `pool.basis_stats()['joined'] == 0` is the signature. |
 | `DKV_POOL_ATTENDED_ONLY` | `1` | MLX | Size each session's pool by the layers that actually own a KV cache. On hybrid models (Qwen3.5: **6 of 24** layers) the rest can never hold a block, and allocating for them cost 406.9 MB of a 542.5 MB pool at 11.4k. Set `0` to restore the old full-width allocation. No-op on dense-attention models. |
 | `--micro-block-size` / `block_size` | **`1024`** (MLX) | MLX | Tokens per compressed block. Raised from 256 after measuring all four metrics at once on Qwen3.5-2B-4bit: linkbench 9/24 → **24/24 (= dense)**, needles 6/6 either way, session pool 135.6 → **60.0 MB**, and the pool against the dense KV it replaces 0.95× → **0.28× (3.61× smaller)**. Retrieval tracks the **number of blocks** the context is split into, not fidelity or routing — at 16k, 256 gives ~58 blocks and 1024 gives ~15. At 256 the fixed 128-token residual budget stored *half of every block verbatim*, which is why the old default barely compressed. Use `512` for synthesis-shaped work. |
 | `DKV_DETERMINISTIC` | `0` | CUDA | `1` forces a deterministic SDPA backend. Greedy decode is **not** reproducible at long context without it — the cause is the decode attention's reduction, not compression. **Turn this on for any run you intend to compare.** |
@@ -339,6 +341,15 @@ The residual budget $R$ acts as an explicit memory-speed-accuracy dial:
 | **DKV Block ($R=64$)** | | **116,680 B** | **113.9 KiB ($2.25\times$ compression)** |
 | **Dense Block** | $[256, 2, 128] \times 2$ | **262,144 B** | **256.0 KiB ($1.00\times$)** |
 
+**$V_K, V_V$ is the largest item after the residual store**, and the one blocks
+most nearly agree on — which is what `DKV_SHARED_BASIS` (opt-in, CUDA) exploits.
+At `frac=0.50` the 32,768 B row is amortised across two slots, taking the
+low-rank core from 51,144 B to **34,760 B (−32%)** and the whole $R=128$ block
+to 165,832 B. Measured end to end on Qwen2.5-1.5B @8k the pool goes
+**91.4 → 69.8 MB (−23.6%)** at retained delta energy 0.969 with zero forced
+joins. The saving is spent on holding *more blocks* in the same budget, not on
+using less memory for the same context.
+
 ### 4. THUDM LongBench & NVIDIA RULER Benchmark Suites (32k Context)
 
 Evaluated on **Qwen2.5-1.5B-Instruct (int4)** under up to $32,768$ context length using DKV active runtime ($r=32$, $R=128$, $B_s=256$):
@@ -391,7 +402,20 @@ To ensure critical factual information is retained, residuals are selected using
 - **Edge-Capture:** Relational connectives with potential low-rank key collision.
 - **Coverage Bonus:** Enforces uniform spread across block token positions to prevent localized error clustering.
 
-### 3. Tiered Offloading & Asynchronous Prefetch (kTransformers-Inspired)
+### 3. Shared Low-Rank Bases (opt-in, CUDA — `DKV_SHARED_BASIS=1`)
+Blocks whose delta subspaces agree read **one** basis row instead of each storing
+its own $V$. For a group basis $V_g$ with orthonormal rows, the best
+approximation of $UV$ inside $\mathrm{span}(V_g)$ is $U' = U(V V_g^\top)$ — a
+single matmul, no re-decomposition and no touching the original K/V. Blocks join
+on **retained energy**, $\mathrm{tr}(GCC^\top)/\mathrm{tr}(GVV^\top)$ with
+$G=U^\top U$, $C=VV_g^\top$, rather than on principal angles, because angles
+weight every basis direction equally while a block's energy sits in the first
+few. Both traces are $[k,k]$, so scoring never touches the token dimension.
+Measured: **−23.6% pool** at retained energy 0.969 with zero forced joins.
+**fp16 KV only** — see the `DKV_SHARED_BASIS_FRAC` knob for why 4-bit KV breaks
+it silently.
+
+### 4. Tiered Offloading & Asynchronous Prefetch (kTransformers-Inspired)
 - **Tiered CPU-GPU KV Offloading:** Maintains a heat score for each micro-block, evicting cold blocks to pinned host RAM when GPU pool utilization exceeds 80%.
 - **Step-Ahead Async Prefetch:** Background prefetching retrieves cold blocks into GPU memory before the subsequent decode step touch point, hiding PCIe transfer latency.
 

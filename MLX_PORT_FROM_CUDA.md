@@ -182,6 +182,14 @@ stored — repairing errors that do not exist and missing the ones sharing
 introduced. MLX's equivalent seam is `compress_deferred_prefill_blocks`, before
 the `capture_scores` ranking at `:2846`.
 
+**Surface it as a CONFIG KEY, not an env var.** CUDA exposes
+`shared_basis` / `shared_basis_frac` on `DKVConfig`, resolved through the same
+`_get_bool`/`_get_float` path as every other knob and passed to the pool as
+constructor args, with `DKV_SHARED_BASIS` overriding in both directions. One
+subtlety worth copying: the env check must test for an **explicit** setting, not
+a truthy one — the helper returns False for an absent variable, so consulting it
+unconditionally lets "unset" silently override a config that asked for it on.
+
 **Residual FORM is a hard precondition.** Residuals in correction form are a
 delta against a block's OWN reconstruction, so sharing invalidates every one of
 them. Exact form (`DKV_RESIDUAL_EXCLUDE_SVD`, MLX default `"1"`) stores the
@@ -280,7 +288,7 @@ RTX 4070 SUPER, Qwen2.5-1.5B-Instruct, 8k NIAH prompt, `mid` preset,
 |---|---|---|---|---|---|---|
 | dense (control) | 0.0 | — | — | — | — | 0/3 |
 | DKV baseline | 91.4 | +0.0% | — | 1.000 | 0 | 0/3 |
-| `frac=0.50` | 69.8 | **-23.6%** | 2.6x | 0.969 | 58-142 | 0/3 |
+| `frac=0.50` | 69.8 | **-23.6%** | 2.6x | 0.969 | 0 | 0/3 |
 | `frac=0.25` | 59.0 | **-35.5%** | 3.3x | 0.905 | 128-703 | 0/3 |
 | `frac=0.125` | 53.6 | **-41.4%** | 6.5x | 0.759 | 505-1487 | 0/3 |
 
@@ -299,13 +307,50 @@ fraction of each block's delta energy that survives the shared basis, which is
 the quantity that determines reconstruction error. At `frac=0.25` blocks keep
 90.5% of their delta energy; at `0.125`, 75.9%.
 
-**The premise is only partly borne out.** The idea was that adjacent blocks of
-one document share a subspace, making the saving nearly free. At `frac=0.50`
-that holds: 58-142 forced joins and `kept` 0.969. Below it the basis store
-fills and most of the saving is bought by FORCED lossy joins, not by genuine
-redundancy — 1487 forced joins at `frac=0.125`. So `frac=0.50` is the regime
-where this is close to free; the deeper settings are lossy compression by
-another name, and should be argued for on that basis.
+**The premise holds at `frac=0.50` and only there.** Re-measured at full scale
+(756 written blocks, not the 27 of the table above — `mid`, `frac=0.50`):
+
+    groups 293/462   joined 463   forced 0   mean_kept 0.969   sharing 2.58x
+
+463 **voluntary** joins and zero forced: adjacent blocks of one document really
+do share a subspace, and the saving there is close to free. Below `frac=0.50`
+the store fills and most of the saving is bought by FORCED lossy joins instead —
+1487 of them at `frac=0.125`. The deeper settings are lossy compression by
+another name and should be argued for on that basis.
+
+*(The 58–142 forced joins previously quoted for `frac=0.50` came from a
+three-depth run whose counters accumulate across depths in one process. Per
+session it is zero.)*
+
+### Logit fidelity — the accuracy instrument that recall could not be
+
+`colab/logit_fidelity.py` compares the model's first-step next-token
+distribution against a dense control on an identical prefix. First step only,
+deliberately: greedy decode diverges, so after the first differing token the
+arms condition on different prefixes and every later comparison measures the
+divergence rather than the compression. n comes from prompts, not steps.
+
+| arm | top-1 agree | KL(dense‖arm) | dense-top1 rank | top-5 overlap |
+|---|---|---|---|---|
+| dense (self-check) | 5/5 | 0.00000 | 0.0 | 5.0/5 |
+| **DKV baseline** | 0/5 | **10.579** | **1254.6** | 0.2/5 |
+| `frac=0.50` | 0/5 | 8.265 | 118.6 | 0.2/5 |
+| `frac=0.25` | 0/5 | 9.927 | 317.4 | 0.2/5 |
+| `frac=0.125` | 0/5 | 8.611 | 189.0 | 0.2/5 |
+
+**No measurable harm** — every shared-basis arm scores *closer* to dense than
+the DKV baseline. Do not read that as an improvement: the ordering is not
+monotone in `frac`, which is the signature of noise rather than a fidelity
+ordering.
+
+**The larger finding is the baseline row.** DKV at this operating point is not
+tracking dense at all — dense's top-1 token sits at rank 1255 in DKV's ranking,
+with zero top-1 agreement and 0.2/5 top-5 overlap. That is pre-existing and has
+nothing to do with shared bases, but it explains the failed recall attempts
+above, and it means this instrument **cannot finely resolve a small change on
+top of a baseline that far out**. It is enough to justify an opt-in; it is not
+enough to justify a default. Worth running on MLX, where the baseline may sit
+much closer to dense and the instrument would then have real resolving power.
 
 
 
