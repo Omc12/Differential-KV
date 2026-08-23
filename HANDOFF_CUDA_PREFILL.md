@@ -690,30 +690,65 @@ position-alignment change. Delete `/tmp/dkv_qprobe_*.pt` and re-run both passes.
 
 ## 8. OPEN ITEMS
 
-* **Re-run `validate_cuda_dkv.py --long` on Qwen3.5-2B/32k.** Both §0.5 fixes are
-  in, and 8k NIAH went 4/6 -> 6/6 on Qwen2.5-0.5B, but the model in §1's table has
-  not been touched since. Pre-decided reading: 9/9 with `fallback_count=0` and
-  `DKV_SP_TRACE_TOKEN` still showing `k_eff < nb` means both defects were the
-  whole story; 8/9 with the needle's block RANKED but dropped means K is too small
-  (a parameter, `DKV_SPARSE_PREFILL_FRAC`); 8/9 with it kept means a third defect
-  downstream of routing.
+> **STATUS 2026-08-23.** Items re-checked against the tree on an RTX 4070 SUPER.
+> Several were already fixed and the list had gone stale; each is now marked.
+> `[CLOSED]` means verified this date, `[OPEN]` means still outstanding,
+> `[MLX]` means it moved to `MLX_TODO.md` because it cannot be tested from CUDA.
+
+* **[CLOSED] Re-run `validate_cuda_dkv.py --long` on Qwen3.5-2B/32k.**
+  **ALL CHECKS PASSED**, 2026-08-23, RTX 4070 SUPER, Qwen3.5-2B:
+
+      2k  @ 0.0 / 0.5 / 0.9   3/3 each, 1 distinct output across 3 runs
+      8k  @ 0.0 / 0.5 / 0.9   3/3 each, 1 distinct output across 3 runs
+      32k @ 0.0 / 0.5 / 0.9   3/3 each, 1 distinct output across 3 runs
+      Triton kernel used, fallback_count=0
+      partial-RoPE vs reference: max|diff| 9.5e-07 on both rope shapes
+
+  That is **9/9 with `fallback_count=0`**, the first of the three pre-decided
+  readings: both §0.5 defects were the whole story. Note `32k@0.9` — the case
+  §1 and the `DKV_RESIDUALS_IN_DENSE` entry both cite as the stubborn failure —
+  now passes 3/3 with deterministic output.
+
+  *Coverage, stated rather than implied:* the reading's `fallback_count=0` half
+  is verified directly by the validator. Its `DKV_SP_TRACE_TOKEN` /
+  `k_eff < nb` half was **not** separately checked, so "sparse prefill was
+  genuinely selective rather than degenerating to attend-all" is inferred from
+  the recall result, not measured. Re-run with the trace if that distinction
+  ever matters.
 * **Controlled prefill-throughput measurement.** Wall clock on the 3 8k cases was
   47.0s (HEAD) vs 48.7s (fixed), but the two runs emit different text once one of
   them starts answering correctly, so that number is not a throughput result. The
   RoPE fix strictly REMOVES work (no gather + rotate of dense history per chunk
   per layer); the router adds a cached min/max plus two GEMMs in place of one
   einsum. Measure it properly before quoting a number.
-* **`_apply_rope_single` at `dkv_attention.py:3344`** — same double-rotation
-  shape, but it is inside the MPS `_validate_this_step` branch, not production
-  CUDA, so it was left alone. Fix it if that validation path is ever trusted.
-* **`ingest_streaming` frame is inconsistent across prefill paths.** The
-  chunked-sparse path (the one that fails --long) captures via `_ingest_k`, but
-  INCREMENTAL prefill (`dkv_attention.py:3526`) passes raw `unrot_key_states` and
-  `finalize_contiguous_prefill` inverse-RoPEs before calling `capture_prefill_kv`.
-  Under the rotated-pool default those two write the pool in the OPPOSITE frame
-  from the first. Not exercised by 1st-turn NIAH; a 2nd-turn session is where it
-  would show. Route every capture site through `_ingest_k`.
-* **`tests/test_niah.py` is only meaningful RUN ALONE.** Run as part of the full
+* **[MLX] `_apply_rope_single`** (now `dkv_attention.py:4746`) — still open, and
+  confirmed to sit inside `if _is_mps_decode:`, so it is unreachable from CUDA
+  and cannot be tested here at all. The helper itself is now partial-RoPE
+  correct (slices by `cos.shape[-1]`), and its sibling caller at `:1699` is
+  guarded by `_pool_rotated_k()`; the `:4746` site is not obviously guarded.
+  Moved to `MLX_TODO.md` §4, where a Mac can actually reach it.
+* **[CLOSED] `ingest_streaming` frame is inconsistent across prefill paths.**
+  Fixed 2026-08-23. FOUR sites still bypassed `_ingest_k` and passed raw
+  unrotated keys: the dense/bypass path, the chunked incremental-prefill path,
+  and two more fed from a single `curr_unrot_k` variable assigned ~700 lines
+  earlier — the last two look clean at the call site, which is why they
+  survived the first pass. All now route through `_ingest_k(rot, unrot)`.
+  Pinned by `tests/test_ingest_frame_consistency.py` (4 tests), which checks
+  the ASSIGNMENTS as well as the call sites. The test is source-level on
+  purpose: RoPE is orthogonal, so a wrong frame preserves norms and corrupts
+  only angles — nothing raises and no shape changes, so there is no runtime
+  signature to assert on.
+* **[CLOSED] `tests/test_niah.py` suite isolation.** The leading hypothesis in
+  the note below — "the pool budget is computed from FREE VRAM at init, so
+  earlier tests holding memory change `max_blocks`, block sizing and therefore
+  routing" — was correct and has been acted on: `tests/conftest.py` now pins
+  `DKV_POOL_BUDGET_GB=2.0` for the whole suite, with a comment naming this as an
+  ISOLATION fix rather than a tuning knob. The full suite runs **216 passed,
+  6 skipped, 0 failed** including `test_niah`, so the file no longer needs to be
+  run alone and the suite result does discriminate. Original note kept below for
+  the reasoning.
+
+  **[HISTORICAL] `tests/test_niah.py` is only meaningful RUN ALONE.** Run as part of the full
   suite it fails all three 8k cases — *identically at HEAD and with both §0.5
   fixes in*, so it is cross-test state contamination, not a regression, and the
   full-suite NIAH result cannot discriminate anything. Ruled out by measurement:
@@ -725,10 +760,11 @@ position-alignment change. Delete `/tmp/dkv_qprobe_*.pt` and re-run both passes.
   holding memory change `max_blocks`, block sizing and therefore routing. Same
   full-suite-only pattern hits `test_triton_combined`. Whoever needs the suite
   green should fix the isolation, and until then A/B the FILE, never the suite.
-* `tests/test_facter_retention.py::test_localized_vertical_factual_retrieval` is
-  FLAKY, unrelated to any of this: unseeded `torch.randn`, ~1-in-5 failures on the
-  relaxed-threshold fallback assertion. Seed it before it costs someone a
-  bisect.
+* **[CLOSED]** `tests/test_facter_retention.py::test_localized_vertical_factual_retrieval`
+  flakiness. Already fixed before this pass: a `_deterministic_numerics` fixture
+  seeds the RNG *and* pins TF32, and its docstring records both leaks — the
+  unseeded `torch.randn` (the root cause) and `torch.set_float32_matmul_precision
+  ("high")` being set globally on DKV import (an independent second trigger).
 * **Prefill router alignment** — section 2. Done; see §0.5.
 * **64k** — untested. Depth 0.9 there puts the needle in the same relative
   position, so the same failure is *expected* but unverified. Re-check after the

@@ -4925,7 +4925,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                             curr_q = query_states[b_idx:b_idx+1]
                             curr_k = key_states[b_idx:b_idx+1]
                             curr_v = value_states[b_idx:b_idx+1]
-                            curr_unrot_k = unrot_key_states[b_idx:b_idx+1]
+                            # _ingest_k at the SOURCE, so both capture sites fed
+                            # from this variable store the frame the decoder
+                            # expects. Under DKV_ROTATED_POOL the pool holds
+                            # POST-RoPE keys and the gather skips re-rotation,
+                            # so a site storing PRE-RoPE keys drops RoPE from
+                            # everything it ingested -- silently, since the
+                            # norms match (RoPE is orthogonal).
+                            curr_unrot_k = _ingest_k(key_states, unrot_key_states)[b_idx:b_idx+1]
 
                             num_chunks = math.ceil(q_len / _chunk_size)
                             chunk_outs = []
@@ -5615,9 +5622,17 @@ def _dkv_prefill_forward_impl(
         )
         for b_idx, sid in enumerate(session_ids):
             if sid != "dummy_session":
+                # _ingest_k, not raw unrot_key. Under DKV_ROTATED_POOL the pool
+                # holds POST-RoPE keys and the decode gather skips re-rotation;
+                # a site that always stores PRE-RoPE keys therefore writes the
+                # pool in the OPPOSITE frame from every other capture site, and
+                # RoPE goes missing from whatever that path ingested. This is
+                # the bypass/dense-fallback path, so it is reached on short
+                # contexts and on second-turn sessions rather than on the
+                # first-turn NIAH that the suite exercises.
                 kv_manager.capture_prefill_kv(
                     sid, layer_idx,
-                    unrot_key[b_idx:b_idx+1].detach(),
+                    _ingest_k(key, unrot_key)[b_idx:b_idx+1].detach(),
                     value[b_idx:b_idx+1].detach(),
                 )
         return attn_out  # [B, H, q_len, D]
@@ -5667,7 +5682,10 @@ def _dkv_prefill_forward_impl(
             chunk_q     = query[b_idx:b_idx+1, :, c_start:c_end, :]
             chunk_k     = key[b_idx:b_idx+1, :, c_start:c_end, :]
             chunk_v     = value[b_idx:b_idx+1, :, c_start:c_end, :]
-            chunk_uk    = unrot_key[b_idx:b_idx+1, :, c_start:c_end, :]
+            # _ingest_k, not raw unrot_key -- same frame-consistency reason as
+            # the bypass path above. This is the chunked incremental-prefill
+            # path, which is exactly where a second-turn session lands.
+            chunk_uk    = _ingest_k(key, unrot_key)[b_idx:b_idx+1, :, c_start:c_end, :]
             c_len       = c_end - c_start
 
             # Local causal attention over new chunk
