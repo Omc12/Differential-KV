@@ -38,7 +38,7 @@ mlx_dkv_wrapper.py -- which is the reference implementation and is not edited.
 USAGE
     python colab/logit_fidelity_mlx.py --arms dense baseline
     python colab/logit_fidelity_mlx.py --arms dense baseline basis0.50   # if
-        # shared bases have been ported to MLX (see MLX_PORT_FROM_CUDA.md §1)
+        # shared bases are ported on the `mlx-shared-basis` branch
 """
 
 import argparse
@@ -67,10 +67,25 @@ ARMS = {
     # (colab/mlx_needle_parity.py:104, colab/linkbench_mlx.py:70).
     "dense":      {},
     "baseline":   {},
-    "basis0.50":  {"DKV_SHARED_BASIS": "1", "DKV_SHARED_BASIS_FRAC": "0.50"},
-    "basis0.25":  {"DKV_SHARED_BASIS": "1", "DKV_SHARED_BASIS_FRAC": "0.25"},
+    # basis arms carry DKV_ROTATED_POOL=0 because shared bases REQUIRE an
+    # unrotated pool: RoPE rotates each key by its absolute position, so blocks
+    # with identical text at different offsets have subspaces rotated apart and
+    # the grouping collapses (measured: best-partner retained energy 0.486
+    # rotated vs 0.972 unrotated; 10 voluntary joins vs 520). The pool refuses
+    # the rotated combination outright. DKV_DECODE_CACHE=1 is required by
+    # DKV_ROTATED_POOL=0 in turn.
+    #
+    # NOTE this makes the basis arms differ from `baseline` in TWO ways, so
+    # `baseline_unrot` is the arm to compare them against -- against plain
+    # `baseline` the rotation change is confounded with the sharing change.
+    "baseline_unrot": {"DKV_ROTATED_POOL": "0", "DKV_DECODE_CACHE": "1"},
+    "basis0.50":  {"DKV_SHARED_BASIS": "1", "DKV_SHARED_BASIS_FRAC": "0.50",
+                   "DKV_ROTATED_POOL": "0", "DKV_DECODE_CACHE": "1"},
+    "basis0.25":  {"DKV_SHARED_BASIS": "1", "DKV_SHARED_BASIS_FRAC": "0.25",
+                   "DKV_ROTATED_POOL": "0", "DKV_DECODE_CACHE": "1"},
 }
-_ARM_KEYS = ("DKV_SHARED_BASIS", "DKV_SHARED_BASIS_FRAC", "DKV_COMPRESSED_DECODE")
+_ARM_KEYS = ("DKV_SHARED_BASIS", "DKV_SHARED_BASIS_FRAC", "DKV_COMPRESSED_DECODE",
+             "DKV_ROTATED_POOL", "DKV_DECODE_CACHE")
 
 QUESTION = "What is the secret passcode? Repeat it exactly."
 

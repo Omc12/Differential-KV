@@ -57,7 +57,8 @@ def test_default_is_off_and_allocates_one_row_per_block():
 
 
 def test_enabled_allocates_fewer_rows_and_a_block_to_row_map():
-    m = _mgr(DKV_SHARED_BASIS="1", DKV_SHARED_BASIS_FRAC="0.25")
+    m = _mgr(DKV_SHARED_BASIS="1", DKV_SHARED_BASIS_FRAC="0.25",
+             DKV_ROTATED_POOL="0")
     assert m._shared_basis is True
     sess = m._create_empty_session(16)
     assert sess["comp_VK"][0].shape[0] == 4, (
@@ -71,7 +72,8 @@ def test_unwritten_slots_point_at_a_VALID_row():
     """Trap 1. An unwritten slot must resolve to a real row -- gathering over
     -1 reads out of bounds. It points at 0 because 0 is valid, NOT because it
     owns row 0, which is why `basis_claimed` exists alongside it."""
-    m = _mgr(DKV_SHARED_BASIS="1", DKV_SHARED_BASIS_FRAC="0.25")
+    m = _mgr(DKV_SHARED_BASIS="1", DKV_SHARED_BASIS_FRAC="0.25",
+             DKV_ROTATED_POOL="0")
     sess = m._create_empty_session(16)
     bof = sess["basis_of"][0]
     assert int(mx.min(bof).item()) == 0
@@ -93,7 +95,8 @@ def test_basis_rows_is_the_identity_when_sharing_is_off():
 def test_basis_rows_returns_one_row_per_BLOCK_under_sharing():
     """The indirection must be invisible to callers and kernels: they still get
     one basis per block even though the store holds far fewer."""
-    m = _mgr(DKV_SHARED_BASIS="1", DKV_SHARED_BASIS_FRAC="0.25")
+    m = _mgr(DKV_SHARED_BASIS="1", DKV_SHARED_BASIS_FRAC="0.25",
+             DKV_ROTATED_POOL="0")
     sess = m._create_empty_session(16)
     vk, vv = m._basis_rows(sess, 0, nb=12)
     assert vk.shape[0] == 12, (
@@ -108,7 +111,8 @@ def test_basis_rows_returns_one_row_per_BLOCK_under_sharing():
 def test_out_of_range_basis_row_raises_rather_than_reading_a_neighbour():
     """MLX does not give the device-side assert CUDA got: an out-of-range row
     silently returns another group's basis. Assert, do not rely on a crash."""
-    m = _mgr(DKV_SHARED_BASIS="1", DKV_SHARED_BASIS_FRAC="0.25")
+    m = _mgr(DKV_SHARED_BASIS="1", DKV_SHARED_BASIS_FRAC="0.25",
+             DKV_ROTATED_POOL="0")
     sess = m._create_empty_session(16)
     bad = sess["basis_of"][0]
     bad[2] = 99                       # past the 4-row store
@@ -121,7 +125,8 @@ def test_correction_form_residuals_are_refused():
     """Residuals in correction form are a delta against a block's OWN
     reconstruction, which a shared basis invalidates outright."""
     with pytest.raises(RuntimeError, match="exact-form residuals"):
-        _mgr(DKV_SHARED_BASIS="1", DKV_RESIDUAL_EXCLUDE_SVD="0")
+        _mgr(DKV_SHARED_BASIS="1", DKV_ROTATED_POOL="0",
+             DKV_RESIDUAL_EXCLUDE_SVD="0")
 
 
 @pytest.mark.parametrize("marker,why", [
@@ -170,7 +175,37 @@ def test_basis_stats_reports_joined_and_mean_kept():
     either way, so both must be reportable next to the memory number."""
     off = _mgr()
     assert off.basis_stats() == {"enabled": False}
-    on = _mgr(DKV_SHARED_BASIS="1")
+    on = _mgr(DKV_SHARED_BASIS="1", DKV_ROTATED_POOL="0")
     st = on.basis_stats()
     assert st["enabled"] is True
     assert {"joined", "forced", "founded", "mean_kept"} <= set(st)
+
+
+def test_rotated_pool_is_refused():
+    """The measured root cause of the port's grouping collapse.
+
+    RoPE rotates every key by its ABSOLUTE POSITION, so two blocks holding the
+    same text at different offsets have subspaces rotated apart -- and this
+    feature compares subspaces. Same document, frac 0.50, only DKV_ROTATED_POOL
+    differing: best-partner retained energy 0.486 vs 0.972, i.e. 10 voluntary
+    joins vs 520 and 186 forced vs 0.
+
+    It REFUSES rather than warns because the failure is silent AND expensive:
+    pool MB is identical either way (the saving comes from allocating fewer
+    basis rows), so a rotated run reports the full memory win while having
+    force-joined nearly every block.
+    """
+    with pytest.raises(RuntimeError, match="UNROTATED pool"):
+        _mgr(DKV_SHARED_BASIS="1", DKV_ROTATED_POOL="1")
+
+
+def test_rotated_pool_can_be_forced_for_measurement():
+    """The escape hatch exists so the bad configuration stays measurable."""
+    m = _mgr(DKV_SHARED_BASIS="1", DKV_ROTATED_POOL="1",
+             DKV_SHARED_BASIS_ALLOW_ROTATED="1")
+    assert m._shared_basis is True and m.rotated_pool is True
+
+
+def test_unrotated_pool_is_accepted():
+    m = _mgr(DKV_SHARED_BASIS="1", DKV_ROTATED_POOL="0")
+    assert m._shared_basis is True and m.rotated_pool is False

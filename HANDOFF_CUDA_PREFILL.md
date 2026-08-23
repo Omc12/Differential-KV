@@ -693,7 +693,9 @@ position-alignment change. Delete `/tmp/dkv_qprobe_*.pt` and re-run both passes.
 > **STATUS 2026-08-23.** Items re-checked against the tree on an RTX 4070 SUPER.
 > Several were already fixed and the list had gone stale; each is now marked.
 > `[CLOSED]` means verified this date, `[OPEN]` means still outstanding,
-> `[MLX]` means it moved to `MLX_TODO.md` because it cannot be tested from CUDA.
+> `[MLX]` means it moved to the MLX side because it cannot be tested from CUDA.
+> Those items are now ANSWERED — see `ACTIVE_RUNTIME/docs/mlx_work_record.md`
+> for the measurements and `CUDA_TODO.md` for what came back for CUDA to do.
 
 * **[CLOSED] Re-run `validate_cuda_dkv.py --long` on Qwen3.5-2B/32k.**
   **ALL CHECKS PASSED**, 2026-08-23, RTX 4070 SUPER, Qwen3.5-2B:
@@ -745,7 +747,12 @@ position-alignment change. Delete `/tmp/dkv_qprobe_*.pt` and re-run both passes.
   and cannot be tested here at all. The helper itself is now partial-RoPE
   correct (slices by `cos.shape[-1]`), and its sibling caller at `:1699` is
   guarded by `_pool_rotated_k()`; the `:4746` site is not obviously guarded.
-  Moved to `MLX_TODO.md` §4, where a Mac can actually reach it.
+  **[CLOSED 2026-08-23 on the Mac.]** It was NOT validation-only: the
+  production `_is_mps_decode` path had the same double rotation, and `low` —
+  the one preset keeping `rotated_pool=True` — also sets
+  `approximate_attn=True` on macOS, which is exactly that gate. Both sites now
+  consult `_pool_rotated_k()`; `tests/test_mps_dense_rope_guard.py` pins it.
+  See `ACTIVE_RUNTIME/docs/mlx_work_record.md` §4.
 * **[CLOSED] `ingest_streaming` frame is inconsistent across prefill paths.**
   Fixed 2026-08-23. FOUR sites still bypassed `_ingest_k` and passed raw
   unrotated keys: the dense/bypass path, the chunked incremental-prefill path,

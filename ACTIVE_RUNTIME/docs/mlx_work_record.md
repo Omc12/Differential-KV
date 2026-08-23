@@ -1,258 +1,24 @@
-# MLX work order
+# MLX work record — the 2026-08-23 cycle
 
-**Read this top to bottom once, then use it as a checklist.** Written
-2026-08-23 from a Windows/CUDA box (RTX 4070 SUPER). Nothing here was run on
-Apple silicon — MLX cannot be installed on this machine at all, so every item
-below is either *unverified on MLX by construction* or *a CUDA finding that
-needs porting*. Where something is a hypothesis it says so.
+Supersedes `MLX_TODO.md` and the second edition of `MLX_PORT_FROM_CUDA.md`, both
+deleted from `main` now that every item in them is answered. They were work
+orders written from a Windows/CUDA box by someone who could not run MLX at all;
+this file is what happened when each item was actually measured on an M3.
 
-Companion documents, in the order worth reading:
+What the CUDA side should do NEXT lives in `CUDA_TODO.md`, not here. This file
+is the record.
 
-* `MLX_PORT_FROM_CUDA.md` — what CUDA learned that MLX needs, with line
-  numbers into `mlx_dkv_wrapper.py`. **§1 is the big one.**
-* `HANDOFF_CUDA_PREFILL.md` §0 — standing rules. The one that governs this
-  file: **never edit `ACTIVE_RUNTIME/serving/mlx_dkv_wrapper.py`.** It is the
-  known-good reference implementation. Item 3 below is the single exception
-  being *proposed*, and it is written as a proposal for that reason.
-
----
-
-## 0. Setup and the baseline check
-
-```bash
-python -m venv dkv_venv && ./dkv_venv/bin/pip install -r ACTIVE_RUNTIME/requirements.txt
-./dkv_venv/bin/pip install mlx
-```
-
-Confirm the MLX-only tests collect — four of them are skipped on CUDA and have
-therefore not run in this work at all:
-
-```bash
-python -m pytest ACTIVE_RUNTIME/tests/test_unrotated_pool.py ACTIVE_RUNTIME/tests/test_residual_budget_clamp.py ACTIVE_RUNTIME/tests/test_dkv_kernel_parity.py ACTIVE_RUNTIME/tests/test_decode_cache_fused_parity.py -q
-```
-
-Then the whole suite. On CUDA it is **216 passed, 6 skipped, 0 failed** with
-five files excluded (two MLX-only, one Windows-path, and three added by the
-MLX/Mac port that import `mlx`). On a Mac they should all collect:
-
-```bash
-python -m pytest ACTIVE_RUNTIME/tests -q
-```
-
-**Record the number before changing anything.** Several items below are only
-interpretable against a known-green baseline.
-
----
-
-## 1. HIGHEST VALUE — run `logit_fidelity_mlx.py` and settle the open question
-
-```bash
-python colab/logit_fidelity_mlx.py --arms dense baseline --ctx 8192
-```
-
-**Why this is first.** On CUDA, DKV's first-step next-token distribution sits
-absurdly far from a dense control at 8k on Qwen2.5-1.5B:
-
-| arm | top-1 agree | KL(dense‖arm) | dense-top1 rank | top-5 overlap |
-|---|---|---|---|---|
-| dense (self-check) | 5/5 | 0.00000 | 0.0 | 5.0/5 |
-| **CUDA DKV baseline** | **0/5** | **10.579** | **1254.6** | **0.2/5** |
-
-DKV is not tracking dense *at all* at that operating point. That single fact
-explains why every recall-based accuracy attempt on CUDA failed to discriminate
-anything — the arms were being compared on top of a baseline already off the
-map — and it is why shared bases shipped opt-in rather than as a default.
-
-**Pre-decide the reading before you run it:**
-
-* **MLX baseline KL small (say < 1) and top-1 agreement high** → the instrument
-  has real resolving power on MLX, *and* CUDA's gap is a CUDA defect rather than
-  the price of compression. That makes it the highest-priority CUDA bug in the
-  repo, and it would be found by bisecting CUDA against MLX layer outputs
-  (`colab/probe_mlx_layer_output_diff.py` and its CUDA twin already exist).
-* **MLX baseline KL also ~10 with top-1 rank in the hundreds** → this is what
-  DKV compression costs at 8k on a 1.5B model on both engines, the CUDA number
-  is not a defect, and any accuracy claim about *any* DKV feature at this
-  operating point is unmeasurable without a larger model or shorter context.
-* **Anything in between** → report the number, do not round it to either story.
-
-Run `--ctx 4096` as well. On CUDA, 4k is where dense recalls the needle but DKV
-does not compress at all (pool 0.0 MB), so the two ranges never overlapped;
-MLX's block sizing differs (default `block_size` 1024) and may overlap.
-
----
-
-## 2. Port shared low-rank bases (`MLX_PORT_FROM_CUDA.md` §1)
-
-The one feature merged from this work. **−23.6% pool** on CUDA at retained
-delta energy 0.969 with zero forced joins. `MLX_PORT_FROM_CUDA.md` §1 has the
-math, the exact `mlx_dkv_wrapper.py` line numbers for every slot-indexed read
-that must be redirected, and §2 has eight traps that each cost a debugging pass
-on CUDA. Do not start without reading both.
-
-The five things most likely to bite on MLX specifically:
-
-1. **`:3605`, the sliding eviction.** `comp_VK[:-1] = comp_VK[1:]` shifts basis
-   ROWS as if they were blocks. Under sharing that renumbers every group at
-   once. CUDA has no equivalent code path, so this trap is MLX-only and is not
-   covered by any CUDA test.
-2. **MLX has more slot-indexed reads than CUDA did** — `:993`, `:1533`, `:2289`,
-   `:2983`, `:3373`, `:3405`, `:4007`, `:4229`, and writes at `:2943`, `:3338`,
-   `:3906`. Miss one and it reads another group's basis. On CUDA the same class
-   of miss surfaced as a CUDA device-side assert; on MLX it may just be wrong
-   numbers, so **assert, do not rely on a crash**.
-3. **Assign in compress, not at write time.** Residual selection scores
-   `delta − recon`, and under a shared basis the recon the decoder rebuilds
-   comes from the *group* basis. MLX's seam is
-   `compress_deferred_prefill_blocks`, before the `capture_scores` ranking at
-   `:2846`.
-4. **Checkpoint shapes at `:2081-2082` change.** Version them or old
-   checkpoints load onto a differently-shaped store.
-5. **Do not put it on a 4-bit-KV preset.** See §2 of the port file: on CUDA's
-   `low` (`kv_quant=q4_0`) quantisation noise takes voluntary joins to **zero**
-   and retained energy to 0.685, *at identical pool MB*. Report
-   `basis_stats()['joined']`; `0` is the signature.
-
-**Port the CPU-side tests too** — `ACTIVE_RUNTIME/tests/test_basis_group.py`
-(27 tests, pure math, no CUDA) should translate to `mx` almost unchanged and is
-the cheapest way to know the projection math is right before touching the pool.
-
----
-
-## 3. PROPOSED MLX EDIT — the `_pending_query` gate (read the standing rule first)
-
-**This is the one place this file proposes changing `mlx_dkv_wrapper.py`, and
-it is a proposal, not an instruction.** The standing rule says never edit MLX.
-Weigh this against it and decide.
-
-CUDA had two faults here; MLX has the second one.
-
-`current_query_tokens` is read as a **lexical query** by the lexical router and
-the decode-time `query_toks` set. MLX sets it correctly *when the pin is
-filled* (`:1978-1979`):
-
-```python
-pq = self._pending_query.pop(session_id, None)
-srl_state.current_query_tokens = list(pq) if pq else list(token_ids[cached_len:])
-```
-
-But the write that fills `_pending_query` is gated on
-`getattr(self.manager, "_factual_enabled", False)` (around `:5500`), which is
-**off by default**. So on the default path the pin is empty and MLX takes the
-whole-prompt fallback — naming every token in the document as part of the
-question, IDF ~uniform, discriminating nothing. `query_span.py`'s own docstring
-says that fallback "would pin nothing useful".
-
-CUDA's fix (commit `0d3b12a9`) ungated it, because the consumers are *routing*,
-not the factual store. Measured there: `current_query_tokens` 7986 → 11 tokens,
-and per-block lexical overlap std 0.0818 → 0.1264.
-
-**Before changing anything, measure whether it matters on MLX:** print
-`len(srl_state.current_query_tokens)` after a single-turn `generate()`. If it
-equals the prompt length, MLX has the same latent issue. Whether to fix it is a
-judgement call against the standing rule — the safe alternative is to pass
-`query_text=` explicitly at every call site instead of touching the wrapper.
-
----
-
-## 4. MPS `_validate_this_step` double rotation (`dkv_attention.py:4746`)
-
-Carried from `HANDOFF_CUDA_PREFILL.md` §8, still open. `_apply_rope_single` is
-called on `dense_k_valid` inside `if _is_mps_decode:` — a path that only exists
-on Apple silicon and therefore **cannot be tested from CUDA at all**.
-
-The helper itself is now partial-RoPE-correct (it slices by `cos.shape[-1]`,
-not by head_dim), and its sibling caller at `:1699` is guarded by
-`_pool_rotated_k()`. The site at `:4746` is not obviously guarded. Under
-`DKV_ROTATED_POOL=1` (the default) the dense-history keys may already be
-rotated, in which case this rotates them a second time.
-
-The handoff deferred it as "not production CUDA, fix it if that validation path
-is ever trusted". On a Mac it *is* reachable. Either verify it is correct, or
-guard it the way `:1699` is guarded — and if you touch it, add a test, because
-a double rotation preserves norms (RoPE is orthogonal) and only corrupts
-angles, so it fails silently.
-
----
-
-## 5. Frame consistency — confirm MLX has no equivalent hole
-
-CUDA had four prefill capture sites that stored K in the wrong frame. Fixed
-this session (`ACTIVE_RUNTIME/tests/test_ingest_frame_consistency.py`, 4 tests)
-by routing every site through one `_ingest_k(rot_k, unrot_k)` helper.
-
-MLX captures keys **post-RoPE** by design (`mlx_dkv_wrapper.py:4448`), so it
-likely has no equivalent split — but that is an inference from one line, not a
-verification. Worth confirming that every MLX capture site agrees on the frame,
-because the failure mode is silent: identical norms, wrong angles, and a
-depth-graded quality loss that looks like a retrieval problem.
-
----
-
-## 6. Measurements that only make sense on MLX
-
-* **`colab/linkbench_mlx.py`, not the needle sweep**, for anything touching
-  `DKV_ROTATED_POOL`. The needle sweep has no confusable distractors and cannot
-  see the effect. Recorded in the README knob table.
-* **`DKV_SVD_SEED` must be varied for any accuracy A/B.** Temperature-0
-  replication is deterministic and proves nothing; at a fixed config this seed
-  alone spans ~30 synthesis points. Use `colab/synthesis_power.py`, which is
-  replicated, paired and interval-bounded.
-* **`colab/bench_decode_interval_mlx.py`** for `DKV_DECODE_CACHE_INTERVAL`.
-
----
-
-## 7. Explicitly NOT worth redoing
-
-Each of these was built on CUDA, measured, and rejected. The full reasoning and
-numbers are in `MLX_PORT_FROM_CUDA.md` under "Three sibling features". In
-short, so nobody re-derives them:
-
-| idea | why it is dead |
-|---|---|
-| Anchor-delta residual budget | Residual fill is already at the full budget on every block at `max_residual` **40 and 128** — zero blocks reach the tier the override targets, so it is inert. Not a budget-size problem. |
-| Shared-basis chunk-graph edges | **Zero** new edges when basis groups are contiguous, which is what a real document produces; co-members are already neighbours. |
-| Learned SRL router — scoring head | val recall@16 **0.599–0.609 vs 0.595** rule-based. Expected: the teacher label derives from the same q·k the rule computes. |
-| Learned SRL router — K-head | Genuinely **14.3% faster at 32k** (paired, CI [-9.00, -6.91] ms, 8/8 rounds) but drops >50% of attention mass on the worst 5% of queries. Not fixable by a floor (needs 0.90, returning all the speed-up), by asymmetric retraining (predicts 115% of K), or by a guard (best signal separates at 0.38 sd). An **oracle static-K sweep** shows no K below 16 has an acceptable tail *at all*, so it is not a training problem. |
-
-The one condition under which the K-head is worth revisiting: it was measured
-on NIAH filler, which is adversarial for it — a needle is precisely a query
-where one distant block carries everything. A **prose-synthesis** workload could
-have a benign tail. That is a measurement, not an argument.
-
----
-
-## 8. Quick reference — what this session changed on CUDA
-
-| commit | what |
-|---|---|
-| `0bca51e8` | shared low-rank bases merged, opt-in |
-| `0d3b12a9` | question-span pin — never worked on CUDA (see §3 above) |
-| `be2897a7` | shared bases become a config key; `low` preset is the *wrong* home |
-| `e6069eea` | README + port-file documentation |
-| `758e0c26` | four more prefill capture sites stored K in the wrong frame (§5) |
-
-CUDA suite at time of writing: **220 passed, 6 skipped, 0 failed**.
-
-CUDA validation, Qwen3.5-2B, RTX 4070 SUPER, 2026-08-23 — **ALL CHECKS PASSED**
-at every rung including the two the handoff listed as outstanding:
-
-    2k / 8k / 32k / 64k, depths 0.0 / 0.5 / 0.9   3/3 recall each
-    determinism at temperature 0                   1 distinct output across 3 runs
-    Triton kernel used                             fallback_count=0
-
-`32k@0.9` and `64k@0.9` — both previously expected to fail — now pass. **This
-is the bar MLX should be held to**: `benchmarks/niah_recall.py` and
-`colab/mlx_needle_parity.py` are the equivalents, and any MLX rung that does
-not reach 3/3 with deterministic output is a real gap rather than a tuning
-question.
+The previous cycle's record is `cuda_port_record.md`, and its adoption bar still
+governs: **a CUDA change ships on MLX only if it is measured to benefit MLX.**
+Working on CUDA is a reason to try it, never a reason to ship it.
 
 ---
 
 # MLX RESULTS — 2026-08-23, M3 (8 GB), mlx 0.32.0 / mlx_lm 0.31.3
 
-Run on Apple silicon against this file. Section numbers refer to the work order
-above. `transformers 5.14.1`, `torch 2.13.0`, venv `dkv_venv`.
+Run on Apple silicon against the retired work order. Section numbers are ITS
+section numbers, kept so the two can be read together if it is recovered from
+git history. `transformers 5.14.1`, `torch 2.13.0`, venv `dkv_venv`.
 
 ## 0. Baseline
 
@@ -350,8 +116,8 @@ orders of magnitude below the "<1" bar that reading asks for.** Therefore:
 
 * The instrument has real resolving power on MLX. Anything measured on top of
   this baseline is meaningful.
-* **CUDA's gap is a CUDA defect, not the price of compression.** By this file's
-  own §1, that makes it the highest-priority CUDA bug in the repo. Bisect CUDA
+* **CUDA's gap is a CUDA defect, not the price of compression.** By the work
+  order's own §1, that makes it the highest-priority CUDA bug in the repo. Bisect CUDA
   against MLX layer outputs (`colab/probe_mlx_layer_output_diff.py` and its CUDA
   twin).
 * The 4k range OVERLAPS on MLX (56 blocks compressed), unlike CUDA where 4k had
@@ -565,3 +331,122 @@ this instrument's floor", not as "bit-identical".**
    are exact; a peak-RSS claim is not supported by them.
 5. **No long-context or recall validation.** `mlx_needle_parity.py --long` and
    `linkbench_mlx.py` have not been run against the sharing arm.
+
+---
+
+# ROOT CAUSE FOUND — why MLX grouped 10 blocks where CUDA grouped 463
+
+The port reproduced shared bases' memory saving but not its GROUPING, and the
+first write-up left that open. It is now closed, and the cause is one line of
+configuration rather than anything in the port.
+
+## The finding
+
+**Shared bases compare SUBSPACES, and RoPE rotates every key by its ABSOLUTE
+POSITION.** Two blocks holding the same text at different offsets therefore have
+subspaces rotated apart, and the retained-energy test — which is exactly a
+weighted average of cos² of the principal angles between them — collapses.
+
+MLX's pool stores POST-RoPE keys by default (`DKV_ROTATED_POOL=1`). CUDA's does
+not, on any preset where sharing is enabled.
+
+Same document, same block size, `frac=0.50`, Qwen2.5-1.5B @8k, only the pool
+frame differing:
+
+| pool | best-partner retained energy | founded | joined | forced | mean_kept |
+|---|---|---|---|---|---|
+| rotated (MLX default) | mean 0.486, max 0.541, **0/27** over 0.90 | 560 | **10** | 186 | 0.903 |
+| unrotated | mean 0.972, median 1.000, **26/27** over 0.90 | 236 | **520** | **0** | 0.968 |
+| *CUDA, for reference* | — | 293 | *463* | *0* | *0.969* |
+
+The unrotated row lands on CUDA's numbers. That is what identifies rotation as
+the entire mechanism rather than one contributing factor.
+
+At MLX's own default block size of 1024 it also works once unrotated: founded
+89, joined 73, forced 6, mean_kept 0.968.
+
+## What was eliminated first, and why each mattered
+
+Each of these was a plausible story that would have been wrong, and each is
+cheap to re-derive if someone doubts the conclusion:
+
+* **Block size.** MLX 1024 vs CUDA 257. Shrinking MLX to 256 reproduced CUDA's
+  exact block count (756) and moved voluntary joins only 0 → 10. Real but tiny.
+* **Zero padding to the store rank.** CUDA slices to the REALISED rank before
+  scoring; MLX passed the padded array. Scoring both ways gives identical
+  numbers to four decimals (0.4862 either way) — the zero rows are inert, as
+  the math says they should be.
+* **The v_scale undo.** `DKV_V_SCALE=0` vs `1`: 10 voluntary joins either way.
+* **Energy truncation.** CUDA selects rank by an `svd_energy` target while MLX
+  truncates at a fixed rank, so "MLX keeps low-energy directions that do not
+  align" was the leading hypothesis. It is BACKWARDS: restricting to the top-r
+  energy directions makes alignment strictly WORSE (rank 24 → 0.486, rank 8 →
+  0.387, rank 2 → 0.145). The top direction holds 66% of a block's delta energy
+  and still does not align across blocks — which in hindsight is exactly the
+  signature of a per-position rotation.
+
+## Method notes worth keeping
+
+* **The first probe measured one pair and called it a distribution.** MLX
+  compresses 1–2 blocks per `_assign_shared_basis` call (392 calls at 8k), so
+  capturing "a batch" captured two blocks. The blocks of a layer have to be
+  ACCUMULATED across calls before any pairwise statistic means anything.
+* **`joined == 0` is a signature with more than one cause.** The port file
+  documents it as the 4-bit-KV signature; here it fired at f16 for an unrelated
+  reason. Treat it as "grouping failed, find out why", not as a diagnosis.
+
+## What changed as a result
+
+`MLXKVBlockManager.__init__` now REFUSES `DKV_SHARED_BASIS=1` on a rotated pool,
+with `DKV_SHARED_BASIS_ALLOW_ROTATED=1` as an escape hatch so the bad
+configuration stays measurable. It refuses rather than warns because the failure
+is silent and expensive: **pool MB is identical either way**, so a rotated run
+reports the full memory win while having force-joined nearly every block.
+
+`DKV_ROTATED_POOL=0` in turn requires `DKV_DECODE_CACHE=1`, which the pool
+already enforced with its own error.
+
+## The cost side, which is now the open question
+
+The unrotated pool is not free — `dkv_attention.py`'s remat-cache decline
+documents it as **43% slower decode on Qwen3.5-2B and 137% on Qwen2.5-1.5B**,
+because declining remat disables that cache for the whole session. So shared
+bases on MLX are currently a memory-for-decode-speed trade, not a free win, and
+the two knobs are coupled:
+
+    shared bases  -->  unrotated pool  -->  no remat cache  -->  slower decode
+
+Anyone pushing this further should attack the remat decline first; that file
+already sketches the fix (plumb the dense window's absolute token positions
+into the function and rotate with `_partial_rope_apply`), and it would make the
+unrotated pool nearly free — which would benefit the unrotated pool's OWN
+retrieval win (40/48 → 47/48 on distractor retrieval) quite apart from bases.
+
+## Fidelity, measured in the correct configuration
+
+| arm | top-1 | KL(dense‖arm) | rank | top-5 | blocks | max abs dlogit |
+|---|---|---|---|---|---|---|
+| baseline (rotated) | 5/5 | 5.135e-12 | 0.00 | 5.0/5 | 168 | 3.125e-02 |
+| baseline (unrotated) | 5/5 | 5.135e-12 | 0.00 | 5.0/5 | 168 | 3.125e-02 |
+| `frac=0.50` | 5/5 | 5.135e-12 | 0.00 | 5.0/5 | 168 | 3.125e-02 |
+| `frac=0.25` | 5/5 | 5.135e-12 | 0.00 | 5.0/5 | 168 | 3.125e-02 |
+
+An unrotated baseline arm was added so the sharing change is not confounded with
+the rotation change. All four rows are identical **because this instrument's
+floor is one fp16 ULP**, not because the arms are equal — the same prompt with
+sharing off vs on gives logit sums agreeing to 8 decimals while the byte hashes
+differ. Read the table as "below the floor". Resolving differences among MLX DKV
+variants needs a sharper instrument than first-step logits at 8k.
+
+## Still open on the shared-basis port
+
+1. Eviction, streaming compress and the batched multi-layer compressor all
+   REFUSE under sharing rather than working. The pool must be sized so eviction
+   never fires.
+2. Checkpoint versioning is documented, not implemented.
+3. Peak-RSS effect unmeasured — `_basis_rows` materialises one row per block at
+   read time, so the transient is full-size even though the store is not. The
+   pool-size numbers are exact; a peak-memory claim is not supported by them.
+4. No long-context or recall validation of the sharing arm
+   (`mlx_needle_parity.py --long`, `linkbench_mlx.py`).
+5. The decode cost of the unrotated pool has not been measured WITH sharing on.

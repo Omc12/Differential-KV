@@ -1805,7 +1805,7 @@ class MLXKVBlockManager:
         # largest item in a slot after the residual store -- is largely
         # duplicated across them. Sharing one basis between such blocks buys
         # -23.6% pool on CUDA at retained delta energy 0.969 with zero FORCED
-        # joins (MLX_PORT_FROM_CUDA.md section 3).
+        # joins (ACTIVE_RUNTIME/docs/mlx_work_record.md).
         #
         # OFF BY DEFAULT because it changes the POOL LAYOUT: comp_VK/comp_VV get
         # FEWER rows than there are blocks, reached through a per-layer
@@ -1827,6 +1827,45 @@ class MLXKVBlockManager:
                 "(DKV_RESIDUAL_EXCLUDE_SVD=1). Correction-form residuals are a "
                 "delta against the block's OWN reconstruction, which a shared "
                 "basis invalidates.")
+        # ── UNROTATED POOL IS A HARD PRECONDITION ────────────────────────────
+        # MEASURED, and it is the whole difference between this feature working
+        # and quietly not working.
+        #
+        # RoPE rotates every key by its ABSOLUTE POSITION, so two blocks holding
+        # the SAME TEXT at different offsets have subspaces rotated apart. This
+        # feature compares subspaces, so a post-RoPE pool destroys exactly the
+        # agreement it depends on. Same document, same block size, frac 0.50,
+        # Qwen2.5-1.5B @8k -- only DKV_ROTATED_POOL differs:
+        #
+        #   rotated   best-partner retained energy  mean 0.486, 0/27 over 0.90
+        #             -> founded 560, joined 10, forced 186, mean_kept 0.903
+        #   unrotated best-partner retained energy  mean 0.972, 26/27 over 0.90
+        #             -> founded 236, joined 520, forced 0,  mean_kept 0.968
+        #
+        # The unrotated numbers land on CUDA's (joined 463, forced 0, mean_kept
+        # 0.969) -- and CUDA never hit this because every preset it enables
+        # sharing on (mid/high/ultra) is already unrotated; `low` is its only
+        # rotated preset. MLX's DEFAULT is rotated, which is why the port
+        # reproduced the memory saving but not the grouping.
+        #
+        # This refuses rather than warns because the failure is SILENT AND
+        # EXPENSIVE: pool MB is identical either way (the saving comes from
+        # allocating fewer basis rows), so a rotated run looks like a clean win
+        # while every block has been FORCE-joined at ~0.90 retained energy.
+        if self._shared_basis and self.rotated_pool and \
+                os.environ.get("DKV_SHARED_BASIS_ALLOW_ROTATED", "0") != "1":
+            raise RuntimeError(
+                "DKV_SHARED_BASIS=1 requires an UNROTATED pool "
+                "(DKV_ROTATED_POOL=0, which itself needs DKV_DECODE_CACHE=1). "
+                "RoPE rotates each key by its absolute position, so blocks with "
+                "identical text at different offsets have subspaces rotated "
+                "apart: measured best-partner retained energy 0.486 rotated vs "
+                "0.972 unrotated, i.e. 10 voluntary joins vs 520 on the same "
+                "document. A rotated run still reports the full memory saving "
+                "because that comes from allocating fewer basis rows -- it "
+                "simply buys it with forced lossy joins instead of dedup. Set "
+                "DKV_SHARED_BASIS_ALLOW_ROTATED=1 to measure that anyway.")
+
         # 4-bit KV destroys the subspace agreement the feature depends on: on
         # CUDA's `low` preset voluntary joins go to ZERO and retained energy to
         # 0.685 AT IDENTICAL POOL MB, because the saving comes from allocating
@@ -2322,7 +2361,7 @@ class MLXKVBlockManager:
     # the block -> row map into the gather.
     #
     # It exists as a single function because of trap 2 in
-    # MLX_PORT_FROM_CUDA.md: MLX has more slot-indexed reads than CUDA did, and
+    # the port record: MLX has more slot-indexed reads than CUDA did, and
     # MISSING ONE reads another group's basis. On CUDA that surfaced as a
     # device-side assert; on MLX it is just wrong numbers, so the mistake has to
     # be made structurally impossible rather than caught at runtime.
