@@ -8,10 +8,20 @@ Everything here was measured on an M3 (8 GB), MLX 0.32.0 / mlx_lm 0.31.3,
 point of the file. Where an item is a hypothesis it says so.
 
 Standing rules are unchanged and still govern this file
-(`HANDOFF_CUDA_PREFILL.md` §0). In particular: **never edit
-`ACTIVE_RUNTIME/serving/mlx_dkv_wrapper.py`** — with the one exception recorded
-in item 5 below, which was made on a branch at the owner's explicit direction
-and is not merged.
+(`HANDOFF_CUDA_PREFILL.md` §0), with **one amendment you need to know about**:
+`mlx_dkv_wrapper.py` HAS been edited, and the change is now on `main`
+(`227cdd7f`). It adds shared low-rank bases, opt-in and off by default.
+
+**The reference implementation is still a valid reference.** Before merging,
+the default path was shown BYTE-IDENTICAL to the previous `main` — md5 over the
+entire compressed pool plus the dense window, every attended layer, on an 8k
+prompt: `cf4582197fb9a530` both sides, with first-step logits hashing to
+`47f057f05d700cbe` both sides. With `DKV_SHARED_BASIS` unset, MLX produces the
+same bytes it did before. Diff CUDA against it exactly as you did.
+
+What that does mean for you: when you read MLX for a behaviour, **check whether
+the line is inside a `self._shared_basis` branch**. If it is, it is not the
+reference path and CUDA should not be made to match it.
 
 ---
 
@@ -223,10 +233,19 @@ not execute. Listed so nobody re-derives them or "fixes" them back.
   test that reads those variables after another test has built a config is
   order-dependent in the same way.
 
-**One MLX exception, on a branch, not merged.** `mlx-shared-basis` ports shared
-low-rank bases into `mlx_dkv_wrapper.py`. Note that item 2b above IS CUDA
-work that came out of it — the two projection defects are in
-`basis_group.py`, which CUDA runs today. It exists because the owner directed
+**The MLX exception is now merged** (`227cdd7f`), off by default, with the
+default path proven byte-identical to the previous `main` — see the amendment
+at the top of this file. Item 2b above IS CUDA work that came out of it: the
+two projection defects live in `basis_group.py`, which CUDA runs today.
+
+**Do not port the MLX shared-basis feature's SETTINGS to CUDA.** On MLX it is
+merged but NOT recommended: the V store halves exactly as designed, yet the
+saving is 1.1% of peak at 8k and 3.4% at 32k, while decode is slower in 3/3
+paired rounds at 0.5–0.65x. Whether CUDA's own trade is better is an open
+question — its slot composition differs (block 257 vs 1024, so V is a much
+larger share of a slot there) and its `_bytes_per_block` framing makes the
+saving a CAPACITY result rather than a peak one. That is item 2b(d) to measure,
+not to assume either way. It exists because the owner directed
 it explicitly, and `main` is untouched. Suite on that branch: 307 passed, 0
 failed, with 295 of those passing with the feature OFF.
 
