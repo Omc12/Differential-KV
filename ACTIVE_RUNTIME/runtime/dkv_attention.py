@@ -1202,7 +1202,7 @@ def _get_engage_threshold():
     return int(os.environ.get("DKV_ENGAGE_THRESHOLD", "4096"))
 
 
-def _prefill_block_key_boxes(blocks, device):
+def _prefill_block_key_boxes(blocks, device, rope=None):
     """Elementwise (min, max) of each block's EXACT keys -> two [nb, H_kv, D].
 
     MLX's prefill router scores blocks from a per-block key min/max computed over
@@ -1226,6 +1226,23 @@ def _prefill_block_key_boxes(blocks, device):
     The box is cached on the block keyed by its active length, so a block that
     has stopped growing is measured once and re-used by every later chunk of
     every layer; a block still accumulating is re-measured when it grows.
+
+    `rope` — UNROTATED POOLS. When the pool stores PRE-RoPE keys (the default:
+    `mid`, `high` and `ultra` all set rotated_pool=False) the box would be in a
+    different frame from the post-RoPE `chunk_q` that scores against it, and the
+    router declined outright rather than rank on that. Pass
+    ``rope(max_pos) -> (cos, sin)`` and each key is rotated at its OWN absolute
+    position first, which puts the box back in the query's frame.
+
+    The positions are not guessed. A block's anchor is token `anchor_idx`, its
+    active row j is `anchor_idx + 1 + j`, and a COMPRESSED block's residual j
+    sits at `anchor_idx + 1 + residual_K_positions[j]` — the same mapping
+    `_remat_attend`'s trace resolves (`j == offset - 1` against the anchor).
+
+    Rotation is by ABSOLUTE position, which never changes for a token, so the
+    rotated box caches exactly like the unrotated one. The cache probe carries a
+    rotation marker regardless, because a box measured in one frame must never
+    be served to a reader expecting the other.
     """
     from collections import defaultdict
 
@@ -1241,6 +1258,7 @@ def _prefill_block_key_boxes(blocks, device):
     # couple of batched kernels rather than one launch pair per block (a 32k
     # prompt has ~128 blocks per layer x 28 layers per chunk).
     pending = defaultdict(list)                        # n_keys -> [(i, keys[H_kv,n,D])]
+    deferred = []                                      # rope path: (i, keys, probe, pos)
 
     for i, b in enumerate(blocks):
         # Cheap cache probe FIRST. Gathering the keys before checking would re-run
@@ -1253,25 +1271,54 @@ def _prefill_block_key_boxes(blocks, device):
         # that can be recycled to a different block (tests/test_pool_recycle_
         # aliasing.py), so the slot id has to be part of the key or a stale box
         # could outlive the content it describes.
+        _rot = rope is not None
         if getattr(b, "active_k", None) is not None:
-            probe = ("act", int(b.active_k.shape[2]))
+            probe = ("act", int(b.active_k.shape[2]), _rot)
         elif getattr(b, "active_k_cpu", None) is not None:
-            probe = ("cpu", int(b.active_k_cpu.shape[2]))
+            probe = ("cpu", int(b.active_k_cpu.shape[2]), _rot)
         elif getattr(b, "state", None) == "COMPRESSED":
-            probe = ("cmp", getattr(b, "pool_idx", None))
+            probe = ("cmp", getattr(b, "pool_idx", None), _rot)
         else:
-            probe = ("anc", 0)
+            probe = ("anc", 0, _rot)
         cached = getattr(b, "_sp_key_box", None)
         if cached is not None and cached[0] == probe and cached[1].device == device:
             mins[i], maxs[i] = cached[1], cached[2]
             continue
 
+        # GROWTH: measure only the rows that are NEW since the cached box.
+        #
+        # An accumulating block is re-measured on every chunk because its length
+        # is part of the probe, and the old code re-read and re-reduced ALL of
+        # its keys each time -- O(n) work per growth, so O(n^2) over a prefill.
+        # That was tolerable while the reduction was the only cost. With `rope`
+        # it is not: every rebuild re-rotated every key, and the measured result
+        # was sparse prefill going from 9.1% FASTER on a rotated pool to 3.1%
+        # SLOWER on an unrotated one -- the rotation ate the whole win.
+        #
+        # A block's already-written keys never change, and min/max is
+        # associative, so the cached box folds with a box over just the new
+        # rows. Each key is then rotated and reduced exactly ONCE.
+        grow = None
+        if (cached is not None and cached[1].device == device
+                and probe[0] in ("act", "cpu") and cached[0][0] == probe[0]
+                and cached[0][2] == probe[2]
+                and isinstance(cached[0][1], int) and probe[1] > cached[0][1]):
+            grow = int(cached[0][1])
+
         ak = b.anchor_kv[0, 0].to(device)                          # [H_kv, D]
         k_blk = None
+        off = None            # within-block ACTIVE index of each k_blk row
         if getattr(b, "active_k", None) is not None:
             k_blk = b.active_k[0].to(device)
+            off = torch.arange(k_blk.shape[1], device=device)
         elif getattr(b, "active_k_cpu", None) is not None:
             k_blk = b.active_k_cpu[0].to(device, non_blocking=True)
+            off = torch.arange(k_blk.shape[1], device=device)
+        if grow is not None and k_blk is not None and k_blk.shape[1] > grow:
+            k_blk = k_blk[:, grow:]                                # new rows only
+            off = off[grow:]
+        elif grow is not None:
+            grow = None                                            # nothing new
         elif probe[0] == "cmp":
             rk = getattr(b, "residual_K_values", None)             # [R, H_kv, D]
             rp = getattr(b, "residual_K_positions", None)          # [R]
@@ -1279,6 +1326,7 @@ def _prefill_block_key_boxes(blocks, device):
                 rk = rk.to(device)
                 valid_r = (rp.to(device) >= 0)
                 if bool(valid_r.any()):
+                    off = rp.to(device)[valid_r].long()            # [r]
                     rk = rk[valid_r]                               # [r, H_kv, D]
                     # Residuals are stored ANCHOR-RELATIVE under the exact-keys
                     # default (compression/lowrank.py:673) -- the true key is
@@ -1290,16 +1338,63 @@ def _prefill_block_key_boxes(blocks, device):
                         rk = rk + ak.unsqueeze(0)
                     k_blk = rk.permute(1, 0, 2)                    # [H_kv, r, D]
 
-        keys = ak.unsqueeze(1) if k_blk is None else torch.cat(
-            [ak.unsqueeze(1), k_blk.to(ak.dtype)], dim=1)          # [H_kv, 1+act, D]
-        pending[keys.shape[1]].append((i, keys, probe))
+        if grow is not None:
+            keys = k_blk.to(ak.dtype)                              # [H_kv, new, D]
+        else:
+            keys = ak.unsqueeze(1) if k_blk is None else torch.cat(
+                [ak.unsqueeze(1), k_blk.to(ak.dtype)], dim=1)      # [H_kv, 1+act, D]
+        base = None if grow is None else (cached[1], cached[2])
+        if rope is not None:
+            a0 = int(getattr(b, "anchor_idx", 0) or 0)
+            # One position per ROW OF `keys`, and on the growth path the anchor
+            # row is not one of them -- it is already folded into the cached box.
+            # Prepending it there gave 19 positions for 18 keys.
+            _anc_pos = ([] if grow is not None
+                        else [torch.tensor([a0], device=device, dtype=torch.long)])
+            _act_pos = ([] if off is None
+                        else [a0 + 1 + off.to(device).long()])
+            pos = torch.cat(_anc_pos + _act_pos) if (_anc_pos or _act_pos) else                 torch.tensor([a0], device=device, dtype=torch.long)
+            deferred.append((i, keys, probe, pos, base))
+            continue
+        pending[keys.shape[1]].append((i, keys, probe, base))
+
+    # Rotate every uncached block in ONE pass. cos/sin are requested once, at the
+    # largest position any of them needs, because building the table is the
+    # expensive half and it is shared across blocks (and, via _history_cos_sin's
+    # cache, across layers).
+    if deferred:
+        _need = max(int(pz.max().item()) for _, _, _, pz, _ in deferred) + 1
+        _cos, _sin = rope(_need)
+        _cf = _cos[0] if _cos.dim() == 3 else _cos                 # [max_pos, rot]
+        _sf = _sin[0] if _sin.dim() == 3 else _sin
+        _lim = _cf.shape[0] - 1
+        # BATCHED BY KEY-COUNT, for the same reason the min/max below is: this
+        # runs per block per layer per chunk, and rotating one block at a time
+        # issued a handful of small kernels each -- ~30 blocks x 28 layers of
+        # launch overhead on a path this repo already measures as launch-bound.
+        # Stacking first makes it a few kernels per distinct block length.
+        _byn = defaultdict(list)
+        for _item in deferred:
+            _byn[_item[1].shape[1]].append(_item)
+        for _n, _grp in _byn.items():
+            _ks = torch.stack([g[1] for g in _grp], dim=0)         # [g, H_kv, n, D]
+            _pz = torch.stack([g[3].clamp(0, _lim) for g in _grp], dim=0)  # [g, n]
+            _ks = _apply_rope_single(
+                _ks, _cf[_pz].unsqueeze(1).to(_ks.dtype),          # [g, 1, n, rot]
+                _sf[_pz].unsqueeze(1).to(_ks.dtype))
+            for _j, (i, _k, probe, _p, base) in enumerate(_grp):
+                pending[_n].append((i, _ks[_j], probe, base))
 
     for _n, group in pending.items():
         stacked = torch.stack([g[1] for g in group], dim=0)        # [g, H_kv, n, D]
         g_min = stacked.amin(dim=2)                                # [g, H_kv, D]
         g_max = stacked.amax(dim=2)
-        for j, (i, _keys, probe) in enumerate(group):
-            mins[i], maxs[i] = g_min[j], g_max[j]
+        for j, (i, _keys, probe, base) in enumerate(group):
+            if base is None:
+                mins[i], maxs[i] = g_min[j], g_max[j]
+            else:
+                mins[i] = torch.minimum(base[0], g_min[j])
+                maxs[i] = torch.maximum(base[1], g_max[j])
             # Cache on the block: identical boxes are re-scored by every later
             # chunk, and blocks stop changing once they are full.
             try:
@@ -1355,7 +1450,7 @@ def _sparse_prefill_relevance(chunk_q, k_min, k_max, scale: float,
 
 
 def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
-                                  chunk_start: int = None):
+                                  chunk_start: int = None, rope=None):
     """DSA/NSA-style block-sparse PREFILL (MLX parity: DKV_SPARSE_PREFILL).
 
     The "CHUNKED SPARSE PREFILL" path below cross-attends EVERY history block
@@ -1431,9 +1526,26 @@ def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
     # and q cannot be un-rotated because prefill only clones the LAST token's
     # pre-RoPE query (unrot_query_states, the q_len>1 branch). Scoring across
     # frames is what the anchor router did; rather than rank on numbers with no
-    # defined relationship to the query, decline and attend every block --
-    # correct, just without the speedup. This is checked FIRST so the fallback
-    # cannot be confused with the recency-window pass-through below.
+    # defined relationship to the query, this used to decline and attend every
+    # block -- correct, just without the speedup.
+    #
+    # IT NO LONGER HAS TO. The blocker was stated as "the keys cannot be rotated
+    # without their true per-token positions", and that premise was wrong: a
+    # block's anchor IS token `anchor_idx`, its active row j is
+    # `anchor_idx + 1 + j`, and a compressed block's residual j is at
+    # `anchor_idx + 1 + residual_K_positions[j]`. `_prefill_block_key_boxes`
+    # takes a `rope` callback and rotates each key at its OWN position before the
+    # min/max, which puts the box in the same frame as the post-RoPE chunk_q.
+    # Rotation is by ABSOLUTE position, so the rotated box caches exactly like
+    # the unrotated one -- this is not a per-chunk cost.
+    #
+    # The other stated blocker -- "q cannot be un-rotated" -- is moot: nothing
+    # un-rotates q, the KEYS move instead.
+    #
+    # Without a `rope` callback the old decline still stands, so a caller that
+    # cannot supply one degrades to attend-all rather than to scoring across
+    # frames. Checked FIRST so it cannot be confused with the recency-window
+    # pass-through below.
     #
     # THE OLD NOTE HERE CALLED DKV_ROTATED_POOL=0 "a non-default diagnostic
     # path". It is not, and that stale premise hid how much this decline costs.
@@ -1451,13 +1563,39 @@ def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
     #   rotated     32k   616 of 868        nb 9-30, k_eff 8, dropping 10-71%
     #                                       of the block list
     #
-    # So on the shipped default there is NO prefill sparsity at any context, and
-    # even on a rotated pool it does not engage below ~32k. HANDOFF_CUDA_PREFILL
-    # §8's "prefill is STILL SPARSE -- k_eff=30 of 120" is the 32k ROTATED case
-    # and does not generalise to the default configuration. Making this work
-    # unrotated needs the keys' TRUE per-token positions, which is the same
-    # thing §0.5 established prefill does not have.
-    if not _pool_rotated_k():
+    # That was the state before DKV_SPARSE_PREFILL_ROTATE (below) existed. With
+    # it ON the unrotated pool reaches 616 of 868 selective at 32k, matching the
+    # rotated column exactly. It is still OFF by default, on the throughput and
+    # fidelity numbers recorded at that flag. 8k does not engage on either pool:
+    # that is `k_eff = max(8, 0.25*nb)` against a small candidate count, not the
+    # frame. HANDOFF_CUDA_PREFILL §8's "prefill is STILL SPARSE -- k_eff=30 of
+    # 120" is the 32k ROTATED case and does not describe the default.
+    # DKV_SPARSE_PREFILL_ROTATE — OPT-IN, and the default is OFF on evidence.
+    #
+    # The capability works: 616 of 868 calls become selective at 32k, dropping
+    # 10-71% of the block list, and recall is unchanged (validate_cuda_dkv.py
+    # --long 9/9, all three 32k cases 3/3 and deterministic). It is off by
+    # default because on an unrotated pool it does not PAY:
+    #
+    #   rotated pool, 32k    sparse prefill 9.1% FASTER  (CI +-1.1%)
+    #   unrotated pool, 32k  no effect resolvable        (CI [-241, +87] ms)
+    #
+    # The reason is that an unrotated pool's history reader has to rotate keys
+    # for the attention anyway, so skipping blocks saves rotation -- and the
+    # router has to rotate to decide which to skip. The saving and the cost are
+    # the same work, and they cancel.
+    #
+    # It is not free either: with block_size 256 at 8k the router engages and
+    # the first-token KL against a dense control goes 0.00024 -> 0.00585 (still
+    # 5/5 top-1 with dense's top-1 at rank 0, but 24x). Paying any fidelity for
+    # a throughput change that measures as zero is the wrong default.
+    #
+    # COVERAGE, stated rather than implied: the throughput number was measured
+    # at the wrapper's default block size and the fidelity number at 256. They
+    # are not the same operating point, and nobody has swept the two together.
+    _rot_ok = os.environ.get("DKV_SPARSE_PREFILL_ROTATE", "0").strip().lower() in (
+        "1", "true", "on", "yes")
+    if not _pool_rotated_k() and (rope is None or not _rot_ok):
         return history_blocks
 
     # MLX: `if manager._sparse_prefill and _cur_start >= manager._sp_min_ctx`.
@@ -1506,7 +1644,9 @@ def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
         return history_blocks
 
     device = chunk_q.device
-    k_min, k_max = _prefill_block_key_boxes([b for _, b in valid], device)
+    k_min, k_max = _prefill_block_key_boxes(
+        [b for _, b in valid], device,
+        rope=None if _pool_rotated_k() else rope)
     scale = 1.0 / math.sqrt(chunk_q.shape[-1])
     scores = _sparse_prefill_relevance(chunk_q, k_min, k_max, scale)   # [nb]
     top_idx = torch.topk(scores, k=k_eff).indices.tolist()  # single sync, not per-block
@@ -1663,20 +1803,29 @@ def _history_cos_sin(model, ref, max_pos: int, device):
     the rotary forward, 28 times per prefill chunk on a non-hybrid model, for 28
     identical results. At 32k the last chunk builds a 32k-long table each time.
 
-    Cached on one entry keyed by (model, max_pos, device, dtype). max_pos grows
-    monotonically through a prefill, so the entry is naturally replaced once per
-    chunk and the cache never holds more than one table. Keeping it keyed by
-    max_pos rather than cleared per chunk also means a repeat prefill of the same
-    length reuses it.
+    Cached on one entry keyed by (model, device, dtype) — NOT by max_pos. The
+    table for a longer extent already contains every shorter one, so a request
+    that fits is served by SLICING, which is a view. The returned shape is
+    exactly the max_pos asked for, as before.
+
+    MAX_POS WAS PART OF THE KEY AND THAT MADE IT THRASH. Two callers inside the
+    same prefill chunk ask for different extents -- the sparse-prefill router
+    asks for the largest position among the blocks it is scoring, and the
+    history reconstruction below asks for one derived from the compressed
+    blocks. With max_pos in the key each MISSED the other's entry, and the miss
+    path calls .clear(), so the two evicted each other and rebuilt a
+    context-length rotary table every layer of every chunk. It went unnoticed
+    while only one caller existed.
     """
-    key = (id(model), int(max_pos), str(device), ref.dtype)
+    key = (id(model), str(device), ref.dtype)
+    max_pos = int(max_pos)
     hit = _HIST_ROPE_CACHE.get(key)
-    if hit is not None:
-        return hit
+    if hit is not None and hit[0] >= max_pos:
+        return hit[1][:, :max_pos], hit[2][:, :max_pos]
     _HIST_ROPE_CACHE.clear()             # only ever one live table
     hist_pos = torch.arange(max_pos, device=device, dtype=torch.long).unsqueeze(0)
     cos_all, sin_all = _resolve_rotary_emb(model)(ref, hist_pos)
-    _HIST_ROPE_CACHE[key] = (cos_all, sin_all)
+    _HIST_ROPE_CACHE[key] = (max_pos, cos_all, sin_all)
     return cos_all, sin_all
 
 
@@ -5087,7 +5236,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 if K_b > 0:
                                     blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
                                     history_blocks = [b for b in blocks if b.anchor_idx < K_b]
-                                    history_blocks = _sparse_prefill_filter_blocks(history_blocks, chunk_q, chunk_start=K_b)
+                                    # LAZY: only an unrotated pool with enough candidates reaches the
+                                    # rope path, and _history_cos_sin caches across layers, so the
+                                    # table is built at most once per chunk.
+                                    history_blocks = _sparse_prefill_filter_blocks(
+                                        history_blocks, chunk_q, chunk_start=K_b,
+                                        rope=lambda _mp, _m=model, _r=value_states[b_idx:b_idx + 1],
+                                        _d=query_states.device: _history_cos_sin(_m, _r, _mp, _d))
 
                                     comp_blocks = []
                                     dense_k = []
@@ -5365,7 +5520,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     if K_b > 0:
                                         blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
                                         history_blocks = [b for b in blocks if b.anchor_idx < K_b]
-                                        history_blocks = _sparse_prefill_filter_blocks(history_blocks, chunk_q, chunk_start=K_b)
+                                        # LAZY: only an unrotated pool with enough candidates reaches the
+                                        # rope path, and _history_cos_sin caches across layers, so the
+                                        # table is built at most once per chunk.
+                                        history_blocks = _sparse_prefill_filter_blocks(
+                                            history_blocks, chunk_q, chunk_start=K_b,
+                                            rope=lambda _mp, _m=model, _r=value_states[b_idx:b_idx + 1],
+                                            _d=query_states.device: _history_cos_sin(_m, _r, _mp, _d))
 
                                         comp_blocks = []
                                         dense_k = []

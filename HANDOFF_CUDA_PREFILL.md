@@ -752,6 +752,15 @@ position-alignment change. Delete `/tmp/dkv_qprobe_*.pt` and re-run both passes.
   prefill sparsity at any context, and even rotated it does not engage below
   ~32k. The `k_eff=30 of 120` quoted above is the 32k rotated case and does not
   generalise. See `ACTIVE_RUNTIME/docs/cuda_work_record.md` §4b.
+
+  **The unrotated decline is now optional** (`DKV_SPARSE_PREFILL_ROTATE=1`,
+  default off). Its stated blocker — "the keys cannot be rotated without their
+  true per-token positions" — was false; the positions follow from `anchor_idx`.
+  With the flag on, the unrotated pool matches the rotated column (616 of 868
+  selective at 32k) and `--long` is 9/9 including all three 32k cases. It stays
+  off because paired A/B puts it at NO RESOLVABLE effect there against 9.2%
+  faster on a rotated pool, while costing first-token KL 0.00024 → 0.00585.
+  Work record §4c has the reason the two cancel.
 * **[CLOSED, as far as it can be] Controlled prefill-throughput measurement.**
   The comparison this item asks for is no longer POSSIBLE: it wanted HEAD vs
   fixed, both §0.5 fixes are now permanent, and the pre-fix HEAD's outputs

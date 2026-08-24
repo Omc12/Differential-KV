@@ -326,17 +326,71 @@ any context, and even on a rotated pool it does not engage below ~32k. §8's
 "prefill is STILL SPARSE — k_eff=30 of 120" is the 32k rotated case and does not
 generalise. The comment now carries this table.
 
-Making it work unrotated needs the keys' TRUE per-token positions, which is the
-same thing §0.5 established prefill does not have. Left open deliberately, now
-with a number on it.
+### 4c. Prefill sparsity on an UNROTATED pool — built, correct, and OFF by default
+
+The decline's stated blocker was "the keys cannot be rotated without their true
+per-token positions". **That premise was false.** A block's anchor is token
+`anchor_idx`, its active row j is `anchor_idx + 1 + j`, and a compressed block's
+residual j is at `anchor_idx + 1 + residual_K_positions[j]` — the same mapping
+`_remat_attend`'s trace already resolves. The second blocker, "q cannot be
+un-rotated", is moot: nothing un-rotates q, the KEYS move instead.
+
+`_prefill_block_key_boxes` now takes a `rope` callback and rotates each key at
+its own absolute position before the min/max, which puts the box in the same
+frame as the post-RoPE `chunk_q`. Behind `DKV_SPARSE_PREFILL_ROTATE=1` the
+unrotated pool reaches **616 of 868 selective at 32k, dropping 10–71%** — the
+rotated column exactly. `validate_cuda_dkv.py --long` is ALL CHECKS PASSED with
+the flag on, all three 32k cases 3/3 and deterministic.
+
+**It ships OFF, on evidence.** Paired prefill A/B at 32k
+(`colab/bench_prefill_paired.py`, A/A control ±4.2% then ±1.0–1.3%):
+
+| pool | sparse prefill vs off | reading |
+|---|---|---|
+| rotated | **9.2% faster**, CI ±1.0% | routing pays |
+| unrotated + rope | **no effect resolvable**, CI [−241, +87] ms | it does not |
+
+The reason is structural: an unrotated pool's history reader must rotate keys
+for the attention anyway, so skipping blocks saves rotation — and the router has
+to rotate to decide what to skip. The saving and the cost are the same work.
+It is not free either: at `block_size` 256 the router engages at 8k and the
+first-token KL against a dense control goes **0.00024 → 0.00585** (still 5/5
+top-1, dense's top-1 at rank 0). Paying fidelity for a measured-zero speedup is
+the wrong default.
+
+*Coverage, stated:* the throughput number is at the wrapper's default block size
+and the fidelity number at 256. Not the same operating point; nobody has swept
+them together.
+
+**Two performance defects were found getting there, and both outlive the flag:**
+
+* `_history_cos_sin` keyed its single-entry cache on `max_pos` and `.clear()`s
+  on a miss. Two callers in the same prefill chunk ask for different extents, so
+  they evicted each other and rebuilt a context-length rotary table every layer
+  of every chunk. Now keyed on (model, device, dtype) with a longer table
+  serving shorter requests by slicing — a view. This helps every prefill,
+  routed or not: the un-routed arm went 13173 → 12772 ms at 32k.
+* the per-block key box was rebuilt from ALL of a block's keys every time the
+  block grew — O(n²) over a prefill. It is now incremental: only rows added
+  since the cached box are measured, and min/max folds associatively. Pinned by
+  `tests/test_prefill_key_boxes.py`, which also caught a real off-by-one in the
+  first version of this (the growth path prepended the anchor's position for a
+  row that is not in its slice).
 
 ---
 
 ## 5. Still open
 
-* **Prefill sparsity on an unrotated pool** — §4b above. Worth real throughput
-  (prefill currently attends every history block on the default preset), and
-  blocked on the same missing per-token positions as §0.5.
+* **Making prefill sparsity PAY on an unrotated pool** — §4c. It works and is
+  correct; it just does not win, because the router's rotation and the
+  attention's rotation are the same work. Anything that lets the router decide
+  without rotating (a position-invariant score, or reusing the attention's own
+  rotated keys) would turn the measured zero into something like the rotated
+  pool's 9.2%.
+* **8k never engages on either pool** — `k_eff = max(8, 0.25*nb)` against a
+  candidate count that the sinks and the 1024-token recency window leave at
+  1–8. That is `DKV_SPARSE_PREFILL_KMIN`, not the frame, and nobody has asked
+  whether 8 is the right floor.
 * **A KEY COLLISION was found and fixed in passing.** `dkv_attention.py`'s
   combined branch and `hf_dkv_wrapper.py`'s pre-rotation both used the workspace
   key `"dense_rot_state"` for values of INCOMPATIBLE type — a dict vs a tuple
