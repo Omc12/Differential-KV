@@ -111,6 +111,14 @@ def set_arm(arm):
         # _REMAT_ENABLED at import, so setting DKV_REMAT_CACHE here would leave
         # both arms on and the benchmark would truthfully report "no effect" for
         # a change it never actually made.
+        #
+        # Run with DKV_SPARSE_BIAS=0.0 exported to price remat on the COMBINED
+        # branch (the library default); BEST_DECODE_DEFAULTS' setdefault
+        # otherwise puts it on "auto" and measures the production branch.
+        # Measured on the combined branch at 8.4k, Qwen2.5-1.5B, 8 rounds:
+        # A=54.75 ms/tok B=78.43, mean_diff -23.459 ms, CI [-24.041, -22.876],
+        # i.e. remat is worth 29.9% there. That number is what made passing it a
+        # correctly-framed dense window the right fix rather than declining.
         DA._REMAT_ENABLED = on
     elif EXPERIMENT == "dense_ring":
         # Requires the append-only patch in assemble_dense_window_kv, which is

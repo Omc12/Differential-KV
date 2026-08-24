@@ -1425,7 +1425,27 @@ class PyTorchDKVHFWrapper:
                             # it changes.
                             _sig = tuple(getattr(b, "anchor_idx", -1)
                                          for b in (_trimmed or []))
-                            _rstate = ws.setdefault("dense_rot_state", {})
+                            # KEY COLLISION, FIXED. This used to be
+                            # "dense_rot_state", which is ALSO the key
+                            # dkv_attention.py's combined branch uses for a
+                            # different cache with an incompatible value: that
+                            # one stores a dict {version, anchors, lengths,
+                            # rot}, this one a tuple (sig, valid_len). Whichever
+                            # wrote second poisoned the other, and the forward
+                            # -- unlike this block, which is inside a try --
+                            # dereferenced it unguarded and died with
+                            # "'tuple' object has no attribute 'get'".
+                            #
+                            # Only reachable when BOTH are live: the combined
+                            # branch needs DKV_SPARSE_BIAS unset or "0.0" (the
+                            # LIBRARY DEFAULT) and this pre-rotation needs the
+                            # mutation-out path. BEST_DECODE_DEFAULTS sets
+                            # DKV_SPARSE_BIAS=auto, which takes the production
+                            # branch instead -- so everything going through the
+                            # serving defaults, validate_cuda_dkv.py included,
+                            # missed it. Same blind spot as the combined-window
+                            # frame defect.
+                            _rstate = ws.setdefault("dense_prerot_state", {})
                             _prev_sig, _prev_len = _rstate.get(layer_idx,
                                                                (None, 0))
                             _from = _prev_len if (_prev_sig == _sig

@@ -579,7 +579,7 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                   pool, block_indices, anchor_indices, cos_all, sin_all,
                   layer_active_rank, q, dense_k, dense_v, dense_len,
                   num_key_value_groups, curr_kv=None, dense_mask=None,
-                  dense_blocks=None, combined_window=False):
+                  dense_blocks=None):
     """MLX's decode form: materialise the routed blocks, then plain SDPA.
 
     MLX builds each routed block's real keys and values --
@@ -608,43 +608,44 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
     unrotated dense keys -- it declines instead of silently attending garbage.
     """
     global _REMAT_UNROTATED_WARNED
-    # ── THE COMBINED BRANCH'S WINDOW IS NOT THIS FUNCTION'S WINDOW ───────────
-    # `_use_combined` (DKV_SPARSE_BIAS unset/"0.0", i.e. the LIBRARY DEFAULT)
-    # builds `_dk_combined` specifically for native_triton_sparse_attn_decode_
-    # combined: a fixed-width workspace that has been RoPE-rotated again, into
-    # the TRUE per-token frame. Measured at layer 0, 8k, against a dense
-    # control's own post-RoPE keys:
+    # ── WHICH DENSE WINDOW THIS FUNCTION REQUIRES ───────────────────────────
+    # `dense_k` must be in the POOL's frame -- the frame the pool stores, NOT the
+    # true per-token frame. Both call sites pass `dense_k_assembled`, which is it.
     #
-    #     combined branch  (_dk_combined)      |dk - K_true| mean  0.047
-    #     production path  (dense_k_assembled) |dk - K_true| mean 43.79
+    # That matters most on an UNROTATED pool, which is the DEFAULT (`mid`, `high`
+    # and `ultra` all set rotated_pool=False; only `low` keeps it on). There the
+    # pool holds PRE-RoPE keys, and the `if not _psr():` branch below rotates the
+    # dense window ITSELF, at the positions from dense_blocks[].token_indices, to
+    # match the compressed half it also rotates. Hand it a window that is ALREADY
+    # rotated and it rotates a second time -- the same defect family as §0.5's
+    # double-RoPE-on-history, at a new site.
     #
-    # The compressed half this function materialises is in the PRODUCTION
-    # frame -- anchors and V_K straight out of a pool that already stores
-    # post-RoPE keys, with no second rotation. So on the combined branch remat
-    # attends a dense window and a compressed half that do not share a frame,
-    # and one plain SDPA over the union is meaningless. It does not raise and
-    # the shapes are right; it just answers wrongly.
+    # THE COMBINED BRANCH USED TO PASS `_dk_combined` INSTEAD, and that is a
+    # different tensor: it is built for native_triton_sparse_attn_decode_combined,
+    # which wants the window PRE-ROTATED, so it already carries the rotation this
+    # function would apply. Measured at layer 0, 8k, against a dense control's own
+    # post-RoPE keys -- note which one is "closer to truth", and that it is the
+    # wrong one to pass here precisely because it is:
     #
-    # Measured end to end, Qwen2.5-1.5B at 8k, first decode step against a plain
-    # transformers dense control (colab/logit_fidelity.py):
+    #     _dk_combined          mean |dk - K_true|  0.047
+    #     dense_k_assembled     mean |dk - K_true| 43.79
     #
-    #     DKV_SPARSE_BIAS default -> remat serves  KL 11.76   top-1 0/5
-    #     DKV_SPARSE_BIAS=auto    -> remat serves  KL 0.00125 top-1 5/5
-    #     DKV_REMAT_CACHE=0       -> kernel serves KL 0.00125 top-1 5/5
+    # `_dk_combined` is already in the true frame, so rotating it again put the
+    # dense rows in no frame at all while the compressed rows landed correctly --
+    # one plain SDPA over a union of two frames, which is meaningless whichever
+    # frame is "right". Nothing raised, the shapes were correct, and the pool
+    # reported the same block count; the only symptom was the answer. At 8k that
+    # read KL 11.76 against a dense control with top-1 agreement 0/5 and the
+    # needle lost outright, against KL 0.00125 and 5/5 once the frames agree.
     #
-    # and on the niah prompt the first row loses the needle outright while the
-    # other two answer 'OMEGA-7741-DELTA'.
+    # It only ever fired on the combined branch -- DKV_SPARSE_BIAS unset or
+    # "0.0", the LIBRARY DEFAULT. BEST_DECODE_DEFAULTS sets it to "auto", which
+    # takes the production branch, so everything going through the serving
+    # defaults (validate_cuda_dkv.py included) was unaffected and never saw it.
     #
-    # BEST_DECODE_DEFAULTS sets DKV_SPARSE_BIAS=auto, so everything that goes
-    # through the serving defaults -- including validate_cuda_dkv.py, which is
-    # why its 9/9 never caught this -- takes the production branch. A caller
-    # that does not apply those defaults gets the broken pairing silently.
-    #
-    # Declining here costs nothing: the combined branch's own kernel is what
-    # served before remat was wired into it, and it is correct.
-    if combined_window:
-        _remat_why("combined-window")
-        return None
+    # Declining here was tried first and REJECTED on measurement: it is correct
+    # but hands the branch back to its own kernel, and remat is worth 29.9% of
+    # decode there (54.75 vs 78.43 ms/token at 8.4k, paired, CI +-0.7%).
     if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
         import sys as _s
         print(f"[PTR] _remat_attend ENTER L{captured_layer_idx} "
@@ -1431,9 +1432,31 @@ def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
     # pre-RoPE query (unrot_query_states, the q_len>1 branch). Scoring across
     # frames is what the anchor router did; rather than rank on numbers with no
     # defined relationship to the query, decline and attend every block --
-    # correct, just without the speedup. DKV_ROTATED_POOL=0 is a non-default
-    # diagnostic path, and this is checked FIRST so the fallback cannot be
-    # confused with the recency-window pass-through below.
+    # correct, just without the speedup. This is checked FIRST so the fallback
+    # cannot be confused with the recency-window pass-through below.
+    #
+    # THE OLD NOTE HERE CALLED DKV_ROTATED_POOL=0 "a non-default diagnostic
+    # path". It is not, and that stale premise hid how much this decline costs.
+    # `mid` is the DEFAULT preset and sets rotated_pool=False, which config.py
+    # then EXPORTS into the environment; so do `high` and `ultra`. Only `low`
+    # keeps a rotated pool. Measured on Qwen2.5-1.5B, counting every call to
+    # this function:
+    #
+    #   pool        ctx   selective calls   what prefill actually attended
+    #   unrotated    8k   0 of 196          every block, every chunk
+    #   unrotated   32k   0 of 868          every block, every chunk
+    #   rotated      8k   0 of 196          every block -- k_eff >= nb, because
+    #                                       only 1-8 candidates survive the
+    #                                       sinks and the 1024-token window
+    #   rotated     32k   616 of 868        nb 9-30, k_eff 8, dropping 10-71%
+    #                                       of the block list
+    #
+    # So on the shipped default there is NO prefill sparsity at any context, and
+    # even on a rotated pool it does not engage below ~32k. HANDOFF_CUDA_PREFILL
+    # §8's "prefill is STILL SPARSE -- k_eff=30 of 120" is the 32k ROTATED case
+    # and does not generalise to the default configuration. Making this work
+    # unrotated needs the keys' TRUE per-token positions, which is the same
+    # thing §0.5 established prefill does not have.
     if not _pool_rotated_k():
         return history_blocks
 
@@ -4554,7 +4577,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _half_r = _rot_dim // 2
                                     _head_dim_full = dense_k_assembled.shape[-1]
                                     _rot_valid = (
-                                        _rot_state is not None
+                                        # isinstance, not just `is not None`: this
+                                        # key was shared with an unrelated cache in
+                                        # hf_dkv_wrapper.py that stores a TUPLE, and
+                                        # the .get() below raised rather than
+                                        # rebuilding. The keys are distinct now;
+                                        # this makes the failure mode a rebuild
+                                        # rather than a crash if it ever recurs.
+                                        isinstance(_rot_state, dict)
                                         and _rot_state.get("version") == current_version
                                         and _rot_state.get("anchors") == _anchors
                                         and len(_rot_state.get("lengths", ())) == len(_lengths)
@@ -4718,14 +4748,22 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         anchor_indices, cos_all, sin_all,
                                         _layer_active_rank,
                                         query_states[b_idx:b_idx+1],
-                                        _dk_combined, _dv_combined, dense_len,
+                                        # NOT _dk_combined. That tensor is built for
+                                        # the combined Triton kernel and has been
+                                        # RoPE-rotated AGAIN, into each token's true
+                                        # frame; the compressed half _remat_attend
+                                        # materialises is in the pool's frame, and one
+                                        # SDPA over a union of two frames is
+                                        # meaningless. dense_k_assembled is the same
+                                        # window the production branch hands it, and
+                                        # is what its contract is written for.
+                                        dense_k_assembled, dense_v_assembled, dense_len,
                                         num_key_value_groups,
                                         curr_kv=((key_states[b_idx:b_idx+1],
                                                   value_states[b_idx:b_idx+1])
                                                  if _MUTATION_OUT_ACTIVE and q_len == 1 else None),
                                         dense_mask=_dense_mask,
-                                    dense_blocks=dense_blocks,
-                                    combined_window=True)
+                                    dense_blocks=dense_blocks)
 
                                     attn_out_b = _remat_out if _remat_out is not None else \
                                         native_triton_sparse_attn_decode_combined(
