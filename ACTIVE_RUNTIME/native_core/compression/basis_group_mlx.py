@@ -92,15 +92,20 @@ def retained_energy(U: mx.array, V: mx.array, Vg: mx.array) -> mx.array:
     ``U: [N, T, k]``, ``V: [N, k, F]``, ``Vg: [G, r, F]``.
     Returns ``[N, G]`` in [0, 1].
 
-    Vg is orthonormalised HERE rather than being required orthonormal, because
-    the pool stores each group's RAW founding basis (see `reproject_U` for why
-    that is load-bearing). The projector onto span(Vg) is the same either way,
-    so this changes nothing about the score -- it just moves the requirement off
-    the caller.
+    Vg is NOT required to have orthonormal rows -- the pool stores each group's
+    RAW founding basis, and `reproject_U` explains why that is load-bearing.
+    The projector onto span(Vg) is obtained with a small [r, r] SOLVE rather
+    than by orthonormalising Vg first.
+
+    THAT CHOICE IS A PERFORMANCE FIX, not a style one. Orthonormalising here
+    meant a QR of a [F, r] matrix (F = 512) per CANDIDATE per BLOCK, on a CPU
+    stream because `mx.linalg.qr` has no GPU implementation. Block compression
+    also runs during DECODE, so it landed straight in the token loop: measured
+    1.39 tok/s against a 15.5 tok/s baseline. The solve is [r, r] (r = 48) and
+    is the same projector.
     """
     if Vg.size == 0 or U.size == 0:
         return mx.zeros((U.shape[0], Vg.shape[0] if Vg.ndim == 3 else 0))
-    Vg = row_orthonormalize(Vg)
 
     Uf = U.astype(mx.float32)
     Vf = V.astype(mx.float32)
@@ -117,8 +122,22 @@ def retained_energy(U: mx.array, V: mx.array, Vg: mx.array) -> mx.array:
     # C[n, g] = V_n Vg_g^T
     C = mx.matmul(Vf, mx.swapaxes(Vgf.reshape(G * r, F), 0, 1))    # [N, k, G*r]
     C = mx.transpose(C.reshape(N, k, G, r), (0, 2, 1, 3))          # [N, G, k, r]
+    Ct = mx.transpose(C, (1, 3, 0, 2))                             # [G, r, N, k]
 
-    CCt = mx.matmul(C, mx.swapaxes(C, -1, -2))                     # [N, G, k, k]
+    # Projector onto span(Vg) without orthonormalising: with Gg = Vg Vg^T,
+    #   num = tr(G  C Gg^-1 C^T)
+    # which reduces to C C^T exactly when Vg's rows ARE orthonormal (Gg = I).
+    Gg = mx.matmul(Vgf, mx.swapaxes(Vgf, -1, -2))                  # [G, r, r]
+    Gg = Gg + mx.eye(r, dtype=mx.float32) * 1e-6                   # zero rows
+    with mx.stream(mx.cpu):                       # solve has no GPU kernel
+        # solve once per GROUP, not once per (block, group): [G, r, r] against
+        # [G, r, N*k] built by folding the block axis into the RHS columns.
+        rhs = Ct.reshape(G, r, N * k)                              # [G, r, N*k]
+        X = mx.linalg.solve(Gg, rhs)                               # [G, r, N*k]
+        mx.eval(X)
+    X = mx.transpose(X.reshape(G, r, N, k), (2, 0, 1, 3))          # [N, G, r, k]
+    CCt = mx.matmul(C, X)                                          # [N, G, k, k]
+    # C Gg^-1 C^T is symmetric, so tr(Gram . CCt) is the plain elementwise sum.
     num = mx.sum(Gram[:, None] * CCt, axis=(-1, -2))               # [N, G]
 
     kept = num / mx.maximum(den, _EPS)[:, None]

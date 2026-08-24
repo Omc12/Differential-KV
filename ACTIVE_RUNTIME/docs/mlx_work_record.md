@@ -588,12 +588,12 @@ reports ~0.2 tok/s and charges prefill to decode):
 | unrotated | 15.49 | **7.12 GB** | 412.79 MB |
 | unrotated + `frac=0.50` | 11.96 | **7.12 GB** | 368.75 MB (−10.7%) |
 
-**Peak memory is IDENTICAL with and without sharing**, to two decimals, even
-though the pool allocates 10.7% less. That is open item 3 answered, and the
-answer is the unwelcome one: `_basis_rows` materialises one row PER BLOCK at
-read time, so the transient is full-size and the saving never reaches peak. The
-pool-size numbers remain exact and the peak-memory claim remains unsupported —
-now measured rather than merely flagged.
+**Peak memory is IDENTICAL with and without sharing.** The *reason* given here
+was wrong, and is corrected in the next section: this put a SYNTHETIC pool
+number (28 layers, 64 slots, 412 MB) next to a REAL peak, and blamed
+`_basis_rows`. Measured properly, in one process, the pool is 1% of peak at 8k
+and 3.4% at 32k — the saving is real but far too small to move peak, and no
+change to the read path can alter that.
 
 **Decode cost, item 5:** the unrotated pool costs ~12% (17.53 → 15.49) and
 sharing costs ~23% more on top (15.49 → 11.96), so the configuration the feature
@@ -649,3 +649,99 @@ raised belongs to `_ensure_block_capacity`, which is fixed and tested.
 | decode cost with sharing | **CLOSED** — ~68% of baseline, single-run estimate |
 | eviction / streaming / batched compress refuse | **OPEN** — never reached up to 32k, guards retained |
 | make `_basis_rows` lazy | **OPEN, and now the item that matters most** |
+
+---
+
+# THE LAZY-GATHER PLAN, MEASURED AND ABANDONED — and the cost that is real
+
+The previous section concluded that `_basis_rows` materialising a full-size
+per-block view was why the pool saving never reached peak, and named making it
+lazy as the item that mattered most. **Both halves of that were wrong**, and
+measuring before implementing is what showed it.
+
+## Why the premise was wrong
+
+**The pool is not where the memory is.** Real pool bytes and MLX peak, measured
+in the SAME process (the earlier comparison put a synthetic pool number next to
+a real peak, which is what produced the bad conclusion):
+
+| ctx | arm | blocks | pool | V store | MLX peak |
+|---|---|---|---|---|---|
+| 8k | unrotated | 168 | 65.22 MB | 13.76 MB | 5.725 GB |
+| 8k | `frac=0.50` | 168 | 58.34 MB | **6.88 MB** | 5.727 GB |
+| 32k | unrotated | 840 | 221.74 MB | 46.79 MB | 6.574 GB |
+| 32k | `frac=0.50` | 840 | 198.34 MB | **23.40 MB** | 6.571 GB |
+
+The V store halves EXACTLY, as designed. But the whole pool is **1.1% of peak at
+8k and 3.4% at 32k** — peak is dominated by weights (~3.1 GB fp16) plus prefill
+activations. A 23 MB saving cannot move a 6.6 GB peak, and no read-path change
+alters that arithmetic.
+
+**And `_basis_rows` was never the cost anyway.** Counting calls by site through
+a real 8k generate under sharing:
+
+    line 4899  kind=nb  calls=140  total rows gathered=840
+
+That is the ONLY site that executes. It gathers ~6 rows per call. The fused
+decode kernel site, the decode-cache eval site and the routed-subset site never
+run in this configuration at all. Making a 6-row gather lazy saves nothing.
+
+**Verdict: not implemented, deliberately.** The one real defect found while
+looking was an `mx.eval` target being handed a GATHERED view instead of the
+store — a full-size materialisation purely to force evaluation. Fixed; it is
+the same mistake already fixed once in the streaming-compress eval list.
+
+## The cost that IS real, and where it actually was
+
+Chasing the decode regression instead found a genuine one, in the SCORING math.
+
+`retained_energy` had been changed to orthonormalise Vg internally (so callers
+could pass the raw stored basis). That is a QR of an `[F, r]` matrix — F=512 —
+**per candidate, per block**, and `mx.linalg.qr` has no GPU kernel, so it ran on
+a CPU stream. Block compression also runs during DECODE, so it landed straight
+in the token loop:
+
+    frac=1.0, QR in the scorer      1.39 tok/s
+    frac=1.0, [r,r] solve instead   9.86 tok/s        (7x)
+
+The projector onto span(Vg) is now obtained with a batched `[r, r]` solve
+(r=48), one per GROUP rather than per (block, group). It reduces to exactly the
+old `C C^T` when Vg's rows are orthonormal, and the torch-agreement tests still
+pass unchanged.
+
+## Decode cost of sharing — bounded, not point-estimated
+
+`colab/bench_decode_paired.py`'s own calibration says cross-process comparison
+here "cannot resolve anything below ~20%", and that is generous: alternating
+three rounds, the SAME arm spanned 6.39–10.31 tok/s. Absolute numbers from
+single runs — including the "17.53 / 15.49 / 11.96" reported earlier — are not
+quotable, and that earlier "~12% and ~23%" claim is **retracted**.
+
+What survives is the PAIRED comparison, alternated over three rounds:
+
+| round | unrotated | `frac=0.50` | ratio |
+|---|---|---|---|
+| 1 | 9.25 | 6.03 | 0.65 |
+| 2 | 10.31 | 6.26 | 0.61 |
+| 3 | 6.39 | 3.26 | 0.51 |
+
+Sharing is slower in **3/3 rounds** at a consistent ratio, so the effect is real
+even though its size is not pinned: roughly **0.5–0.65x decode**. Prefill runs
+~10% longer (15.8s → 17.3s). Peak was **7.12 GB in all six runs**.
+
+That harness cannot be used directly here, and the reason is worth recording:
+its whole design is ONE process with the config flipped by rebinding a
+module-level constant. `DKV_SHARED_BASIS` changes the POOL LAYOUT and is read at
+manager construction, so the two arms cannot share a process. Measuring this
+properly needs a different instrument, not a different run.
+
+## Where that leaves the feature
+
+Shared bases on MLX halve the V store exactly as designed, pass 9/9 needles
+including 32k@0.9, and cost roughly a third to a half of decode for a pool
+saving that is 1–3% of peak. **It should stay opt-in, and on this model there is
+no operating point where it is currently worth enabling.**
+
+It would become worth revisiting if the pool ever dominated peak — a much
+longer context, a smaller model, or a configuration where weights are not 3 GB
+of the footprint. That is a different measurement, not an argument.

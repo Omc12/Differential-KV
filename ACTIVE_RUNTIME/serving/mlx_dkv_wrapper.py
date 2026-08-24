@@ -2952,7 +2952,12 @@ class MLXKVBlockManager:
                 session["dense_values"][layer_idx],
                 session["comp_U"][layer_idx],
                 session["comp_U_scale"][layer_idx],
-                *self._basis_rows(session, layer_idx),
+                # NOT _basis_rows: this is an mx.eval TARGET, and a gathered
+                # per-block view would materialise a full-size array purely to
+                # force evaluation. What needs forcing is the STORE. Same
+                # mistake as the eval list in the streaming compress path.
+                session["comp_VK"][layer_idx],
+                session["comp_VV"][layer_idx],
                 session["comp_anc_k"][layer_idx],
                 session["comp_anc_v"][layer_idx],
                 session["comp_min_k"][layer_idx],
