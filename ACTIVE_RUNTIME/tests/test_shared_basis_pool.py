@@ -9,6 +9,13 @@ the two things that matter --
   2. With it on, blocks still reconstruct to the right K/V, VRAM actually
      drops, and the capacity/refcount contracts hold.
 
+EVERY test here that enables sharing also sets DKV_ROTATED_POOL=0 explicitly.
+That is not boilerplate: sharing compares SUBSPACES, RoPE rotates each key by
+its absolute position, and the pool now REFUSES the rotated combination outright
+(see test_shared_basis_refuses_a_rotated_pool). DKV_ROTATED_POOL defaults to
+"1", so a test that leaves it implicit was measuring the degenerate arm --
+forced lossy joins at the full advertised memory saving.
+
 Reconstruction is checked end to end -- write a block, read it back through
 the pool's own indirection, compare against anchor + U V -- because that is
 the only assertion that catches an indirection wired up in one reader and not
@@ -115,6 +122,7 @@ def test_release_basis_is_a_noop_when_off(monkeypatch):
 
 def test_store_is_smaller_than_the_block_count(monkeypatch):
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.25")
     p = _pool(16)
     assert p.shared_basis_active is True
@@ -128,6 +136,7 @@ def test_bytes_per_block_amortises_v(monkeypatch):
     monkeypatch.delenv("DKV_SHARED_BASIS", raising=False)
     plain = _pool(8)
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.25")
     shared = _pool(8)
 
@@ -141,6 +150,7 @@ def test_pool_vram_actually_drops(monkeypatch):
     monkeypatch.delenv("DKV_SHARED_BASIS", raising=False)
     plain_mb = _pool(64)._pool_mb()
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.25")
     shared_mb = _pool(64)._pool_mb()
     assert shared_mb < plain_mb, (plain_mb, shared_mb)
@@ -148,6 +158,7 @@ def test_pool_vram_actually_drops(monkeypatch):
 
 def test_blocks_in_one_subspace_collapse_to_one_row(monkeypatch):
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.5")
     p = _pool(16)
     U, V = _shared_factors(6, seed=2)
@@ -161,6 +172,7 @@ def test_shared_blocks_still_reconstruct(monkeypatch):
     """The point of the whole feature: sharing a basis must not change what a
     block decompresses to, when the blocks genuinely share a subspace."""
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.5")
     p = _pool(16)
     U, V = _shared_factors(6, seed=3)
@@ -174,6 +186,7 @@ def test_shared_blocks_still_reconstruct(monkeypatch):
 
 def test_unrelated_blocks_get_their_own_rows(monkeypatch):
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "1.0")
     p = _pool(8)
     U, V = _factors(4, seed=4)
@@ -185,6 +198,7 @@ def test_unrelated_blocks_get_their_own_rows(monkeypatch):
 def test_capacity_pressure_forces_joins_without_failing(monkeypatch):
     """A frac too small for the document must degrade fidelity, never error."""
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.125")   # 16 slots -> 2 rows
     p = _pool(16)
     U, V = _factors(8, seed=5)
@@ -199,6 +213,7 @@ def test_capacity_pressure_forces_joins_without_failing(monkeypatch):
 
 def test_layers_do_not_share_rows(monkeypatch):
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "1.0")
     p = _pool(8)
     U, V = _shared_factors(2, seed=6)
@@ -213,6 +228,7 @@ def test_freeing_a_slot_reclaims_its_basis_row(monkeypatch):
     """Without this a session that cycles topics exhausts basis capacity and
     every later block is force-joined -- a fidelity cliff with no error."""
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.25")   # 16 slots -> 4 rows
     p = _pool(16)
     U, V = _factors(4, seed=7)
@@ -235,6 +251,7 @@ def test_rewriting_a_slot_does_not_leak_its_old_claim(monkeypatch):
     """Overwriting a slot in place must release the previous basis claim, or
     the refcount only ever rises."""
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.5")
     p = _pool(8)
     U, V = _factors(1, seed=9)
@@ -249,6 +266,7 @@ def test_growth_preserves_existing_assignments(monkeypatch):
     """Growth only APPENDS basis rows, so an already-written slot keeps its row
     and never has to be re-projected."""
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.5")
     p = _pool(8)
     U, V = _factors(3, seed=10)
@@ -268,6 +286,7 @@ def test_growth_preserves_existing_assignments(monkeypatch):
 
 def test_growth_hands_the_registry_its_new_rows(monkeypatch):
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.5")
     p = _pool(8)
     cap_before = p.basis_registry.capacity
@@ -283,6 +302,7 @@ def test_correction_form_residuals_refuse_to_share(monkeypatch):
     reconstruction, so re-expressing it in a shared basis would invalidate every
     one of them. The pool must refuse rather than silently corrupt."""
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_RESIDUAL_EXACT_KEYS", "0")
     p = _pool(8)
     assert p.shared_basis_active is False
@@ -293,6 +313,7 @@ def test_per_block_write_path_shares_too(monkeypatch):
     """write_block (CPU compress / fallback) must honour the same contract as
     write_blocks_batched, or the two paths disagree about where V lives."""
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.5")
     p = _pool(8)
     U, V = _shared_factors(3, seed=11)
@@ -311,6 +332,7 @@ def test_unwritten_slot_resolves_to_a_valid_row(monkeypatch):
     """An unwritten slot must still index somewhere in range -- any gather over
     it would otherwise read out of bounds."""
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.25")
     p = _pool(16)
     idx = torch.arange(16)
@@ -323,6 +345,7 @@ def test_unwritten_slot_resolves_to_a_valid_row(monkeypatch):
 
 def test_basis_index_clamps_out_of_range_slots(monkeypatch):
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     p = _pool(8)
     rows = p.basis_index(torch.tensor([-5, 999]))
     assert rows.min().item() >= 0 and rows.max().item() < p.V_KV.shape[0]
@@ -338,6 +361,7 @@ def test_basis_stats_reports_the_sharing_factor(monkeypatch):
     so the honest answer is 8x, not 16x.
     """
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.5")
     p = _pool(16)
     U, V = _shared_factors(8, seed=12)
@@ -368,6 +392,7 @@ def test_compiled_kernels_decline_under_shared_basis(monkeypatch):
     assert _compiled_kernel_ok(_pool(8)) is True
 
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")   # sharing REQUIRES this
     assert _compiled_kernel_ok(_pool(8)) is False
     # ...and anything that is not a pool at all must not crash the guard.
     assert _compiled_kernel_ok(None) is True
@@ -453,3 +478,103 @@ def test_joint_adapter_batched_gather():
     assert got.shape == (2, RANK, FEAT)
     assert torch.allclose(got[0], j0, atol=1e-6)
     assert torch.allclose(got[1], j2, atol=1e-6)
+
+
+# ── Shared bases must REFUSE a rotated pool (CUDA_TODO §2) ───────────────────
+#
+# The failure this guards is silent: no error, no shape change, and the FULL
+# advertised memory saving, because the saving comes from allocating fewer basis
+# rows rather than from grouping succeeding. Only `forced` in basis_stats() ever
+# showed it. Measured on the MLX port at frac=0.50, same document, only
+# DKV_ROTATED_POOL differing: rotated joined 10 / forced 186, unrotated joined
+# 520 / forced 0.
+
+
+def test_shared_basis_refuses_a_rotated_pool(monkeypatch, capsys):
+    monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "1")
+    monkeypatch.delenv("DKV_SHARED_BASIS_ALLOW_ROTATED", raising=False)
+    p = _pool()
+    assert p._shared_basis is False, (
+        "shared bases stayed on with a rotated pool; grouping degenerates to "
+        "forced lossy joins while the memory number still looks correct")
+    assert not p.shared_basis_active
+    out = capsys.readouterr().out
+    assert "ROTATED" in out and "DKV_ROTATED_POOL=0" in out, (
+        "the refusal must say WHICH setting to change; a bare 'ignored' sent "
+        "three debugging passes after the wrong knob last time")
+
+
+def test_rotated_pool_stays_measurable_behind_the_escape_hatch(monkeypatch, capsys):
+    """A guard that cannot be turned off cannot be A/B'd against."""
+    monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "1")
+    monkeypatch.setenv("DKV_SHARED_BASIS_ALLOW_ROTATED", "1")
+    p = _pool()
+    assert p._shared_basis is True
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_unrotated_pool_still_enables_sharing(monkeypatch):
+    """The guard must not fire on the configuration sharing is FOR.
+
+    Every preset that turns sharing on -- mid, high, ultra -- already sets
+    rotated_pool=False, so this is the path that must keep working.
+    """
+    monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")
+    monkeypatch.delenv("DKV_SHARED_BASIS_ALLOW_ROTATED", raising=False)
+    p = _pool()
+    assert p._shared_basis is True
+
+
+def test_reset_does_not_let_basis_groups_outlive_the_pool(monkeypatch):
+    """Basis groups are POOL state and must not survive a reset.
+
+    reset() deletes V_KV, but basis_store is a _JointVAdapter holding a
+    reference to it, and on the LAZY path (CUDA's default) reset() does not
+    re-allocate. Leaving the registry in place meant the next document's blocks
+    faced a store whose capacity was already spent by the previous document's
+    groups, and were force-joined to bases belonging to text they never saw --
+    with every memory number still correct.
+
+    The invariant is the same on both paths: after a reset there are NO groups.
+    Non-lazy pools rebuild the registry immediately; lazy pools drop it and
+    rebuild on the next allocation.
+    """
+    monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")
+    monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.5")
+    p = _pool(16)
+    U, V = _shared_factors(6, seed=3)
+    _write(p, list(range(6)), U, V)
+    assert p.basis_registry is not None and p.basis_registry.n_groups >= 1
+
+    p.reset()
+    assert p.basis_registry is None or p.basis_registry.n_groups == 0, (
+        "basis groups survived the reset; the next document inherits the "
+        "previous one's spent capacity and force-joins to its bases")
+    if p.basis_store is not None:
+        assert p.basis_store._t is p.V_KV, (
+            "basis_store still points at the V_KV that reset() deleted")
+
+
+def test_lazy_pool_drops_basis_state_on_reset(monkeypatch):
+    """The path that actually shipped: lazy=True never re-allocates in reset()."""
+    monkeypatch.setenv("DKV_SHARED_BASIS", "1")
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")
+    monkeypatch.setenv("DKV_SHARED_BASIS_FRAC", "0.5")
+    p = NativeBlockPool(
+        max_blocks=1024, num_kv_heads=KV, head_dim=HD, rank=RANK,
+        max_seq_len=SEQ, device="cpu", dtype=torch.float32,
+        initial_blocks=16, num_layers=2, lazy=True, max_residual_tokens=4)
+    p.ensure_allocated(16)
+    U, V = _shared_factors(6, seed=3)
+    _write(p, list(range(6)), U, V)
+    assert p.basis_registry.n_groups >= 1
+
+    p.reset()
+    assert p.basis_registry is None, (
+        "a lazy pool does not re-allocate in reset(), so the registry it keeps "
+        "is one whose rows index a V_KV nothing reads any more")
+    assert p.basis_of is None and p.basis_store is None

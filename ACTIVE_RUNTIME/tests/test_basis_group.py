@@ -354,3 +354,142 @@ def test_fraction_and_threshold_are_clamped(monkeypatch):
     assert shared_basis_threshold() == 1.0
     monkeypatch.setenv("DKV_SHARED_BASIS_THRESHOLD", "nope")
     assert shared_basis_threshold() == 0.90
+
+
+# ── The two projection defects the MLX port handed back (CUDA_TODO §2b) ──────
+#
+# Both were invisible to every test that existed: reconstruction stayed exact
+# under the old code, so no distance metric moved. What moved was the split of
+# scale BETWEEN U and V, which only the router can see.
+
+
+def _nonorthonormal_basis(r, F, seed=0):
+    """A basis shaped like the one this pool actually stores.
+
+    The joint ``[K | V]`` basis is sliced out of one orthonormal ``Vh`` and its
+    V half is then divided by the per-block ``v_scale`` gain, so the rows are
+    not unit-norm and not mutually orthogonal. Measured row norms on the MLX
+    port: 0.78-0.83.
+    """
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    On = row_orthonormalize(torch.randn(1, r, F, generator=g))[0]
+    half = F // 2
+    V = On.clone()
+    V[:, half:] /= 3.0                       # the v_scale gain, divided back out
+    return V
+
+
+def test_founder_reprojection_is_exact_with_its_own_basis():
+    """U' == U when the group basis IS the block's own V.
+
+    This is the whole point of the pseudo-inverse. ``U (V Vg^T)`` gets this
+    wrong for a non-orthonormal Vg -- and every block founds its own group when
+    nothing shares, so it is the common case, not an edge one.
+    """
+    F, r, T = 64, 8, 16
+    V = _nonorthonormal_basis(r, F, seed=3).unsqueeze(0)          # [1, r, F]
+    g = torch.Generator(device="cpu").manual_seed(4)
+    U = torch.randn(1, T, r, generator=g)
+
+    Up = reproject_U(U, V, V)
+    assert torch.allclose(Up, U, atol=1e-4), (
+        f"founder is not exact: max|U' - U| = {(Up - U).abs().max():.3e}")
+    # and therefore the reconstruction is unchanged too
+    assert torch.allclose(torch.bmm(Up, V), torch.bmm(U, V), atol=1e-3)
+
+
+def test_reproject_recovers_the_true_projection_for_a_skewed_basis():
+    """U' Vg must be the ORTHOGONAL projection of U V onto span(Vg).
+
+    Checked by residual orthogonality: (U V - U' Vg) must be perpendicular to
+    every row of Vg. The transpose form fails this whenever Vg Vg^T != I.
+    """
+    F, r, k, T = 48, 6, 6, 12
+    Vg = _nonorthonormal_basis(r, F, seed=7).unsqueeze(0)
+    g = torch.Generator(device="cpu").manual_seed(8)
+    U = torch.randn(1, T, k, generator=g)
+    V = torch.randn(1, k, F, generator=g)
+
+    resid = torch.bmm(U, V) - torch.bmm(reproject_U(U, V, Vg), Vg)   # [1, T, F]
+    leak = torch.matmul(resid, Vg.transpose(1, 2)).abs().max()       # [1, T, r]
+    assert leak < 1e-3, f"residual is not orthogonal to the basis: {leak:.3e}"
+
+
+def test_retained_energy_is_one_for_a_block_in_its_own_skewed_basis():
+    """A block scored against its own basis keeps ALL of its energy.
+
+    With the plain ``C C^T`` form and a basis whose rows are scaled by 1/3, the
+    score is off by that scaling and the threshold decision changes -- so a
+    block can be refused entry to the one group that represents it exactly.
+    """
+    F, r, T = 48, 6, 20
+    V = _nonorthonormal_basis(r, F, seed=11).unsqueeze(0)          # [1, r, F]
+    g = torch.Generator(device="cpu").manual_seed(12)
+    U = torch.randn(1, T, r, generator=g)
+
+    kept = retained_energy(U, V, V)                                # [1, 1]
+    assert kept.shape == (1, 1)
+    assert abs(float(kept[0, 0]) - 1.0) < 1e-3, (
+        f"self-energy should be 1.0, got {float(kept[0, 0]):.4f}")
+
+
+def test_retained_energy_still_matches_the_orthonormal_form():
+    """The solve must REDUCE to the old formula when Vg really is orthonormal.
+
+    Guards the reduction claim in the comment: if this drifts, every previously
+    measured shared-basis number becomes incomparable.
+    """
+    F, r, k, T, G = 64, 8, 8, 24, 3
+    g = torch.Generator(device="cpu").manual_seed(21)
+    U = torch.randn(2, T, k, generator=g)
+    V = torch.randn(2, k, F, generator=g)
+    Vg = row_orthonormalize(torch.randn(G, r, F, generator=g))
+
+    kept = retained_energy(U, V, Vg)
+    # old form, computed here directly
+    Gram = torch.bmm(U.transpose(1, 2), U)
+    den = (Gram * torch.bmm(V, V.transpose(1, 2))).sum(dim=(1, 2))
+    C = torch.matmul(V, Vg.reshape(G * r, F).t()).reshape(2, k, G, r).permute(0, 2, 1, 3)
+    num = (Gram.unsqueeze(1) * torch.matmul(C, C.transpose(-1, -2))).sum(dim=(-1, -2))
+    ref = (num / den.clamp(min=1e-12).unsqueeze(1)).clamp(0.0, 1.0)
+    assert torch.allclose(kept, ref, atol=1e-4), (
+        f"solve form diverged from the orthonormal form: "
+        f"max {(kept - ref).abs().max():.3e}")
+
+
+def test_founder_stores_an_orthonormal_basis_and_reprojection_survives_it():
+    """CUDA stores the ORTHONORMALISED founding basis, and that is deliberate.
+
+    The MLX port stores the raw V so a founder reprojects to exactly its own U.
+    CUDA cannot: this pool quantises U to int8 with one per-block scale, and a
+    raw joint [K|V] basis is ill-conditioned enough that U' = U V Vg^+ carries
+    that conditioning into the quantised tensor. Measured on
+    test_shared_blocks_still_reconstruct, six blocks on one basis --
+    orthonormal store: joiner rel 0.0058-0.0079; raw store: 0.0379-0.0791.
+
+    What must hold either way is that RECONSTRUCTION is unchanged: U' Vg is the
+    same projection of U V regardless of which basis of the same row space is
+    stored. That is the invariant this pins, so a future change of store cannot
+    silently move it.
+    """
+    F, r, T = 32, 4, 10
+    V = _nonorthonormal_basis(r, F, seed=31).unsqueeze(0)          # [1, r, F]
+    g = torch.Generator(device="cpu").manual_seed(32)
+    U = torch.randn(1, T, r, generator=g)
+
+    reg = SharedBasisRegistry(capacity=4, threshold=0.9)
+    store = torch.zeros(4, r, F)
+    assignments, gathered = reg.assign_batch(U, V, layer=0, basis_store=store)
+
+    assert assignments[0].is_new, "first block must found its own group"
+    row = assignments[0].row
+    norms = store[row].norm(dim=-1)
+    assert torch.allclose(norms, torch.ones_like(norms), atol=1e-4), (
+        f"founder row is not orthonormal: norms {norms.tolist()}")
+
+    # The invariant that matters: same row space -> same reconstruction.
+    rec_store = torch.bmm(reproject_U(U, V, gathered), gathered)
+    rec_own = torch.bmm(reproject_U(U, V, V), V)
+    assert torch.allclose(rec_store, rec_own, atol=1e-3), (
+        "changing which basis of the row space is stored moved the "
+        "reconstruction; reproject_U is not taking a true projection")

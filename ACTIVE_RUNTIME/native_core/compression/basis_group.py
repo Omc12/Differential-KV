@@ -25,13 +25,18 @@ holds proportionally more blocks.
 THE MATH
 --------
 A block's delta is stored factored as ``D ~= U V`` with ``U``: [T, k],
-``V``: [k, F].  Given a group basis ``Vg``: [r, F] with ORTHONORMAL ROWS, the
-best approximation of ``U V`` inside span(Vg) is
+``V``: [k, F].  Given a group basis ``Vg``: [r, F], the best approximation of
+``U V`` inside span(Vg) is
 
-    U' = U (V Vg^T)          and         D ~= U' Vg
+    U' = U V Vg^+            and         D ~= U' Vg
 
-so re-expressing a block in a shared basis is one [k, F] x [F, r] matmul.  No
-re-decomposition, no touching the original K/V.
+with ``Vg^+ = Vg^T (Vg Vg^T)^-1`` the right pseudo-inverse.  It collapses to the
+simpler ``U (V Vg^T)`` exactly when Vg's rows are ORTHONORMAL -- which the rows
+this pool stores are NOT, because the joint ``[K | V]`` basis has its V half
+divided by the per-block ``v_scale`` gain.  Using the plain transpose there is
+not a rounding difference: it rescales U against V, and the router reads them
+separately.  So re-expressing a block is one [k, F] x [F, r] matmul plus an
+[r, r] solve.  No re-decomposition, no touching the original K/V.
 
 The energy that survives that projection is the quantity worth thresholding on
 — not the raw principal angles, because those weight every basis direction
@@ -39,7 +44,8 @@ equally while the block's energy is concentrated in the first few:
 
     G     = U^T U                       [k, k]
     C     = V Vg^T                      [k, r]
-    kept  = tr(G C C^T) / tr(G V V^T)
+    Gg    = Vg Vg^T                     [r, r]
+    kept  = tr(G C Gg^-1 C^T) / tr(G V V^T)
 
 ``kept`` is in [0, 1] and is exactly ``||U' Vg||_F^2 / ||U V||_F^2``.  A block
 joins a group when ``kept >= threshold``; the lost ``1 - kept`` of delta energy
@@ -161,16 +167,20 @@ def row_orthonormalize(V: torch.Tensor) -> torch.Tensor:
 def retained_energy(
     U: torch.Tensor,        # [N, T, k]
     V: torch.Tensor,        # [N, k, F]
-    Vg: torch.Tensor,       # [G, r, F] row-orthonormal
+    Vg: torch.Tensor,       # [G, r, F] -- NOT required to be row-orthonormal
     eps: float = 1e-12,
 ) -> torch.Tensor:          # [N, G] in [0, 1]
     """Fraction of each block's delta energy that survives projection onto each
     group basis.
 
-    ``kept[n, g] = ||U_n (V_n Vg_g^T) Vg_g||_F^2 / ||U_n V_n||_F^2``
+    ``kept[n, g] = ||proj_{span(Vg_g)}(U_n V_n)||_F^2 / ||U_n V_n||_F^2``
 
     computed through the [k, k] Gram matrix so the token dimension T is only
     touched once, by the Gram itself.
+
+    Vg is the pool's RAW founding basis and its rows are NOT orthonormal, so the
+    projector is taken with a small [r, r] solve rather than by assuming
+    ``Vg Vg^T = I``.  See the comment at the solve for why it is not a QR.
     """
     if Vg.numel() == 0 or U.numel() == 0:
         return U.new_zeros((U.shape[0], Vg.shape[0] if Vg.dim() == 3 else 0))
@@ -191,8 +201,26 @@ def retained_energy(
     C = torch.matmul(Vf, Vgf.reshape(G * r, F).t())            # [N, k, G*r]
     C = C.reshape(N, k, G, r).permute(0, 2, 1, 3)              # [N, G, k, r]
 
-    # num[n, g] = tr(Gram_n C C^T) = sum_{a,b} Gram[a,b] * <C[b], C[a]>
-    CCt = torch.matmul(C, C.transpose(-1, -2))                 # [N, G, k, k]
+    # Projector onto span(Vg) WITHOUT orthonormalising Vg: with Gg = Vg Vg^T,
+    #     num = tr(Gram . C Gg^-1 C^T)
+    # which reduces to exactly the old `C C^T` when Vg's rows ARE orthonormal
+    # (Gg = I). The store now holds each group's RAW founding basis -- see
+    # reproject_U for why that is load-bearing -- and raw rows are not
+    # orthonormal, so the plain form silently mis-scores every candidate.
+    #
+    # THE SOLVE IS ALSO THE PERFORMANCE FIX. The obvious way to keep the old
+    # form working is to orthonormalise Vg here instead, which is a QR of an
+    # [F, r] matrix per CANDIDATE per BLOCK. Block compression also runs during
+    # DECODE, so that lands in the token loop: measured on the MLX port at
+    # 1.39 tok/s against ~9.9. This solve is [r, r] (r = 48) and batched ONCE
+    # PER GROUP, with the block axis folded into the right-hand side.
+    Gg = torch.matmul(Vgf, Vgf.transpose(-1, -2))              # [G, r, r]
+    Gg = Gg + torch.eye(r, dtype=Gg.dtype, device=Gg.device) * 1e-6
+    Ct = C.permute(1, 3, 0, 2).reshape(G, r, N * k)            # [G, r, N*k]
+    X = torch.linalg.solve(Gg, Ct)                             # [G, r, N*k]
+    X = X.reshape(G, r, N, k).permute(2, 0, 1, 3)              # [N, G, r, k]
+    CCt = torch.matmul(C, X)                                   # [N, G, k, k]
+    # C Gg^-1 C^T is symmetric, so tr(Gram . CCt) is the elementwise sum.
     num = (Gram.unsqueeze(1) * CCt).sum(dim=(-1, -2))          # [N, G]
 
     kept = num / den.clamp(min=eps).unsqueeze(1)
@@ -208,14 +236,41 @@ def reproject_U(
     V: torch.Tensor,        # [N, k, F]
     Vg: torch.Tensor,       # [N, r, F] row-orthonormal, one basis PER BLOCK
 ) -> torch.Tensor:          # [N, T, r]
-    """Re-express each block's U in its assigned group basis: ``U' = U (V Vg^T)``.
+    """``U' = U V Vg^+``, so ``U' Vg`` is the projection of ``U V`` onto span(Vg).
 
-    ``U' Vg`` is then the orthogonal projection of ``U V`` onto span(Vg), i.e.
-    the best possible reconstruction from that basis.  Vg is per-block here
-    (already gathered by group id), not the [G, r, F] store.
+    ``Vg`` is PER BLOCK here (already gathered by group id), not the [G, r, F]
+    store, and it is NOT assumed to have orthonormal rows.
+
+    THE PSEUDO-INVERSE IS NOT PEDANTRY -- it is what makes a FOUNDER EXACT.
+    With ``Vg == V`` (a block that founded its own group, which is every block
+    when nothing shares) the right pseudo-inverse gives ``V V^+ == I`` and so
+    ``U' == U`` and ``U' Vg == U V`` bit-for-bit. The simpler ``U (V Vg^T)``
+    only does that when Vg's rows are ORTHONORMAL, and the joint ``[K | V]``
+    basis this pool stores is not: the halves are sliced out of one orthonormal
+    ``Vh`` and the V half is then divided by the per-block ``v_scale`` gain
+    (lowrank.py, before the assignment) -- measured row norms 0.78-0.83 on the
+    MLX port.
+
+    That mattered in production, not in theory. Storing a unit-normalised basis
+    and pushing the scale into U leaves ``U V`` unchanged, so reconstruction
+    stays exact and no distance metric notices -- but the ROUTER reads U and V
+    SEPARATELY, so its per-block scores shift and it retains a different set of
+    blocks. The signature on MLX was a needle that passed at depth 0.0 and
+    failed at 0.5 and 0.9: depth-DEPENDENT is routing, depth-invariant would
+    have been reconstruction.
     """
-    Cmat = torch.bmm(V.float(), Vg.float().transpose(1, 2))    # [N, k, r]
-    Up = torch.bmm(U.float(), Cmat)                            # [N, T, r]
+    Vf = V.float()
+    Gf = Vg.float()
+    Cmat = torch.bmm(Vf, Gf.transpose(1, 2))                   # [N, k, r]
+    Gram = torch.bmm(Gf, Gf.transpose(1, 2))                   # [N, r, r]
+    # Ridge, because a rank truncation leaves zero basis rows and those make
+    # Gram singular. It is tiny next to the row norms it regularises, and a
+    # zero row contributes nothing either way.
+    r = Gram.shape[-1]
+    Gram = Gram + torch.eye(r, dtype=Gram.dtype, device=Gram.device) * 1e-6
+    # Cmat @ Gram^-1, obtained as a solve rather than an explicit inverse.
+    Cp = torch.linalg.solve(Gram.transpose(1, 2), Cmat.transpose(1, 2))
+    Up = torch.bmm(U.float(), Cp.transpose(1, 2))              # [N, T, r]
     return torch.nan_to_num(Up, nan=0.0, posinf=0.0, neginf=0.0)
 
 
@@ -345,9 +400,11 @@ class SharedBasisRegistry:
         """Assign every block in a compress batch to a basis row.
 
         Returns the per-block assignments and the per-block gathered bases
-        ``[N, r, F]`` (row-orthonormal) that ``reproject_U`` should be called
-        with.  ``basis_store`` is mutated: newly founded groups write their
-        orthonormalised basis into their row.
+        ``[N, r, F]`` that ``reproject_U`` should be called with.
+        ``basis_store`` is mutated: a newly founded group writes its
+        orthonormalised basis into its row -- see the comment at that write for
+        the int8-U measurement that keeps it that way on CUDA.  reproject_U and
+        retained_energy do NOT rely on it, taking the pseudo-inverse instead.
 
         Blocks are processed in order, so a block CAN join a group founded by
         an earlier block of the same batch.  That is the common case inside a
@@ -410,6 +467,35 @@ class SharedBasisRegistry:
 
             if self._free_rows:
                 row = self._free_rows.pop()
+                # ORTHONORMALISED, and on CUDA that is DELIBERATE -- the
+                # opposite of what the MLX port concluded. Storing the founder's
+                # RAW V makes it reproject exactly (U' == U) and gives the
+                # router the true U/V scale split, which is why MLX stores raw.
+                #
+                # CUDA CANNOT AFFORD IT, because this pool quantises U to INT8
+                # with ONE per-block scale (native_block_pool.py, scale_u =
+                # max_abs/127). A raw joint [K|V] basis is ill-conditioned --
+                # measured cond 46.6, row norms 2.42-3.45 on the pool's own
+                # shared-factor test -- and U' = U V Vg^+ pushes that
+                # conditioning straight into the tensor being quantised: the
+                # small columns collapse onto a handful of int8 levels.
+                # Measured end to end on test_shared_blocks_still_reconstruct,
+                # six blocks sharing one basis:
+                #
+                #     store            founder rel   joiner rel
+                #     orthonormalised     0.0070     0.0058-0.0079
+                #     raw V               0.0072     0.0379-0.0791
+                #
+                # i.e. raw storage buys an exact founder and costs the joiners a
+                # factor of 5-10. MLX does not quantise U, so its trade is the
+                # other way round and its choice does not port.
+                #
+                # reproject_U and retained_energy still take the pseudo-inverse
+                # rather than assuming this: it reduces to the transpose form
+                # for an orthonormal Vg (pinned by
+                # test_retained_energy_still_matches_the_orthonormal_form), so
+                # it costs nothing here and stays correct if the store ever
+                # changes.
                 basis_store[row] = V_on[n].to(basis_store.dtype)
                 g = BasisGroup(row=row, rank=k_use, members=1, layer=layer,
                                top_dir=V_on[n, 0].detach().cpu())

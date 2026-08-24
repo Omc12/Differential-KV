@@ -1,6 +1,11 @@
 """Shared bases are wired to the PRESET, not only to an env var.
 
-`low` is the memory-priority preset, so it takes the 23.6% pool reduction.
+`low` is the memory-priority preset and looks like the natural home for the
+23.6% pool reduction. It is NOT: `low` is the one preset that keeps
+rotated_pool=True, and shared bases on a rotated pool degenerate to forced
+lossy joins at an identical pool size (see test_shared_basis_refuses_a_rotated_pool).
+It also sets kv_quant="q4_0", which breaks the same feature for an INDEPENDENT
+reason.
 `mid` (the default) and `high` (max fidelity) must not, and an explicit env
 var must still win over whatever the preset chose -- in BOTH directions, which
 is the half that is easy to get wrong: `shared_basis_enabled()` returns False
@@ -89,6 +94,9 @@ def test_pool_honours_the_preset_argument(monkeypatch):
     """The regression this guards: shared_basis_enabled() returns False for an
     UNSET variable, so a pool that consulted the environment unconditionally
     would ignore a preset that asked for it on."""
+    # Sharing is only supported on an UNROTATED pool and the pool now
+    # refuses the rotated combination; DKV_ROTATED_POOL defaults to "1".
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")
     monkeypatch.delenv("DKV_SHARED_BASIS", raising=False)
     monkeypatch.delenv("DKV_SHARED_BASIS_FRAC", raising=False)
     p = _pool(shared_basis=True, frac=0.50)
@@ -98,6 +106,9 @@ def test_pool_honours_the_preset_argument(monkeypatch):
 
 
 def test_env_overrides_the_pool_argument(monkeypatch):
+    # Sharing is only supported on an UNROTATED pool and the pool now
+    # refuses the rotated combination; DKV_ROTATED_POOL defaults to "1".
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")
     monkeypatch.setenv("DKV_SHARED_BASIS", "0")
     assert _pool(shared_basis=True).shared_basis_active is False
     monkeypatch.setenv("DKV_SHARED_BASIS", "1")
@@ -105,6 +116,9 @@ def test_env_overrides_the_pool_argument(monkeypatch):
 
 
 def test_pool_argument_frac_is_applied(monkeypatch):
+    # Sharing is only supported on an UNROTATED pool and the pool now
+    # refuses the rotated combination; DKV_ROTATED_POOL defaults to "1".
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")
     monkeypatch.delenv("DKV_SHARED_BASIS", raising=False)
     monkeypatch.delenv("DKV_SHARED_BASIS_FRAC", raising=False)
     assert _pool(True, frac=0.25, n=16).V_KV.shape[0] == 4
@@ -112,6 +126,9 @@ def test_pool_argument_frac_is_applied(monkeypatch):
 
 
 def test_pool_argument_frac_is_clamped(monkeypatch):
+    # Sharing is only supported on an UNROTATED pool and the pool now
+    # refuses the rotated combination; DKV_ROTATED_POOL defaults to "1".
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")
     monkeypatch.delenv("DKV_SHARED_BASIS", raising=False)
     monkeypatch.delenv("DKV_SHARED_BASIS_FRAC", raising=False)
     assert _pool(True, frac=9.0, n=16).V_KV.shape[0] == 16
@@ -121,6 +138,9 @@ def test_pool_argument_frac_is_clamped(monkeypatch):
 def test_low_preset_pool_actually_saves(monkeypatch):
     """End to end: the preset value reaches _bytes_per_block, which is where
     the saving turns into MORE BLOCKS rather than just less memory."""
+    # Sharing is only supported on an UNROTATED pool and the pool now
+    # refuses the rotated combination; DKV_ROTATED_POOL defaults to "1".
+    monkeypatch.setenv("DKV_ROTATED_POOL", "0")
     monkeypatch.delenv("DKV_SHARED_BASIS", raising=False)
     monkeypatch.delenv("DKV_SHARED_BASIS_FRAC", raising=False)
     off = _pool(shared_basis=False)

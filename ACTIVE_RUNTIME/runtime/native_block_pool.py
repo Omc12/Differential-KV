@@ -272,6 +272,68 @@ class NativeBlockPool:
                       f"f16). The VRAM saving is unchanged, which is why this "
                       f"is easy to miss -- check pool.basis_stats()['joined'].",
                       flush=True)
+        # ── SHARED BASES REQUIRE AN UNROTATED POOL ──────────────────────────
+        # Shared low-rank bases compare SUBSPACES. RoPE rotates every key by its
+        # ABSOLUTE POSITION, so two blocks holding the same text at different
+        # offsets have subspaces rotated apart and the grouping collapses.
+        # Measured on the MLX port, same document, same block size, frac=0.50,
+        # with only DKV_ROTATED_POOL differing:
+        #
+        #   pool        best-partner retained energy   founded  joined  forced
+        #   rotated     mean 0.486,  0/27 clear 0.90       560      10     186
+        #   unrotated   mean 0.972, 26/27 clear 0.90       236     520       0
+        #
+        # The unrotated row reproduces this pool's own published numbers
+        # (joined 463, forced 0, mean_kept 0.969), which is what identifies
+        # rotation as the whole mechanism.
+        #
+        # CUDA has never hit this because it got lucky: every preset that turns
+        # sharing on -- mid, high, ultra -- already sets rotated_pool=False. But
+        # `low` is the one ROTATED preset, so DKV_SHARED_BASIS=1 on `low`
+        # degenerates exactly as above.
+        #
+        # REFUSE, don't warn. The kv_quant note above warns because a 4-bit pool
+        # still produces a usable (if badly grouped) result; this one produces no
+        # error, no shape change, and the FULL memory win -- pool MB is identical
+        # either way, because the saving comes from allocating fewer basis rows
+        # rather than from grouping succeeding. A rotated run therefore reports
+        # the expected saving with its fidelity quietly bought by forced lossy
+        # joins. These are two INDEPENDENT reasons sharing fails on `low`;
+        # excusing one does not cover the other.
+        #
+        # DKV_SHARED_BASIS_ALLOW_ROTATED=1 keeps the bad configuration
+        # measurable, because a guard that cannot be turned off cannot be
+        # A/B'd against.
+        if self._shared_basis:
+            try:
+                from native_core.sparse_decode.triton_fused_decode import (
+                    pool_stores_rotated_k as _psr,
+                )
+                _rot = bool(_psr())
+            except Exception:                                    # noqa: BLE001
+                _rot = str(_os.environ.get("DKV_ROTATED_POOL", "1")).strip().lower()                     not in ("0", "false", "off", "no")
+            if _rot:
+                if str(_os.environ.get("DKV_SHARED_BASIS_ALLOW_ROTATED", "0")
+                       ).strip().lower() in ("1", "true", "on", "yes"):
+                    print("[DKV WARNING] shared bases on a ROTATED pool "
+                          "(DKV_SHARED_BASIS_ALLOW_ROTATED=1). Grouping will "
+                          "degenerate to forced lossy joins while the memory "
+                          "number looks correct -- check "
+                          "pool.basis_stats()['forced'].", flush=True)
+                else:
+                    print("[DKV] DKV_SHARED_BASIS ignored: the pool stores "
+                          "ROTATED keys (DKV_ROTATED_POOL=1, which the `low` "
+                          "preset sets). RoPE rotates each key by its absolute "
+                          "position, so blocks holding the same text at "
+                          "different offsets have subspaces rotated apart and "
+                          "no two blocks clear the join threshold -- the store "
+                          "fills with founders and everything later is "
+                          "FORCE-joined, at the full advertised memory saving. "
+                          "Set DKV_ROTATED_POOL=0 to use sharing, or "
+                          "DKV_SHARED_BASIS_ALLOW_ROTATED=1 to measure it "
+                          "anyway.", flush=True)
+                    self._shared_basis = False
+
         self.basis_of = None          # [n_blocks] int32 device tensor, or None
         self.basis_registry = None
         self.basis_store = None       # _JointVAdapter over V_KV, or None
@@ -1269,6 +1331,27 @@ class NativeBlockPool:
         self._ref_counts       = []
         self._last_used        = []
         self.version           = []
+        # BASIS GROUPS ARE POOL STATE AND MUST DIE WITH THE POOL.
+        #
+        # The attrs loop above deletes V_KV, but `basis_store` is a
+        # _JointVAdapter holding a reference to it, so the old tensor stays
+        # alive behind the adapter while the next allocation builds a NEW V_KV.
+        # `basis_registry` and `basis_of` were not cleared either. On the LAZY
+        # path -- which is CUDA's default -- reset() does not call
+        # _allocate_tensors, so nothing rebuilt them: the registry kept every
+        # group it had, its rows indexing a store no reader uses any more, and
+        # its capacity already spent. The next document's blocks then found
+        # nothing free and were FORCE-JOINED to the previous document's bases.
+        #
+        # This is the same defect the MLX port hit with the registry on the
+        # manager, and it is invisible to any single-session test: prefill state
+        # is byte-identical between a passing and a failing configuration, and
+        # only a several-requests-in-one-process run reaches it. That is what
+        # colab/needle_suite_cuda.py is for.
+        self.basis_of = None
+        self.basis_registry = None
+        self.basis_store = None
+        self._basis_claimed = None
         # OPT-D: Bump generation so any proxy cached against the pre-reset data
         # is automatically evicted on the next decode call.
         self._stratified_generation = getattr(self, "_stratified_generation", 0) + 1

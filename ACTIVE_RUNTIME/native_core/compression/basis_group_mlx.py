@@ -155,6 +155,17 @@ def reproject_U(U: mx.array, V: mx.array, Vg: mx.array) -> mx.array:
     ``Vg`` is PER BLOCK here (``[N, r, F]``, already gathered by group id), not
     the ``[G, r, F]`` store, and it is NOT assumed to have orthonormal rows.
 
+    CUDA DELIBERATELY DIVERGES ON WHAT IT STORES, and the divergence is measured.
+    `basis_group.py` keeps writing the ORTHONORMALISED basis for a founder,
+    because that pool quantises U to INT8 with one per-block scale. A raw joint
+    [K | V] basis is ill-conditioned (measured cond 46.6, row norms 2.42-3.45 on
+    its own shared-factor test) and `U' = U V Vg^+` carries that conditioning
+    into the tensor being quantised. Measured over six blocks sharing one basis:
+    orthonormal store gives joiner rel 0.0058-0.0079, raw store 0.0379-0.0791 --
+    a factor of 5-10 for an exact founder. MLX does not quantise U, so it takes
+    the other side of that trade. Both runtimes use the pseudo-inverse below
+    either way, since it reduces to the transpose form when Vg is orthonormal.
+
     THE PSEUDO-INVERSE IS NOT PEDANTRY -- it is what makes a FOUNDER EXACT.
     With ``Vg == V`` (a block that founded its own group, which is every block
     when nothing shares) the right pseudo-inverse gives ``V V^+ == I`` and
