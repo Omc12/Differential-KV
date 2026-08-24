@@ -10,7 +10,7 @@ WHY IT IS BUILT THIS WAY
 ------------------------
 This repo has had to retract several unmeasured or under-powered claims (see
 ACTIVE_RUNTIME/docs/cuda_port_record.md, and the seed-noise warning carried
-forward into MLX_PORT_FROM_CUDA.md: the randomised SVD's seed alone moves
+forward into ACTIVE_RUNTIME/docs/mlx_work_record.md: the randomised SVD's seed alone moves
 synthesis 30 points at a fixed config). So:
 
   * The seed-sensitive quantity (DKV_RSVD_SEED) is PINNED across arms, so a
