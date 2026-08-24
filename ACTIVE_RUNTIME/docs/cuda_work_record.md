@@ -63,24 +63,33 @@ and position and is therefore identical between arms.
 
 Found by the corrected harness, on the row §1 never had.
 
-**`_remat_attend` is called from two sites with dense windows in DIFFERENT
-ROTATIONAL FRAMES, and it assumes the production one.**
+**The combined branch handed `_remat_attend` an ALREADY-ROTATED dense window,
+and remat rotated it a second time.** Same defect family as §0.5's
+double-RoPE-on-history, at a new site.
 
-`_use_combined` (`dkv_attention.py:4363`) is true when `DKV_SPARSE_BIAS` is unset
-or `"0.0"` — the LIBRARY DEFAULT. That branch builds `_dk_combined` for
-`native_triton_sparse_attn_decode_combined`: a fixed-width workspace re-rotated
-into each token's TRUE frame. The compressed half `_remat_attend` materialises is
-in the PRODUCTION frame — anchors and `V_K` straight out of a pool that already
-stores post-RoPE keys, no second rotation. Measured at layer 0, 8k, against a
-dense control's own keys:
+The default preset leaves the pool UNROTATED — `mid`, `high` and `ultra` all set
+`rotated_pool=False` and `config.py` exports it into the environment; only `low`
+keeps a rotated pool (see §4b, which turns on the same fact). On an unrotated
+pool `_remat_attend` rotates the dense window itself, at the positions from
+`dense_blocks[].token_indices`, to match the compressed half it also rotates. So
+it must be given the UNROTATED window.
+
+`_use_combined` (`dkv_attention.py`) is true when `DKV_SPARSE_BIAS` is unset or
+`"0.0"` — the LIBRARY DEFAULT. That branch builds `_dk_combined` for
+`native_triton_sparse_attn_decode_combined`, which wants the window PRE-ROTATED,
+and passed that to remat. Measured at layer 0, 8k, against a dense control's own
+post-RoPE keys — note that the tensor CLOSER to truth is the wrong one to pass,
+precisely because it already carries the rotation remat would apply:
 
 | branch | window handed to remat | mean abs(dk − K_true) |
 |---|---|---|
 | combined (`DKV_SPARSE_BIAS` default) | `_dk_combined` | **0.047** |
 | production (`DKV_SPARSE_BIAS=auto`)  | `dense_k_assembled` | 43.79 |
 
-One plain SDPA over a union of two frames is meaningless. Nothing raises, the
-shapes are right, and the pool reports the same block count.
+Rotating `_dk_combined` again put the dense rows in no frame at all while the
+compressed rows landed correctly — one plain SDPA over a union of two frames,
+which is meaningless whichever frame is "right". Nothing raises, the shapes are
+right, and the pool reports the same block count.
 
 **End to end, first decode step, against a true dense control:**
 
@@ -97,11 +106,20 @@ A caller using the library without those defaults got the broken pairing
 silently. `colab/logit_fidelity.py` does not apply them, which is why the
 corrected harness walked straight into it.
 
-**Fix.** `_remat_attend` takes `combined_window=True` from that call site and
-declines, with a reason code. The combined branch's own kernel is what served
-before remat was wired into it, and it is correct. After the fix all three rows
-above read KL 0.00125 / 5-of-5, `validate_cuda_dkv.py --long` is unchanged at
-ALL CHECKS PASSED, and `colab/needle_suite_cuda.py` reports the arms identical.
+**Fix: the combined branch now passes `dense_k_assembled`**, the same window the
+production branch hands remat and the one its contract is written for.
+
+**Declining was tried first and REJECTED on measurement.** Making
+`_remat_attend` refuse the combined branch is correct — it returns that branch to
+its own kernel — but `colab/bench_decode_paired.py` prices remat there at
+**29.9% of decode** (54.75 vs 78.43 ms/token, paired over 8 rounds, CI ±0.7% of a
+token). Declining bought correctness and paid all of it; passing the right window
+buys correctness for nothing, and is also markedly more stable (cv 1.3% against
+the old broken path's 22.9%, because remat's cache serves whole intervals).
+
+After the fix all three rows above read KL 0.00125 / 5-of-5,
+`validate_cuda_dkv.py --long` is unchanged at ALL CHECKS PASSED, and
+`colab/needle_suite_cuda.py` reports the three arms identical.
 
 **Ruled out by measurement before the frame was found** — recorded so nobody
 re-walks them:
@@ -196,10 +214,20 @@ previous one's bases. Same defect MLX hit with the registry on the manager.
 Fixed, with `test_lazy_pool_drops_basis_state_on_reset` (which fails on the old
 code; the non-lazy test passes either way, because that path re-allocates).
 
-**(d) the memory claim.** Not re-measured. CUDA's −23.6% remains a CAPACITY
-result via `_bytes_per_block`, which is a different and defensible claim; it is
-still not backed by a same-process PEAK measurement, so it must not be quoted as
-a memory saving. Open.
+**(d) the memory claim — MEASURED.** `colab/bench_shared_basis_peak.py`, pool
+bytes summed from the pool's REAL tensors and peak from
+`torch.cuda.max_memory_allocated()`, both in the same process, both arms:
+
+| ctx | pool off | pool on | pool Δ | peak off | peak on | peak Δ |
+|---|---|---|---|---|---|---|
+| 8k | 95.9 MB | 73.2 MB | **−23.7%** | 3619.2 MB | 3598.1 MB | **−0.6%** |
+| 32k | 366.1 MB | 279.4 MB | **−23.7%** | 4614.5 MB | 4532.6 MB | **−1.8%** |
+
+The −23.6% pool figure reproduces exactly and the V store halves as designed
+(924 → 462 rows at 8k, 3528 → 1764 at 32k). Peak barely moves, because weights
+alone are 3087 MB of every peak above. MLX measured 1.1% / 3.4% for the same
+feature; CUDA is 0.6% / 1.8% — same conclusion. **The CAPACITY framing is the
+only one the measurement supports**, and the README now says so.
 
 ---
 
@@ -223,15 +251,101 @@ character when the prompt is a literal prefix.
 
 ---
 
-## 4. Still open, unchanged by this work
+## 4. The two §4 items — both ANSWERED, and both were instrument problems
 
-* **§4 decode −12%** — not investigated.
-* **§4 sparse prefill selectivity** — not re-measured; `DKV_SP_TRACE_TOKEN`
-  still the way in.
-* **§2b(d) peak memory** — see above.
-* **The root inside `_dk_combined`** — the fix declines rather than reconciling
-  the two frames. Making remat serve the combined branch would mean giving it a
-  window in the pool's frame, or teaching it which frame it holds. Worth doing
-  only if the combined branch is ever measured faster; it is not today.
+### 4a. The "~12% slower decode" cannot be salvaged: both numbers are impossible
+
+`HANDOFF_CUDA_PREFILL.md` §8 records decode 259.8 tok/s (HEAD) vs 229.4 (fixed)
+at 8k on Qwen3.5-2B, "**-11.7%** ... and that is NOT explained", alongside a
+dense arm at 309.0. All three come from
+
+    decode_tok_s = (GEN - 1) / (total_s - ttft_s)
+
+where `total_s` and `ttft_s` are the walls of TWO SEPARATE `generate()` calls,
+each running its own full prefill (`benchmarks/clean_sweep_v2.py:100-128`).
+
+**A bandwidth bound settles it without needing the old build.** Decode streams
+every weight once per token, so tok/s <= bandwidth / weight_bytes. Qwen3.5-2B is
+1.882 B params fp16 = 3.76 GB; this card is 504 GB/s:
+
+| accounting | ceiling |
+|---|---|
+| all weights | 133.9 tok/s |
+| excluding the embedding table entirely (over-generous — it is TIED, so `lm_head` streams it) | 183.5 tok/s |
+
+Against the most generous ceiling, dense 309.0 is **1.68x** it, HEAD 259.8 is
+**1.42x**, fixed 229.4 is **1.25x**. All three are above what the hardware can
+do, so none is a decode rate and their difference is not a regression.
+
+**And the estimator's noise is prefill wall noise.** `colab/bench_decode_
+estimator_check.py` runs it against itself — same build, same prompt, nothing
+changed between repetitions — and reports it beside per-token times taken from
+`DKV_TIME_ATTN`, which need no subtraction:
+
+| run | prefill wall cv | ESTIMATOR range | ground-truth range |
+|---|---|---|---|
+| clocks ramping | 11.06% | **17.2%** | 2.0% |
+| warm and quiet | 1.15% | 0.3% | 1.2% |
+
+So its resolution is not a property of the method alone — it is whatever the
+prefill wall happens to be doing, amplified by prefill/decode ≈ 0.6x here. The
+original −12% was measured across two builds in separate runs, which is the
+worst case for that. It also reads **25% low** in both runs (20.2–20.6 against a
+true 27.3–27.4 tok/s), because the two prefills do not cancel.
+
+**The real number.** Qwen3.5-2B, 8.4k, DKV under the serving defaults:
+**27.4 tok/s (36.5 ms/token)**, range 1.2% across reps. Use
+`colab/bench_decode_paired.py` for comparisons — its A/A control resolves ±0.3%
+of a token.
+
+**What decode timing DID find.** Pricing this session's own change with that
+harness: remat is worth **29.9%** of decode on the combined branch (54.75 vs
+78.43 ms/token, paired, CI ±0.7%). That is what made handing remat a correctly
+framed window the right fix rather than letting it decline.
+
+### 4b. Sparse prefill selectivity — measured, and it is OFF by default
+
+§4 asked whether prefill was "genuinely selective rather than degenerating to
+attend-all". It degenerates, and not subtly. `_sparse_prefill_filter_blocks` has
+four early returns that all mean *attend every block*, and its only instrument
+(`DKV_SP_TRACE_TOKEN`) prints AFTER all four, so a decline is silent. Counting
+every call instead:
+
+| pool | ctx | selective calls | what prefill attended |
+|---|---|---|---|
+| unrotated (**the default**) | 8k | **0 of 196** | every block, every chunk |
+| unrotated | 32k | **0 of 868** | every block, every chunk |
+| rotated | 8k | 0 of 196 | every block — `k_eff >= nb` |
+| rotated | 32k | 616 of 868 | nb 9–30, k_eff 8, dropping 10–71% |
+
+The decline's own comment called `DKV_ROTATED_POOL=0` "a non-default diagnostic
+path". **It is the default**: `mid` sets `rotated_pool=False` and `config.py`
+exports it into the environment, as do `high` and `ultra`; only `low` keeps a
+rotated pool. So on the shipped configuration there is no prefill sparsity at
+any context, and even on a rotated pool it does not engage below ~32k. §8's
+"prefill is STILL SPARSE — k_eff=30 of 120" is the 32k rotated case and does not
+generalise. The comment now carries this table.
+
+Making it work unrotated needs the keys' TRUE per-token positions, which is the
+same thing §0.5 established prefill does not have. Left open deliberately, now
+with a number on it.
+
+---
+
+## 5. Still open
+
+* **Prefill sparsity on an unrotated pool** — §4b above. Worth real throughput
+  (prefill currently attends every history block on the default preset), and
+  blocked on the same missing per-token positions as §0.5.
+* **A KEY COLLISION was found and fixed in passing.** `dkv_attention.py`'s
+  combined branch and `hf_dkv_wrapper.py`'s pre-rotation both used the workspace
+  key `"dense_rot_state"` for values of INCOMPATIBLE type — a dict vs a tuple
+  `(sig, valid_len)`. Whichever wrote second poisoned the other, and the forward
+  dereferenced it unguarded: `'tuple' object has no attribute 'get'`. Reachable
+  only with the combined branch AND mutation-out both live, i.e. without the
+  serving defaults — the same blind spot again. The wrapper's key is now
+  `dense_prerot_state` and the forward's read is `isinstance`-guarded so a future
+  collision degrades to a rebuild. Reproduced on 32d66345 to confirm it predates
+  this work.
 * **§3 of the old file (stale line numbers)** — every line number in this record
   is paired with a function name or a distinctive fragment for that reason.
