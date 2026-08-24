@@ -95,6 +95,25 @@ blocks — the two-GEMM form plus the RoPE work the fix REMOVES roughly cancel i
 Both TTFT deltas are inside run-to-run spread (the 3 reps overlap), so read them
 as "no measurable prefill cost", not as a 1% regression.
 
+> **RETRACTED 2026-08-24 — the -12% is not a measurement.** Every decode tok/s
+> on this page comes from `(GEN - 1) / (total_s - ttft_s)` over two separate
+> `generate()` calls that each run a full prefill. Decode streams every weight
+> once per token, so `tok/s <= bandwidth / weight_bytes`: Qwen3.5-2B is 1.882 B
+> params fp16 = 3.76 GB and this card is 504 GB/s, a ceiling of **133.9 tok/s**
+> (183.5 even if the embedding table is excluded entirely, which is
+> over-generous because it is tied). 309.0 / 259.8 / 229.4 are 1.68x / 1.42x /
+> 1.25x that ceiling. None of them is a decode rate, so the -12% and the -26%
+> below are differences between impossible numbers.
+>
+> The estimator's spread is the PREFILL wall's spread, amplified by
+> prefill/decode: measured against itself on one build it ranged 17.2% with
+> clocks ramping and 0.3% warm, and read 25% low both times.
+> `colab/bench_decode_estimator_check.py` reproduces this and prints the
+> bandwidth ceiling beside whatever it measured. The real figure for this
+> configuration is **27.4 tok/s (36.5 ms/token)**. Use
+> `colab/bench_decode_paired.py` for any comparison — A/A resolves ±0.3% of a
+> token. Full account: `ACTIVE_RUNTIME/docs/cuda_work_record.md` §4a.
+
 Decode is ~12% slower and that is NOT yet explained. A prefill-only change moving
 decode at all points at the working set: correct routing retains a different set
 of blocks, so decode gathers differently. Worth a look before this matters for
@@ -127,7 +146,7 @@ Cost, 8k (11,007 tok), 128 new tokens, both arms measured by the SAME harness:
 | metric | dense | DKV (fixed) | DKV vs dense |
 |---|---|---|---|
 | TTFT (prefill) | 2.013 s | 5.128 s | **2.5x slower** |
-| decode | 309.0 tok/s | 229.4 tok/s | **26% slower** |
+| decode | 309.0 tok/s | 229.4 tok/s | **26% slower** — RETRACTED, both above the 133.9 tok/s bandwidth ceiling |
 | peak VRAM | 5.21 GB | 4.62 GB | 11% lower |
 | 32k | OOM | 5.06 GB | dense cannot run |
 
@@ -715,8 +734,24 @@ position-alignment change. Delete `/tmp/dkv_qprobe_*.pt` and re-run both passes.
   is verified directly by the validator. Its `DKV_SP_TRACE_TOKEN` /
   `k_eff < nb` half was **not** separately checked, so "sparse prefill was
   genuinely selective rather than degenerating to attend-all" is inferred from
-  the recall result, not measured. Re-run with the trace if that distinction
-  ever matters.
+  the recall result, not measured.
+
+  **MEASURED 2026-08-24, and it degenerates.** Counting every call to
+  `_sparse_prefill_filter_blocks` rather than trusting a trace that prints only
+  after its four early returns:
+
+      pool        ctx   selective calls   what prefill attended
+      unrotated    8k   0 of 196          every block, every chunk
+      unrotated   32k   0 of 868          every block, every chunk
+      rotated      8k   0 of 196          every block (k_eff >= nb)
+      rotated     32k   616 of 868        nb 9-30, k_eff 8, dropping 10-71%
+
+  Unrotated is the DEFAULT — `mid`, `high` and `ultra` all set
+  `rotated_pool=False` and `config.py` exports it into the environment; only
+  `low` keeps a rotated pool. So on the shipped configuration there is NO
+  prefill sparsity at any context, and even rotated it does not engage below
+  ~32k. The `k_eff=30 of 120` quoted above is the 32k rotated case and does not
+  generalise. See `ACTIVE_RUNTIME/docs/cuda_work_record.md` §4b.
 * **[CLOSED, as far as it can be] Controlled prefill-throughput measurement.**
   The comparison this item asks for is no longer POSSIBLE: it wanted HEAD vs
   fixed, both §0.5 fixes are now permanent, and the pre-fix HEAD's outputs
