@@ -129,6 +129,29 @@ separately**, so it retains a different set of blocks. On MLX the signature was
 a needle that passed at depth 0.0 and failed at 0.5 and 0.9. Depth-DEPENDENT is
 routing; depth-invariant would have been reconstruction.
 
+**(c) If you adopt (a) and (b), do NOT reintroduce a per-candidate QR.**
+CUDA today calls `row_orthonormalize` ONCE per compress batch
+(`basis_group.py:366`) and `retained_energy` requires an already-orthonormal
+Vg, so CUDA does not have the performance bug MLX hit. But the fix for (a)/(b)
+is to store the founder's RAW basis, and the obvious way to keep scoring
+working after that is to orthonormalise Vg inside `retained_energy` — which is
+a QR of an `[F, r]` matrix per CANDIDATE per BLOCK. On MLX that cost 1.39 tok/s
+against ~9.9, because block compression also runs during DECODE. Use a batched
+`[r, r]` solve for the projector instead (it reduces to exactly the old
+`C C^T` when Vg is orthonormal); `basis_group_mlx.retained_energy` has the
+form.
+
+**(d) Check the memory claim against PEAK, not just pool bytes.** On MLX the V
+store halves exactly as designed and the saving is still only **1.1% of peak at
+8k and 3.4% at 32k** — peak is dominated by weights and prefill activations, so
+the pool is simply not where the memory is. CUDA's README frames its −23.6% as
+a CAPACITY result ("the budget holds proportionally more blocks"), which is a
+defensible and different claim — but if it is ever quoted as a memory saving,
+it needs a peak measurement behind it. Measure pool bytes and peak IN THE SAME
+PROCESS: putting a synthetic pool number next to a real peak is exactly the
+mistake that produced a wrong conclusion here, and it took a second measurement
+to catch.
+
 There is also a third, which CUDA appears to survive but should confirm:
 **basis groups are SESSION state.** On MLX the registry lived on the manager,
 so one request's groups outlived it and a later request's blocks force-joined a
