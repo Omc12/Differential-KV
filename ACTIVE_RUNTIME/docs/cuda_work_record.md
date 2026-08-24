@@ -358,9 +358,61 @@ first-token KL against a dense control goes **0.00024 → 0.00585** (still 5/5
 top-1, dense's top-1 at rank 0). Paying fidelity for a measured-zero speedup is
 the wrong default.
 
-*Coverage, stated:* the throughput number is at the wrapper's default block size
-and the fidelity number at 256. Not the same operating point; nobody has swept
-them together.
+**Both numbers re-taken at ONE operating point.** An earlier note claimed they
+came from different block sizes; that was wrong — `bench_prefill_paired.py` and
+`logit_fidelity.py` both run block_size 256, preset mid. The context differed,
+so both were re-taken at 32k, where routing actually engages:
+
+| 32k, first token, vs a plain-transformers control | KL | top-1 | rank |
+|---|---|---|---|
+| ROTATE off (default) | **0.00036** | 3/3 | 0 |
+| ROTATE on | **0.10580** | 3/3 | 0 |
+
+294× the KL at the exact context where the paired throughput A/B reports no
+resolvable change. The fidelity is spent and nothing is bought with it.
+
+### Two ways to make it pay — both tried, both fail
+
+**1. "Decide without rotating": transform the BOX, not the keys.** A box is
+`[nb, H_kv, D]` against keys at `[nb, S, H_kv, D]`, so 257× less work, and RoPE
+acts on 2-D pairs so a rectangle maps to a rotated rectangle whose enclosing box
+is exact *at one angle*. The block is the problem: it spans S positions, pair i
+sweeps `theta_i * S`, and at theta=1e6, S=257 the fast pairs wrap many times —
+pair 0 sweeps 257 radians. The only enclosure valid at every position is the
+RADIUS, which discards direction. Counting pairs that keep a tight box against
+the sweep a single angle may cover:
+
+| sweep ≤ | pairs tight | sound? |
+|---|---|---|
+| 0.5 | 35/64 | **no** — an enclosure test finds keys outside the box |
+| 0.05 | 24/64 | no |
+| 0.001 | 6/64 | yes, and 58/64 ranking on magnitude alone |
+
+Sound and discriminative are mutually exclusive here. Sub-block boxes do not
+rescue it (pair 0 wraps within ~6 positions). It was built, tested, and reverted;
+the enclosure test is what caught the unsoundness, not a recall run.
+
+**2. Lower the floor.** `k_eff = max(KMIN, 0.25*nb)` with KMIN=8 against nb=9–30
+is what actually caps the win: at `k_eff≈2` the unrotated pool DOES pay — **5.1%
+at 32k, CI ±1.2%**. Recall survives it: needle suite unchanged, and
+`validate_cuda_dkv.py --long` **9/9 including all three 32k cases at KMIN=2**.
+
+**It still must not ship, and only one harness could tell:**
+
+| `multifact_eval_cuda.py`, 16k, Qwen2.5-1.5B | multi-needle | relational | synthesis |
+|---|---|---|---|
+| KMIN=8 | 3/3 | **4/4** | 13.3 |
+| KMIN=2 | 3/3 | **3/4** | 30.0 |
+
+Asked for Dr. Quillfeather's number at KMIN=2 the model returns **8857 — Dr.
+Braxanible's**. A BINDING failure, which is the characteristic compressed-KV
+failure and which NIAH cannot see by construction. Synthesis rising at the same
+time is not a counterweight: 13.3 is this model's floor with routing OFF too, so
+it was never measuring the router. **KMIN=8 stays**, and if it is ever revisited
+the gate is multifact, not the needle suite.
+
+That also answers the separate "8k never engages" item: it is the same KMIN, and
+the same reason not to move it.
 
 **Two performance defects were found getting there, and both outlive the flag:**
 
@@ -381,16 +433,14 @@ them together.
 
 ## 5. Still open
 
-* **Making prefill sparsity PAY on an unrotated pool** — §4c. It works and is
-  correct; it just does not win, because the router's rotation and the
-  attention's rotation are the same work. Anything that lets the router decide
-  without rotating (a position-invariant score, or reusing the attention's own
-  rotated keys) would turn the measured zero into something like the rotated
-  pool's 9.2%.
-* **8k never engages on either pool** — `k_eff = max(8, 0.25*nb)` against a
-  candidate count that the sinks and the 1024-token recency window leave at
-  1–8. That is `DKV_SPARSE_PREFILL_KMIN`, not the frame, and nobody has asked
-  whether 8 is the right floor.
+* **Prefill sparsity on an unrotated pool is CLOSED, not open.** It works, it is
+  correct, and it does not pay — the two available levers are measured and
+  rejected in §4c. Reopening it needs a genuinely different idea, not another
+  pass at those two.
+* **Nothing in this record has been measured on more than one model.** Every
+  accuracy number here is Qwen2.5-1.5B, and the one place a second harness was
+  brought in (multifact) immediately overturned a decision the first two had
+  cleared. That is the most likely place a conclusion here is wrong.
 * **A KEY COLLISION was found and fixed in passing.** `dkv_attention.py`'s
   combined branch and `hf_dkv_wrapper.py`'s pre-rotation both used the workspace
   key `"dense_rot_state"` for values of INCOMPATIBLE type — a dict vs a tuple

@@ -1590,9 +1590,65 @@ def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
     # 5/5 top-1 with dense's top-1 at rank 0, but 24x). Paying any fidelity for
     # a throughput change that measures as zero is the wrong default.
     #
-    # COVERAGE, stated rather than implied: the throughput number was measured
-    # at the wrapper's default block size and the fidelity number at 256. They
-    # are not the same operating point, and nobody has swept the two together.
+    # MEASURED AT ONE OPERATING POINT. An earlier note here claimed the
+    # throughput and fidelity numbers came from different block sizes; that was
+    # wrong -- colab/bench_prefill_paired.py and colab/logit_fidelity.py both
+    # run block_size 256, preset mid. What DID differ was the context, so both
+    # were re-taken at 32k, which is where routing actually engages:
+    #
+    #     32k, first token, against a plain-transformers dense control
+    #     ROTATE off   KL 0.00036   top-1 3/3   dense-top1 rank 0
+    #     ROTATE on    KL 0.10580   top-1 3/3   dense-top1 rank 0
+    #
+    # 294x the KL at the very context where the paired throughput A/B reports
+    # no resolvable change. That is the clearest form of the argument for the
+    # default: the fidelity is spent and nothing is bought with it.
+    #
+    # ── TWO WAYS OUT WERE TRIED AND BOTH FAIL. Do not re-walk them. ──────────
+    #
+    # 1. "DECIDE WITHOUT ROTATING" -- transform the BOX instead of the keys.
+    #    A box is [nb, H_kv, D] against keys at [nb, S, H_kv, D], so it is 257x
+    #    less work, and RoPE acts on 2-D pairs so a rectangle maps to a rotated
+    #    rectangle whose enclosing box is exact AT ONE ANGLE. The block is the
+    #    problem: it spans S positions, so pair i sweeps theta_i * S, and with
+    #    Qwen's theta=1e6 at S=257 the fast pairs wrap many times -- pair 0
+    #    sweeps 257 radians. No single angle encloses them, and the only
+    #    enclosure that holds at every position is the RADIUS (|(y1,y2)| is
+    #    rotation-invariant), which throws away direction.
+    #
+    #    Counting how many of the 64 pairs keep a tight box as a function of the
+    #    sweep a single angle is allowed to cover:
+    #
+    #        sweep <= 0.5    35/64 tight  -- but NOT SOUND; a built enclosure
+    #                                       test catches keys outside the box
+    #        sweep <= 0.05   24/64 tight
+    #        sweep <= 0.001   6/64 tight  -- sound, and 58/64 on the radius,
+    #                                       i.e. ranking on magnitude alone
+    #
+    #    Sound and discriminative are mutually exclusive here. Sub-block boxes
+    #    do not rescue it either: pair 0 wraps within ~6 positions. Soundness
+    #    requires per-token rotation, which is what this path already does.
+    #
+    # 2. LOWER THE FLOOR. k_eff = max(KMIN, 0.25*nb) with KMIN=8 against nb=9-30
+    #    is what actually caps the win: at k_eff~2 the unrotated pool DOES pay,
+    #    5.1% at 32k (CI +-1.2%). Recall survives it -- needle suite unchanged
+    #    and validate_cuda_dkv.py --long 9/9 including all three 32k cases at
+    #    KMIN=2. It still must not ship, because the harness those two cannot
+    #    see through does:
+    #
+    #        colab/multifact_eval_cuda.py, 16k, Qwen2.5-1.5B
+    #        KMIN=8   multi-needle 3/3   relational 4/4   synthesis 13.3
+    #        KMIN=2   multi-needle 3/3   relational 3/4   synthesis 30.0
+    #
+    #    The relational failure is a BINDING failure -- asked for Dr.
+    #    Quillfeather's number it returns 8857, which is Dr. Braxanible's. That
+    #    is the characteristic compressed-KV failure and NIAH cannot see it by
+    #    construction. Synthesis improving at the same time is not a
+    #    counterweight: 13.3 is this model's floor with routing OFF as well, so
+    #    it was never measuring the router.
+    #
+    #    KMIN=8 stays. If it is ever revisited, gate it on multifact, not on
+    #    the needle suite.
     _rot_ok = os.environ.get("DKV_SPARSE_PREFILL_ROTATE", "0").strip().lower() in (
         "1", "true", "on", "yes")
     if not _pool_rotated_k() and (rope is None or not _rot_ok):
