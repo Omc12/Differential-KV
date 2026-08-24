@@ -23,6 +23,27 @@ The CUDA baseline number is also worth confirming or refuting as a CUDA-specific
 defect. If MLX's baseline is close to dense on the same prompt and model, the
 CUDA gap is a CUDA bug, not the price of compression.
 
+RESOLVED, 2026-08-24, AND NOT THE WAY THIS FILE EXPECTED
+--------------------------------------------------------
+The CUDA 10.579 was an INSTRUMENT DEFECT in colab/logit_fidelity.py, not a CUDA
+bug and not the price of compression. That harness captured the LAST `lm_head`
+call, and at `max_new_tokens=1` the decode loop samples token 1 from the logits
+prefill already produced and then forwards AGAIN -- so it was scoring DKV's
+token N+2 against a dense control's token N+1. Re-measured at the same position
+against a true dense control, CUDA's baseline reads KL 2.4e-4 with 5/5 top-1 and
+896 compressed blocks engaged. The CUDA harness now carries a `dense_true/dec`
+self-check row containing no compression, which must read 0.
+
+WHAT THIS HARNESS MEASURES, PRECISELY. It keeps the FIRST `_sanitize_logits`
+call, i.e. the token sampled from PREFILL. That is the right quantity and it is
+the same one CUDA's corrected `baseline` row reports -- but it means the
+5.135e-12 result says nothing about COMPRESSED DECODE, because on a fresh
+prefill no block is compressed yet and the first token never reads the pool.
+CUDA added a second row for the decode step and it found a real defect there
+that no first-token measurement could see. An MLX equivalent would need the
+SECOND sampled logits plus a dense control decoded from the same step-1 token;
+until someone adds it, MLX's compressed decode is unmeasured here, not clean.
+
 METHOD (identical to the CUDA version, deliberately)
 ----------------------------------------------------
 FIRST DECODE STEP ONLY. Greedy decode diverges: once two arms pick different

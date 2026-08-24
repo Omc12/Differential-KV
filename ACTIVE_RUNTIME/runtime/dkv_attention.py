@@ -579,7 +579,7 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                   pool, block_indices, anchor_indices, cos_all, sin_all,
                   layer_active_rank, q, dense_k, dense_v, dense_len,
                   num_key_value_groups, curr_kv=None, dense_mask=None,
-                  dense_blocks=None):
+                  dense_blocks=None, combined_window=False):
     """MLX's decode form: materialise the routed blocks, then plain SDPA.
 
     MLX builds each routed block's real keys and values --
@@ -608,6 +608,43 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
     unrotated dense keys -- it declines instead of silently attending garbage.
     """
     global _REMAT_UNROTATED_WARNED
+    # ── THE COMBINED BRANCH'S WINDOW IS NOT THIS FUNCTION'S WINDOW ───────────
+    # `_use_combined` (DKV_SPARSE_BIAS unset/"0.0", i.e. the LIBRARY DEFAULT)
+    # builds `_dk_combined` specifically for native_triton_sparse_attn_decode_
+    # combined: a fixed-width workspace that has been RoPE-rotated again, into
+    # the TRUE per-token frame. Measured at layer 0, 8k, against a dense
+    # control's own post-RoPE keys:
+    #
+    #     combined branch  (_dk_combined)      |dk - K_true| mean  0.047
+    #     production path  (dense_k_assembled) |dk - K_true| mean 43.79
+    #
+    # The compressed half this function materialises is in the PRODUCTION
+    # frame -- anchors and V_K straight out of a pool that already stores
+    # post-RoPE keys, with no second rotation. So on the combined branch remat
+    # attends a dense window and a compressed half that do not share a frame,
+    # and one plain SDPA over the union is meaningless. It does not raise and
+    # the shapes are right; it just answers wrongly.
+    #
+    # Measured end to end, Qwen2.5-1.5B at 8k, first decode step against a plain
+    # transformers dense control (colab/logit_fidelity.py):
+    #
+    #     DKV_SPARSE_BIAS default -> remat serves  KL 11.76   top-1 0/5
+    #     DKV_SPARSE_BIAS=auto    -> remat serves  KL 0.00125 top-1 5/5
+    #     DKV_REMAT_CACHE=0       -> kernel serves KL 0.00125 top-1 5/5
+    #
+    # and on the niah prompt the first row loses the needle outright while the
+    # other two answer 'OMEGA-7741-DELTA'.
+    #
+    # BEST_DECODE_DEFAULTS sets DKV_SPARSE_BIAS=auto, so everything that goes
+    # through the serving defaults -- including validate_cuda_dkv.py, which is
+    # why its 9/9 never caught this -- takes the production branch. A caller
+    # that does not apply those defaults gets the broken pairing silently.
+    #
+    # Declining here costs nothing: the combined branch's own kernel is what
+    # served before remat was wired into it, and it is correct.
+    if combined_window:
+        _remat_why("combined-window")
+        return None
     if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
         import sys as _s
         print(f"[PTR] _remat_attend ENTER L{captured_layer_idx} "
@@ -4687,7 +4724,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                                                   value_states[b_idx:b_idx+1])
                                                  if _MUTATION_OUT_ACTIVE and q_len == 1 else None),
                                         dense_mask=_dense_mask,
-                                    dense_blocks=dense_blocks)
+                                    dense_blocks=dense_blocks,
+                                    combined_window=True)
 
                                     attn_out_b = _remat_out if _remat_out is not None else \
                                         native_triton_sparse_attn_decode_combined(
