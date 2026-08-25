@@ -431,7 +431,55 @@ the same reason not to move it.
 
 ---
 
-## 5. Still open
+## 5. TASKS — open, in priority order
+
+**T1. Does CUDA lose the needle at depths nobody tests? (owner's report, believed)**
+The suites that say "9/9" sample THREE depths: `validate_cuda_dkv.py` is
+`[2k, 8k, 32k] x [0.0, 0.5, 0.9]`. `pool_stores_rotated_k`'s claim of "9/9 at
+every depth and every length" was an overclaim and is corrected in that
+docstring. `colab/needle_suite_cuda.py` samples 0.1 and FAILS there on
+Qwen2.5-1.5B while all three validator depths pass.
+
+Two candidate causes, and they must be separated before anything is changed:
+
+* **The PTA phase error.** This is THE architectural CUDA/MLX divergence, and it
+  is depth-dependent by construction. MLX ingests `keys_rot` (post-RoPE), so its
+  reconstruction lands in each token's true frame and its only error is low-rank
+  truncation. CUDA's default presets — `mid`, `high`, `ultra` — set
+  `rotated_pool=False` (measured), so the decode gather rotates the anchor and
+  the whole `V_K` basis at the ANCHOR's position and every compressed token
+  carries a RoPE phase error of up to a full block. `_ingest_k` records the same
+  gradient from the other side: at depth 0.0 the block sits near position 0
+  where RoPE is ~identity, so it passes while deeper needles degrade. `low` is
+  the only preset that stores what MLX stores.
+* **The needle's tokenisation.** `niah_recall`'s `OMEGA-7741-DELTA` splits
+  `' O'|'ME'|'GA'`, which `_assert_needle_unambiguous` exists to reject and
+  which the repo measures as a 0.1875-logit coin flip on small models. The
+  observed failure returns `7741-DELTA` — exactly the fragmenting prefix
+  missing.
+
+`colab/needle_depth_sweep.py` (added, NOT YET RUN) separates them: a fine depth
+grid, the validator's unambiguous needle, and a DENSE control at every point, so
+a depth where both fail is the prompt and a depth where only DKV fails is DKV.
+Run it at 8k and 32k, then — only if DKV alone fails — A/B `DKV_ROTATED_POOL=1`
+at the failing depths. Note that flag is measured as −18% to −24% decode and
++1.1 GB VRAM, so it is a trade, not a free fix.
+
+**T2. Shared bases have still never seen an accuracy test.**
+That was §2b's actual complaint. Its projection defects are fixed, its rotated-
+pool guard is in, and its memory is measured — but `DKV_SHARED_BASIS=1` has
+never been run through the needle suite, multifact, or the corrected logit
+harness, all three of which now exist and work. Until it is, the feature is
+unvalidated, not validated-and-clean.
+
+**T3. Everything here is one model.** Every accuracy number in this record is
+Qwen2.5-1.5B. The one time a second harness was brought in (multifact) it
+immediately overturned a decision the other two had cleared. A second model is
+the highest-value coverage this record is missing.
+
+---
+
+## 6. Closed, with the reasoning worth keeping
 
 * **Prefill sparsity on an unrotated pool is CLOSED, not open.** It works, it is
   correct, and it does not pay — the two available levers are measured and

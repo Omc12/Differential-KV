@@ -324,8 +324,31 @@ def pool_stores_rotated_k() -> bool:
     was read at the time as a broken unrotated READ path rather than a real
     fidelity trade, and that reading was right: it is now fixed. Re-measured
     with DKV_ROTATED_POOL=0 on the current build, the sweep is 9/9 with 9/9
-    determinism on BOTH Qwen3.5-2B and Qwen2.5-1.5B-Instruct, at every depth
-    and every length.
+    determinism on BOTH Qwen3.5-2B and Qwen2.5-1.5B-Instruct.
+
+    "AT EVERY DEPTH AND EVERY LENGTH" IS AN OVERCLAIM, corrected 2026-08-25.
+    That sweep is validate_cuda_dkv.py's nine cases, which are
+    [2k, 8k, 32k] x [0.0, 0.5, 0.9] -- THREE depths on a coarse grid, not every
+    depth. The claim reads as coverage the suite does not have, and the gap is
+    not hypothetical: colab/needle_suite_cuda.py samples 0.1 and fails there on
+    Qwen2.5-1.5B while all three validator depths pass.
+
+    That matters MOST for this flag, because the phase error described above is
+    depth-dependent BY CONSTRUCTION -- it grows with a token's offset from its
+    block anchor, and _ingest_k's docstring records the same gradient from the
+    other side ("at depth 0.0 the block sits near position 0 where RoPE is
+    ~identity, so it passed while deeper needles degraded"). A three-point grid
+    that happens to include 0.0 is the weakest possible test of a defect whose
+    signature is a gradient. Do not read the 9/9 as "no depth gradient"; it is
+    "no gradient visible at 0.0, 0.5 and 0.9".
+
+    The open question this leaves is whether the remaining unrotated-pool
+    failures are the phase error or the needle's tokenisation
+    (niah_recall's OMEGA-7741-DELTA splits ' O'|'ME'|'GA', which
+    _assert_needle_unambiguous exists to reject). colab/needle_depth_sweep.py
+    separates them: a fine depth grid, an unambiguous needle, and a DENSE
+    control at every point, so a depth where both fail is the prompt and a
+    depth where only DKV fails is DKV.
 
     With that gone, unrotated is strictly better on accuracy. linkbench at 32k
     over 48 seeds on Qwen3.5-2B -- 48 samples per point, unlike multifact whose
