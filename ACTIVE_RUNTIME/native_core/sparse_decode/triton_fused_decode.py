@@ -1792,7 +1792,8 @@ def _build_stratified_U_for_triton(
 _gathered_rot_cache: dict = {}
 
 
-def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indices, cos, sin):
+def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indices, cos, sin,
+                                     raw_k=False):
     """Gather the [N] routed rows of every per-block tensor the Triton kernels
     read, pre-rotating the K-side rows (anchors_K, V_K, res_k) by each block
     anchor's RoPE when rotation inputs are provided. Returns a dict of compact
@@ -1890,8 +1891,26 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     # remat versus fused-kernel paths (the unrotated profile also shows
     # _fused_sparse_decode_kernel at 144 calls where the rotated one does not).
     # Start there, with the profiler, not here.
+    # raw_k: hand back the PRE-RoPE frame untouched, for a caller that will
+    # MATERIALISE the keys and can therefore rotate each one at its OWN absolute
+    # position. That is strictly better than what `do_rot` does below, which
+    # rotates the anchor and the whole V_K basis at the ANCHOR's position and
+    # leaves every token in the block carrying a RoPE phase error of up to a
+    # full block -- the Project-Then-Attend approximation MLX does not make.
+    #
+    # It also removes a frame SPLIT that no amount of residual budget can fix:
+    # with do_rot the exact residuals are rotated at their TRUE positions while
+    # the low-rank base they correct is rotated at the anchor, so the correction
+    # and the thing it corrects live in different frames and their sum is the
+    # exact key in neither. Raw keeps base and residual in ONE frame and rotates
+    # the sum, which is what makes the residual actually cancel.
+    #
+    # Only the remat path can use this: project-then-attend never forms the key,
+    # so it cannot rotate per token without a D-dim reconstruction per token,
+    # which is the whole cost the low-rank form exists to avoid.
     do_rot = (anchor_indices is not None and cos is not None and sin is not None
-              and not pool_stores_rotated_k())
+              and not pool_stores_rotated_k() and not raw_k)
+    g["raw_k"] = bool(raw_k and not pool_stores_rotated_k())
     cos_anc = sin_anc = None
     if do_rot:
         cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos

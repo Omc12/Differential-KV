@@ -566,6 +566,43 @@ def _stabilise_routed_set(kv_manager, sid, layer_idx, block_indices, anchor_indi
 # in one run.
 _REMAT_WHY_SEEN = set()
 
+# DKV_EXACT_ROPE_REMAT — rotate each MATERIALISED key at its own absolute
+# position instead of rotating the basis at the block anchor.
+#
+# It removes the Project-Then-Attend phase error on an unrotated pool: the basis
+# rotation lands every token of a block in the ANCHOR's frame, so a token j into
+# its block carries j positions of RoPE error, and the exact residual (rotated at
+# its TRUE position) ends up correcting a base in a different frame. Rotating the
+# materialised key instead gives R(true_pos)(anchor_raw + delta_raw + res_raw),
+# which is MLX's form and whose only error is low-rank truncation.
+#
+# DEFAULT OFF, and the reason is a measurement that went the other way.
+#
+#   colab/logit_fidelity.py, 8k, decode step   ON 0.00029   OFF 0.00125
+#   colab/needle_depth_sweep.py, 8k, 11 depths ON 11/11     OFF 11/11
+#   colab/needle_depth_sweep.py, 32k,11 depths ON 10/11     OFF 11/11
+#
+# At 32k depth 0.80 it returns `Falcon-9427-6123` for `Falcon-9427-6183` --
+# deterministic over repeats, one digit wrong. That is the "right letters, wrong
+# digits" signature this file already associates with a RoPE phase error at the
+# top of the spectrum, and it is exactly the failure the change was meant to
+# remove.
+#
+# So the more accurate keys measure closer to dense in KL and lose the needle
+# anyway. This repo has been here before: per-layer cosine did not determine end
+# behaviour, and neither does KL. RECALL IS THE GATE, so the default follows the
+# recall column even though the KL column disagrees.
+#
+# NOT UNDERSTOOD, and worth saying so rather than dressing it up: the position
+# mapping was checked against three independent statements of the block layout
+# and matches, `g["res_k"]` is assigned outside the do_rot branch so the raw
+# gather is complete, and the routed SET is identical either way (the router
+# never sees these tensors). The most likely remaining explanation is that the
+# anchor-frame error was suppressing a competitor to the needle's digit token
+# rather than helping the needle -- i.e. the old path was lucky at a coin-flip
+# margin -- but that is a hypothesis, not a measurement.
+_EXACT_ROPE_REMAT = os.environ.get("DKV_EXACT_ROPE_REMAT", "0") != "0"
+
 
 def _remat_why(code, extra=""):
     if os.environ.get("DKV_REMAT_WHY") != "1" or code in _REMAT_WHY_SEEN:
@@ -987,7 +1024,13 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
     _rkey = _RC.make_key(captured_layer_idx, current_version, _poolgen, _step)
     _hit = _rc.get(_rkey)
     if _hit is None:
-        _g = _grb(pool, block_indices, anchor_indices, cos_all, sin_all)
+        # RAW on an unrotated pool -- see the rotation right after _rb below, and
+        # the `raw_k` note in _gather_routed_blocks_for_kernel. On a rotated pool
+        # the pool already holds post-RoPE keys and nothing rotates either way,
+        # so this flag is inert there.
+        _raw = (not _psr()) and _EXACT_ROPE_REMAT
+        _g = _grb(pool, block_indices, anchor_indices, cos_all, sin_all,
+                  raw_k=_raw)
         # The residuals are a CORRECTNESS requirement, not a refinement: they
         # carry the exact values of the tokens the SVD reconstructs worst (codes,
         # digits). Dropping them attends every routed block at pure low-rank
@@ -1001,6 +1044,55 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             res_pos=_g["res_pos"] if _has_res else None,
             res_v=_g["res_v"] if _has_res else None,
             res_pos_v=_g["res_pos_v"] if _has_res else None)
+        if _g.get("raw_k") and anchor_indices is not None and cos_all is not None:
+            # ── EVERY KEY AT ITS OWN POSITION, which is MLX's form ───────────
+            # _Km is now R-free: anchor_raw + delta_recon_raw + res_raw, one
+            # frame throughout. Rotating it here at each row's TRUE absolute
+            # position gives R(true_pos) . (anchor_raw + delta_raw), so the only
+            # error left is low-rank truncation -- exactly what MLX has, and
+            # what the anchor-position rotation this replaces did not.
+            #
+            # The old path rotated V_K and anchors_K at the ANCHOR's position,
+            # so a token j into its block carried a RoPE phase error of j
+            # positions. That error grows with the offset, which is why it reads
+            # as a DEPTH GRADIENT: a needle near position 0 sits where RoPE is
+            # ~identity and survives, a deeper one does not. _ingest_k's
+            # docstring records the same gradient from the other side.
+            #
+            # AFFORDABLE ONLY HERE, and only because remat already materialised
+            # the keys. It is one RoPE over the [N, 1+S, H_kv, D] it just built,
+            # and it sits INSIDE the RematCache entry, so it is paid once per
+            # refresh rather than once per token.
+            #
+            # Row 0 of each block is its ANCHOR, at anchor_idx exactly; row 1+j
+            # is active token j, at anchor_idx + 1 + j. Same layout the residual
+            # scatter and the trace resolver both use.
+            _cf = cos_all.squeeze(0) if cos_all.dim() == 3 else cos_all
+            _sf = sin_all.squeeze(0) if sin_all.dim() == 3 else sin_all
+            _S1 = _Km.shape[1]
+            _pos = (anchor_indices.to(_Km.device).long().unsqueeze(1)
+                    + torch.arange(_S1, device=_Km.device).unsqueeze(0))  # [N, S1]
+            # Clamping here would rotate an out-of-range row at the LAST table
+            # row instead of its own position -- value-exact and silently in the
+            # wrong frame. Decline the whole optimisation instead; the caller
+            # falls back to the anchor rotation, which is worse but honest.
+            if int(_pos.max().item()) < _cf.shape[0]:
+                _Km = _apply_rope_single(
+                    _Km, _cf[_pos].unsqueeze(2).to(_Km.dtype),
+                    _sf[_pos].unsqueeze(2).to(_Km.dtype))
+            else:
+                _remat_why("exact-rope-table-short",
+                           f"need {int(_pos.max().item()) + 1} rows, table has "
+                           f"{_cf.shape[0]}")
+                _g2 = _grb(pool, block_indices, anchor_indices, cos_all, sin_all)
+                _Km, _Vm = _rb(
+                    _g2["U"], _g2["V_K"], _g2["V_V"], _g2["anchors_K"],
+                    _g2["anchors_V"], _g2["scales"], _g2["U_scale"],
+                    layer_active_rank,
+                    res_k=_g2["res_k"] if _g2.get("has_res") else None,
+                    res_pos=_g2["res_pos"] if _g2.get("has_res") else None,
+                    res_v=_g2["res_v"] if _g2.get("has_res") else None,
+                    res_pos_v=_g2["res_pos_v"] if _g2.get("has_res") else None)
         _rc.put(_rkey, _Km, _Vm)
         # clone: under DKV_STATIC_GATHER the gather returns a PERSISTENT buffer
         # that the next layer's gather overwrites, and this is held across

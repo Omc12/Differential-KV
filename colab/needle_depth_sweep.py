@@ -78,13 +78,41 @@ def run_arm(args):
         bad, parts = _unambiguous(tok, NEEDLE)
         print(f"[needle] {NEEDLE!r} -> {parts} {'BAD ' + str(bad) if bad else 'OK'}",
               flush=True)
+        from transformers import DynamicCache
         for d in args.depths:
             prompt = build_prompt(tok, args.ctx, d)
-            ids = tok(prompt, return_tensors="pt").input_ids.to("cuda")
+            ids = tok(prompt).input_ids
+            # CHUNKED prefill plus a hand-written greedy loop. model.generate()
+            # on a 32k prompt tries to allocate 46 GiB on a 12 GB card -- it
+            # materialises the whole attention at once -- so the dense CONTROL
+            # was the arm that could not run, at exactly the context where the
+            # comparison matters most. Chunking is numerically free: attention is
+            # causal, so the last token attends the same keys either way.
+            try:
+                cache = DynamicCache(config=model.config)
+            except TypeError:
+                cache = DynamicCache()
+            step, gen = 512, []
             with torch.inference_mode():
-                out = model.generate(ids, max_new_tokens=24, do_sample=False,
-                                     pad_token_id=tok.eos_token_id)
-            comp = tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+                for i in range(0, len(ids), step):
+                    ch = ids[i:i + step]
+                    out = model(input_ids=torch.tensor([ch], device="cuda"),
+                                position_ids=torch.tensor(
+                                    [list(range(i, i + len(ch)))], device="cuda"),
+                                past_key_values=cache, use_cache=True)
+                cur, pos = int(out.logits[0, -1].argmax()), len(ids)
+                for _ in range(24):
+                    gen.append(cur)
+                    if cur == tok.eos_token_id:
+                        break
+                    out = model(input_ids=torch.tensor([[cur]], device="cuda"),
+                                position_ids=torch.tensor([[pos]], device="cuda"),
+                                past_key_values=cache, use_cache=True)
+                    pos += 1
+                    cur = int(out.logits[0, -1].argmax())
+            comp = tok.decode(gen, skip_special_tokens=True)
+            del cache, out
+            torch.cuda.empty_cache()
             ok = NEEDLE in comp
             rows.append({"depth": d, "ok": bool(ok), "blocks": 0, "text": comp[:60]})
             print(f"  [{'PASS' if ok else 'FAIL'}] dense d={d:.2f} -> {comp[:50]!r}",
@@ -107,7 +135,24 @@ def run_arm(args):
             out = w.generate(prompt, max_new_tokens=24, temperature=0.0,
                              top_p=1.0, repetition_penalty=1.0,
                              query_text=QUESTION)
-            comp = out[len(prompt):] if out.startswith(prompt) else out[-200:]
+            # ISOLATE THE COMPLETION BY THE QUESTION MARKER, not by length.
+            #
+            # The needle is IN THE PROMPT, so every length-based slice is a trap
+            # and this harness hit two of them: `out[-200:]` made two runs with
+            # identical output disagree on PASS/FAIL depending on where the
+            # window landed, and a token slice with a backward margin can catch
+            # the prompt's OWN copy of the needle -- which at depth 1.0 sits
+            # immediately before the question.
+            #
+            # The prompt ends with QUESTION, so everything after its LAST
+            # occurrence is the completion and nothing else, at every depth.
+            _cut = out.rfind(QUESTION)
+            if _cut >= 0:
+                comp = out[_cut + len(QUESTION):]
+            elif out.startswith(prompt):
+                comp = out[len(prompt):]
+            else:
+                comp = ""                    # cannot isolate -> do not guess
             ok = NEEDLE in comp
             nb = 0
             try:

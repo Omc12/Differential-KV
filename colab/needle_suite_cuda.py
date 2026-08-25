@@ -69,13 +69,42 @@ def run_arm(args):
             os.environ.setdefault(k, v)
 
     from serving.hf_dkv_wrapper import DKVHFWrapper
-    from niah_recall import NEEDLE, QUESTION, build_prompt
+    import niah_recall
+    # THE NEEDLE THIS SUITE SHIPPED WITH WAS CONTAMINATED. niah_recall's
+    # OMEGA-7741-DELTA tokenises as ' O'|'ME'|'GA' on Qwen, which is the
+    # partial-word shape validate_cuda_dkv._assert_needle_unambiguous exists to
+    # reject: the repo measures it as a 0.1875-logit coin flip on small models,
+    # so a miss says nothing about the KV cache. This suite reported a failure at
+    # 8k@0.1 whose output was '7741-DELTA' -- exactly that prefix missing -- and
+    # that reading could not be separated from a real depth defect.
+    #
+    # Use the validator's needle, and CHECK rather than trust: swapping in
+    # another fragmenting one later must fail loudly, not silently reintroduce
+    # the coin flip.
+    niah_recall.NEEDLE = "Falcon-9427-6183"
+    niah_recall.NEEDLE_SENT = f"The secret passcode is {niah_recall.NEEDLE}."
+    from niah_recall import QUESTION, build_prompt
+    NEEDLE = niah_recall.NEEDLE
 
     w = DKVHFWrapper(model_id=args.model,
                      config={"quantization": None, "rank": 32, "block_size": 256,
                              "micro_block_size": 256, "preset": "mid"})
     w.ensure_loaded()
     tok = w.tokenizer
+
+    _parts = [tok.decode([i]) for i in
+              tok(" " + NEEDLE, add_special_tokens=False).input_ids]
+    _words = {x.lower() for x in NEEDLE.replace("-", " ").split()}
+    _bad = [x for x in _parts if x.strip() and not x.strip().isdigit()
+            and x.strip() != "-" and x.strip().lower() not in _words]
+    if _bad:
+        raise SystemExit(
+            f"needle {NEEDLE!r} tokenises as {_parts} with partial-word pieces "
+            f"{_bad}. A model can miss those for tokenisation reasons alone, so "
+            f"recall here would not be measuring DKV. Pick a needle whose every "
+            f"token is a whole word, a digit or a separator.")
+    print(f"  needle {NEEDLE!r} -> {len(_parts)} tokens, all whole-word/digit/"
+          f"separator", flush=True)
     rows = []
     # ONE wrapper, every case, IN ORDER -- so anything that leaks between
     # requests (pool slots, basis groups, routing state) is reachable here and
@@ -91,12 +120,25 @@ def run_arm(args):
         # searched. Character slicing when the prompt is a literal prefix is
         # exact; re-tokenising is NOT -- decode(encode(x)) != x here, and the
         # round trip clipped real answers to '-DELTA' and scored them FAIL.
-        if out.startswith(prompt):
+        # ANCHOR ON THE QUESTION, not on a length.
+        #
+        # The needle is IN THE PROMPT, so every length-based slice is a trap and
+        # this file hit two of them. The token slice below carries a 4-token
+        # backward margin to survive a boundary merge -- and that margin can
+        # reach back into the prompt's OWN copy of the needle, which is what a
+        # shallow depth puts right there. It reported 8k@0.1 as FAIL with output
+        # '9427-6183' while colab/needle_depth_sweep.py, anchored on the
+        # question, passed the same case.
+        #
+        # The prompt ends with QUESTION, so everything after its LAST occurrence
+        # is the completion and nothing else, at every depth.
+        cut = out.rfind(QUESTION)
+        if cut >= 0:
+            comp = out[cut + len(QUESTION):]
+        elif out.startswith(prompt):
             comp = out[len(prompt):]
         else:
-            pn = len(tok(prompt).input_ids)
-            oid = tok(out).input_ids
-            comp = tok.decode(oid[max(0, pn - 4):]) if len(oid) > pn else ""
+            comp = ""                        # cannot isolate -> do not guess
         ok = NEEDLE in comp
         nb = 0
         try:

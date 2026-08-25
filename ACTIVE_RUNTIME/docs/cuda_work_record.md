@@ -240,9 +240,25 @@ requests nor any defect that only appears without those defaults. §1b was the
 second kind. The suite deliberately does NOT apply the serving defaults;
 `--serving-defaults` measures the other configuration.
 
-Current reading, all arms identical: 3/4, the one failure being an
-arm-independent partial recall at `8k@0.1` (the model answers `7741-DELTA`,
-dropping `OMEGA-`). That is a real model/config result, not an arm difference.
+**Current reading: 4/4, all arms identical.** It was reported as 3/4 for most of
+this work, with an "arm-independent partial recall at 8k@0.1". That failure was
+this harness, twice over, and both bugs are fixed:
+
+* **the needle was contaminated.** It used `niah_recall`'s
+  `OMEGA-7741-DELTA`, which Qwen splits `' O'|'ME'|'GA'` — the exact
+  partial-word shape `validate_cuda_dkv._assert_needle_unambiguous` exists to
+  reject, measured in this repo as a 0.1875-logit coin flip on small models.
+  The suite now uses the validator's needle AND runs the unambiguity check, so
+  swapping in a fragmenting one later fails loudly.
+* **the answer extraction was length-based.** The needle is IN THE PROMPT, so a
+  slice that misses the boundary scores the prompt. A token slice with a
+  4-token backward margin reaches into the prompt's own copy of the needle at
+  shallow depths, which is what produced `'9427-6183'`. Extraction is now
+  anchored on the LAST occurrence of QUESTION — the prompt ends with it, so
+  everything after is the completion and nothing else, at every depth.
+
+Length-based answer extraction has now produced a wrong reading three times in
+this file. Anchor on a marker, never on a length.
 
 **One trap worth carrying.** Isolating the completion by re-tokenising
 `generate()`'s output is NOT safe: `decode(encode(x)) != x` here, and the round
@@ -431,51 +447,86 @@ the same reason not to move it.
 
 ---
 
-## 5. TASKS — open, in priority order
+## 5. T1 and T2 — DONE. What the depth question actually was.
 
-**T1. Does CUDA lose the needle at depths nobody tests? (owner's report, believed)**
-The suites that say "9/9" sample THREE depths: `validate_cuda_dkv.py` is
-`[2k, 8k, 32k] x [0.0, 0.5, 0.9]`. `pool_stores_rotated_k`'s claim of "9/9 at
-every depth and every length" was an overclaim and is corrected in that
-docstring. `colab/needle_suite_cuda.py` samples 0.1 and FAILS there on
-Qwen2.5-1.5B while all three validator depths pass.
+### T1. No depth-dependent CUDA failure survives a correct instrument
 
-Two candidate causes, and they must be separated before anything is changed:
+The owner reported CUDA losing needles at depths MLX handles, and the suites
+could not have refuted it: `validate_cuda_dkv.py` samples three depths
+(`[2k, 8k, 32k] x [0.0, 0.5, 0.9]`), and `pool_stores_rotated_k`'s claim of
+"9/9 at every depth and every length" was an overclaim, now corrected in that
+docstring.
 
-* **The PTA phase error.** This is THE architectural CUDA/MLX divergence, and it
-  is depth-dependent by construction. MLX ingests `keys_rot` (post-RoPE), so its
-  reconstruction lands in each token's true frame and its only error is low-rank
-  truncation. CUDA's default presets — `mid`, `high`, `ultra` — set
-  `rotated_pool=False` (measured), so the decode gather rotates the anchor and
-  the whole `V_K` basis at the ANCHOR's position and every compressed token
-  carries a RoPE phase error of up to a full block. `_ingest_k` records the same
-  gradient from the other side: at depth 0.0 the block sits near position 0
-  where RoPE is ~identity, so it passes while deeper needles degrade. `low` is
-  the only preset that stores what MLX stores.
-* **The needle's tokenisation.** `niah_recall`'s `OMEGA-7741-DELTA` splits
-  `' O'|'ME'|'GA'`, which `_assert_needle_unambiguous` exists to reject and
-  which the repo measures as a 0.1875-logit coin flip on small models. The
-  observed failure returns `7741-DELTA` — exactly the fragmenting prefix
-  missing.
+`colab/needle_depth_sweep.py` answers it properly: eleven depths, the
+validator's unambiguous needle, and a DENSE control at every point (its dense
+arm chunks the prefill — `model.generate` on a 32k prompt asks for 46 GiB on a
+12 GB card, so the control was the arm that could not run at the context that
+mattered).
 
-`colab/needle_depth_sweep.py` (added, NOT YET RUN) separates them: a fine depth
-grid, the validator's unambiguous needle, and a DENSE control at every point, so
-a depth where both fail is the prompt and a depth where only DKV fails is DKV.
-Run it at 8k and 32k, then — only if DKV alone fails — A/B `DKV_ROTATED_POOL=1`
-at the failing depths. Note that flag is measured as −18% to −24% decode and
-+1.1 GB VRAM, so it is a trade, not a free fix.
+| ctx | dense | DKV |
+|---|---|---|
+| 8k, 11 depths | 11/11 | **11/11** |
+| 32k, 11 depths | 11/11 | **11/11** |
 
-**T2. Shared bases have still never seen an accuracy test.**
-That was §2b's actual complaint. Its projection defects are fixed, its rotated-
-pool guard is in, and its memory is measured — but `DKV_SHARED_BASIS=1` has
-never been run through the needle suite, multifact, or the corrected logit
-harness, all three of which now exist and work. Until it is, the feature is
-unvalidated, not validated-and-clean.
+So on this model, with a clean needle and correct extraction, CUDA matches dense
+at every depth. **The reported failure was instrument, not engine** — see §3 for
+the two bugs, both mine, both in harnesses written during this work. That is not
+a refutation of the owner's observation in general: it is one model, and any
+harness still using `niah_recall`'s needle reproduces the same false failure.
 
-**T3. Everything here is one model.** Every accuracy number in this record is
-Qwen2.5-1.5B. The one time a second harness was brought in (multifact) it
-immediately overturned a decision the other two had cleared. A second model is
-the highest-value coverage this record is missing.
+### T1b. The PTA phase error is real, the fix works, and it still ships OFF
+
+The one architectural CUDA/MLX divergence is real and worth naming: MLX ingests
+`keys_rot`, so its reconstruction lands in each token's true frame and its only
+error is low-rank truncation. CUDA's default presets set `rotated_pool=False`,
+and the decode gather rotates the anchor and the whole `V_K` basis at the
+ANCHOR's position — so a token j into its block carries j positions of RoPE
+error, and the exact residual (rotated at its TRUE position) corrects a base in
+a different frame.
+
+`DKV_EXACT_ROPE_REMAT` removes it: gather raw, reconstruct raw, then rotate the
+MATERIALISED key at each row's own absolute position. Affordable only on the
+remat path, which already materialises the keys, and it sits inside the
+RematCache entry so it is paid per refresh rather than per token.
+
+| | exact-RoPE ON | OFF (default) |
+|---|---|---|
+| decode-step KL, 8k | **0.00029** | 0.00125 |
+| depth sweep, 8k | 11/11 | 11/11 |
+| depth sweep, 32k | **10/11** | 11/11 |
+
+At 32k depth 0.80 it returns `Falcon-9427-6123` for `...-6183` — deterministic
+over repeats, one digit wrong, which is the "right letters, wrong digits"
+signature this repo already associates with a RoPE phase error. So the more
+accurate keys measure 4.3x closer to dense in KL and lose the needle anyway.
+Recall is the gate, so the default follows the recall column. **Not understood**
+— the position mapping matches three independent statements of the block layout,
+the raw gather is complete, and the routed set is identical either way. The
+likeliest explanation is that the anchor-frame error was suppressing a
+competitor at a coin-flip margin, but that is a hypothesis.
+
+### T2. Shared bases ARE validated now — §2b's actual complaint, answered
+
+§2b's real objection was "unvalidated against any working accuracy test". Its
+defects were fixed, its guard added and its memory measured, but the feature had
+never been run through an accuracy suite. All three now exist and all three were
+run at `DKV_SHARED_BASIS=1, frac=0.50` (unrotated pool, which the default preset
+already gives):
+
+| harness | OFF | ON |
+|---|---|---|
+| needle suite (4 cases) | 4/4 | **4/4** |
+| multifact multi-needle | 3/3 | **3/3** |
+| multifact relational (BINDING) | 4/4 | **4/4** |
+| multifact synthesis | 13.3 | 10.0 |
+| logit fidelity, first token | 0.00024 | **0.00024** |
+| logit fidelity, decode step | 0.00125 | **0.00146** |
+
+No regression anything here can resolve. The synthesis move is inside the
+±15-point RSVD-seed band this repo already records for that metric, and both
+numbers are far below its ≥30 bar, which this model does not clear with every
+feature off either. The row that would have mattered — relational, the binding
+test that caught KMIN=2 — is unchanged at 4/4.
 
 ---
 
