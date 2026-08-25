@@ -32,6 +32,7 @@ USAGE
     python colab/needle_depth_sweep.py --ctx 32768 --arms dkv dense
 """
 import argparse
+import io
 import json
 import os
 import subprocess
@@ -56,6 +57,55 @@ def _unambiguous(tok, needle):
     return bad, parts
 
 
+
+_NAT_FILES = ("ACTIVE_RUNTIME/nat_paper.txt", "benchmarks/berry_paper.txt",
+              "benchmarks/random_features_paper.txt")
+
+
+def _filler_text(kind):
+    """The haystack. `repeat` is what every needle harness in this repo uses.
+
+    THAT IS A PROBLEM AND IT INFLATES EVERY NEEDLE NUMBER HERE. niah_recall's
+    FILLER is ONE sentence -- 38 unique words -- tiled to length. A random
+    alphanumeric code dropped into that is a colossal outlier, so DKV's residual
+    budget, which spends its slots on the WORST-RECONSTRUCTED tokens in each
+    block, is all but guaranteed to spend one on the needle. Recall then measures
+    "is the needle distinctive", which it is by construction, rather than "does
+    the compressed representation retain it".
+
+    `natural` fills with real papers from this repo (1544 unique words in the
+    first alone), where the needle competes with genuinely distinctive tokens for
+    a budget of 40 slots per block. That is the condition an outside benchmark
+    puts DKV in, and it is the one where DKV is reported to degrade at early and
+    mid depth while staying perfect late.
+    """
+    if kind == "repeat":
+        return None
+    parts = []
+    for rel in _NAT_FILES:
+        fp = os.path.join(REPO, rel)
+        if os.path.exists(fp):
+            parts.append(io.open(fp, encoding="utf-8", errors="ignore").read())
+    if not parts:
+        raise SystemExit("no natural filler files found")
+    return "\n\n".join(parts)
+
+
+def _build_natural(tok, ctx, depth, text, needle_sent, question):
+    """Same shape as niah_recall.build_prompt, different haystack."""
+    body = tok.encode(text, add_special_tokens=False)
+    needle = tok.encode(needle_sent + "\n", add_special_tokens=False)
+    q = tok.encode(question, add_special_tokens=False)
+    budget = max(100, ctx - len(needle) - len(q) - 80)
+    reps = budget // max(1, len(body)) + 1
+    allf = (body * reps)[:budget]
+    at = int(len(allf) * depth)
+    p1, p2 = tok.decode(allf[:at]), tok.decode(allf[at:])
+    return ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            "<|im_start|>user\n" + p1 + "\n" + needle_sent + "\n" + p2 +
+            "\n\n" + question + "<|im_end|>\n<|im_start|>assistant\n")
+
+
 def run_arm(args):
     os.chdir(ACTIVE)
     sys.path.insert(0, ACTIVE)
@@ -68,6 +118,12 @@ def run_arm(args):
     niah_recall.NEEDLE = NEEDLE
     niah_recall.NEEDLE_SENT = f"The secret passcode is {NEEDLE}."
     from niah_recall import QUESTION, build_prompt
+    _nat = _filler_text(args.filler)
+    if _nat is not None:
+        _bp = build_prompt
+        build_prompt = lambda t, c, d: _build_natural(          # noqa: E731
+            t, c, d, _nat, niah_recall.NEEDLE_SENT, QUESTION)
+    print(f"[filler] {args.filler}", flush=True)
 
     rows = []
     if args.arm == "dense":
@@ -180,6 +236,10 @@ def main():
     ap.add_argument("--depths", type=float, nargs="+",
                     default=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
     ap.add_argument("--arms", nargs="+", default=["dense", "dkv"])
+    ap.add_argument("--filler", default="repeat", choices=["repeat", "natural"],
+                    help="repeat = one sentence tiled (what every harness here "
+                         "does, and it makes the needle a guaranteed outlier); "
+                         "natural = real papers, where the needle competes")
     ap.add_argument("--arm", default="")
     ap.add_argument("--json", default="")
     args = ap.parse_args()
@@ -194,7 +254,7 @@ def main():
         print(f"\n== arm {arm} @ {args.ctx} ==", flush=True)
         cmd = [sys.executable, os.path.abspath(__file__), "--arm", arm,
                "--model", args.model, "--ctx", str(args.ctx), "--json", out,
-               "--depths"] + [str(d) for d in args.depths]
+               "--filler", args.filler, "--depths"] + [str(d) for d in args.depths]
         p = subprocess.run(cmd, cwd=REPO)
         if p.returncode != 0 or not os.path.exists(out):
             print(f"{arm}: FAILED (exit {p.returncode})", flush=True)
@@ -214,6 +274,32 @@ def main():
         r = res.get(a, [])
         print(f"{a}: {sum(1 for x in r if x['ok'])}/{len(r)}")
     print("\nA DKV failure at a depth DENSE also fails is not a DKV failure.")
+
+    # ── RATE PER DEPTH BAND ──────────────────────────────────────────────
+    # One sample per depth cannot tell 100% from 50%, and DKV's reported
+    # weakness is a RATE (50 / 21 / 100 across early / mid / late), not a
+    # hard failure. Banding the fine grid is what makes those comparable.
+    #
+    # The mechanism to test: the recency window is EXACT and everything
+    # before it is low-rank reconstructed with a small residual budget. If
+    # that is the cause, `late` is perfect and `early`/`mid` are not, and
+    # the gap WIDENS with context because the window is a shrinking
+    # fraction of it (measured: 1048 exact tokens at 8k, ~3% of 32k).
+    bands = (("early", 0.0, 0.34), ("mid", 0.34, 0.67), ("late", 0.67, 1.01))
+    print("")
+    print(f"{'arm':>7} " + " ".join(f"{n:>14}" for n, _, _ in bands))
+    for a in args.arms:
+        r = res.get(a, [])
+        cells = []
+        for _n, lo, hi in bands:
+            sel = [x for x in r if lo <= x['depth'] < hi]
+            cells.append(
+                f"{100 * sum(1 for x in sel if x['ok']) / len(sel):.0f}% "
+                f"({sum(1 for x in sel if x['ok'])}/{len(sel)})" if sel else '-')
+        print(f"{a:>7} " + " ".join(f"{c:>14}" for c in cells))
+    print("")
+    print("The recency window is EXACT; everything before it is reconstructed.")
+    print("If that is the mechanism, `late` is perfect and `early`/`mid` are not.")
 
 
 if __name__ == "__main__":

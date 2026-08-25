@@ -447,9 +447,73 @@ the same reason not to move it.
 
 ---
 
+## 4d. THE HAYSTACK WAS HIDING A REAL DEFECT — recall on natural text
+
+**Every needle harness here fills the context with ONE SENTENCE tiled to
+length.** `niah_recall.FILLER` is 291 characters, 38 unique words;
+`validate_cuda_dkv.py` builds from a list of eight. A random alphanumeric code
+dropped into that is a colossal outlier, and DKV's residual budget spends its
+slots on the WORST-RECONSTRUCTED tokens of each block — so the needle is all but
+guaranteed one. The suites were measuring "is the needle distinctive", which it
+is by construction, not "does the compressed representation retain it".
+
+Swap the haystack for real papers already in this repo (`nat_paper.txt`,
+`berry_paper.txt`, `random_features_paper.txt` — 1544 unique words in the first
+alone), hold everything else fixed. Qwen2.5-1.5B, `mid`, block_size 256, needle
+`Falcon-9427-6183`, DENSE control at every point:
+
+| filler | ctx | dense | DKV |
+|---|---|---|---|
+| tiled sentence | 8k | 11/11 | **11/11** |
+| tiled sentence | 32k | 11/11 | **21/21** |
+| **natural text** | 8k | **12/12** | **3/12** |
+| **natural text** | 32k | **12/12** | **3/12** |
+
+Dense is perfect in every condition, so the prompt, needle and extraction are
+sound. This is DKV.
+
+**IT IS NOT A RETRIEVAL FAILURE.** The needle is found and corrupted:
+
+    Falcon-9427-6185   for   Falcon-9427-6183
+    "Falcon911"        for   Falcon-9427-6183
+
+Right word, wrong digits.
+
+**The residual budget is the dominant lever.** `DKV_MAX_RESIDUAL` 40 → 200 on
+natural filler at 32k takes DKV from **3/12 to 8/12**. `DKV_EXACT_ROPE_REMAT=1`,
+which removes the PTA phase error, gives **2/12** — no help, and an independent
+confirmation that the phase error is not this.
+
+So on realistic text the needle's tokens do not win one of the 40
+worst-reconstructed slots in their block, come back through pure low-rank
+reconstruction, and their digits flip. On tiled filler they always win a slot at
+any budget, which is why every suite here reads 9/9.
+
+**Raising it is not free.** Residuals are already 40 × 2·128·2·2 B = 40,960 B of
+an 83,136 B slot — 49% of it. At 200 the slot roughly triples, which is most of
+DKV's memory case. And 8/12 is still not 12/12.
+
+**How this differs from the owner's external benchmark.** That one reports DKV
+perfect in the LATE band, degrading early/mid, worsening with context, and
+attributes it to the exact recency window shrinking as a fraction of the
+sequence. This does not reproduce that shape: the rate is 3/12 at BOTH 8k and
+32k, and the late band is 0/4 at 32k. Same family of conclusion — everything
+outside the exact window is lossy — but the lever here is the residual budget,
+not the window size. Different configurations; the gap has not been chased.
+
+---
+
 ## 5. T1 and T2 — DONE. What the depth question actually was.
 
-### T1. No depth-dependent CUDA failure survives a correct instrument
+### T1. SUPERSEDED BY §4d — this held only for the TILED haystack
+
+> **Read §4d first.** Everything below is correct for the filler these suites
+> use, and that filler is the problem: on natural text the same sweep reads
+> **DKV 3/12 against dense 12/12**. The conclusion "no depth-dependent CUDA
+> failure survives a correct instrument" was true of the instrument and false of
+> DKV. The needle and the extraction needed fixing, and so did the haystack.
+
+### T1 (as measured, on tiled filler)
 
 The owner reported CUDA losing needles at depths MLX handles, and the suites
 could not have refuted it: `validate_cuda_dkv.py` samples three depths

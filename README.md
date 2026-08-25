@@ -68,6 +68,27 @@ make setup
 | `make chat` | Starts interactive terminal CLI in Direct Mode |
 | `make serve` | Launches OpenAI-compatible REST API gateway on `http://localhost:8000` |
 | `make test` | Runs needle-in-a-haystack (NIAH) recall guardrail tests at 8k & 16k context |
+
+> **NIAH numbers in this repo are measured on a TILED haystack, and that
+> inflates them.** `niah_recall.FILLER` is one 291-character sentence (38 unique
+> words) repeated to length; `validate_cuda_dkv.py` cycles eight. A random code
+> in that text is a colossal outlier, so DKV's residual budget — which spends its
+> slots on each block's worst-reconstructed tokens — is all but guaranteed to
+> keep it. Refill the same prompts from real papers in this repo and hold
+> everything else fixed (Qwen2.5-1.5B, `mid`, 12 depths, dense control at every
+> point):
+>
+> | filler | ctx | dense | DKV |
+> |---|---|---|---|
+> | tiled sentence | 8k / 32k | 11/11 | **11/11 / 21/21** |
+> | natural text | 8k | 12/12 | **3/12** |
+> | natural text | 32k | 12/12 | **3/12** |
+>
+> The needle is found and corrupted, not missed — `Falcon-9427-618`**`5`** for
+> `...618`**`3`**. `DKV_MAX_RESIDUAL` 40 → 200 recovers 3/12 → 8/12, so the
+> residual budget is the lever, but residuals are already 49% of a pool slot.
+> Reproduce with `colab/needle_depth_sweep.py --filler natural`; the full
+> account is `ACTIVE_RUNTIME/docs/cuda_work_record.md` §4d.
 | `make native` | Compiles high-performance C++ engine (`dkv_native`) with Metal/CUDA support |
 
 ---
@@ -191,7 +212,7 @@ Differential-KV runtime behaviors can be fine-tuned using environment variables:
 | **Backends** | MLX (Apple Silicon) / PyTorch + Triton (CUDA) | forked `llama.cpp` / `ggml` (Metal & CUDA) |
 | **Model Format** | HuggingFace Transformers / `mlx-community` | GGUF |
 | **Primary Target** | Research, rapid iteration, serving gateway | Production edge deployment, minimal host overhead |
-| **Status** | Reference accuracy (4k–64k NIAH 100% exact recall) | Experimental / Work-In-Progress |
+| **Status** | Reference accuracy (4k–64k NIAH 100% exact recall — **on TILED filler only; see below**) | Experimental / Work-In-Progress |
 
 ---
 
