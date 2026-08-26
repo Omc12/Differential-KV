@@ -1472,6 +1472,13 @@ if use_compile == "1":
                       flush=True)
                 state["use"] = eager
                 return eager(*a, **kw)
+        # Let callers ask whether the fallback actually fired. warm_up_jit used
+        # to announce "Inductor compilation finished" unconditionally, because
+        # the guard swallows the backend failure and the warmup call therefore
+        # RETURNS NORMALLY -- so a box without cl.exe was told compilation had
+        # succeeded while every decode ran eager. Two contradictory lines in the
+        # same log, and the reassuring one came last.
+        _run._dkv_eager_fallback = lambda: state["use"] is eager
         return _run
 
     try:
@@ -1613,7 +1620,20 @@ def warm_up_jit(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        print("[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.", flush=True)
+        # Report what the guard actually settled on, not what we attempted.
+        _fell_back = [
+            _n for _n, _fn in (("_reconstruct_and_score", _reconstruct_and_score),
+                               ("_attend_and_reconstruct_v", _attend_and_reconstruct_v))
+            if getattr(_fn, "_dkv_eager_fallback", None) is not None
+            and _fn._dkv_eager_fallback()
+        ]
+        if _fell_back:
+            print(f"[DKV JIT] Decode kernel warmup finished, but Inductor did NOT "
+                  f"compile: {', '.join(_fell_back)} fell back to eager for the "
+                  f"rest of the process. Decode is correct but unfused; on Windows "
+                  f"this is usually a missing cl.exe (MSVC Build Tools).", flush=True)
+        else:
+            print("[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.", flush=True)
 
     except Exception as e:
         # Non-fatal: warmup failure just means first real call will compile.
