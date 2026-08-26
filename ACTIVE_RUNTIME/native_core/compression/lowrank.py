@@ -406,12 +406,66 @@ def _greedy_whole_runs(s_np, runs, T, budget):
     if _mode in ("query", "query_first"):
         if _has_priority or _mode == "query":
             # A USABLE QUERY WAS CONSULTED. Scope the reservation to what it
-            # points at, even if that is nothing -- a query that does not point
-            # at this block is evidence the block is not the answer's, and
-            # reserving for it is what cost 4f its synthesis rows.
-            ranked = [r for r in ranked if r[0]]
-            if not ranked:
+            # points at -- reserving for content nobody asked for is what cost
+            # 4f its synthesis rows.
+            _marked = [r for r in ranked if r[0]]
+            if _marked:
+                ranked = _marked
+            elif not _has_priority:
+                pass          # NO query at all -> reserve by error, untouched.
+            elif _mode == "query":
                 return [], set()
+            else:
+                # NOTHING MARKED IN THIS BLOCK. Two very different situations
+                # produce that and they are NOT separable per block:
+                #
+                #   * the block is filler and the query rightly ignores it;
+                #   * the query is right about the block and WRONG about the
+                #     words, because the answer is phrased differently from the
+                #     question.
+                #
+                # The relevance signal is lexical, so the second is not exotic.
+                # Measured on the 8k natural sweep with the needle reworded to
+                # share no content word with the question ('The vault
+                # combination is ...' against 'What is the secret passcode?'),
+                # reserving nothing for unmarked blocks scores **2/12** against
+                # 12/12 when the wording matches. A retrieval feature that only
+                # works when the asker guesses the document's vocabulary is not
+                # a retrieval feature.
+                #
+                # DKV_RESIDUAL_RUN_UNMARKED lets an unmarked block reserve its
+                # best N runs anyway -- bounded crowd-out, on the reasoning that
+                # a buried code is typically its block's worst-reconstructed
+                # span, so one run is usually the right one.
+                #
+                # DEFAULT 0 (reserve nothing), because the measurement does not
+                # support paying for it by default. Twelve depths, dense control
+                # 12/12, `same` = the question shares 'secret passcode' with the
+                # needle sentence, `reworded` = the needle says 'vault
+                # combination' instead:
+                #
+                #                      N=0                  N=1
+                #     8k  same        12/12                12/12
+                #     8k  reworded     2/12                11/12
+                #     32k same        12/12                10/12
+                #     32k reworded     2/12                 2/12
+                #
+                # N=1 buys the 8k reworded column and costs two depths at 32k,
+                # and it does NOT rescue 32k reworded -- there the block is lost
+                # in ROUTING, which scores the same residual keys, so a
+                # reservation cannot reach it. Since 32k reworded is 2/12 either
+                # way, N=1's benefit is narrow and its cost is on the headline
+                # gate, so the default keeps dense parity at both contexts and
+                # the knob is there for callers whose questions do not share
+                # vocabulary with their documents at <= 8k.
+                try:
+                    _n_unmarked = int(os.environ.get(
+                        "DKV_RESIDUAL_RUN_UNMARKED", "0"))
+                except ValueError:
+                    _n_unmarked = 0
+                if _n_unmarked <= 0:
+                    return [], set()
+                ranked = ranked[:_n_unmarked]
         # NO USABLE QUERY -> fall through and reserve by error (4f's behaviour).
         #
         # WITHOUT THIS FALLBACK THE WHOLE FIX HANGS ON THE QUERY PIN, which is
@@ -1929,13 +1983,13 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                             # points everywhere and so reserves nothing.
                             _q_eff = _q_ids if usable_query(_q_ids, _total) else None
                             if _q_eff is None and _all is not None:
-                                # TAIL-OF-PROMPT FALLBACK, which is SnapKV's
-                                # observation window. When no short question span
-                                # can be pinned -- either nothing was supplied, or
-                                # the request is one huge user turn ending in its
-                                # instruction, which is what a summarisation
-                                # prompt looks like -- the last tokens of the
-                                # prompt ARE the question in both shapes.
+                                # TAIL-OF-PROMPT FALLBACK. When no short
+                                # question span can be pinned -- either nothing
+                                # was supplied, or the request is one huge user
+                                # turn ending in its instruction, which is what a
+                                # summarisation prompt looks like -- the last
+                                # tokens of the prompt ARE the question in both
+                                # shapes, so use them as one.
                                 #
                                 # Without this the block has no query at all and
                                 # falls back to reserving by error, which is 4f's

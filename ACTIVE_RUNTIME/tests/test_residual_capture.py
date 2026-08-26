@@ -495,15 +495,44 @@ class TestNoQueryIsNotTheSameAsQuerySaidNo:
         assert sel.indices.tolist() != _topk_with_coverage(
             scores, cap, 0.0).indices.tolist()
 
-    def test_query_that_points_nowhere_reserves_nothing(self, monkeypatch):
-        from native_core.compression.lowrank import (
-            _select_residual_rows, _topk_with_coverage)
+    def test_query_pointing_nowhere_still_reserves_ONE_run(self, monkeypatch):
+        # The relevance signal is LEXICAL, so "the query marked nothing here" is
+        # not proof the block is irrelevant -- the answer may simply be worded
+        # differently from the question. Reserving nothing for unmarked blocks
+        # scores 2/12 on the 8k natural sweep with a reworded needle, against
+        # 12/12 when the wording matches.
+        #
+        # So an unmarked block reserves its BEST run and no more: enough to keep
+        # a buried code (typically its block's worst-reconstructed span) whole,
+        # bounded so the rest of the budget still goes to the error ranking.
+        from native_core.compression.lowrank import _select_residual_rows
         monkeypatch.setenv("DKV_RESIDUAL_RUN_RESERVE", "query_first")
-        _toks, scores, runs, _ci = self._fixture()
+        monkeypatch.setenv("DKV_RESIDUAL_RUN_UNMARKED", "1")
+        _toks, scores, runs, ci = self._fixture()
         annotated = [(lo, hi, 0) for lo, hi in runs]   # consulted, said no
-        sel = _select_residual_rows(scores, 11, 0.0, runs=annotated, res_cap=11)
-        assert sel.indices.tolist() == _topk_with_coverage(
-            scores, 11, 0.0).indices.tolist()
+        cap = 11
+        sel = _select_residual_rows(scores, cap, 0.0, runs=annotated, res_cap=cap)
+        rows = set(range(*runs[ci]))
+        assert rows <= set(sel.indices.tolist()[:cap]), sel.indices.tolist()
+
+    def test_unmarked_reservation_is_bounded_to_one_run(self, monkeypatch):
+        import torch
+        from native_core.compression.lowrank import _select_residual_rows
+        monkeypatch.setenv("DKV_RESIDUAL_RUN_RESERVE", "query_first")
+        monkeypatch.setenv("DKV_RESIDUAL_RUN_UNMARKED", "1")
+        # Three separate 4-token codes; unmarked, so only the best may reserve.
+        toks = ([' Falcon', '-', '9', '4'] + [' alpha', ' beta', ' gamma']) * 3
+        runs = atomic_runs(toks)
+        assert len(runs) == 3, runs
+        scores = torch.tensor([9.0 if (i % 7) < 4 else 1.0 for i in range(len(toks))])
+        annotated = [(lo, hi, 0) for lo, hi in runs]
+        sel = _select_residual_rows(scores, 20, 0.0, runs=annotated, res_cap=20)
+        front = sel.indices.tolist()[:4]
+        lo = min(front)
+        assert sorted(front) == list(range(lo, lo + 4)), front
+        # and only ONE run was reserved, not all three
+        starts = {r[0] for r in runs}
+        assert lo in starts
 
     def test_rank_runs_by_query_annotates_even_when_nothing_matches(self):
         toks = [' alpha'] * 8 + CODE + [' beta'] * 8

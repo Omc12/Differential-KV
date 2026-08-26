@@ -1007,7 +1007,7 @@ It sits at a different point in the same trade: a convention that is easy to get
 right and lossier on digits, against one that is lossier to implement and better
 on them. This side is now correct at the harder point.
 
-### The pin was a single point of failure, and the fix is SnapKV's window
+### The pin was a single point of failure, and the fix is the tail of the prompt
 
 Scoping to the query is only sound if "there is no usable query" is handled, and
 the first two attempts got that wrong in opposite directions — each measured, not
@@ -1034,14 +1034,52 @@ no query at all and falls back to reserving by error — §4f's behaviour, which
 exactly what costs document synthesis its rows (6.7).
 
 **So when no question can be pinned, use the LAST TOKENS OF THE PROMPT as the
-query.** That is SnapKV's observation window, and it is the one idea from the
-external benchmark's winners that this repo had not yet borrowed. It works
-because both prompt shapes put the question last: a retrieval prompt ends with
-its question, and a summarisation prompt is one huge user turn ending in its
-instruction. `DKV_RESIDUAL_QUERY_TAIL` (default 64) sets the window.
+query.** It works because both prompt shapes put the question last: a retrieval
+prompt ends with its question, and a summarisation prompt is one huge user turn
+ending in its instruction. `DKV_RESIDUAL_QUERY_TAIL` (default 64) sets the
+window.
 
 That single fallback takes the no-pin case from 3/12 to **12/12** and synthesis
 from 13.3 to **30.0** — the first time `multifact_eval_cuda` has passed 9/9.
+
+### The relevance signal is LEXICAL, and that is a real limit
+
+The pass marks a run when a query token id appears within a window of it. That is
+word overlap, so it only helps when the answer is phrased in the question's
+vocabulary. Measured by rewording the needle sentence to share no content word
+with the question — `The vault combination is Falcon-9427-6183.` against
+`What is the secret passcode?` — twelve depths, dense control 12/12:
+
+| | question wording matches | question reworded |
+|---|---|---|
+| 8k natural | 12/12 | **2/12** |
+| 32k natural | 12/12 | **2/12** |
+
+This is NOT a regression: 2/12 is where natural-text recall sat before any of
+§4f–§4h. What the work buys is the matched-wording column, which is most
+retrieval and not all of it.
+
+`DKV_RESIDUAL_RUN_UNMARKED=N` lets a block with no marked run reserve its best N
+runs anyway, on the reasoning that a buried code is usually its block's
+worst-reconstructed span:
+
+|  | N=0 (default) | N=1 |
+|---|---|---|
+| 8k matched | 12/12 | 12/12 |
+| 8k reworded | 2/12 | **11/12** |
+| 32k matched | **12/12** | 10/12 |
+| 32k reworded | 2/12 | 2/12 |
+
+N=1 buys the 8k reworded column and costs two depths at 32k, and it does not
+rescue 32k reworded at all — there the block is lost in ROUTING, which scores the
+same residual keys, so no reservation can reach it. Default 0 keeps dense parity
+at both contexts; the knob is for callers whose questions do not share vocabulary
+with their documents at <= 8k.
+
+**The real fix is a non-lexical relevance signal** — scoring candidate runs by
+actual attention from the tail window rather than by word overlap, which needs
+the prefill query vectors threaded to the compressor. Not attempted here, and it
+is the obvious next piece of work.
 
 ### Why this is safe where §4e's query work was not
 
