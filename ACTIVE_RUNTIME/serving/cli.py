@@ -635,10 +635,23 @@ async def run_client_mode(args):
                             kv = data.get("kv_summary", {})
                             if kv:
                                 print(f"Active Sessions: {kv.get('sessions', 0)}")
-                                print(f"VRAM Saved:      {kv.get('vram_saved_mb', 0.0):.2f} MB")
-                                print(f"Compressions:    {kv.get('total_compressions', 0)}")
-                                print(f"Avg Cosine Sim:  {kv.get('avg_cosine_sim', 0.0):.4f}")
-                                print(f"Avg Norm Drift:  {kv.get('avg_norm_drift', 0.0):.4f}")
+                                # vram_saved_mb and the cosine/drift averages come from the CPU
+                                # compress path only; on CUDA (config.gpu_compress default)
+                                # nothing takes that path, so they read 0 while every block
+                                # was in fact compressed. `blocks_compressed` is the real
+                                # count on both paths -- see KVRuntimeManager.runtime_summary.
+                                if kv.get("vram_saved_measured", True):
+                                    print(f"VRAM Saved:      {kv.get('vram_saved_mb', 0.0):.2f} MB")
+                                else:
+                                    print( "VRAM Saved:      n/a (GPU compress path does not accumulate it)")
+                                print(f"Compressions:    {kv.get('blocks_compressed', kv.get('total_compressions', 0))}")
+                                _qs = kv.get("quality_sampled", kv.get("total_compressions", 0))
+                                if _qs:
+                                    print(f"Avg Cosine Sim:  {kv.get('avg_cosine_sim', 0.0):.4f} (over {_qs} CPU-path blocks)")
+                                else:
+                                    print( "Avg Cosine Sim:  n/a (GPU compress path records no fidelity metrics)")
+                                if _qs:
+                                    print(f"Avg Norm Drift:  {kv.get('avg_norm_drift', 0.0):.4f}")
                                 
                                 pager = kv.get("pager", {})
                                 if pager:
@@ -1092,10 +1105,23 @@ async def run_direct_mode(args):
                     
                     if kv_summary:
                         print(f"Active Sessions: {kv_summary.get('sessions', 0)}")
-                        print(f"VRAM Saved:      {kv_summary.get('vram_saved_mb', 0.0):.2f} MB")
-                        print(f"Compressions:    {kv_summary.get('total_compressions', 0)}")
-                        print(f"Avg Cosine Sim:  {kv_summary.get('avg_cosine_sim', 0.0):.4f}")
-                        print(f"Avg Norm Drift:  {kv_summary.get('avg_norm_drift', 0.0):.4f}")
+                        # vram_saved_mb and the cosine/drift averages come from the CPU
+                        # compress path only; on CUDA (config.gpu_compress default)
+                        # nothing takes that path, so they read 0 while every block
+                        # was in fact compressed. `blocks_compressed` is the real
+                        # count on both paths -- see KVRuntimeManager.runtime_summary.
+                        if kv_summary.get("vram_saved_measured", True):
+                            print(f"VRAM Saved:      {kv_summary.get('vram_saved_mb', 0.0):.2f} MB")
+                        else:
+                            print( "VRAM Saved:      n/a (GPU compress path does not accumulate it)")
+                        print(f"Compressions:    {kv_summary.get('blocks_compressed', kv_summary.get('total_compressions', 0))}")
+                        _qs = kv_summary.get("quality_sampled", kv_summary.get("total_compressions", 0))
+                        if _qs:
+                            print(f"Avg Cosine Sim:  {kv_summary.get('avg_cosine_sim', 0.0):.4f} (over {_qs} CPU-path blocks)")
+                        else:
+                            print( "Avg Cosine Sim:  n/a (GPU compress path records no fidelity metrics)")
+                        if _qs:
+                            print(f"Avg Norm Drift:  {kv_summary.get('avg_norm_drift', 0.0):.4f}")
                         
                         pager = kv_summary.get("pager", {})
                         if pager:

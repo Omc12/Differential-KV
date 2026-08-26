@@ -4581,12 +4581,52 @@ class KVRuntimeManager:
         comp_s  = self._compressor.summary()
         avg_cos   = (self.total_cosine_sim / max(1, self.total_compressions))
         avg_drift = (self.total_norm_drift  / max(1, self.total_compressions))
+
+        # `total_compressions` COUNTS ONLY THE CPU PATH, and on CUDA that is the
+        # path that does not run. config.gpu_compress defaults to `not is_macos`
+        # (config.py), so the CUDA default routes every block through
+        # compress_layer_blocks_gpu, which never reaches
+        # _postprocess_compressed_block -- the sole place total_compressions,
+        # vram_saved_bytes, total_cosine_sim and rank_histogram are incremented.
+        # So this dict reported "0 compressions, 0.0 MB saved" on every normal
+        # CUDA run no matter how much was compressed, and an external benchmark
+        # harness reading it concluded DKV had not engaged at all.
+        #
+        # The GPU path does keep a count, on the streaming manager, and that
+        # count is authoritative there: stats["total_compressed"] is bumped by
+        # the GPU branch AND by both sync/backpressure CPU fallbacks
+        # (streaming_sparse_ingest.py), so it is the whole total, not a second
+        # addend -- summing the two would double-count every fallback block.
+        #
+        # Reported as a SEPARATE key rather than folded into total_compressions
+        # because the GPU path computes no cosine_sim/norm_drift. Widening that
+        # denominator with blocks contributing no numerator would drag
+        # avg_cosine_sim toward 0 and read as a fidelity collapse -- swapping a
+        # visible zero for a plausible wrong number, which is worse.
+        blocks_compressed = self.total_compressions
+        quality_sampled   = self.total_compressions
+        if self._streaming_mgr is not None:
+            try:
+                blocks_compressed = int(self._streaming_mgr.stats["total_compressed"])
+            except Exception:
+                pass
+
+        # vram_saved_bytes accumulates in that same CPU-only place, so it is 0 on
+        # CUDA for the same reason. Left as measured and FLAGGED rather than
+        # estimated: the pool's own _pool_mb() is ALLOCATED capacity (sized from
+        # prefill length by ensure_allocated at create_session, before a single
+        # block is compressed), so dividing it by the dense KV yields a
+        # pool-sizing ratio, not an achieved compression ratio. For real
+        # per-layer block accounting use the `sessions` property below.
         return {
             "sessions":              len(self.session_blocks),
+            "blocks_compressed":     blocks_compressed,
             "total_compressions":    self.total_compressions,
+            "quality_sampled":       quality_sampled,
             "avg_cosine_sim":        round(avg_cos, 4),
             "avg_norm_drift":        round(avg_drift, 4),
             "vram_saved_mb":         round(self.vram_saved_bytes / 1e6, 2),
+            "vram_saved_measured":   self.vram_saved_bytes > 0,
             "fixed_rank":            self.rank,
             "rank_histogram":        dict(sorted(self.rank_histogram.items())),
             "pager":                 pager_s,
