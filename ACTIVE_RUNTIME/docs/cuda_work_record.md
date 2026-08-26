@@ -970,10 +970,18 @@ everything.
 
 ### Still open
 
-* **`DKV_TOPK_BLOCKS=0` reaching 12/12 is no longer the only route there**, so
-  the routing-rank question §4g raised is no longer blocking recall. It is still
-  true that the router ranks a needle's block far below 32 of ~128, and that is
-  worth understanding on its own.
+* **`DKV_TOPK_BLOCKS=0` reaching 12/12 is no longer the only route there**, and
+  it was never a shippable one. Attend-all is a GROUND-TRUTH mode, not a
+  configuration: measured with `colab/bench_decode_paired.py` at 33,637 tokens,
+  `EXPERIMENT=topk TOPK_ON=0`, it costs **51.1% of decode** — 17.86 → 11.82
+  tok/s, +28.6 ms/token, CI [+28.2, +29.0], resolution ±0.8% of a token. The
+  same A/B at 8,437 tokens is NO EFFECT RESOLVABLE, because there K=16 already
+  keeps 16 of ~33 blocks; the cost is the ratio, so it grows with context and
+  32k is where it bites. Sparse attention exists to not pay that, and recall no
+  longer needs it.
+
+  It remains true that the router ranks a needle's block far below 32 of ~128,
+  which is worth understanding on its own — but it is no longer costing recall.
 * **Synthesis is 13.3 against a >= 30 bar** and dense could not be measured here
   (`multifact_eval_cuda --dense` forwards unchunked and OOMs at 16k on a 12 GB
   card). This work restored what §4f cost; it did not make synthesis good, and
