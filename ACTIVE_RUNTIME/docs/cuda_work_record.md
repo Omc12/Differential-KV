@@ -503,6 +503,74 @@ not the window size. Different configurations; the gap has not been chased.
 
 ---
 
+## 4e. T0 attacked and NOT fixed — five candidate causes eliminated
+
+The defect of §4d, pursued. **It is not fixed.** What follows is the mechanism
+and the eliminations, so the next attempt starts from here.
+
+**The mechanism is PARTIAL CAPTURE of the answer's token run.** Reading the pool
+after prefill and asking whether the needle's absolute positions appear in its
+block's `residual_K_positions` — natural filler, 32k, 40 residual rows either
+way, so this is purely WHICH rows are chosen:
+
+| depth | needle tokens captured exact | answer |
+|---|---|---|
+| 0.50 | 8 of 17 | correct |
+| 0.67 | 7 of 11 — the run STRADDLES a block boundary | `"Falcon-942"` |
+| 0.83 | **3 of 17** | `"Falcon-947"` |
+
+Failure tracks capture. Half a code is worth nothing: the right word and the
+wrong digits. At 0.67 the run crosses a block boundary, so its tokens are split
+across two independent 40-slot budgets and two independent error rankings,
+neither of which knows about the other.
+
+**Eliminated, each measured against the natural-filler sweep (baseline 3/12,
+dense 12/12):**
+
+| candidate | result |
+|---|---|
+| RoPE phase error (`DKV_EXACT_ROPE_REMAT=1`) | **2/12** — no help |
+| coverage quota (`DKV_RESIDUAL_COVERAGE_FRAC=0.25 / 0.50`) | **0/12** — WORSE |
+| rarity pass (`DKV_RESIDUAL_RARITY_CAPTURE=0`) | **3/12** — no change |
+| atomic segment weighting (run shares its rarest IDF) | capture unchanged at 8/17; reverted as a dead knob |
+| query-proximity capture (new, `DKV_RESIDUAL_QUERY_CAPTURE`) | capture 3→5 and 7→8 of 17, end recall **3/12** |
+| **residual budget 40 → 200** | **8/12** — the only lever, and it roughly triples the pool slot |
+
+Coverage is worse because CUDA's `_topk_with_coverage` EXCLUDES coverage
+positions from the ranked selection, so at `frac=0.25` the answer competes for 30
+slots instead of 40.
+
+**Two hypotheses that sounded right and were wrong**, recorded because both will
+be re-proposed:
+
+* *"natural text is full of digits, so the shape heuristic stops discriminating"*
+  — backwards. `is_core` fires on 4.5–5.8% of tokens in the papers against 14.5%
+  in the tiled filler, i.e. 11–33 core tokens per block against a 40-row budget.
+  Shape is not the constraint.
+* *"the boost never fires on this path"* — it fires on every block, but boosts
+  **256 of 256 rows**, so MLX's budget-floor formula (`boosted + n_cov + margin`)
+  always evaluates to the full budget and the adaptive tier is inert.
+
+**What was added and left OFF.** `DKV_RESIDUAL_QUERY_CAPTURE` boosts a
+distance-weighted window around tokens whose id appears in the pinned query
+(`manager._pending_query`, set by the wrapper before prefill). Selection is
+otherwise blind to the query — it ranks by how badly the low-rank basis fits a
+token, never by whether anyone will ask for it, which is exactly the difference
+against attention-selected methods. It measurably captures more of the answer and
+does not change end recall, so it ships off with that number attached rather than
+being deleted or switched on.
+
+**Where the next attempt should start.** The budget is the only thing that has
+moved recall, and the reason is that an answer needs MOST of its run exact.
+Selection is per-token and per-block; an answer is neither. Something that
+captures a RUN as a unit, and can span a block boundary, is the shape of the fix
+— not another per-token score. The methods that beat DKV on the owner's external
+benchmark (SnapKV, kv_quant) have no position or distinctiveness dependence at
+all.
+
+---
+
+
 ## 5. T1 and T2 — DONE. What the depth question actually was.
 
 ### T1. SUPERSEDED BY §4d — this held only for the TILED haystack
