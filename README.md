@@ -83,9 +83,11 @@ make setup
 > | natural text | 8k | 12/12 | **2/12** | **12/12** |
 > | natural text | 32k | 12/12 | **3/12** | **12/12** |
 >
-> Tiled filler is unaffected — the same sweep reads 12/12 at 8k after the change,
-> and `validate_cuda_dkv.py --long` (Qwen3.5-2B, 2k/8k/32k x 3 depths) stays
-> ALL CHECKS PASSED: 9/9 recall, 9/9 determinism, no kernel fallback.
+> Tiled filler is unaffected — the same sweep reads 12/12 at both 8k and 32k
+> after the change, and `validate_cuda_dkv.py --long` (Qwen3.5-2B, 2k/8k/32k x 3
+> depths) stays ALL CHECKS PASSED: 9/9 recall, 9/9 determinism, no fallback.
+> Cost: ~4% of prefill, decode and memory unchanged (no budget is raised — the
+> same 40 residual slots, spent differently).
 >
 > The needle was found and CORRUPTED, not missed — `Falcon-9427-618`**`5`** for
 > `...618`**`3`**. Qwen splits that code into eleven tokens, residual selection
