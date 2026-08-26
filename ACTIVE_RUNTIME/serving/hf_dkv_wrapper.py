@@ -21,6 +21,15 @@ os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 # allocator mode that has historically interacted badly with CUDA graph capture,
 # which is why the graph path stays opt-in.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+
+# Quantization spellings this wrapper accepts, at module scope so
+# tests/test_quant_alias_parity.py can assert that every value the CLI and the
+# presets actually emit appears here. The bug that motivated this was exactly a
+# divergence between the two: cli.py emitted 'int4', the wrapper matched only
+# 'nf4', and the mismatch loaded fp16 in silence.
+QUANT_4BIT_ALIASES = ("nf4", "int4", "4bit", "4-bit", "fp4")
+QUANT_8BIT_ALIASES = ("int8", "8bit", "8-bit", "llm.int8")
 """
 runtime/hf_dkv_wrapper.py
 
@@ -647,8 +656,8 @@ class PyTorchDKVHFWrapper:
         # throughput difference whose whole cause was a string that did not
         # match. `low` preset users never hit it because :623 sets the literal
         # "nf4"; everyone else passing the CLI's own value did.
-        _q4 = _quant_type_early in ("nf4", "int4", "4bit", "4-bit", "fp4")
-        _q8 = _quant_type_early in ("int8", "8bit", "8-bit", "llm.int8")
+        _q4 = _quant_type_early in QUANT_4BIT_ALIASES
+        _q8 = _quant_type_early in QUANT_8BIT_ALIASES
         if quantization_config is None and (_q4 or _q8) and _has_cuda():
             try:
                 from transformers import BitsAndBytesConfig as _BnBConfig
