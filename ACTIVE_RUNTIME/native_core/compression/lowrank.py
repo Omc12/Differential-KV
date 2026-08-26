@@ -1648,8 +1648,19 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                             _counts[_t] = _counts.get(_t, 0) + 1
                         _counts_cache.clear()   # keep only the latest session state
                         _counts_cache[_ckey] = _counts
+                    # The QUERY, pinned by the wrapper before prefill. Residual
+                    # selection is otherwise blind to it -- it ranks by how badly
+                    # the low-rank basis fits a token, never by whether anyone
+                    # will ask for it. See the query-proximity pass in
+                    # residual_capture for the measurement that motivates it.
+                    # _pending_query is a DICT keyed by session id, not a list.
+                    # Passing the dict itself would iterate its KEYS and match
+                    # session names against token ids -- silently no-op.
+                    _pq_map = getattr(manager, "_pending_query", None) or {}
+                    _q_ids = _pq_map.get(_sid) if isinstance(_pq_map, dict) else None
                     boost_row, n_boosted = compute_boost_multipliers(
-                        tok_strs, block_token_ids, _counts or {}, _total)
+                        tok_strs, block_token_ids, _counts or {}, _total,
+                        query_ids=_q_ids)
                     # Store only when there IS a key to store under; the same
                     # reasoning as the lookup above -- no key means no caching,
                     # not no boost.

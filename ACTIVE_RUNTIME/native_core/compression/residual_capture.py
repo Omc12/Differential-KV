@@ -155,7 +155,8 @@ def _detect_table_rows(tok_strs):
     return marked
 
 
-def compute_boost_multipliers(tok_strs, tids, counts, total_tokens):
+def compute_boost_multipliers(tok_strs, tids, counts, total_tokens,
+                              query_ids=None):
     """Return (boost_multipliers, n_boosted) for one block's tokens.
 
     tok_strs: decoded surface string per token; tids: token ids; counts:
@@ -240,6 +241,59 @@ def compute_boost_multipliers(tok_strs, tids, counts, total_tokens):
                 if boost[i] > 1.0:
                     continue
                 boost[i] = tok_boost * (_idf_weight(tids[i], counts, total_tokens) / 2.0)
+
+    # ── QUERY-PROXIMITY CAPTURE (DKV_RESIDUAL_QUERY_CAPTURE) ─────────────────
+    # Every pass above ranks by SHAPE or RARITY, which are properties of the
+    # document alone. Reconstruction error is too: it asks "which tokens does the
+    # low-rank basis fit worst", never "which tokens is anyone going to ask for".
+    #
+    # That is the whole gap against attention-selected methods. Measured on this
+    # repo's own natural-text sweep, DKV scores 3/12 where dense scores 12/12,
+    # and the failures track how much of the answer survived capture:
+    #
+    #     depth 0.50   8 of the needle's 17 tokens exact   -> correct
+    #     depth 0.67   7 of 11 (the run straddles a block) -> "Falcon-942"
+    #     depth 0.83   3 of 17                             -> "Falcon-947"
+    #
+    # Partial capture of a code is worth nothing; the model returns the right
+    # word and the wrong digits.
+    #
+    # The query is available at compress time -- the wrapper pins it before
+    # prefill -- so the block can be asked the one question that matters: does
+    # any of this text answer the query? Tokens whose id appears in the query get
+    # a window around them boosted, because the ANSWER sits beside the query
+    # terms, not on them ("the secret passcode is X" -- the query supplies
+    # "secret passcode", the block must keep X).
+    #
+    # This does NOT raise the budget. The same rows are spent on a set chosen for
+    # relevance rather than for being hard to reconstruct.
+    if (query_ids and
+            os.environ.get("DKV_RESIDUAL_QUERY_CAPTURE", "0") == "1"):
+        try:
+            q_boost = float(os.environ.get("DKV_RESIDUAL_QUERY_BOOST", "24.0"))
+        except ValueError:
+            q_boost = 24.0
+        try:
+            q_win = int(os.environ.get("DKV_RESIDUAL_QUERY_WINDOW", "24"))
+        except ValueError:
+            q_win = 24
+        # Content words only. Matching on stopwords would light up every block
+        # equally and boost nothing in particular, which is the same failure as
+        # boosting everything.
+        q_set = {int(t) for t in query_ids}
+        hits = [i for i, t in enumerate(tids)
+                if int(t) in q_set
+                and tok_strs[i].strip().lower() not in _OWNER_STOPWORDS
+                and len(tok_strs[i].strip()) > 2]
+        for h in hits:
+            lo, hi = max(0, h - q_win), min(S, h + q_win + 1)
+            for i in range(lo, hi):
+                # Distance-weighted, so the tokens ADJACENT to a query term --
+                # where an answer to it lives -- outrank the far end of the
+                # window, and a block with no query terms is untouched.
+                w = q_boost * (1.0 - abs(i - h) / float(q_win + 1))
+                if w > boost[i]:
+                    boost[i] = w
 
     # Table capture (layer 3)
     if os.environ.get("DKV_RESIDUAL_TABLE_CAPTURE", "1") == "1":
