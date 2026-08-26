@@ -693,10 +693,15 @@ harness resolves what it is being asked to resolve.
 
 A third run of the same arm after 4g's query-ranking pass was added read
 **+56 ms / +1.8%, CI [-43, +155]** -- NO EFFECT RESOLVABLE at its own +-3.6%
-resolution, which is wider than the effect the tighter runs measured. Three
-paired runs across three processes therefore read 6.6%, 7.9% and 1.8%. Take the
-prefill cost as single-digit percent and NOT precisely pinned: the paired CI is
-within-run, and these differ by more than it across runs.
+resolution, which is wider than the effect the tighter runs measured. A fourth,
+on the SHIPPED default once 4h scoped the reservation to the query, reads
+**+119 ms / +4.4%, CI [+23.6, +214.8]** -- resolvable, and the number to quote
+for what actually ships.
+
+Four paired runs across four processes read 6.6%, 7.9%, 1.8% and 4.4%. Take the
+prefill cost as SINGLE-DIGIT PERCENT and not precisely pinned: the paired CI is
+within-run, and these differ by more than it across runs. Decode and memory are
+untouched in every one of them.
 
 Two thirds of the original cost was a DEVICE SYNC per block per layer, and it
 took three tries to remove because it kept moving: `scores.cpu()`, then
