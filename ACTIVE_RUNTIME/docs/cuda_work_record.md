@@ -866,11 +866,18 @@ run-atomic selection and is still unexplained.
   **11/12** on its own and composes with both fixes above to the same 11/12; 0.58
   survives every combination tried, including attend-all-plus-everything-exact
   reaching 12/12, which means it is reachable — just not by these levers.
-* **`DKV_EXACT_ROPE_REMAT` should be re-decided.** §T1b keeps it OFF because it
-  scored 10/11 against 11/11 at 32k — **on the tiled filler**, the haystack §4d
-  showed cannot see this defect. On natural text it is worth +1 at 32k and 0 at
-  8k. Left OFF here only because flipping a default deserves its own gate run,
-  not because the measurement supports OFF.
+* **`DKV_EXACT_ROPE_REMAT` is now ON by default — DECIDED, not left open.**
+  §T1b kept it off on a 10/11-against-11/11 result measured on the tiled filler
+  and under the pre-§4f capture defect. Its own gate run:
+
+      natural 32k   OFF 10/12   ON 11/12
+      natural 8k    OFF 12/12   ON 12/12
+      tiled 8k/32k  ON 12/12 / 12/12   (the regression that kept it off is GONE)
+      validate_cuda_dkv --long          ALL CHECKS PASSED
+      multifact 16k  relational 4/4, multi-needle 3/3, synthesis 6.7 unchanged
+      decode cost    -0.055 ms/token, CI [-0.655, +0.545], NO EFFECT RESOLVABLE
+
+  So 32k natural ships at **11/12**, and the last failure is depth 0.58 alone.
 * **`max_residual` 40 against MLX's 128 is ANSWERED, and the answer is no.**
   Raising it to MLX's default scores 8/12 against 40's 9/12. The divergence is
   real and is not what separates the two runtimes.
@@ -912,7 +919,16 @@ the two bugs, both mine, both in harnesses written during this work. That is not
 a refutation of the owner's observation in general: it is one model, and any
 harness still using `niah_recall`'s needle reproduces the same false failure.
 
-### T1b. The PTA phase error is real, the fix works, and it still ships OFF
+### T1b. The PTA phase error is real, the fix works — and it SHIPS ON as of 4g
+
+> **The heading below said "and it still ships OFF". That is no longer
+> true.** Both rows of the table were measured on the TILED filler, which
+> §4d showed cannot see this defect, and under the pre-§4f capture defect.
+> Re-measured on natural text with run-atomic capture: 32k **10/12 → 11/12**,
+> 8k 12/12 either way, tiled 12/12 at both contexts, every other gate
+> unchanged, and decode cost NO EFFECT RESOLVABLE. The docstring's own
+> guess — "the old path was lucky at a coin-flip margin" — was right, and
+> the margin is gone. Default flipped ON; see §4g.
 
 The one architectural CUDA/MLX divergence is real and worth naming: MLX ingests
 `keys_rot`, so its reconstruction lands in each token's true frame and its only

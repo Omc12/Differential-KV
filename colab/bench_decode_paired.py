@@ -147,6 +147,11 @@ def set_arm(arm):
         _var = ("DKV_ROUTER_ROPE" if EXPERIMENT == "router_rope"
                 else "DKV_RESIDUAL_EXACT_ROPE")
         os.environ[_var] = "0" if on else "1"
+    elif EXPERIMENT == "exact_rope_remat":
+        # Cost of rotating each MATERIALISED key at its own absolute position
+        # instead of rotating the basis once at the block anchor. Paid inside the
+        # RematCache entry, so once per refresh rather than once per token.
+        os.environ["DKV_EXACT_ROPE_REMAT"] = "1" if on else "0"
     elif EXPERIMENT == "router_exact_key":
         # Cost of folding the anchor into the residual key before rotating it:
         # one broadcast add on [N, R, H_kv, D] per routing call, alongside the

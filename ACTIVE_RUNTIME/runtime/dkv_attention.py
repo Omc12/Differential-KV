@@ -576,32 +576,38 @@ _REMAT_WHY_SEEN = set()
 # materialised key instead gives R(true_pos)(anchor_raw + delta_raw + res_raw),
 # which is MLX's form and whose only error is low-rank truncation.
 #
-# DEFAULT OFF, and the reason is a measurement that went the other way.
+# DEFAULT ON since cuda_work_record.md 4g. It was OFF, on this measurement:
 #
 #   colab/logit_fidelity.py, 8k, decode step   ON 0.00029   OFF 0.00125
 #   colab/needle_depth_sweep.py, 8k, 11 depths ON 11/11     OFF 11/11
 #   colab/needle_depth_sweep.py, 32k,11 depths ON 10/11     OFF 11/11
 #
-# At 32k depth 0.80 it returns `Falcon-9427-6123` for `Falcon-9427-6183` --
-# deterministic over repeats, one digit wrong. That is the "right letters, wrong
-# digits" signature this file already associates with a RoPE phase error at the
-# top of the spectrum, and it is exactly the failure the change was meant to
-# remove.
+# -- the more accurate keys measured 4.3x closer to dense in KL and lost a needle
+# anyway, at 32k depth 0.80, deterministic over repeats. The note here called
+# that NOT UNDERSTOOD and guessed "the anchor-frame error was suppressing a
+# competitor to the needle's digit token ... the old path was lucky at a
+# coin-flip margin".
 #
-# So the more accurate keys measure closer to dense in KL and lose the needle
-# anyway. This repo has been here before: per-layer cosine did not determine end
-# behaviour, and neither does KL. RECALL IS THE GATE, so the default follows the
-# recall column even though the KL column disagrees.
+# THAT GUESS WAS RIGHT, AND THE MARGIN IS GONE. Both rows above were measured on
+# the TILED filler -- the haystack 4d showed cannot see this defect, because a
+# random code in one repeated sentence is a guaranteed outlier that wins its
+# residual slots at any budget -- and with the run-atomic capture of 4f the
+# 32k tiled sweep now reads 12/12 with this ON, so the regression that kept it
+# off does not reproduce. Re-measured, twelve depths, dense control 12/12:
 #
-# NOT UNDERSTOOD, and worth saying so rather than dressing it up: the position
-# mapping was checked against three independent statements of the block layout
-# and matches, `g["res_k"]` is assigned outside the do_rot branch so the raw
-# gather is complete, and the routed SET is identical either way (the router
-# never sees these tensors). The most likely remaining explanation is that the
-# anchor-frame error was suppressing a competitor to the needle's digit token
-# rather than helping the needle -- i.e. the old path was lucky at a coin-flip
-# margin -- but that is a hypothesis, not a measurement.
-_EXACT_ROPE_REMAT = os.environ.get("DKV_EXACT_ROPE_REMAT", "0") != "0"
+#   natural filler 32k    OFF 10/12   ON 11/12
+#   natural filler 8k     OFF 12/12   ON 12/12
+#   tiled filler 8k/32k   ON 12/12 / 12/12
+#   validate_cuda_dkv --long (Qwen3.5-2B)   ALL CHECKS PASSED
+#   multifact 16k   relational 4/4, multi-needle 3/3, synthesis 6.7 (unchanged)
+#
+# FREE on decode: colab/bench_decode_paired.py MODE=AB EXPERIMENT=exact_rope_remat
+# reads -0.055 ms/token, CI [-0.655, +0.545], NO EFFECT RESOLVABLE, with the A/A
+# control validated at +-1.4% of a token. It is paid inside the RematCache entry,
+# so once per refresh rather than once per token.
+#
+# Set DKV_EXACT_ROPE_REMAT=0 to restore the anchor-frame basis rotation.
+_EXACT_ROPE_REMAT = os.environ.get("DKV_EXACT_ROPE_REMAT", "1") != "0"
 
 
 def _remat_why(code, extra=""):
