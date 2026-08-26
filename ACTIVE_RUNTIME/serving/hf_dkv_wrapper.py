@@ -628,22 +628,64 @@ class PyTorchDKVHFWrapper:
                 print("[DKV] Low preset + MPS: running in FP16 to avoid torchao NaN/stability issues on MPS")
 
         # ── 4-bit NF4 loading (BitsAndBytes) ──────────────────────────────────
-        _quant_type_early = config.get("quantization") or os.environ.get("DKV_QUANTIZATION", "")
-        if (quantization_config is None
-                and _quant_type_early == "nf4"
-                and _has_cuda()):
+        _quant_type_early = (config.get("quantization")
+                             or os.environ.get("DKV_QUANTIZATION", ""))
+        _quant_type_early = str(_quant_type_early or "").strip().lower()
+
+        # ACCEPT THE SPELLING THE CLI ACTUALLY EMITS. This branch used to fire
+        # only on the exact string "nf4", while serving/cli.py passes
+        # `'quantization': 'int4'` -- it got away with it because it ALSO builds
+        # a BitsAndBytesConfig and passes it as quantization_config. Any caller
+        # that copied the CLI's config dict WITHOUT copying that second argument
+        # matched nothing here and loaded the model in fp16, silently.
+        #
+        # The failure is quiet and expensive. Qwen2.5-7B in fp16 is 7.62B x 2 =
+        # 15.2 GB; on a 12 GB card that spills ~3.5 GB into WDDM shared memory
+        # and every touch crosses PCIe. Reported from a benchmark harness as
+        # ~195 s/query with peak allocation 15.49 GiB, against 7.6 s and
+        # 6.61 GiB for the same model and context genuinely in NF4 -- a 26x
+        # throughput difference whose whole cause was a string that did not
+        # match. `low` preset users never hit it because :623 sets the literal
+        # "nf4"; everyone else passing the CLI's own value did.
+        _q4 = _quant_type_early in ("nf4", "int4", "4bit", "4-bit", "fp4")
+        _q8 = _quant_type_early in ("int8", "8bit", "8-bit", "llm.int8")
+        if quantization_config is None and (_q4 or _q8) and _has_cuda():
             try:
                 from transformers import BitsAndBytesConfig as _BnBConfig
-                quantization_config = _BnBConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.bfloat16,
-                    bnb_4bit_use_double_quant=True,
-                )
-                torch_dtype = torch.bfloat16
-                print("[DKV] 4-bit NF4 quantization enabled (BitsAndBytes).")
+                if _q4:
+                    quantization_config = _BnBConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type=("fp4" if _quant_type_early == "fp4"
+                                             else "nf4"),
+                        bnb_4bit_compute_dtype=torch.bfloat16,
+                        bnb_4bit_use_double_quant=True,
+                    )
+                    torch_dtype = torch.bfloat16
+                    print(f"[DKV] 4-bit quantization enabled (BitsAndBytes, "
+                          f"requested as '{_quant_type_early}').")
+                else:
+                    quantization_config = _BnBConfig(load_in_8bit=True)
+                    print(f"[DKV] 8-bit quantization enabled (BitsAndBytes, "
+                          f"requested as '{_quant_type_early}').")
             except ImportError:
                 print("[DKV] WARNING: bitsandbytes not installed — falling back to fp16.")
+
+        # NEVER LOAD FP16 SILENTLY AFTER QUANTIZATION WAS ASKED FOR. Whatever
+        # the reason -- an unrecognised spelling, no CUDA, missing bitsandbytes
+        # -- the caller asked for a smaller model and is about to get a full-size
+        # one. On a card that cannot hold it that is not a small regression, it
+        # is a 26x cliff (see above), and the only symptom is a number in a
+        # column nobody reads until something is already wrong.
+        if _quant_type_early and quantization_config is None:
+            print(f"[DKV] WARNING: quantization={_quant_type_early!r} was requested "
+                  f"but NO quantization config is in effect — the model will load "
+                  f"UNQUANTIZED (fp16). "
+                  + ("CUDA not available." if not _has_cuda()
+                     else "Unrecognised value; expected one of "
+                          "nf4/int4/4bit/fp4/int8/8bit.")
+                  + " On a card too small for full weights this spills to host "
+                    "memory and costs far more than it looks like.",
+                  file=sys.stderr, flush=True)
 
         if _has_cuda():
             _configure_cuda_allocator()
