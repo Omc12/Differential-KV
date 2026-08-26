@@ -89,6 +89,11 @@ def set_arm(arm):
         os.environ["DKV_COMPRESS_GRAM_SVD"] = "1" if on else "0"
     elif EXPERIMENT == "rotated_pool":
         os.environ["DKV_ROTATED_POOL"] = "0" if on else "1"
+    elif EXPERIMENT == "run_atomic":
+        # Compression-time cost of run-atomic residual selection: one extra pass
+        # over each block's decoded token strings (cached with the boost row) and
+        # one device->host copy of the block's score vector per block per layer.
+        os.environ["DKV_RESIDUAL_RUN_ATOMIC"] = "1" if on else "0"
     else:
         raise SystemExit(f"unknown EXPERIMENT={EXPERIMENT}")
 

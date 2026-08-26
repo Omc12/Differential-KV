@@ -363,3 +363,139 @@ def compute_boost_multipliers(tok_strs, tids, counts, total_tokens,
                 final[j] = max(final[j], boost[i])
     n_boosted = sum(1 for b in final if b > 1.0)
     return final, n_boosted
+
+
+def atomic_runs(tok_strs, max_len=None):
+    """Contiguous spans that are worth NOTHING unless captured WHOLE.
+
+    Returns a list of half-open ``(lo, hi)`` spans over the block's ACTIVE rows,
+    i.e. the same index space as ``compute_boost_multipliers``' return value.
+
+    WHY THIS EXISTS. Residual selection ranks tokens INDIVIDUALLY and takes the
+    top ``max_residual`` of them. An answer is not an individual token: Qwen
+    splits ``Falcon-9427-6183`` into eleven of them
+    (``' Falcon' '-' '9' '4' '2' '7' '-' '6' '1' '8' '3'``). Ranking them one at
+    a time routinely keeps a PREFIX and drops the tail, and the decoder then
+    reproduces exactly what survived and invents the rest.
+
+    Measured on this repo's natural-text needle sweep (Qwen2.5-1.5B, mid,
+    block_size 256, budget 40 -- the block's residual set read straight out of
+    the pool after prefill, so this is which rows were chosen, not an inference
+    from the answer):
+
+        depth 0.83  layer 13  kept ' Falcon' '-' '9' '4' '2' '7' '-',
+                              dropped '6' '1' '8' '3'   -> "Falcon-9427-6137"
+        depth 0.50  layer 13  kept all but the final '3' -> "Falcon-9427-6185"
+        depth 0.25  layer 13  kept 5 of 11               -> "Falcon" and nothing
+
+    Half a code is not half an answer, it is a WRONG answer with the right
+    shape, so the budget spent on the surviving prefix bought nothing. A run is
+    therefore all-or-nothing, and the selection that consumes these spans treats
+    it that way.
+
+    A run is a maximal span of non-prose tokens containing at least one CORE
+    token (digit / all-caps / '-' / '_'), extended backwards over its OWNER --
+    the capitalised word that names it, the same rule the owner-capture boost
+    uses -- and merged across a single non-core separator so a hyphenated code
+    stays ONE run instead of three.
+
+    Runs longer than ``max_len`` (DKV_RESIDUAL_RUN_MAX, default 32) are DROPPED
+    rather than returned: a long numeric line -- a table row, a reference list --
+    would consume the whole budget as one indivisible unit and evict everything
+    else. Those fall back to per-token ranking, which is what they get today.
+    """
+    if max_len is None:
+        try:
+            max_len = int(os.environ.get("DKV_RESIDUAL_RUN_MAX", "32"))
+        except ValueError:
+            max_len = 32
+
+    S = len(tok_strs)
+    if S == 0:
+        return []
+
+    is_core, is_prose = [], []
+    for s in tok_strs:
+        sc = s.strip()
+        has_digit = any(c.isdigit() for c in sc)
+        is_upper = sc.isupper() and sc.isalpha() and len(sc) >= 2
+        is_core.append(has_digit or is_upper or sc == '-' or sc == '_')
+        if not sc:
+            is_prose.append(True)
+        elif sc in _PROSE_PUNCT:
+            is_prose.append(True)
+        elif sc.isalpha() and (sc.islower() or (sc.istitle() and len(sc) > 1)):
+            is_prose.append(True)
+        else:
+            is_prose.append(False)
+
+    # Maximal non-prose segments, keeping only those that carry a core token.
+    segs, in_seg = [], False
+    for i in range(S):
+        if not is_prose[i]:
+            if in_seg:
+                segs[-1][1] = i + 1
+            else:
+                segs.append([i, i + 1])
+                in_seg = True
+        else:
+            in_seg = False
+    segs = [s for s in segs if any(is_core[i] for i in range(s[0], s[1]))]
+    if not segs:
+        return []
+
+    # OWNER extension. 'Falcon' is prose by shape, so the segment above starts at
+    # the '-' after it -- and a code without the word that names it is as useless
+    # as a word without its code. Same walk-back as _apply_owner_capture.
+    try:
+        owner_dist = int(os.environ.get("DKV_RESIDUAL_OWNER_DIST", "12"))
+    except ValueError:
+        owner_dist = 12
+    for seg in segs:
+        j, steps = seg[0] - 1, 0
+        while j >= 0 and steps < owner_dist:
+            sc = tok_strs[j].strip()
+            if sc and sc[0].isupper() and sc.lower() not in _OWNER_STOPWORDS:
+                seg[0] = j
+                break
+            if not sc or sc in _PROSE_PUNCT:
+                break            # a sentence break is not an owner
+            j -= 1
+            steps += 1
+
+    # Merge spans separated by at most one token: ' Falcon - 9427' tokenises with
+    # the separators attached differently depending on spacing, and a code split
+    # into two runs can still be captured half-and-half.
+    #
+    # NEVER MERGE PAST max_len. Merging is an optimisation that keeps one code
+    # together; it must not be able to DESTROY a run. Unconditional merging did
+    # exactly that, and it cost a needle: in dense numeric prose the needle's own
+    # span chained through its neighbours into a 30+-token blob, the length
+    # filter below dropped the blob whole, and the block came back with NO run
+    # covering the code at all -- measured at 8k depth 0.58, capture 1-4 of 11 at
+    # every layer and the answer "Falcon-942.". A merge that can delete its own
+    # subject is worse than no merge.
+    # A SENTENCE OR LINE BREAK IS NEVER INSIDE AN ATOMIC UNIT. Merging across one
+    # chains a code into whatever numbers the next sentence opens with -- measured
+    # at 8k depth 0.58, 'Falcon-9427-6183' merged forward across '.\n' into the
+    # following figure's axis labels and became a 31-token run, claiming 31 of the
+    # 40 slots to protect 11 tokens of answer. The gap this rule is FOR is a
+    # spacing artefact ('Falcon - 9427'), never a period.
+    def _breaks(i):
+        s = tok_strs[i]
+        return ('\n' in s) or (s.strip() in ('.', '!', '?', ';', ':'))
+
+    merged = [segs[0]]
+    for lo, hi in segs[1:]:
+        prev = merged[-1]
+        gap = lo - prev[1]
+        joinable = (gap == 0) or (gap == 1 and not _breaks(prev[1]))
+        if joinable and (max(prev[1], hi) - prev[0]) <= max_len:
+            prev[1] = max(prev[1], hi)
+        else:
+            merged.append([lo, hi])
+
+    # What survives the cap now is only a SINGLE segment that is itself over-long
+    # -- a table row, a reference list -- which is the case the cap is actually
+    # for. Those fall back to per-token ranking, as they do today.
+    return [(lo, hi) for lo, hi in merged if 0 < hi - lo <= max_len]

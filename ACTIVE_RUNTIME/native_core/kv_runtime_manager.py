@@ -4235,7 +4235,7 @@ class KVRuntimeManager:
         
         deltas_batch = torch.stack(deltas_list, dim=0)
         
-        from native_core.compression.lowrank import compress_lowrank_batch, _topk_with_coverage
+        from native_core.compression.lowrank import compress_lowrank_batch
         U_batch, S_batch, Vh_batch, scale_batch = compress_lowrank_batch(deltas_batch, max_rank)
         try:
             _cov_frac = float(os.environ.get("DKV_RESIDUAL_COVERAGE_FRAC", "0"))
@@ -4300,6 +4300,9 @@ class KVRuntimeManager:
                 # _residual_error_threshold() defaults to 0.0 for exactly that
                 # reason. The selection below uses it.
                 _boost_vec = None
+                # Atomic token runs, same DELTA-row space as _boost_vec. Reset
+                # per block so one block's spans cannot protect another's rows.
+                _runs = None
                 n_max_residual = int(n * 0.15)
 
                 # OPT-A: Adaptive residual budget — 3-tier block classifier by median reconstruction error.
@@ -4325,7 +4328,16 @@ class KVRuntimeManager:
                             _cached_boost = _session_boosts.get(block.anchor_idx)
 
                         if _cached_boost is not None:
-                            boost_row, n_boosted = _cached_boost
+                            # THREE-tuple. This cache is the SAME dict the
+                            # batched GPU producer writes (lowrank.py stores it
+                            # as manager._res_capture_boost_rows), so the arity
+                            # has to agree across both producers. Getting it
+                            # wrong here would be INVISIBLE: the
+                            # `except Exception: pass` below swallows an unpack
+                            # error and silently drops the boost -- taking the
+                            # residual budget FLOOR with it, back to the 15%
+                            # default.
+                            boost_row, n_boosted, _runs = _cached_boost
                         else:
                             from native_core.compression.residual_capture import compute_boost_multipliers
                             _tok = self.tokenizer
@@ -4353,8 +4365,21 @@ class KVRuntimeManager:
                                 _counts_cache[_ckey] = _counts
                             boost_row, n_boosted = compute_boost_multipliers(
                                 tok_strs, block_token_ids, _counts or {}, _total)
+                            try:
+                                # Gated on the flag so turning the feature off
+                                # removes its cost too -- see the note at the
+                                # batched producer.
+                                from native_core.compression.lowrank import (
+                                    _run_atomic_enabled as _ra_on,
+                                )
+                                if _ra_on():
+                                    from native_core.compression.residual_capture import atomic_runs
+                                    _runs = atomic_runs(tok_strs)
+                            except Exception:                    # noqa: BLE001
+                                _runs = None
                             if _sid is not None:
-                                _session_boosts[block.anchor_idx] = (boost_row, n_boosted)
+                                _session_boosts[block.anchor_idx] = (
+                                    boost_row, n_boosted, _runs)
 
                         if boost_row is not None and n_boosted > 0:
                             # Carried to the JOINT score below, not multiplied
@@ -4437,8 +4462,19 @@ class KVRuntimeManager:
                         if _boost_vec is not None:
                             joint_err = joint_err * _boost_vec.to(joint_err.dtype)
 
-                        top_k_J = _topk_with_coverage(
-                            joint_err, min(n_max_residual, n), _cov_frac)
+                        # RUN-ATOMIC, same as the batched GPU producer: a code
+                        # is worth nothing captured half-way, so whole runs fill
+                        # the slots the pool will actually KEEP before the
+                        # per-token ranking gets the remainder.
+                        from native_core.compression.lowrank import (
+                            _select_residual_rows as _sel_res_rows,
+                        )
+                        _res_cap_h = getattr(
+                            getattr(self, "native_pool", None),
+                            "max_residual_tokens", None) or n
+                        top_k_J = _sel_res_rows(
+                            joint_err, min(n_max_residual, n), _cov_frac,
+                            runs=_runs, res_cap=_res_cap_h)
 
                         # A token qualifies if EITHER half is non-degenerate:
                         # with one shared index set, dropping it on K alone would

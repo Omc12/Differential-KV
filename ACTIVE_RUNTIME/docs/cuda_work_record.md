@@ -505,6 +505,15 @@ not the window size. Different configurations; the gap has not been chased.
 
 ## 4e. T0 attacked and NOT fixed — five candidate causes eliminated
 
+> **SUPERSEDED BY 4f, which fixes it.** The eliminations below stand and
+> the closing prescription -- capture a RUN as a unit -- was right. What is
+> wrong here is the LEVER: "the budget is the only thing that has moved
+> recall" reads as "raise max_residual", and 4f shows every token exact
+> still scores only 6/12. The fix spends the SAME forty slots on a
+> complete run. Two eliminations below are also confounded by that
+> defect and should not be carried forward without re-measuring: the
+> `DKV_EXACT_ROPE_REMAT` row, and the query-capture row.
+
 The defect of §4d, pursued. **It is not fixed.** What follows is the mechanism
 and the eliminations, so the next attempt starts from here.
 
@@ -567,6 +576,178 @@ captures a RUN as a unit, and can span a block boundary, is the shape of the fix
 — not another per-token score. The methods that beat DKV on the owner's external
 benchmark (SnapKV, kv_quant) have no position or distinctiveness dependence at
 all.
+
+---
+
+
+## 4f. T0 FIXED — selection was PER-TOKEN and an answer is a RUN
+
+§4e's prescription was right and its diagnosis of the lever was not. "The budget
+is the only thing that has moved recall" pointed at `DKV_MAX_RESIDUAL_TOKENS`;
+the thing that actually moved recall was making the same forty slots hold a
+COMPLETE run instead of a truncated one. Nothing here raises a budget.
+
+**Environment for every number below:** RTX 4070 SUPER, Qwen2.5-1.5B-Instruct,
+preset `mid`, `block_size` 256, `max_residual` 40, needle `Falcon-9427-6183`,
+natural filler, DENSE control at every depth, twelve depths at k/12.
+
+### Three candidate causes eliminated first, each with its reading fixed before the run
+
+| arm | 8k natural | reading |
+|---|---|---|
+| dense control | **12/12** | the prompt, needle and extraction are sound |
+| DKV, as shipped | **2/12** | the defect, reproduced |
+| `DKV_TOPK_BLOCKS=0` (attend ALL blocks) | **2/12** | **routing is NOT the cause** |
+| `DKV_MAX_RESIDUAL_TOKENS=256` (every token exact) | **6/12** | the budget is not the whole story either |
+| `DKV_RESIDUALS_IN_DENSE=1` | **2/12**, byte-identical at all 12 depths | the flag is INERT on this path |
+
+Two of these are worth keeping.
+
+**`DKV_RESIDUALS_IN_DENSE` does not reach the default decode path.** It is a
+Triton-kernel flag, and this configuration logs `REMAT ACTIVE — materialise-then-
+SDPA (MLX's decode form)`. The output is byte-identical at every depth with it on
+and off. Anyone reaching for it as the MLX-partition fix is measuring nothing.
+
+**Every token exact is still only 6/12**, and some of its failures are WORSE than
+the baseline's (`Falcon-1000`, `20212021`, `Falcon942` against the baseline's
+tidy `Falcon-9427-618x`). So "the answer's rows were not exact" is not a
+sufficient account of this defect, and neither raising the budget nor spending it
+more cleverly can reach dense on its own.
+
+### The mechanism, read out of the pool rather than inferred from the answer
+
+For the block bracketing the needle, which of the needle's own rows appear in
+`residual_K_positions` after prefill. `n_res_written` is 40/40 throughout, so the
+adaptive tier is NOT capping anything — this is purely WHICH rows were chosen:
+
+| depth | layer 13 captured | model answered |
+|---|---|---|
+| 0.83 | `' Falcon' '-' '9' '4' '2' '7' '-'` — **dropped `'6' '1' '8' '3'`** | `Falcon-9427-6137` |
+| 0.50 | all but the final `'3'` | `Falcon-9427-6185` |
+| 0.25 | 5 of 11 | `Falcon`, and nothing after it |
+
+The model reproduces EXACTLY the captured prefix and invents the rest. Capture is
+also different at every layer, because each layer ranks its own reconstruction
+errors independently.
+
+That is the whole defect. Qwen splits `Falcon-9427-6183` into eleven tokens;
+selection ranks tokens one at a time and takes the top forty; the tail of the run
+loses. **Half a code is not half an answer — it is a wrong answer with the right
+shape**, so the seven slots spent on the surviving prefix bought nothing.
+
+### The fix — `atomic_runs` + run-atomic selection, at the SAME budget
+
+`residual_capture.atomic_runs` returns the spans that are worth nothing unless
+kept whole: a maximal non-prose segment carrying a core token, extended back over
+its OWNER (`Falcon` is prose by shape, so only the owner walk-back pulls it in),
+merged across a spacing artefact but never across a sentence or line break, and
+dropped when a single segment is longer than `DKV_RESIDUAL_RUN_MAX` (32) because a
+whole table row is not an atomic unit.
+
+`lowrank._select_residual_rows` then REORDERS the existing error ranking: whole
+runs, best run first, all-or-nothing, fill the slots the pool will actually keep
+(`_res_cap`, not `n_max_residual` — the content boost can raise the latter to 256
+and the pool would truncate the runs at 40 all over again), and everything else
+keeps its old relative order behind them. Same row count in, same row count out.
+
+A run cut by a block edge needs no special case: it is whole within its own block
+and its other half is whole within the neighbour, which is what lets a straddled
+answer survive two independent forty-slot budgets — §4e's "can span a block
+boundary", for free.
+
+`DKV_RESIDUAL_RUN_ATOMIC=0` restores the old ranking exactly, and gates the extra
+pass so an A/B of the flag does not pay for it in both arms.
+
+Capture after the change, same probe, same budget: **11 of 11 at essentially
+every layer** at all three depths.
+
+### Results
+
+| | dense | DKV before | DKV after |
+|---|---|---|---|
+| needle 8k TILED (the old suites' filler) | 11/11 | 12/12 | **12/12** |
+| needle 8k natural | 12/12 | **2/12** | **11/12** |
+| needle 32k natural | 12/12 | **3/12** (§4d) | **9/12** |
+| multifact relational 16k | — | 4/4 | **4/4** |
+| multifact multi-needle 16k | — | 3/3 | **3/3** |
+| multifact synthesis 16k | — | 13.3 | **6.7** |
+
+The relational row — the binding test NIAH cannot see — is unchanged at 4/4, and
+`validate_cuda_dkv.py --long` on Qwen3.5-2B stays ALL CHECKS PASSED (9/9 recall,
+9/9 determinism, `fallback_count=0`), so nothing the old suites can see moved.
+
+The tiled row is the point of §4d restated: on that filler the needle is a
+guaranteed outlier, it already won its slots, and a fix aimed at the real defect
+correctly does nothing there. Do not gate on it.
+
+### What it costs in TIME
+
+`colab/bench_prefill_paired.py`, which grows a `run_atomic` arm here. A/A control
+run first and it reported NO EFFECT RESOLVABLE, CI [-51.8, +70.7] ms, so the
+harness resolves what it is being asked to resolve.
+
+    as first written           +427 ms   15.9%   CI [+362, +492]
+    batched score transfer     +419 ms   15.5%   CI [+348, +490]
+    no device sync at all      +177 ms    6.6%   CI [+107, +247]
+    numpy-vectorised reorder   +214 ms    7.9%   CI [+170, +257]
+
+The last two overlap, so read the shipped cost as **~7% of prefill** (~180-215 ms
+on 8k), not as a difference between them.
+
+Two thirds of the original cost was a DEVICE SYNC per block per layer, and it
+took three tries to remove because it kept moving: `scores.cpu()`, then
+`base.indices.tolist()`, then a boolean mask index -- whose output shape is
+data-dependent, so it synchronises too. Each drain waits on that block's queued
+int8-recon matmul instead of letting the pipeline run ahead, ~900 times on an 8k
+prefill. Most of the rest was `float(cpu_tensor[lo:hi].max())` paying the torch
+dispatcher ~15 us a call, ~21k calls; numpy does the same slice in ~2 us.
+
+**Decode and memory are unchanged.** This is a compression-time reordering of a
+fixed number of rows: the pool stores the same `max_residual` residuals and the
+decode kernel reads the same array.
+
+### What this COSTS in accuracy, measured, not waved at
+
+**Synthesis regresses 13.3 → 6.7** (facts 4/15 → 2/15), each setting reproduced
+twice and identical both times, so it is real and not run-to-run spread. Run
+reservation spends slots on codes and entities, and document synthesis is made of
+the scattered rare PROSE words the rarity pass protects.
+
+Capping the reservation is the obvious guard and it does not work.
+`DKV_RESIDUAL_RUN_FRAC=0.5`, i.e. at most 20 of the 40 slots reservable:
+
+    needle 8k natural     11/12 -> 10/12   (d=0.25 'Falcon-4278-6183')
+    synthesis 16k          6.7  ->  6.7    (reproduced twice)
+
+It costs recall and recovers none of the synthesis loss, so the cost is not slot
+VOLUME. The knob was removed rather than shipped, on the same reasoning §4e used
+to revert atomic segment weighting: a parameter whose only measured effect is
+negative is worse than no parameter. The remaining account of the synthesis loss
+is that it is compositional — which forty rows, not how many — and it is NOT
+explained here.
+
+### What is still open
+
+* **8k depth 0.0 (1 of the 2 remaining 8k failures).** The needle lands in block
+  0, which the deferred path releases as `force_exact` — and `force_exact` is
+  only lossless while `T_active <= _res_cap`. At 256 active rows against 40 slots
+  it falls through to the same ranked selection as any other block, so the
+  comment at `streaming_sparse_ingest._is_block_compression_eligible` claiming
+  block 0 is "protected from LOSSY compression by being compressed LOSSLESSLY" is
+  false for every block size this runtime actually uses. Block 0 also carries the
+  chat template and the paper's title, authors and URLs — 14 runs, 63 tokens, for
+  40 slots — so the answer's run loses the run ranking at some layers. It does
+  not reproduce at 32k, where depth 0.0 passes.
+* **32k depths 0.33 / 0.50 / 0.58.** The signature CHANGED: `Falcon-94276-831`
+  and `Falcon-94276-618` carry the right digits in nearly the right order with
+  the separator misplaced, where the pre-fix failures dropped the tail outright.
+  That is positional, not content, which makes the Project-Then-Attend phase error
+  the obvious next suspect — and §4e's elimination of it (`DKV_EXACT_ROPE_REMAT=1`
+  gave 2/12) was measured while capture was still truncating the run, i.e. under a
+  condition where it could not have helped. **That elimination should be
+  re-measured now, not trusted.**
+* **`max_residual` 40 against MLX's 128** (`mlx_dkv_wrapper.py:1964`) remains an
+  unexplained divergence in the exact quantity this section is about.
 
 ---
 

@@ -69,26 +69,33 @@ make setup
 | `make serve` | Launches OpenAI-compatible REST API gateway on `http://localhost:8000` |
 | `make test` | Runs needle-in-a-haystack (NIAH) recall guardrail tests at 8k & 16k context |
 
-> **NIAH numbers in this repo are measured on a TILED haystack, and that
-> inflates them.** `niah_recall.FILLER` is one 291-character sentence (38 unique
+> **NIAH numbers on a TILED haystack are inflated, and this repo's suites all
+> use one.** `niah_recall.FILLER` is a single 291-character sentence (38 unique
 > words) repeated to length; `validate_cuda_dkv.py` cycles eight. A random code
-> in that text is a colossal outlier, so DKV's residual budget — which spends its
+> in that text is a colossal outlier, so the residual budget — which spends its
 > slots on each block's worst-reconstructed tokens — is all but guaranteed to
 > keep it. Refill the same prompts from real papers in this repo and hold
-> everything else fixed (Qwen2.5-1.5B, `mid`, 12 depths, dense control at every
-> point):
+> everything else fixed (Qwen2.5-1.5B, `mid`, `block_size` 256, `max_residual`
+> 40, 12 depths, dense control at every point):
 >
-> | filler | ctx | dense | DKV |
-> |---|---|---|---|
-> | tiled sentence | 8k / 32k | 11/11 | **11/11 / 21/21** |
-> | natural text | 8k | 12/12 | **3/12** |
-> | natural text | 32k | 12/12 | **3/12** |
+> | filler | ctx | dense | DKV before | DKV now |
+> |---|---|---|---|---|
+> | natural text | 8k | 12/12 | **2/12** | **11/12** |
+> | natural text | 32k | 12/12 | **3/12** | **9/12** |
 >
-> The needle is found and corrupted, not missed — `Falcon-9427-618`**`5`** for
-> `...618`**`3`**. `DKV_MAX_RESIDUAL` 40 → 200 recovers 3/12 → 8/12, so the
-> residual budget is the lever, but residuals are already 49% of a pool slot.
-> Reproduce with `colab/needle_depth_sweep.py --filler natural`; the full
-> account is `ACTIVE_RUNTIME/docs/cuda_work_record.md` §4d.
+> Tiled filler is unaffected — the same sweep reads 12/12 at 8k after the change,
+> and `validate_cuda_dkv.py --long` (Qwen3.5-2B, 2k/8k/32k x 3 depths) stays
+> ALL CHECKS PASSED: 9/9 recall, 9/9 determinism, no kernel fallback.
+>
+> The needle was found and CORRUPTED, not missed — `Falcon-9427-618`**`5`** for
+> `...618`**`3`**. Qwen splits that code into eleven tokens, residual selection
+> ranked tokens one at a time, and the tail of the run lost; the model then
+> reproduced exactly the captured prefix and invented the rest. Selection now
+> takes a token RUN whole or not at all, at the **same** budget — no extra
+> memory, and ~7% of prefill time. It costs document synthesis (multifact 16k,
+> 13.3 → 6.7), which is measured and unexplained. Reproduce with
+> `colab/needle_depth_sweep.py --filler natural`; the full account is
+> `ACTIVE_RUNTIME/docs/cuda_work_record.md` §4d (the defect) and §4f (the fix).
 | `make native` | Compiles high-performance C++ engine (`dkv_native`) with Metal/CUDA support |
 
 ---

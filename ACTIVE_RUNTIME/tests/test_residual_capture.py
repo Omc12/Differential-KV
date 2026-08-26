@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from native_core.compression.residual_capture import (
     _detect_table_rows,
+    atomic_runs,
     compute_boost_multipliers,
 )
 
@@ -180,3 +181,144 @@ class TestTorchPathIntegration:
         missed = sorted(table_positions - sel)
         assert not missed, (
             f"{len(missed)} table rows left to low-rank reconstruction: {missed}")
+
+
+# Qwen2.5 splits the validator's needle into exactly these eleven tokens.
+CODE = [' Falcon', '-', '9', '4', '2', '7', '-', '6', '1', '8', '3']
+SENT = [' The', ' secret', ' passcode', ' is'] + CODE + ['.', chr(10)]
+
+
+class TestAtomicRuns:
+    """A code is worth nothing captured half-way, so it has to be ONE span."""
+
+    def test_code_and_its_owner_are_one_run(self):
+        runs = atomic_runs(SENT)
+        lo, hi = next(r for r in runs if r[0] <= 4 and 14 <= r[1])
+        assert (lo, hi) == (4, 15), (lo, hi, runs)   # ' Falcon' .. '3'
+
+    def test_owner_word_is_included(self):
+        # 'Falcon' is prose by shape -- alphabetic and title-case -- so only the
+        # owner walk-back pulls it in, and a code without the word naming it is
+        # as useless as the word without the code.
+        lo, _hi = atomic_runs(SENT)[0]
+        assert SENT[lo] == ' Falcon'
+
+    def test_merge_never_destroys_the_run_it_should_protect(self):
+        # REGRESSION. Merging across a one-token gap used to be unconditional, so
+        # in dense numeric prose the code chained into the following figure's
+        # numbers, the combined span blew past max_len, and the length filter
+        # dropped it whole -- leaving NO run over the code. Measured at 8k depth
+        # 0.58: capture 1-4 of 11 at every layer, answer 'Falcon-942.'.
+        figure = [' 56', ' x', ' 112', ' x', ' 224', ' x', ' 448', ' x',
+                  ' 896', ' x', ' 1792', ' x', ' 3584', ' x', ' 7168'] * 3
+        toks = SENT + figure
+        runs = atomic_runs(toks)
+        assert any(lo <= 4 and 15 <= hi for lo, hi in runs), runs
+
+    def test_sentence_break_is_not_inside_a_run(self):
+        figure = [' 56', ' x', ' 112', ' x', ' 224']
+        runs = atomic_runs(SENT + figure)
+        code = next(r for r in runs if r[0] <= 4 < r[1])
+        assert code[1] <= len(SENT), (code, runs)
+
+    def test_overlong_single_segment_is_dropped_not_truncated(self):
+        # A whole table row is not an atomic unit: taking it all-or-nothing would
+        # spend the entire budget on one line. Those fall back to per-token.
+        row = [str(i) for i in range(60)]
+        assert atomic_runs(row) == []
+
+    def test_plain_prose_has_no_runs(self):
+        assert atomic_runs(PROSE[:8]) == []
+
+
+@pytest.mark.skipif(
+    os.environ.get("DKV_RUN_TORCH_TESTS", "1") != "1",
+    reason="torch not requested")
+class TestRunAtomicSelection:
+    """The same slot count, spent on a COMPLETE set instead of a truncated one."""
+
+    def _fixture(self):
+        import torch
+        filler = [' w%s' % chr(97 + i % 26) for i in range(40)]
+        toks = filler + CODE
+        scores = torch.cat([
+            torch.linspace(9.0, 2.0, 40),            # filler out-errors the code
+            torch.tensor([8.6, 8.4, 8.2, 8.0, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4]),
+        ])
+        return toks, scores, atomic_runs(toks), set(range(40, 51))
+
+    def test_whole_run_survives_the_pool_truncation(self):
+        from native_core.compression.lowrank import (
+            _select_residual_rows, _topk_with_coverage)
+        _toks, scores, runs, code = self._fixture()
+        cap = 40
+        base = _topk_with_coverage(scores, cap, 0.0)
+        sel = _select_residual_rows(scores, cap, 0.0, runs=runs, res_cap=cap)
+        kept_base = len(code & set(base.indices.tolist()[:cap]))
+        kept_run = len(code & set(sel.indices.tolist()[:cap]))
+        assert kept_base < len(code), kept_base      # per-token truncates it
+        assert kept_run == len(code), (kept_run, sel.indices.tolist()[:cap])
+
+    def test_budget_is_not_raised(self):
+        from native_core.compression.lowrank import (
+            _select_residual_rows, _topk_with_coverage)
+        _toks, scores, runs, _code = self._fixture()
+        base = _topk_with_coverage(scores, 40, 0.0)
+        sel = _select_residual_rows(scores, 40, 0.0, runs=runs, res_cap=40)
+        assert sel.indices.numel() == base.indices.numel()
+
+    def test_values_match_their_indices(self):
+        # _reorder_runs_first rebuilds `values` for the new order; a mismatch here
+        # would silently corrupt the caller's `values > threshold` mask.
+        import torch
+        from native_core.compression.lowrank import _select_residual_rows
+        _toks, scores, runs, _code = self._fixture()
+        sel = _select_residual_rows(scores, 40, 0.0, runs=runs, res_cap=40)
+        assert torch.allclose(sel.values, scores[sel.indices.long()])
+
+    def test_disabled_reproduces_the_plain_ranking(self, monkeypatch):
+        from native_core.compression.lowrank import (
+            _select_residual_rows, _topk_with_coverage)
+        monkeypatch.setenv("DKV_RESIDUAL_RUN_ATOMIC", "0")
+        _toks, scores, runs, _code = self._fixture()
+        off = _select_residual_rows(scores, 40, 0.0, runs=runs, res_cap=40)
+        assert off.indices.tolist() == _topk_with_coverage(
+            scores, 40, 0.0).indices.tolist()
+
+    def test_run_too_large_for_the_remainder_reserves_nothing(self):
+        # ALL-OR-NOTHING. A run that cannot fit must not be taken in PART, so
+        # with a budget below the run length nothing is reserved and the result
+        # is exactly the per-token ranking.
+        #
+        # That is not the same as "no row of the code is selected": the leftover
+        # slots are still filled by the ordinary ranking, which is free to pick a
+        # high-error row that happens to sit inside the run. Suppressing that
+        # would be a regression, not the guarantee.
+        from native_core.compression.lowrank import (
+            _select_residual_rows, _topk_with_coverage)
+        _toks, scores, runs, _code = self._fixture()
+        assert min(hi - lo for lo, hi in runs) > 5
+        sel = _select_residual_rows(scores, 5, 0.0, runs=runs, res_cap=5)
+        assert sel.indices.tolist() == _topk_with_coverage(
+            scores, 5, 0.0).indices.tolist()
+
+
+def test_both_residual_producers_agree_on_the_boost_cache_arity():
+    """manager._res_capture_boost_rows is written by the batched GPU compressor
+    and read by the deferred one. They are the SAME dict, so a producer storing
+    a different tuple width breaks the other -- and the reader's
+    `except Exception: pass` would swallow it, silently disabling the boost and
+    the residual budget floor with it."""
+    import io
+    import re
+    root = os.path.join(os.path.dirname(__file__), "..")
+    lr = io.open(os.path.join(root, "native_core", "compression", "lowrank.py"),
+                 encoding="utf-8").read()
+    km = io.open(os.path.join(root, "native_core", "kv_runtime_manager.py"),
+                 encoding="utf-8").read()
+    unpacks = (re.findall(r"= _cached_boost", lr)
+               + re.findall(r"= _cached_boost", km))
+    assert len(unpacks) == 2, unpacks
+    for src, name in ((lr, "lowrank"), (km, "kv_runtime_manager")):
+        line = next(l for l in src.splitlines() if "= _cached_boost" in l)
+        assert line.count(",") == 2, (name, line)
