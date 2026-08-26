@@ -954,6 +954,59 @@ reached it — not `DKV_TOPK_BLOCKS=32`, not a doubled residual budget, not
 slots back to the error ranking did. So the last failure was not a missing
 guarantee, it was a guarantee spent in the wrong place.
 
+### THREE states, not two — the reservation's policy in full
+
+The scoping only works if "the query does not point here" is distinguished from
+"there was no query". Both look like *no marked runs*, and they want opposite
+behaviour:
+
+| what `rank_runs_by_query` returns | means | reservation |
+|---|---|---|
+| `(lo, hi)` bare | no query pinned at all | **reserve by error** (§4f) |
+| `(lo, hi, 0)` for every run | query consulted, points elsewhere | **reserve nothing** |
+| `(lo, hi, prio)` with marks | query points here | reserve the marked runs |
+
+Both failure directions were measured, and each one costs a different gate:
+
+* **Treating "no query" as "points nowhere"** switches the whole of §4f–§4h off.
+  The pin is best-effort — `hf_dkv_wrapper` fills `_pending_query` from an
+  explicit `query_text`, else from `_extract_query_token_ids` over the chat
+  messages, else not at all, the lot under a bare `except`. Measured by
+  neutering the signal on the 8k natural sweep: **3/12**, straight back to the
+  pre-§4f defect.
+* **Treating "points nowhere" as "no query"** re-engages the reservation on
+  every block a document-level question does not name, which is most of them:
+  synthesis **13.3 → 6.7**. This is the case synthesis lives in, and it includes
+  the `>50%` degenerate guard — a question about a whole paper shares content
+  words with most of it, so the guard fires and the block must still reserve
+  nothing.
+
+`DKV_RESIDUAL_RUN_RESERVE=query` (strict) keeps the two-state behaviour for A/B;
+`all` is §4f's. The default is `query_first`.
+
+### Answering "just do what MLX does" — measured, and the answer is no
+
+MLX matches dense on this workload, so its choices are the obvious thing to
+copy. All three that can be tested here measure WORSE:
+
+| MLX choice | on CUDA |
+|---|---|
+| flat per-token `argsort(capture_scores)[-n_res:]` — MLX has no run-atomic or query-aware selection at all | that IS the pre-§4f code: **2/12** at 8k |
+| `max_residual = 128` (`mlx_dkv_wrapper.py:1964`) against CUDA `mid`'s 40 | **8/12** at 32k, against 40's 9/12 |
+| post-RoPE key storage (`DKV_ROTATED_POOL=1`) | **8/12** at 8k, **6/12** at 32k, against 12/12 |
+
+The last row is the interesting one and it is not a surprise: `config.py` already
+records that the UNROTATED pool is what buys exact digit recall on this side
+(tablebench 24/24 unrotated against 14/24 rotated), and `mid` takes it
+deliberately. MLX's convention is what makes MLX's read path safe — it has no
+read-time position to get wrong — but on CUDA it costs more accuracy than the
+position bugs it prevents, and those bugs are now fixed anyway (§4g).
+
+So MLX is not doing something cheaper and better that this side failed to copy.
+It sits at a different point in the same trade: a convention that is easy to get
+right and lossier on digits, against one that is lossier to implement and better
+on them. This side is now correct at the harder point.
+
 ### Why this is safe where §4e's query work was not
 
 The signal is the same pinned query. What differs is where it is applied:

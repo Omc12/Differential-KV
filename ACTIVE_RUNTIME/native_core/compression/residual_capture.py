@@ -549,8 +549,12 @@ def rank_runs_by_query(tok_strs, tids, query_ids, runs, window=None):
             if int(tids[i]) in q
             and len(tok_strs[i].strip()) > 2
             and tok_strs[i].strip().lower() not in _OWNER_STOPWORDS]
+    # No query term in THIS block is a real answer -- "the query does not point
+    # here" -- so annotate with all-zero priority rather than returning bare
+    # spans. The bare form means "no usable query was consulted at all", which
+    # the selector treats completely differently; see the note there.
     if not hits:
-        return [(lo, hi) for lo, hi in runs]
+        return [(lo, hi, 0) for lo, hi in runs]
 
     out, n_prio = [], 0
     for lo, hi in runs:
@@ -558,5 +562,14 @@ def rank_runs_by_query(tok_strs, tids, query_ids, runs, window=None):
         out.append((lo, hi, 1 if near else 0))
         n_prio += int(near)
     if n_prio * 2 > len(runs):
-        return [(lo, hi) for lo, hi, _p in out]
+        # The query matched more than half the block's runs, so it carries no
+        # RANKING information -- but it was still a real query, and "matched too
+        # much to discriminate" is not the same as "there was no query". Annotate
+        # with all-zero priority so the selector reserves nothing here instead of
+        # falling back to reserving by error.
+        #
+        # This is the case document synthesis lives in: a question about a whole
+        # paper shares content words with most of it. Returning bare spans here
+        # cost 13.3 -> 6.7 by re-engaging the reservation on every such block.
+        return [(lo, hi, 0) for lo, hi, _p in out]
     return out

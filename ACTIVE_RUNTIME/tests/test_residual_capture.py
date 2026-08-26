@@ -364,14 +364,19 @@ class TestQueryRunPriority:
         assert rank_runs_by_query(
             self.BLOCK, self._ids(self.BLOCK), None, runs) == runs
 
-    def test_a_query_matching_everything_is_dropped_not_trusted(self):
+    def test_a_query_matching_everything_has_its_MARKS_dropped(self):
         # `_pending_query` falls back to the WHOLE PROMPT when no question span
         # can be extracted. That would mark every run relevant, which carries no
         # ranking information and would silently randomise the order.
+        #
+        # The marks go, the ANNOTATION stays. "Matched too much to discriminate"
+        # is still a real query, and the selector must not read it as "there was
+        # no query" -- that fallback reserves by error, which is exactly what
+        # cost document synthesis 13.3 -> 6.7.
         ids = self._ids(self.BLOCK)
         runs = atomic_runs(self.BLOCK)
         out = rank_runs_by_query(self.BLOCK, ids, ids, runs)
-        assert all(len(r) == 2 for r in out), out
+        assert all(len(r) == 3 and r[2] == 0 for r in out), out
 
     def test_priority_beats_a_higher_error_run_in_the_greedy(self):
         import torch
@@ -448,3 +453,67 @@ class TestQueryScopedReservation:
         sel = _select_residual_rows(scores, 12, 0.0, runs=prio, res_cap=12)
         front = sel.indices.tolist()[:len(range(*runs[code_i]))]
         assert sorted(front) == list(range(*runs[code_i]))
+
+
+@pytest.mark.skipif(
+    os.environ.get("DKV_RUN_TORCH_TESTS", "1") != "1",
+    reason="torch not requested")
+class TestNoQueryIsNotTheSameAsQuerySaidNo:
+    """The shipped default has to tell those two apart.
+
+    `_pending_query` is best-effort -- hf_dkv_wrapper fills it from an explicit
+    query_text, else from the chat messages, else not at all, all under a bare
+    except. If "no query" were treated as "the query points nowhere", every block
+    would reserve nothing and the whole of 4f-4h would silently switch off:
+    measured at 3/12 on the 8k natural sweep with the signal neutered.
+    """
+
+    def _fixture(self):
+        import torch
+        toks = [' alpha'] * 8 + CODE + [' beta'] * 8
+        runs = atomic_runs(toks)
+        ci = next(i for i, r in enumerate(runs) if r[0] <= 8 < r[1])
+        # The filler out-errors the answer, so a per-token top-k truncates the
+        # run and the reservation is the only thing that keeps it whole.
+        scores = torch.full((len(toks),), 9.0)
+        for lo, hi in runs:
+            for r in range(lo, hi):
+                scores[r] = 2.0
+        return toks, scores, runs, ci
+
+    def test_no_query_falls_back_to_reserving_by_error(self, monkeypatch):
+        from native_core.compression.lowrank import (
+            _select_residual_rows, _topk_with_coverage)
+        monkeypatch.setenv("DKV_RESIDUAL_RUN_RESERVE", "query_first")
+        _toks, scores, runs, ci = self._fixture()
+        assert all(len(r) == 2 for r in runs)          # bare spans == no query
+        cap = 11
+        sel = _select_residual_rows(scores, cap, 0.0, runs=runs, res_cap=cap)
+        rows = set(range(*runs[ci]))
+        # The reservation still happens, so a whole run survives the truncation.
+        assert rows <= set(sel.indices.tolist()[:cap])
+        assert sel.indices.tolist() != _topk_with_coverage(
+            scores, cap, 0.0).indices.tolist()
+
+    def test_query_that_points_nowhere_reserves_nothing(self, monkeypatch):
+        from native_core.compression.lowrank import (
+            _select_residual_rows, _topk_with_coverage)
+        monkeypatch.setenv("DKV_RESIDUAL_RUN_RESERVE", "query_first")
+        _toks, scores, runs, _ci = self._fixture()
+        annotated = [(lo, hi, 0) for lo, hi in runs]   # consulted, said no
+        sel = _select_residual_rows(scores, 11, 0.0, runs=annotated, res_cap=11)
+        assert sel.indices.tolist() == _topk_with_coverage(
+            scores, 11, 0.0).indices.tolist()
+
+    def test_rank_runs_by_query_annotates_even_when_nothing_matches(self):
+        toks = [' alpha'] * 8 + CODE + [' beta'] * 8
+        ids = list(range(700, 700 + len(toks)))
+        runs = atomic_runs(toks)
+        out = rank_runs_by_query(toks, ids, [999999], runs)   # no hit anywhere
+        assert all(len(r) == 3 and r[2] == 0 for r in out), out
+
+    def test_absent_query_returns_bare_spans(self):
+        toks = [' alpha'] * 8 + CODE + [' beta'] * 8
+        runs = atomic_runs(toks)
+        out = rank_runs_by_query(toks, list(range(len(toks))), None, runs)
+        assert all(len(r) == 2 for r in out), out

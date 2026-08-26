@@ -344,6 +344,11 @@ def _greedy_whole_runs(s_np, runs, T, budget):
     # silently skipped the whole content boost).
     # Spans arrive as (lo, hi) or, when a query was pinned at prefill, as
     # (lo, hi, priority) from residual_capture.rank_runs_by_query.
+    # A 3-tuple means residual_capture.rank_runs_by_query actually ran with a
+    # usable query. A bare 2-tuple means it did not: no query was pinned, or the
+    # one that was matched more than half the block's runs and was dropped as
+    # carrying no ranking information.
+    _has_priority = any(len(r) > 2 for r in runs)
     spans = [(r[0], min(r[1], T), (r[2] if len(r) > 2 else 0)) for r in runs
              if 0 <= r[0] < T and r[1] > r[0]]
     if not spans or budget <= 0:
@@ -397,11 +402,34 @@ def _greedy_whole_runs(s_np, runs, T, budget):
     # The 32k row is the interesting one: `all` left depth 0.58 failing and no
     # other lever reached it, including DKV_TOPK_BLOCKS=32 and a doubled residual
     # budget. Handing the un-asked-for runs' slots back to the error ranking did.
-    _mode = os.environ.get("DKV_RESIDUAL_RUN_RESERVE", "query").strip().lower()
-    if _mode == "query":
-        if not any(p for p, _s, _l, _h in ranked):
-            return [], set()
-        ranked = [r for r in ranked if r[0]]
+    _mode = os.environ.get("DKV_RESIDUAL_RUN_RESERVE", "query_first").strip().lower()
+    if _mode in ("query", "query_first"):
+        if _has_priority or _mode == "query":
+            # A USABLE QUERY WAS CONSULTED. Scope the reservation to what it
+            # points at, even if that is nothing -- a query that does not point
+            # at this block is evidence the block is not the answer's, and
+            # reserving for it is what cost 4f its synthesis rows.
+            ranked = [r for r in ranked if r[0]]
+            if not ranked:
+                return [], set()
+        # NO USABLE QUERY -> fall through and reserve by error (4f's behaviour).
+        #
+        # WITHOUT THIS FALLBACK THE WHOLE FIX HANGS ON THE QUERY PIN, which is
+        # best-effort: hf_dkv_wrapper fills `_pending_query` from an explicit
+        # query_text, else from _extract_query_token_ids over the chat messages,
+        # else not at all, and the whole thing sits under `except: pass`. A
+        # caller that does not go through the chat template would silently lose
+        # every gain in 4f-4h. Measured by neutering the signal
+        # (DKV_RESIDUAL_RUN_QUERY_WINDOW=0) on the 8k natural sweep: **3/12**,
+        # straight back to the pre-4f defect.
+        #
+        # So the degradation is graceful in the case that actually happens: a
+        # usable query scopes the reservation and synthesis keeps its rows; no
+        # query at all gets 4f's guarantee, which is worse for synthesis but
+        # 11/12 for recall rather than 3/12.
+        #
+        # `query` (strict) keeps the old behaviour for A/B: scope even when there
+        # was nothing to scope by.
 
     front, seen, remaining = [], set(), budget
     for _prio, _sc, lo, hi in ranked:
