@@ -499,3 +499,64 @@ def atomic_runs(tok_strs, max_len=None):
     # -- a table row, a reference list -- which is the case the cap is actually
     # for. Those fall back to per-token ranking, as they do today.
     return [(lo, hi) for lo, hi in merged if 0 < hi - lo <= max_len]
+
+
+def rank_runs_by_query(tok_strs, tids, query_ids, runs, window=None):
+    """Annotate `runs` with whether each one sits beside a QUERY term.
+
+    Returns the same spans as ``(lo, hi, priority)``, priority 1 or 0. The
+    consumer fills the residual budget in priority order first, so this decides
+    WHICH WHOLE RUN gets the slots -- it never changes how many.
+
+    WHY THIS IS NOT THE QUERY BOOST THAT DID NOT WORK. `DKV_RESIDUAL_QUERY_CAPTURE`
+    multiplies a per-token score, and it could not lift a code at all: a core
+    token already sits at `tok_boost * idf/2` = 24 and the query pass writes
+    `if w > boost[i]`, whose maximum is also 24. It measurably moved capture and
+    left recall at 3/12. Ordering whole RUNS is a different lever -- selection is
+    now all-or-nothing, so the only question left is which run wins, and that is
+    exactly the question a query can answer.
+
+    The failure it targets, measured at 8k depth 0.0 with run-atomic selection on
+    (the needle's own rows, read out of the pool after prefill):
+
+        24 of 28 layers   captured 11 of 11
+        L16 L18 L26 L27   captured  0 of 11
+
+    Block 0 holds the chat template plus the paper's title, authors and a URL --
+    14 runs, 63 tokens, for 40 slots. Those competitors are genuinely
+    hard to reconstruct and completely irrelevant to "what is the secret
+    passcode", which is the one thing reconstruction error cannot express.
+
+    SELF-LIMITING. If more than half the block's runs look query-relevant the
+    signal carries no ranking information, so it is dropped entirely. That is the
+    degenerate case in production, where `_pending_query` falls back to the whole
+    prompt when no question span can be extracted -- a fallback that would
+    otherwise mark everything relevant and quietly randomise the order.
+    """
+    if not runs or not query_ids or not tids:
+        return [(lo, hi) for lo, hi in runs]
+    if window is None:
+        try:
+            window = int(os.environ.get("DKV_RESIDUAL_RUN_QUERY_WINDOW", "24"))
+        except ValueError:
+            window = 24
+
+    # Content words only. Matching stopwords would light up every run equally,
+    # which is the same as lighting up none.
+    q = {int(t) for t in query_ids}
+    S = min(len(tok_strs), len(tids))
+    hits = [i for i in range(S)
+            if int(tids[i]) in q
+            and len(tok_strs[i].strip()) > 2
+            and tok_strs[i].strip().lower() not in _OWNER_STOPWORDS]
+    if not hits:
+        return [(lo, hi) for lo, hi in runs]
+
+    out, n_prio = [], 0
+    for lo, hi in runs:
+        near = any(lo - window <= h < hi + window for h in hits)
+        out.append((lo, hi, 1 if near else 0))
+        n_prio += int(near)
+    if n_prio * 2 > len(runs):
+        return [(lo, hi) for lo, hi, _p in out]
+    return out

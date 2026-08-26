@@ -342,7 +342,10 @@ def _greedy_whole_runs(s_np, runs, T, budget):
     # this codebase has already had disagree once (token_indices carries the
     # anchor, active_k does not, so a full block compared 257 against 256 and
     # silently skipped the whole content boost).
-    spans = [(lo, min(hi, T)) for lo, hi in runs if 0 <= lo < T and hi > lo]
+    # Spans arrive as (lo, hi) or, when a query was pinned at prefill, as
+    # (lo, hi, priority) from residual_capture.rank_runs_by_query.
+    spans = [(r[0], min(r[1], T), (r[2] if len(r) > 2 else 0)) for r in runs
+             if 0 <= r[0] < T and r[1] > r[0]]
     if not spans or budget <= 0:
         return [], set()
     # A run's claim is as strong as its most distinctive token, not as long as
@@ -353,10 +356,16 @@ def _greedy_whole_runs(s_np, runs, T, budget):
     # once per run per block per layer, which is ~21k calls on an 8k prefill and
     # measured as most of a 314 ms (11.6%) prefill regression. The same slice in
     # numpy is a couple of microseconds.
-    ranked = sorted(((float(s_np[lo:hi].max()), lo, hi) for lo, hi in spans),
-                    key=lambda t: t[0], reverse=True)
+    # PRIORITY FIRST, then error. Reconstruction error cannot express "does
+    # anyone want this", and in a block whose competitors are a paper's title,
+    # authors and a URL that is the only question that separates them from the
+    # answer. `priority` is 0 for every run unless a query was pinned, so this
+    # reduces to the pure error order whenever there is no query to ask.
+    ranked = sorted(((prio, float(s_np[lo:hi].max()), lo, hi)
+                     for lo, hi, prio in spans),
+                    key=lambda t: (t[0], t[1]), reverse=True)
     front, seen, remaining = [], set(), budget
-    for _sc, lo, hi in ranked:
+    for _prio, _sc, lo, hi in ranked:
         rows = [r for r in range(lo, hi) if r not in seen]
         if not rows or len(rows) > remaining:
             continue
@@ -1837,8 +1846,18 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                         # flag times the selection and silently pays for this pass
                         # in both arms, and reports a change it never made.
                         if _run_atomic_enabled():
-                            from native_core.compression.residual_capture import atomic_runs
+                            from native_core.compression.residual_capture import (
+                                atomic_runs, rank_runs_by_query,
+                            )
                             _runs = atomic_runs(tok_strs)
+                            # Which of those runs anyone is going to ASK for.
+                            # Selection is all-or-nothing now, so the only
+                            # question left is which run wins the slots -- and
+                            # that is the one question reconstruction error
+                            # cannot answer. Same pinned query the boost reads.
+                            if _runs and _q_ids:
+                                _runs = rank_runs_by_query(
+                                    tok_strs, block_token_ids, _q_ids, _runs)
                     except Exception:                            # noqa: BLE001
                         _runs = None
                         if os.environ.get("DKV_DBG_RESIDUAL_ERRORS") == "1":

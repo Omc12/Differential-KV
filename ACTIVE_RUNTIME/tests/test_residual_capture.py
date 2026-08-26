@@ -14,6 +14,7 @@ from native_core.compression.residual_capture import (
     _detect_table_rows,
     atomic_runs,
     compute_boost_multipliers,
+    rank_runs_by_query,
 )
 
 
@@ -322,3 +323,67 @@ def test_both_residual_producers_agree_on_the_boost_cache_arity():
     for src, name in ((lr, "lowrank"), (km, "kv_runtime_manager")):
         line = next(l for l in src.splitlines() if "= _cached_boost" in l)
         assert line.count(",") == 2, (name, line)
+
+
+class TestQueryRunPriority:
+    """WHICH whole run wins the slots -- the one question error cannot answer."""
+
+    # A block shaped like the one that actually failed: the answer's run plus
+    # the paper front-matter (authors, a URL) that was evicting it at 4 of 28
+    # layers, all of it genuinely hard to reconstruct and none of it asked for.
+    BLOCK = ([' The', ' secret', ' passcode', ' is'] + CODE + ['.', chr(10)]
+             + [' filler'] * 40
+             + [' Hassani', '1', ',', ' Walton', '2', chr(10)]
+             + [' filler'] * 40
+             + [' https', '://', 'github', '.', 'com', '/', 'SHI', '-', 'Labs',
+                chr(10)])
+
+    def _ids(self, toks):
+        return list(range(500, 500 + len(toks)))
+
+    def test_answer_run_is_prioritised_over_irrelevant_runs(self):
+        ids = self._ids(self.BLOCK)
+        runs = atomic_runs(self.BLOCK)
+        q = [ids[1], ids[2]]                       # ' secret', ' passcode'
+        out = rank_runs_by_query(self.BLOCK, ids, q, runs)
+        assert any(len(r) > 2 for r in out), out
+        code = next(r for r in out if r[0] <= 4 < r[1])
+        others = [r for r in out if r is not code]
+        assert code[2] == 1
+        assert all(r[2] == 0 for r in others), out
+
+    def test_no_query_leaves_the_error_order_untouched(self):
+        runs = atomic_runs(self.BLOCK)
+        assert rank_runs_by_query(
+            self.BLOCK, self._ids(self.BLOCK), None, runs) == runs
+
+    def test_a_query_matching_everything_is_dropped_not_trusted(self):
+        # `_pending_query` falls back to the WHOLE PROMPT when no question span
+        # can be extracted. That would mark every run relevant, which carries no
+        # ranking information and would silently randomise the order.
+        ids = self._ids(self.BLOCK)
+        runs = atomic_runs(self.BLOCK)
+        out = rank_runs_by_query(self.BLOCK, ids, ids, runs)
+        assert all(len(r) == 2 for r in out), out
+
+    def test_priority_beats_a_higher_error_run_in_the_greedy(self):
+        import torch
+        from native_core.compression.lowrank import _select_residual_rows
+        toks = ([' alpha'] * 8 + CODE + [' beta'] * 8
+                + [' Hassani', '1', ',', ' Walton', '2'])
+        runs = atomic_runs(toks)
+        code = next(i for i, r in enumerate(runs) if r[0] <= 8 < r[1])
+        # The irrelevant run out-errors the answer by a wide margin.
+        scores = torch.ones(len(toks))
+        for lo, hi in runs:
+            for r in range(lo, hi):
+                scores[r] = 9.0
+        for r in range(runs[code][0], runs[code][1]):
+            scores[r] = 2.0
+        prio = [(lo, hi, 1 if i == code else 0) for i, (lo, hi) in enumerate(runs)]
+        cap = 11
+        plain = _select_residual_rows(scores, cap, 0.0, runs=runs, res_cap=cap)
+        withp = _select_residual_rows(scores, cap, 0.0, runs=prio, res_cap=cap)
+        rows = set(range(runs[code][0], runs[code][1]))
+        assert not rows <= set(plain.indices.tolist()[:cap])
+        assert rows <= set(withp.indices.tolist()[:cap])

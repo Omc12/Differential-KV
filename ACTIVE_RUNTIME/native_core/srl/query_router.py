@@ -96,6 +96,15 @@ _HIGH_QUALITY_ROUTING = os.environ.get(
 # the query is treated as a new topic and stale rare-lexical seeds are suppressed.
 _TOPIC_SWITCH_THRESHOLD = float(os.environ.get("DKV_SRL_TOPIC_SWITCH_THRESHOLD", "0.30"))
 
+# DKV_ROUTER_EXACT_KEY — score the residual router on the EXACT key.
+#
+# A residual row's true key is R(p_r) . (anchor_raw + res_raw). Scoring it as
+# q.R(p_r)(res) + q.R(p_anchor)(anchor) combines two different rotational frames
+# and is the true score for neither. Default ON; set to 0 to restore the split
+# form for an A/B. Only reachable on an UNROTATED pool, which is what preset
+# `mid` builds -- see the note at the fold site.
+_ROUTER_EXACT_KEY = os.environ.get("DKV_ROUTER_EXACT_KEY", "1") != "0"
+
 
 # ── Level-1 Anchor Screening ──────────────────────────────────────────────────
 
@@ -1037,6 +1046,10 @@ def route_blocks_relevance(
 
     slots_long = block_indices.long()
     anc = pool.anchors_K[slots_long].clone()                    # [N, H_kv, D] fp16
+    # The UNROTATED anchor, kept before `anc` is rotated in place below. The
+    # residual score needs it in the residual row's OWN frame, not the anchor's
+    # -- see the exact-key reconstruction further down.
+    anc_raw = anc
 
     if _route_rope and anchor_indices is not None and cos is not None and sin is not None:
         # Reshape by cos's OWN last dim (rotary_dim), not the key's head_dim.
@@ -1071,7 +1084,7 @@ def route_blocks_relevance(
         # Partial-rotary aware: rotate the leading rotary_dim slice, pass the
         # tail through. Reduces to the original full-width form when
         # rotary_dim == head_dim, so full-rotary models are bit-identical.
-        anc = _rope_partial(anc, cos_anc, sin_anc)
+        anc = _rope_partial(anc.clone(), cos_anc, sin_anc)
     else:
         cos_anc = sin_anc = None
 
@@ -1135,6 +1148,14 @@ def route_blocks_relevance(
         # DKV_ROUTE_RESIDUALS>0 still sets it explicitly, same as MLX.
         R = min(R_all, r_route) if r_route > 0 else min(64, R_all)
         rk = res_k[slots_long, :R].clone()                      # [N, R, H_kv, D]
+        # Needed BEFORE the rotation branch below, which now folds the anchor in
+        # so the exact key is rotated as one vector.
+        try:
+            from native_core.compression.lowrank import _exact_keys_enabled
+            _res_is_anchor_relative_pre = bool(_exact_keys_enabled(rk.device))
+        except Exception:                                        # noqa: BLE001
+            _res_is_anchor_relative_pre = False
+        _rk_anchor_folded = False
         rvalid = (res_pos[slots_long, :R] >= 0)         # [N, R]
 
         if _route_rope and cos is not None and sin is not None:
@@ -1178,6 +1199,28 @@ def route_blocks_relevance(
             res_p = res_p.clamp(min=0, max=cos_flat.shape[0] - 1)
             cos_res = cos_flat[res_p].to(device=rk.device, dtype=rk.dtype).unsqueeze(2)  # [N, R, 1, rot]
             sin_res = sin_flat[res_p].to(device=rk.device, dtype=rk.dtype).unsqueeze(2)  # [N, R, 1, rot]
+            # RECONSTRUCT THE EXACT KEY BEFORE ROTATING IT, not after.
+            #
+            # A residual row's true key is R(p_r) . (anchor_raw + res_raw). This
+            # rotated `res` at p_r and then added the anchor score computed from
+            # an anchor rotated at the ANCHOR's position, so the two halves of
+            # `q . k` lived in DIFFERENT rotational frames and their sum was the
+            # true score for neither. That is the same frame split
+            # triton_fused_decode.pool_stores_rotated_k describes for decode --
+            # "the two live in different frames and their sum is not the exact
+            # key in either one" -- except here it decides which blocks are
+            # VISIBLE AT ALL, and a needle's whole claim on the top-K lives in
+            # this term.
+            #
+            # It only exists on an UNROTATED pool, because that is the only case
+            # where this branch rotates anything -- and `mid`, the default
+            # preset, sets rotated_pool=False. (Two comments in this repo say
+            # otherwise: config.py's "low/mid/high keep rotated_pool=True" and
+            # pool_stores_rotated_k's "DEFAULT ON". Both are stale; the config
+            # object built from preset `mid` reports False.)
+            if _res_is_anchor_relative_pre and _ROUTER_EXACT_KEY:
+                rk = rk + anc_raw.unsqueeze(1).to(rk.dtype)
+                _rk_anchor_folded = True
             rk = _rope_partial(rk, cos_res, sin_res)
 
         # Permute rk to [H_kv, D, N * R]
@@ -1187,7 +1230,11 @@ def route_blocks_relevance(
         s_res = torch.bmm(q_reshaped.float(), rk_permuted.float()) * scale
         s_res = s_res.reshape(H_kv, gpk, L, N, R)
 
-        # ADD THE ANCHOR TERM BACK. This is the whole residual router.
+        # THE ANCHOR TERM IS PART OF THE RESIDUAL SCORE. This is the whole
+        # residual router. It is now folded into `rk` BEFORE rotation (see
+        # above) rather than added to the score afterwards, because adding
+        # it afterwards combined two different rotational frames; the
+        # history below is why the term has to be there at all.
         #
         # The two runtimes store a residual in DIFFERENT FRAMES, and only one of
         # them can be scored directly:
@@ -1228,12 +1275,14 @@ def route_blocks_relevance(
         # rank-R product this function deliberately never builds, so no exact
         # score is available there. Left as-is rather than made "less wrong" on a
         # non-default path with no measurement behind it.
-        try:
-            from native_core.compression.lowrank import _exact_keys_enabled
-            _res_is_anchor_relative = bool(_exact_keys_enabled(rk.device))
-        except Exception:                                        # noqa: BLE001
-            _res_is_anchor_relative = False
-        if _res_is_anchor_relative:
+        # `s_res` is ALREADY the exact score when the anchor was folded in above
+        # and rotated with it. Adding s_anc again here would double-count the
+        # anchor -- the bug this replaces was adding it in the wrong FRAME, not
+        # adding it at all. The anchor is still added separately in the one case
+        # where it was never folded: an unrotated read path (no cos/sin), where
+        # both terms are already in the same (raw) frame and the sum is exact.
+        _res_is_anchor_relative = _res_is_anchor_relative_pre
+        if _res_is_anchor_relative and not _rk_anchor_folded:
             s_res = s_res + s_anc.unsqueeze(-1)
 
         # Apply validity mask

@@ -147,6 +147,11 @@ def set_arm(arm):
         _var = ("DKV_ROUTER_ROPE" if EXPERIMENT == "router_rope"
                 else "DKV_RESIDUAL_EXACT_ROPE")
         os.environ[_var] = "0" if on else "1"
+    elif EXPERIMENT == "router_exact_key":
+        # Cost of folding the anchor into the residual key before rotating it:
+        # one broadcast add on [N, R, H_kv, D] per routing call, alongside the
+        # rotation that already runs on the same tensor.
+        os.environ["DKV_ROUTER_EXACT_KEY"] = "1" if on else "0"
     elif EXPERIMENT == "rotated_pool":
         # A = UNROTATED (the candidate default), B = rotated (the historical one),
         # so a POSITIVE mean_diff is what unrotated COSTS.

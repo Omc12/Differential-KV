@@ -4373,8 +4373,15 @@ class KVRuntimeManager:
                                     _run_atomic_enabled as _ra_on,
                                 )
                                 if _ra_on():
-                                    from native_core.compression.residual_capture import atomic_runs
+                                    from native_core.compression.residual_capture import (
+                                        atomic_runs, rank_runs_by_query,
+                                    )
                                     _runs = atomic_runs(tok_strs)
+                                    _pq = getattr(self, "_pending_query", None) or {}
+                                    _qi = _pq.get(_sid) if isinstance(_pq, dict) else None
+                                    if _runs and _qi:
+                                        _runs = rank_runs_by_query(
+                                            tok_strs, block_token_ids, _qi, _runs)
                             except Exception:                    # noqa: BLE001
                                 _runs = None
                             if _sid is not None:

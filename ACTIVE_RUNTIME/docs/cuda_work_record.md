@@ -691,8 +691,12 @@ harness resolves what it is being asked to resolve.
     no device sync at all      +177 ms    6.6%   CI [+107, +247]
     numpy-vectorised reorder   +214 ms    7.9%   CI [+170, +257]
 
-The last two overlap, so read the shipped cost as **~7% of prefill** (~180-215 ms
-on 8k), not as a difference between them.
+A third run of the same arm after 4g's query-ranking pass was added read
+**+56 ms / +1.8%, CI [-43, +155]** -- NO EFFECT RESOLVABLE at its own +-3.6%
+resolution, which is wider than the effect the tighter runs measured. Three
+paired runs across three processes therefore read 6.6%, 7.9% and 1.8%. Take the
+prefill cost as single-digit percent and NOT precisely pinned: the paired CI is
+within-run, and these differ by more than it across runs.
 
 Two thirds of the original cost was a DEVICE SYNC per block per layer, and it
 took three tries to remove because it kept moving: `scores.cpu()`, then
@@ -751,6 +755,127 @@ explained here.
 
 ---
 
+
+## 4g. The rest of the gap — routing, not representation
+
+§4f left 8k at 11/12 and 32k at 9/12 against dense's 12/12. This closes 8k and
+takes 32k to 11/12. Same environment as §4f throughout.
+
+### The measurement that reframed it
+
+| arm, 32k natural | result | reading |
+|---|---|---|
+| §4f as shipped | 9/12 | |
+| `DKV_MAX_RESIDUAL_TOKENS=128` (MLX's own default) | **8/12** | budget is not the lever — it is WORSE |
+| `DKV_TOPK_BLOCKS=32` (double the routed budget) | **9/12** | no change |
+| **`DKV_TOPK_BLOCKS=0`** (attend every block) | **12/12** | **dense parity** |
+
+Attend-all reaching 12/12 is the decisive one: with run-atomic capture at a
+budget of 40, the compressed REPRESENTATION is already good enough for
+dense-equal recall. There is no third lossy path. Everything still missing was
+the router declining to look at the block.
+
+And K=32 changing nothing while K=all fixes everything says the needle's block is
+not ranked 17th–32nd of ~128 — it is ranked far down. That is a RANKING failure,
+so a bigger K cannot buy it.
+
+### Fault 1 — the router scored a key that exists in no frame
+
+`route_blocks_relevance` rotates the ANCHOR at the anchor's position, rotates each
+RESIDUAL row at its own true position, and then adds the two scores:
+
+    s_res = q . R(p_r)(res)  +  q . R(p_anchor)(anchor)
+
+A residual row's true key is `R(p_r) . (anchor_raw + res_raw)`, so that sum is the
+true score for neither frame. It is the same frame split
+`triton_fused_decode.pool_stores_rotated_k` describes for decode — "the two live
+in different frames and their sum is not the exact key in either one" — except
+here it decides which blocks are VISIBLE AT ALL, and a buried code's entire claim
+on the top-K lives in that term.
+
+Fixed by reconstructing the exact key BEFORE rotating it: fold the raw anchor into
+`rk`, rotate the sum at each row's true position, and stop adding `s_anc`
+afterwards. `DKV_ROUTER_EXACT_KEY=0` restores the split form.
+
+**32k 9/12 → 10/12.** Decode cost: NO EFFECT RESOLVABLE, +0.150 ms/token, CI
+[-0.139, +0.439], A/A control run first at ±1.4% of a token.
+
+**This only exists on an UNROTATED pool**, which is the case that rotates anything
+here — and preset `mid` sets `rotated_pool=False`. Two comments in this repo say
+otherwise and are stale: `config.py`'s "low/mid/high keep rotated_pool=True", and
+`pool_stores_rotated_k`'s "DEFAULT ON". The config object built from preset `mid`
+reports False, and `DKV_ROTATED_POOL` lands in the environment as `0`.
+
+Note what did NOT work: `DKV_ROUTER_ROPE=0`, which deletes the rotation entirely,
+also scores 9/12 — the same count with a DIFFERENT set of failing depths
+(0.33/0.58/0.83 against 0.33/0.50/0.58). Removing position-awareness just shuffles
+which needle survives. The frame has to be repaired, not discarded.
+
+### Fault 2 — the run ranking spent the budget on runs nobody asked for
+
+With capture now all-or-nothing, the only question left is WHICH run wins the
+slots, and §4f ranked them by reconstruction error alone. Reading the needle's own
+rows out of the pool at 8k depth 0.0, per layer:
+
+    24 of 28 layers   captured 11 of 11
+    L16 L18 L26 L27   captured  0 of 11
+
+Block 0 holds the chat template plus the paper's title, authors and a GitHub URL —
+14 runs, 63 tokens, for 40 slots. Those competitors are genuinely hard to
+reconstruct and completely irrelevant to "what is the secret passcode", which is
+the one thing an error score cannot express. All-or-nothing turns losing that
+ranking into losing everything, and L26/L27 are the layers that most directly
+shape the emitted token.
+
+`residual_capture.rank_runs_by_query` annotates each run with whether it sits
+within a window of a QUERY term, and the greedy fills priority runs first. On the
+real block 0 exactly 3 of 14 runs are marked and the needle's is the longest of
+them.
+
+**8k 11/12 → 12/12 — dense parity.**
+
+**This is NOT the query boost that failed in §4e.** That one multiplies a
+per-token score and could not lift a code at all: a core token already sits at
+`tok_boost * idf/2` = 24 and the query pass writes `if w > boost[i]`, whose
+maximum is also 24. It moved capture and left recall at 3/12. Ordering whole runs
+is a different lever, and it only became available once selection was atomic.
+
+**Self-limiting by construction.** If more than half a block's runs look
+query-relevant the signal carries no ranking information and is dropped. That is
+the production case, where `_pending_query` falls back to the whole prompt when no
+question span can be extracted — a fallback that would otherwise mark everything
+relevant and quietly randomise the order.
+
+### Where it stands
+
+| | dense | before §4f | after §4f | now |
+|---|---|---|---|---|
+| needle 8k natural | 12/12 | 2/12 | 11/12 | **12/12** |
+| needle 32k natural | 12/12 | 3/12 | 9/12 | **11/12** |
+| multifact relational 16k | — | 4/4 | 4/4 | **4/4** |
+| multifact multi-needle 16k | — | 3/3 | 3/3 | **3/3** |
+| multifact synthesis 16k | — | 13.3 | 6.7 | **6.7** |
+
+`validate_cuda_dkv.py --long` on Qwen3.5-2B stays ALL CHECKS PASSED. The synthesis
+cost recorded in §4f is unchanged by either fault above — it belongs to
+run-atomic selection and is still unexplained.
+
+### Still open
+
+* **32k depth 0.58, the last failure.** `DKV_EXACT_ROPE_REMAT=1` takes 32k to
+  **11/12** on its own and composes with both fixes above to the same 11/12; 0.58
+  survives every combination tried, including attend-all-plus-everything-exact
+  reaching 12/12, which means it is reachable — just not by these levers.
+* **`DKV_EXACT_ROPE_REMAT` should be re-decided.** §T1b keeps it OFF because it
+  scored 10/11 against 11/11 at 32k — **on the tiled filler**, the haystack §4d
+  showed cannot see this defect. On natural text it is worth +1 at 32k and 0 at
+  8k. Left OFF here only because flipping a default deserves its own gate run,
+  not because the measurement supports OFF.
+* **`max_residual` 40 against MLX's 128 is ANSWERED, and the answer is no.**
+  Raising it to MLX's default scores 8/12 against 40's 9/12. The divergence is
+  real and is not what separates the two runtimes.
+
+---
 
 ## 5. T1 and T2 — DONE. What the depth question actually was.
 
