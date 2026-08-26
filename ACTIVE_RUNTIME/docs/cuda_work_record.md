@@ -710,7 +710,14 @@ dispatcher ~15 us a call, ~21k calls; numpy does the same slice in ~2 us.
 fixed number of rows: the pool stores the same `max_residual` residuals and the
 decode kernel reads the same array.
 
-### What this COSTS in accuracy, measured, not waved at
+### What this COSTS in accuracy — RECOVERED IN 4h, read that first
+
+> The synthesis regression below is real and was measured correctly, but
+> it is no longer the shipped behaviour. It came from reserving a whole
+> run for EVERY atomic span; scoping the reservation to the runs the
+> query points at (4h) restores synthesis to 13.3 AND takes 32k needle
+> recall to 12/12. The analysis below stands as the reason the scope
+> matters.
 
 **Synthesis regresses 13.3 → 6.7** (facts 4/15 → 2/15), each setting reproduced
 twice and identical both times, so it is real and not run-to-run spread. Run
@@ -881,6 +888,96 @@ run-atomic selection and is still unexplained.
 * **`max_residual` 40 against MLX's 128 is ANSWERED, and the answer is no.**
   Raising it to MLX's default scores 8/12 against 40's 9/12. The divergence is
   real and is not what separates the two runtimes.
+
+---
+
+## 4h. DENSE PARITY — the reservation only ever needed to cover the query
+
+§4f bought needle recall by reserving a whole run for EVERY atomic span in a
+block, and paid for it in document synthesis (13.3 → 6.7). §4g closed 8k and left
+32k at 11/12. Scoping the reservation to the runs the query actually points at
+closes both, and gives the synthesis back.
+
+`DKV_RESIDUAL_RUN_RESERVE` (default `query`) chooses which runs may claim slots
+all-or-nothing:
+
+* `query` — only runs marked by `rank_runs_by_query`. If NO run is marked, the
+  block reserves nothing and the whole budget goes to the per-token ranking.
+* `all` — §4f's behaviour, every run best-scoring first.
+
+### The synthesis cost was compositional, and nothing around the selection touched it
+
+Before changing anything, the other candidates were eliminated. multifact
+synthesis at 16k, Qwen2.5-1.5B:
+
+| arm | score |
+|---|---|
+| shipped (K=16, remat cache on) | 6.7 |
+| `DKV_TOPK_BLOCKS=0` — attend every block | 6.7 |
+| `DKV_REMAT_CACHE=0` — no decode staleness | 6.7 |
+| both | 6.7 |
+| `DKV_RESIDUAL_RUN_ATOMIC=0` | **13.3** |
+
+Routing does not move it. Decode staleness does not move it — even though
+`remat_cache.remat_enabled`'s own docstring records a synthesis cost for the
+cache on this exact model, that cost is not what is happening here. ONLY which
+forty rows are spent moves it, which is what made the reservation's scope the
+thing to change.
+
+### Result — strictly better on every gate, not a trade
+
+Dense control 12/12 at every point, twelve depths at k/12:
+
+| gate | `all` (§4f/§4g) | `query` (shipped) |
+|---|---|---|
+| needle 8k natural | 12/12 | **12/12** |
+| needle 32k natural | 11/12 | **12/12** |
+| needle 8k tiled | 12/12 | 12/12 |
+| needle 32k tiled | 12/12 | 12/12 |
+| multifact relational 16k | 4/4 | 4/4 |
+| multifact multi-needle 16k | 3/3 | 3/3 |
+| multifact synthesis 16k | 6.7 | **13.3** |
+| `validate_cuda_dkv --long` | ALL PASSED | ALL PASSED |
+
+**Natural-text needle recall is now at dense at BOTH contexts**, from 2/12 and
+3/12 where this work started, and §4f's synthesis regression is gone rather than
+merely documented.
+
+The 32k row deserves a note. Under `all`, depth 0.58 failed and NO other lever
+reached it — not `DKV_TOPK_BLOCKS=32`, not a doubled residual budget, not
+`DKV_EXACT_ROPE_REMAT`, not the §4g router fix. Handing the un-asked-for runs'
+slots back to the error ranking did. So the last failure was not a missing
+guarantee, it was a guarantee spent in the wrong place.
+
+### Why this is safe where §4e's query work was not
+
+The signal is the same pinned query. What differs is where it is applied:
+
+* §4e multiplied it into a per-token score, where it could not move a code at all
+  — a core token already sits at the pass's own ceiling of 24 — and left recall
+  at 3/12.
+* §4g used it to ORDER whole runs, which only became meaningful once selection
+  was atomic.
+* This uses it to SCOPE the reservation, which is the first place where being
+  wrong is cheap: an unmarked run is not evicted, it simply competes on
+  reconstruction error exactly as it did before §4f existed.
+
+That asymmetry is the safety argument. `rank_runs_by_query` already drops its own
+signal when more than half a block's runs look relevant, which is the degenerate
+production case where `_pending_query` falls back to the whole prompt; combined
+with `query` mode, a useless query now costs nothing rather than reserving
+everything.
+
+### Still open
+
+* **`DKV_TOPK_BLOCKS=0` reaching 12/12 is no longer the only route there**, so
+  the routing-rank question §4g raised is no longer blocking recall. It is still
+  true that the router ranks a needle's block far below 32 of ~128, and that is
+  worth understanding on its own.
+* **Synthesis is 13.3 against a >= 30 bar** and dense could not be measured here
+  (`multifact_eval_cuda --dense` forwards unchunked and OOMs at 16k on a 12 GB
+  card). This work restored what §4f cost; it did not make synthesis good, and
+  nothing in §4f–§4h ever moved it above the pre-existing 13.3.
 
 ---
 

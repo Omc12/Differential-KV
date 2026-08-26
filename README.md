@@ -81,7 +81,7 @@ make setup
 > | filler | ctx | dense | DKV before | DKV now |
 > |---|---|---|---|---|
 > | natural text | 8k | 12/12 | **2/12** | **12/12** |
-> | natural text | 32k | 12/12 | **3/12** | **11/12** |
+> | natural text | 32k | 12/12 | **3/12** | **12/12** |
 >
 > Tiled filler is unaffected — the same sweep reads 12/12 at 8k after the change,
 > and `validate_cuda_dkv.py --long` (Qwen3.5-2B, 2k/8k/32k x 3 depths) stays
@@ -94,8 +94,10 @@ make setup
 > it, none of which raises a budget: selection takes a token RUN whole or not at
 > all; the residual router scores the EXACT key instead of summing two different
 > rotational frames; and whole runs are ordered by whether the QUERY asks for
-> them before by how badly they reconstruct. It costs document synthesis
-> (multifact 16k, 13.3 → 6.7), which is measured and unexplained. Reproduce with
+> them before by how badly they reconstruct, and the reservation is scoped to
+> the runs the query asks for. Recall is now AT DENSE on natural text at both
+> contexts, with multifact relational 4/4, multi-needle 3/3 and synthesis
+> unchanged at 13.3. Reproduce with
 > `colab/needle_depth_sweep.py --filler natural`; the full account is
 > `ACTIVE_RUNTIME/docs/cuda_work_record.md` §4d (the defect) and §4f (the fix).
 | `make native` | Compiles high-performance C++ engine (`dkv_native`) with Metal/CUDA support |

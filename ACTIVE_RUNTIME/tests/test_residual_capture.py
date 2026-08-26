@@ -238,6 +238,13 @@ class TestAtomicRuns:
 class TestRunAtomicSelection:
     """The same slot count, spent on a COMPLETE set instead of a truncated one."""
 
+    @pytest.fixture(autouse=True)
+    def _reserve_all(self, monkeypatch):
+        # These cases hand in runs with NO query priority. The shipped default
+        # (`query`) deliberately reserves nothing for those, so they pin the
+        # `all` mode; the default's own behaviour is covered below.
+        monkeypatch.setenv("DKV_RESIDUAL_RUN_RESERVE", "all")
+
     def _fixture(self):
         import torch
         filler = [' w%s' % chr(97 + i % 26) for i in range(40)]
@@ -387,3 +394,57 @@ class TestQueryRunPriority:
         rows = set(range(runs[code][0], runs[code][1]))
         assert not rows <= set(plain.indices.tolist()[:cap])
         assert rows <= set(withp.indices.tolist()[:cap])
+
+
+@pytest.mark.skipif(
+    os.environ.get("DKV_RUN_TORCH_TESTS", "1") != "1",
+    reason="torch not requested")
+class TestQueryScopedReservation:
+    """The shipped default: reserve slots ONLY for runs the query points at."""
+
+    def _fixture(self):
+        import torch
+        toks = [' alpha'] * 8 + CODE + [' beta'] * 8 + [' Hassani', '1', ',']
+        runs = atomic_runs(toks)
+        code_i = next(i for i, r in enumerate(runs) if r[0] <= 8 < r[1])
+        scores = torch.ones(len(toks))
+        for lo, hi in runs:                      # every run out-errors the prose
+            for r in range(lo, hi):
+                scores[r] = 9.0
+        for r in range(runs[code_i][0], runs[code_i][1]):
+            scores[r] = 2.0                      # the ANSWER reconstructs well
+        return toks, scores, runs, code_i
+
+    def test_unasked_runs_do_not_claim_slots(self, monkeypatch):
+        # 4f bought needle recall by reserving every run, and that is what cost
+        # document synthesis its scattered rare-prose rows (6.7 against 13.3).
+        from native_core.compression.lowrank import (
+            _select_residual_rows, _topk_with_coverage)
+        monkeypatch.setenv("DKV_RESIDUAL_RUN_RESERVE", "query")
+        _toks, scores, runs, _ci = self._fixture()
+        plain = _topk_with_coverage(scores, 12, 0.0)
+        sel = _select_residual_rows(scores, 12, 0.0, runs=runs, res_cap=12)
+        assert sel.indices.tolist() == plain.indices.tolist()
+
+    def test_the_asked_for_run_still_gets_its_guarantee(self, monkeypatch):
+        from native_core.compression.lowrank import _select_residual_rows
+        monkeypatch.setenv("DKV_RESIDUAL_RUN_RESERVE", "query")
+        _toks, scores, runs, code_i = self._fixture()
+        prio = [(lo, hi, 1 if i == code_i else 0)
+                for i, (lo, hi) in enumerate(runs)]
+        cap = 12
+        sel = _select_residual_rows(scores, cap, 0.0, runs=prio, res_cap=cap)
+        rows = set(range(runs[code_i][0], runs[code_i][1]))
+        assert rows <= set(sel.indices.tolist()[:cap])
+
+    def test_only_the_marked_run_is_reserved(self, monkeypatch):
+        # The other runs out-error the answer, so if they were reserved too the
+        # answer would be evicted -- which is exactly the 4f behaviour.
+        from native_core.compression.lowrank import _select_residual_rows
+        monkeypatch.setenv("DKV_RESIDUAL_RUN_RESERVE", "query")
+        _toks, scores, runs, code_i = self._fixture()
+        prio = [(lo, hi, 1 if i == code_i else 0)
+                for i, (lo, hi) in enumerate(runs)]
+        sel = _select_residual_rows(scores, 12, 0.0, runs=prio, res_cap=12)
+        front = sel.indices.tolist()[:len(range(*runs[code_i]))]
+        assert sorted(front) == list(range(*runs[code_i]))

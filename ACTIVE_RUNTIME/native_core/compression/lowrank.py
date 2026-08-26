@@ -364,6 +364,45 @@ def _greedy_whole_runs(s_np, runs, T, budget):
     ranked = sorted(((prio, float(s_np[lo:hi].max()), lo, hi)
                      for lo, hi, prio in spans),
                     key=lambda t: (t[0], t[1]), reverse=True)
+    # DKV_RESIDUAL_RUN_RESERVE — WHICH runs may claim slots all-or-nothing.
+    #
+    #   query  (default) ONLY runs the pinned query points at; if none is
+    #          marked, reserve nothing and leave the whole budget to the
+    #          per-token ranking
+    #   all    every run, best-scoring first (priority still breaks ties)
+    #
+    # THE RESERVATION'S COST IS ENTIRELY COMPOSITIONAL, and this is what fixes
+    # it. `all` bought needle recall at the price of document synthesis, and
+    # nothing AROUND the selection could recover that: on multifact synthesis at
+    # 16k, attend-all reads 6.7, DKV_REMAT_CACHE=0 reads 6.7, both together read
+    # 6.7, and run-atomic off reads 13.3. Only WHICH forty rows are spent moves
+    # it. Reserving whole runs for content nobody asked for is what costs
+    # synthesis its scattered rare-prose rows, so scoping the reservation to the
+    # query keeps the guarantee exactly where an answer needs it and hands the
+    # rest of the budget straight back.
+    #
+    # It is strictly better on every gate, not a trade (dense control 12/12 at
+    # every point, twelve depths):
+    #
+    #                          all      query
+    #     needle 8k natural    12/12    12/12
+    #     needle 32k natural   11/12    12/12   <- dense parity
+    #     needle 8k tiled      12/12    12/12
+    #     needle 32k tiled     12/12    12/12
+    #     multifact relational   4/4      4/4
+    #     multifact multi-needle 3/3      3/3
+    #     multifact synthesis    6.7     13.3   <- 4f's regression, gone
+    #     validate_cuda_dkv --long  ALL CHECKS PASSED both
+    #
+    # The 32k row is the interesting one: `all` left depth 0.58 failing and no
+    # other lever reached it, including DKV_TOPK_BLOCKS=32 and a doubled residual
+    # budget. Handing the un-asked-for runs' slots back to the error ranking did.
+    _mode = os.environ.get("DKV_RESIDUAL_RUN_RESERVE", "query").strip().lower()
+    if _mode == "query":
+        if not any(p for p, _s, _l, _h in ranked):
+            return [], set()
+        ranked = [r for r in ranked if r[0]]
+
     front, seen, remaining = [], set(), budget
     for _prio, _sc, lo, hi in ranked:
         rows = [r for r in range(lo, hi) if r not in seen]
