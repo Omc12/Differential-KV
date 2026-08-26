@@ -1007,6 +1007,42 @@ It sits at a different point in the same trade: a convention that is easy to get
 right and lossier on digits, against one that is lossier to implement and better
 on them. This side is now correct at the harder point.
 
+### The pin was a single point of failure, and the fix is SnapKV's window
+
+Scoping to the query is only sound if "there is no usable query" is handled, and
+the first two attempts got that wrong in opposite directions — each measured, not
+argued:
+
+| what the block was told | first attempt | second | shipped |
+|---|---|---|---|
+| real question pinned | 12/12 | 12/12 | **12/12** |
+| no `query_text` supplied | **3/12** | 11/12 | **12/12** |
+| synthesis (one huge user turn) | 13.3 | 6.7 | **30.0** |
+
+**The degenerate case is not an absent pin, it is a pin the size of the prompt.**
+`serving.query_span.extract_query_token_ids` returns `list(prompt_ids)` verbatim
+when it cannot find a user turn — its own comment says "No messages supplied or
+no user role found → full-prompt fallback" — and `hf_dkv_wrapper` pins whatever
+it returns. A query covering the whole document points everywhere, which for
+this purpose is the same as pointing nowhere, so the block reserved nothing and
+recall fell to **3/12**. `usable_query` rejects any pin larger than
+`DKV_RESIDUAL_QUERY_MAX_FRAC` (0.25) of the context; a real question is tens of
+tokens against thousands, so the separation is not delicate.
+
+Rejecting it is not enough on its own, because then a summarisation request has
+no query at all and falls back to reserving by error — §4f's behaviour, which is
+exactly what costs document synthesis its rows (6.7).
+
+**So when no question can be pinned, use the LAST TOKENS OF THE PROMPT as the
+query.** That is SnapKV's observation window, and it is the one idea from the
+external benchmark's winners that this repo had not yet borrowed. It works
+because both prompt shapes put the question last: a retrieval prompt ends with
+its question, and a summarisation prompt is one huge user turn ending in its
+instruction. `DKV_RESIDUAL_QUERY_TAIL` (default 64) sets the window.
+
+That single fallback takes the no-pin case from 3/12 to **12/12** and synthesis
+from 13.3 to **30.0** — the first time `multifact_eval_cuda` has passed 9/9.
+
 ### Why this is safe where §4e's query work was not
 
 The signal is the same pinned query. What differs is where it is applied:
@@ -1040,10 +1076,13 @@ everything.
 
   It remains true that the router ranks a needle's block far below 32 of ~128,
   which is worth understanding on its own — but it is no longer costing recall.
-* **Synthesis is 13.3 against a >= 30 bar** and dense could not be measured here
-  (`multifact_eval_cuda --dense` forwards unchunked and OOMs at 16k on a 12 GB
-  card). This work restored what §4f cost; it did not make synthesis good, and
-  nothing in §4f–§4h ever moved it above the pre-existing 13.3.
+* **Synthesis PASSES now — 30.0, reproduced three times** — where the
+  pre-existing level was 13.3 and §4f's worst point was 6.7. That is the tail-of-
+  prompt window doing work the residual budget never had before, not a recovery.
+  It is still only 6/15 facts and 1/5 links, so the gate passing is a floor being
+  cleared rather than the task being solved, and the dense ceiling remains
+  unmeasured here (`multifact_eval_cuda --dense` forwards unchunked and OOMs at
+  16k on a 12 GB card).
 
 ---
 

@@ -1914,7 +1914,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                         # in both arms, and reports a change it never made.
                         if _run_atomic_enabled():
                             from native_core.compression.residual_capture import (
-                                atomic_runs, rank_runs_by_query,
+                                atomic_runs, rank_runs_by_query, usable_query,
                             )
                             _runs = atomic_runs(tok_strs)
                             # Which of those runs anyone is going to ASK for.
@@ -1922,9 +1922,36 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                             # question left is which run wins the slots -- and
                             # that is the one question reconstruction error
                             # cannot answer. Same pinned query the boost reads.
-                            if _runs and _q_ids:
+                            #
+                            # `usable_query` rejects the full-prompt fallback:
+                            # pinning that and treating it as a real question
+                            # scores 3/12 on the 8k natural sweep, because it
+                            # points everywhere and so reserves nothing.
+                            _q_eff = _q_ids if usable_query(_q_ids, _total) else None
+                            if _q_eff is None and _all is not None:
+                                # TAIL-OF-PROMPT FALLBACK, which is SnapKV's
+                                # observation window. When no short question span
+                                # can be pinned -- either nothing was supplied, or
+                                # the request is one huge user turn ending in its
+                                # instruction, which is what a summarisation
+                                # prompt looks like -- the last tokens of the
+                                # prompt ARE the question in both shapes.
+                                #
+                                # Without this the block has no query at all and
+                                # falls back to reserving by error, which is 4f's
+                                # behaviour: fine for recall, and what costs
+                                # document synthesis its scattered rare-prose
+                                # rows.
+                                try:
+                                    _tail = int(os.environ.get(
+                                        "DKV_RESIDUAL_QUERY_TAIL", "64"))
+                                except ValueError:
+                                    _tail = 64
+                                if _tail > 0 and int(_all.numel()) > _tail:
+                                    _q_eff = _all[-_tail:].tolist()
+                            if _runs and _q_eff:
                                 _runs = rank_runs_by_query(
-                                    tok_strs, block_token_ids, _q_ids, _runs)
+                                    tok_strs, block_token_ids, _q_eff, _runs)
                     except Exception:                            # noqa: BLE001
                         _runs = None
                         if os.environ.get("DKV_DBG_RESIDUAL_ERRORS") == "1":

@@ -501,6 +501,40 @@ def atomic_runs(tok_strs, max_len=None):
     return [(lo, hi) for lo, hi in merged if 0 < hi - lo <= max_len]
 
 
+def usable_query(query_ids, total_tokens):
+    """Is this pin a QUESTION, or the whole prompt wearing a question's name?
+
+    `serving.query_span.extract_query_token_ids` returns `list(prompt_ids)`
+    verbatim when it cannot find a user turn -- "No messages supplied or no user
+    role found -> full-prompt fallback" -- and `hf_dkv_wrapper` pins whatever it
+    returns. So the common degenerate case is NOT an absent pin, it is a pin the
+    size of the context, and every downstream consumer has to decide for itself
+    whether that means anything. For residual reservation it does not: a "query"
+    covering the whole document points everywhere, which is the same as pointing
+    nowhere.
+
+    That distinction is worth its own function because the two failure modes sit
+    on opposite sides of it, both measured on the 8k natural needle sweep:
+
+        real question pinned, scoped reservation      12/12
+        full-prompt pin treated as a real question     3/12   <- collapses
+        full-prompt pin treated as no query           11/12
+
+    A real question is tens of tokens against a context of thousands, so the
+    separation is not delicate. The threshold is a FRACTION rather than a
+    constant so it holds at every context length.
+    """
+    if not query_ids:
+        return False
+    try:
+        frac = float(os.environ.get("DKV_RESIDUAL_QUERY_MAX_FRAC", "0.25"))
+    except ValueError:
+        frac = 0.25
+    if not total_tokens or total_tokens <= 0:
+        return True
+    return len(query_ids) < max(1.0, frac * float(total_tokens))
+
+
 def rank_runs_by_query(tok_strs, tids, query_ids, runs, window=None):
     """Annotate `runs` with whether each one sits beside a QUERY term.
 

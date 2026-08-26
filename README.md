@@ -97,9 +97,11 @@ make setup
 > all; the residual router scores the EXACT key instead of summing two different
 > rotational frames; and whole runs are ordered by whether the QUERY asks for
 > them before by how badly they reconstruct, and the reservation is scoped to
-> the runs the query asks for. Recall is now AT DENSE on natural text at both
-> contexts, with multifact relational 4/4, multi-needle 3/3 and synthesis
-> unchanged at 13.3. Reproduce with
+> the runs the query asks for — falling back to SnapKV's observation window, the
+> last 64 prompt tokens, when no question span can be pinned. Recall is now AT
+> DENSE on natural text at both contexts, and `multifact_eval_cuda` passes 9/9
+> for the first time: relational 4/4, multi-needle 3/3, synthesis 30.0 against a
+> pre-existing 13.3. Reproduce with
 > `colab/needle_depth_sweep.py --filler natural`; the full account is
 > `ACTIVE_RUNTIME/docs/cuda_work_record.md` §4d (the defect) and §4f (the fix).
 | `make native` | Compiles high-performance C++ engine (`dkv_native`) with Metal/CUDA support |
