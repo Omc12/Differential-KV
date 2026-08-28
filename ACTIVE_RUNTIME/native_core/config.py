@@ -681,15 +681,19 @@ class DKVConfig:
                 print(f"  gc_interval               = {self.gc_interval}")
                 print(f"  srl_route_every           = {self.srl_route_every}")
 
-    def _get_bool(self, key: str, env_name: str, default: bool, config_dict: dict) -> bool:
+    def _get_bool(self, key: str, env_name: str, default: bool, config_dict: dict,
+                  alias_env: str = None) -> bool:
         if key in config_dict:
             val = config_dict[key]
             if isinstance(val, bool):
                 return val
             return str(val).lower() in ("true", "1", "yes", "on")
-        env_val = os.environ.get(env_name)
-        if env_val is not None:
-            return env_val.lower() in ("true", "1", "yes", "on")
+        for name in (env_name, alias_env):
+            if not name:
+                continue
+            env_val = os.environ.get(name)
+            if env_val is not None:
+                return env_val.lower() in ("true", "1", "yes", "on")
         return default
 
     def _get_int(self, key: str, env_name: str, default: int, config_dict: dict,
@@ -717,19 +721,24 @@ class DKVConfig:
                     pass
         return default
 
-    def _get_float(self, key: str, env_name: str, default: float, config_dict: dict) -> float:
+    def _get_float(self, key: str, env_name: str, default: float, config_dict: dict,
+                   alias_env: str = None) -> float:
         if key in config_dict:
             try:
                 return float(config_dict[key])
             except (ValueError, TypeError):
                 pass
-        env_val = os.environ.get(env_name)
-        if env_val is not None:
-            try:
-                return float(env_val)
-            except (ValueError, TypeError):
-                pass
+        for name in (env_name, alias_env):
+            if not name:
+                continue
+            env_val = os.environ.get(name)
+            if env_val is not None:
+                try:
+                    return float(env_val)
+                except (ValueError, TypeError):
+                    pass
         return default
+
 
     def _get_str(self, key: str, env_name: str, default: str, config_dict: dict) -> str:
         if key in config_dict:

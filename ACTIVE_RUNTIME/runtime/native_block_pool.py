@@ -368,6 +368,10 @@ class NativeBlockPool:
     def residual_K_values(self, val):
         self._residual_K_values = val
 
+    @residual_K_values.deleter
+    def residual_K_values(self):
+        self._residual_K_values = None
+
     @property
     def residual_V_values(self):
         return self.get_residual_v()
@@ -375,6 +379,11 @@ class NativeBlockPool:
     @residual_V_values.setter
     def residual_V_values(self, val):
         self._residual_V_values = val
+
+    @residual_V_values.deleter
+    def residual_V_values(self):
+        self._residual_V_values = None
+
 
     def get_residual_k(self, indices=None) -> Optional[torch.Tensor]:
         """Unified interface for retrieving K residuals for specified block indices."""
