@@ -679,6 +679,61 @@ def _apply_table_capture(boost_multipliers, tok_strs, tids, counts,
     return n_marked
 
 
+def _apply_rarity_capture(boost_multipliers, tok_strs, tids, counts,
+                          total_tokens, tok_boost):
+    """Rare-word capture (DKV_RESIDUAL_RARITY_CAPTURE, default ON).
+
+    The shape-based passes (core-segment, owner, table) protect tokens with a
+    recognisable structure: digits, ALLCAPS, table rows, entity names.  Rare
+    PROSE WORDS — author names, technical terms, domain abbreviations — carry
+    just as much factual content but have no shape signature, so they must
+    out-error ~250 filler tokens to earn an exact slot under the baseline.
+    That is why multi-fact document synthesis fails while NIAH succeeds: the
+    needles are codes (structured), but document facts are expressed in rare
+    words (unstructured).
+
+    Fix: any token that hasn't already received a shape boost and whose IDF
+    score (log N / (count+0.1)) exceeds DKV_RESIDUAL_RARITY_MIN_IDF (default
+    3.0) gets a sub-unity multiplier of tok_boost × (idf/2) × rarity_weight,
+    where DKV_RESIDUAL_RARITY_WEIGHT defaults to 0.5.  The sub-unity weight
+    ensures a code or table cell always outranks a merely rare word when both
+    compete for the last residual slot — NIAH must not regress to buy synthesis.
+
+    RARITY IS MEANINGLESS WITHOUT FREQUENCIES.  With counts={} EVERY token
+    scores the 6.0 IDF ceiling and a uniform boost carries no ranking
+    information — worse than not running.  Callers that cannot supply counts
+    get the shape-based passes only.
+
+    Returns the number of newly-boosted tokens."""
+    if os.environ.get("DKV_RESIDUAL_RARITY_CAPTURE", "1") != "1":
+        return 0
+    if not counts:          # no frequency information → skip (see docstring)
+        return 0
+    import math
+    try:
+        rarity_w = float(os.environ.get("DKV_RESIDUAL_RARITY_WEIGHT", "0.5"))
+    except ValueError:
+        rarity_w = 0.5
+    try:
+        rarity_min_idf = float(os.environ.get("DKV_RESIDUAL_RARITY_MIN_IDF", "3.0"))
+    except ValueError:
+        rarity_min_idf = 3.0
+    S = len(tok_strs)
+    n_boosted = 0
+    for i in range(S):
+        if boost_multipliers[i] > 1.0:
+            continue                        # already protected by a shape rule
+        sc = tok_strs[i].strip()
+        if not sc or not any(c.isalnum() for c in sc):
+            continue                        # punctuation / whitespace
+        count = counts.get(tids[i], 1)
+        idf = math.log(max(total_tokens, 2) / (count + 0.1))
+        if idf >= rarity_min_idf:
+            boost_multipliers[i] = tok_boost * (idf / 2.0) * rarity_w
+            n_boosted += 1
+    return n_boosted
+
+
 def compress_mlx_block_batched(deltas: mx.array, rank: int, n_oversamples: int = 5, n_iter: int = 2) -> Tuple[mx.array, mx.array, mx.array]:
     """Compress a batch of KV delta vectors using randomised truncated SVD on GPU in parallel.
     
@@ -3504,6 +3559,13 @@ class MLXKVBlockManager:
                             print(f"[DBG_TABLE/content] block {start_blocks + block_idx} "
                                   f"n_tab={n_tab} text={_joined[:180]!r}", flush=True)
 
+                    # Rarity capture: rare prose words not already covered by shape rules
+                    # (digits, ALLCAPS, tables, entity names) get a sub-unity boost so
+                    # rare technical terms and author names compete for exact-residual slots
+                    # (improves multi-fact document synthesis without regressing NIAH).
+                    _apply_rarity_capture(boost_multipliers, tok_strs, tids,
+                                          counts, total_tokens, tok_boost)
+
                     # Apply window boost (Phase 2: contiguous runs)
                     final_boosts = list(boost_multipliers)
                     W = 2
@@ -4008,6 +4070,10 @@ class MLXKVBlockManager:
                                          tok_strs, tids, counts, total_tokens, tok_boost)
                     _apply_table_capture(boost_multipliers, tok_strs, tids,
                                          counts, total_tokens, tok_boost)
+
+                    # Rarity capture: rare prose words not covered by shape rules
+                    _apply_rarity_capture(boost_multipliers, tok_strs, tids,
+                                          counts, total_tokens, tok_boost)
 
                     final_boosts = list(boost_multipliers)
                     W = 2
@@ -4635,6 +4701,10 @@ class MLXKVBlockManager:
                 if _n_tab_stream and os.environ.get("DKV_DBG_TABLE") == "1":
                     print(f"[DBG_TABLE/stream] block {num_blocks}: marked={_n_tab_stream}",
                           flush=True)
+
+                # Rarity capture: rare prose words not covered by shape rules
+                _apply_rarity_capture(boost_multipliers, tok_strs, tids,
+                                      counts, total_tokens, tok_boost)
 
                 # Apply window boost (Phase 2: contiguous runs)
                 final_boosts = list(boost_multipliers)

@@ -1420,6 +1420,67 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                     }
                 }
 
+                // ── Rarity capture (rare prose words) ───────────────────────────────────
+                // The shape-based passes (core-segment, owner, table) protect tokens with a
+                // recognisable structure: digits, ALLCAPS, table rows, entity names.  Rare
+                // PROSE WORDS — author names, technical terms, domain abbreviations — carry
+                // just as much factual content but have no shape signature, so they must
+                // out-error ~250 filler tokens to earn an exact slot under the baseline.
+                //
+                // Fix: any token that hasn't already received a shape boost and whose IDF
+                // score (log(session_len / (count+0.1))) exceeds DKV_RESIDUAL_RARITY_MIN_IDF
+                // (default 3.0) gets boost_multipliers[s] = tok_boost × (idf/2) × rarity_w,
+                // where DKV_RESIDUAL_RARITY_WEIGHT defaults to 0.5. The sub-unity weight
+                // ensures a code or table cell always outranks a merely rare word.
+                //
+                // RARITY IS MEANINGLESS WITHOUT FREQUENCIES. If session_token_ids is null or
+                // token_counts is empty, the IDF denominator defaults to count=1 for every
+                // token, so ALL tokens score the 6.0 ceiling — a uniform boost that carries
+                // no ranking information. Skip the pass entirely in that case.
+                {
+                    static const bool rarity_on = []() {
+                        const char* e = std::getenv("DKV_RESIDUAL_RARITY_CAPTURE");
+                        return !(e && std::string(e) == "0");
+                    }();
+                    static const float rarity_w = []() {
+                        const char* e = std::getenv("DKV_RESIDUAL_RARITY_WEIGHT");
+                        if (e) { try { return std::stof(e); } catch (...) {} }
+                        return 0.5f;
+                    }();
+                    static const float rarity_min_idf = []() {
+                        const char* e = std::getenv("DKV_RESIDUAL_RARITY_MIN_IDF");
+                        if (e) { try { return std::stof(e); } catch (...) {} }
+                        return 3.0f;
+                    }();
+                    // Only run when we have session frequency counts (non-empty token_counts).
+                    if (rarity_on && rarity_w > 0.0f && !token_counts.empty()
+                            && params.session_len > 0) {
+                        for (int s = 0; s < S_deltas; ++s) {
+                            if (boost_multipliers[s] > 1.0f) continue;  // already shape-boosted
+                            const std::string& sc_raw = tok_strs[s];
+                            // Strip whitespace for the alnum check
+                            bool has_alnum = false;
+                            for (char c : sc_raw) {
+                                if (std::isalnum(static_cast<unsigned char>(c))) {
+                                    has_alnum = true;
+                                    break;
+                                }
+                            }
+                            if (!has_alnum) continue;  // punctuation / whitespace
+                            int32_t tid = params.token_ids[s + 1];
+                            int count = 1;
+                            auto it = token_counts.find(tid);
+                            if (it != token_counts.end()) count = it->second;
+                            float idf = std::log(
+                                static_cast<float>(std::max(params.session_len, 2)) /
+                                (static_cast<float>(count) + 0.1f));
+                            if (idf >= rarity_min_idf) {
+                                boost_multipliers[s] = tok_boost * (idf / 2.0f) * rarity_w;
+                            }
+                        }
+                    }
+                }
+
                 // Apply window boost (Phase 2: contiguous runs)
                 std::vector<float> final_boosts = boost_multipliers;
                 const int W = 2;
