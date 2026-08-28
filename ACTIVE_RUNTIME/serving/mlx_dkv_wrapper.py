@@ -5660,37 +5660,55 @@ def _resolve_attn_dims(attn):
     n_kv_heads = (
         getattr(attn, "n_kv_heads", None)
         or getattr(attn, "num_key_value_heads", None)
+        or getattr(attn, "num_kv_heads", None)
         or n_heads
     )
     head_dim = getattr(attn, "head_dim", None)
     if head_dim is None:
-        head_dim = attn.q_proj.weight.shape[0] // n_heads
+        if hasattr(attn, "q_proj") and hasattr(attn.q_proj, "weight") and n_heads is not None and n_heads > 0:
+            head_dim = attn.q_proj.weight.shape[0] // n_heads
     return n_heads, n_kv_heads, head_dim
 
 
 def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Optional[Any] = None) -> mx.array:
-    """Patched Qwen2 attention that:
-    - During PREFILL: uses the native MLX KV cache (via `cache`) so that
-      every chunk attends correctly over all preceding tokens.
-      Also captures the K/V into DKV dense store for later decode use.
-    - During DECODE (L==1): bypasses native cache entirely and uses our
-      DKV compressed+dense attention.
+    """Patched attention for DKV that:
+    - For SLIDING WINDOW layers (e.g. Gemma 4 sliding layers with head_dim=256):
+      delegates immediately to original native MLX attention with bounded cache.
+    - For GLOBAL FULL-ATTENTION layers (e.g. Gemma 4 global layers with head_dim=512):
+      - During PREFILL: uses native MLX KV cache for causal attention and captures
+        K/V into DKV dense store (skipping capture for cross-layer shared layers).
+      - During DECODE (L==1): uses DKV compressed+dense attention (reusing target
+        layer's KV pool state and skipping streaming ingest for shared layers).
     """
-    if not hasattr(self, "kv_manager"):
-        return self.original_call(x, mask, cache)
+    if (
+        getattr(self, "is_sliding", False)
+        or getattr(self, "layer_type", "") == "sliding_attention"
+        or not hasattr(self, "kv_manager")
+    ):
+        if hasattr(self, "original_call"):
+            return self.original_call(x, mask=mask, cache=cache)
+        elif hasattr(self.__class__, "original_call"):
+            return self.__class__.original_call(self, x, mask=mask, cache=cache)
+        raise RuntimeError(f"Layer {getattr(self, 'layer_idx', '?')} has no original_call to fallback to.")
 
     B, L, D = x.shape
     manager = self.kv_manager
-    layer_idx = self.layer_idx
+    layer_idx = getattr(self, "layer_idx", 0)
+    kv_layer_idx = getattr(self, "kv_layer_idx", layer_idx)
+    is_kv_shared = getattr(self, "is_kv_shared_layer", False)
 
     session_ids = manager.active_session_ids
     position_ids = manager.position_ids
 
     n_heads, n_kv_heads, head_dim = self.n_heads, self.n_kv_heads, self.head_dim
 
-    q_out   = self.q_proj(x)
-    keys    = self.k_proj(x)
-    values  = self.v_proj(x)
+    q_out = self.q_proj(x)
+    if is_kv_shared:
+        keys = None
+        values = None
+    else:
+        keys = self.k_proj(x)
+        values = self.v_proj(x)
 
     # Gated-attention variants (Qwen3-Next/Qwen3.5-style) pack [query | gate]
     # per head into q_proj's output (2x width); split and apply sigmoid(gate)
@@ -5703,59 +5721,48 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
         attn_gate = attn_gate.reshape(B, L, -1)
     else:
         queries = q_out.reshape(B, L, n_heads, head_dim)
-    keys = keys.reshape(B, L, n_kv_heads, head_dim)
 
-    # QK-norm (RMSNorm on queries/keys before rotation) — used by Qwen3-family
-    # attention but not Qwen2/Llama/Mistral; apply only when the module has it.
+    # QK-norm (RMSNorm on queries/keys before rotation) — applied when present
     q_norm = getattr(self, "q_norm", None)
     k_norm = getattr(self, "k_norm", None)
     if q_norm is not None:
         queries = q_norm(queries)
-    if k_norm is not None:
-        keys = k_norm(keys)
-
     queries = queries.transpose(0, 2, 1, 3)
-    keys    = keys.transpose(0, 2, 1, 3)
-    values  = values.reshape(B, L, n_kv_heads, head_dim).transpose(0, 2, 1, 3)
+
+    if not is_kv_shared and keys is not None and values is not None:
+        keys = keys.reshape(B, L, n_kv_heads, head_dim)
+        if k_norm is not None:
+            keys = k_norm(keys)
+        keys = keys.transpose(0, 2, 1, 3)
+        values = values.reshape(B, L, n_kv_heads, head_dim).transpose(0, 2, 1, 3)
 
     if B == 1:
-        # Fast path: plain int offset (no per-layer mx.array creation) and no
-        # single-element concatenate — decode calls this 28×/token.
+        # Fast path: plain int offset (no per-layer mx.array creation)
         offset0 = int(position_ids[0, 0]) if position_ids is not None else 0
         queries_rot = self.rope(queries, offset=offset0)    # [1, H_q, L, D]
-        keys_rot    = self.rope(keys,    offset=offset0)    # [1, H_kv, L, D]
+        if not is_kv_shared and keys is not None:
+            keys_rot = self.rope(keys, offset=offset0)       # [1, H_kv, L, D]
+        else:
+            keys_rot = None
     else:
         queries_rot_list = []
         keys_rot_list    = []
         for b_idx in range(B):
             offset = int(position_ids[b_idx, 0]) if position_ids is not None else 0
             queries_rot_list.append(self.rope(queries[b_idx:b_idx+1], offset=offset))
-            keys_rot_list.append(  self.rope(keys[   b_idx:b_idx+1], offset=offset))
+            if not is_kv_shared and keys is not None:
+                keys_rot_list.append(self.rope(keys[b_idx:b_idx+1], offset=offset))
 
         queries_rot = mx.concatenate(queries_rot_list, axis=0)  # [B, H_q, L, D]
-        keys_rot    = mx.concatenate(keys_rot_list,    axis=0)  # [B, H_kv, L, D]
+        if not is_kv_shared and keys_rot_list:
+            keys_rot = mx.concatenate(keys_rot_list, axis=0)    # [B, H_kv, L, D]
+        else:
+            keys_rot = None
 
     is_decode = (L == 1)
 
     if is_decode:
         # ── DECODE PATH ──
-        # Two modes (selected by the DKV_COMPRESSED_DECODE env flag):
-        #   "1" → the attention output is produced by the DKV fused
-        #         compressed+dense kernel (manager.execute_decode_attention →
-        #         compute_decode_attention_static). The query is scored against
-        #         every compressed block in low-rank space (never decompressing
-        #         KV) plus the dense recency window, then LSE-combined. This is
-        #         the real DKV sparse decode path.
-        #   else → exact full-KV MLX attention over the native cache (the prior
-        #         numerically-exact baseline). out_b is computed AFTER the ingest
-        #         loop in both modes; the compressed path requires the current
-        #         token to be ingested first so the query attends to history+self.
-        # Route decode through the real DKV compressed+dense sparse attention
-        # or exact full-KV MLX attention. The decision is resolved ONCE at the
-        # prefill→decode boundary (MLXQwenModel.__call__) and stored per cache_key
-        # so that this attention path and the cache-retention decision agree.
-        # Fallback (direct attention use without the patched model): resolve from
-        # the current sequence length.
         cache_key = tuple(session_ids)
         pm = getattr(manager, "patched_model", None)
         _decode_map = getattr(pm, "_decode_compressed", None) if pm is not None else None
@@ -5765,307 +5772,258 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
             _seq_len = int(position_ids[0, 0]) if position_ids is not None else 0
             _use_compressed_decode = _resolve_compressed_decode(_seq_len)
 
-        # Ingest the current token into the DKV store (architecture intact, and
-        # required first for the compressed path so it can attend to itself).
-        for b_idx in range(B):
-            sid = session_ids[b_idx]
-            if sid != "dummy_session":
-                manager.ingest_streaming(
-                    sid, layer_idx,
-                    keys_rot[b_idx:b_idx+1],
-                    values[ b_idx:b_idx+1],
-                    k_unrot=(None if manager.rotated_pool else keys[b_idx:b_idx+1])
-                )
+        # Ingest current token into DKV store (non-shared layers only; shared layers reuse target state)
+        if not is_kv_shared and keys_rot is not None and values is not None:
+            for b_idx in range(B):
+                sid = session_ids[b_idx]
+                if sid != "dummy_session":
+                    manager.ingest_streaming(
+                        sid, kv_layer_idx,
+                        keys_rot[b_idx:b_idx+1],
+                        values[b_idx:b_idx+1],
+                        k_unrot=(None if manager.rotated_pool else keys[b_idx:b_idx+1])
+                    )
 
-                # ── Factual store query (MLX decode path, layer 0 only) ──────
-                # MLX attention bypasses dkv_attention.py so the factual store
-                # is never queried there. Use unrotated K at layer 0 as proxy Q
-                # (same approach as C++ main.cpp). Results populate the factual
-                # state fields read by the serving loop on the NEXT decode step.
-                if layer_idx == 0:
-                    try:
-                        pool = getattr(manager, 'native_pool', None)
-                        factual_store = getattr(manager, "_factual_stores", {}).get(sid)
-                        srl_state = manager.get_srl_state(sid)
-                        if (factual_store is not None and pool is not None
-                                and pool.W_proj is not None and srl_state is not None
-                                and factual_store.entries):
-                            import numpy as _np
-                            import torch as _torch
-                            # keys: [B, H_kv, L=1, D] — extract [H_kv, D] for this batch element
-                            k_np = _np.array(keys[b_idx, :, 0, :])
-                            k_torch = _torch.from_numpy(k_np).float()
+                    # ── Factual store query (MLX decode path, first attended DKV layer only) ──
+                    _first_attended = (
+                        manager._attended_layers[0]
+                        if getattr(manager, "_attended_layers", None)
+                        else 0
+                    )
+                    if kv_layer_idx == _first_attended:
+                        try:
+                            pool = getattr(manager, 'native_pool', None)
+                            factual_store = getattr(manager, "_factual_stores", {}).get(sid)
+                            srl_state = manager.get_srl_state(sid)
+                            if (factual_store is not None and pool is not None
+                                    and pool.W_proj is not None and srl_state is not None
+                                    and factual_store.entries):
+                                import numpy as _np
+                                import torch as _torch
+                                k_np = _np.array(keys[b_idx, :, 0, :])
+                                k_torch = _torch.from_numpy(k_np).float()
 
-                            matching_entries = []
-                            srl_state.current_step_factual_tokens = set()
-                            srl_state.current_step_factual_sequences = []
-                            srl_state.current_step_max_similarity = 0.0
-                            srl_state.current_step_sequence_entity_ids = []
-                            srl_state.current_step_sequence_is_prime = []
-                            srl_state.current_step_sequence_prefixes = []
-
-                            if srl_state.factual_anchor_q is None:
-                                srl_state.factual_anchor_q = k_torch.detach().clone()
-                                
-                                # ── Early Entity Binding ─────────────────────────────────────────
-                                try:
-                                    query_toks = set(getattr(srl_state, "current_query_tokens", []))
-                                    inv_index = getattr(srl_state, "inverted_index", None)
-                                    if query_toks and factual_store is not None and inv_index is not None:
-                                        important_query_toks = query_toks & inv_index.important_vocab
-                                        prime_matches = []
-                                        for fe in factual_store.entries:
-                                            if getattr(fe, "is_prime", False):
-                                                fe_important = set(fe.tokens) & inv_index.important_vocab
-                                                overlap = len(important_query_toks & fe_important)
-                                                if overlap >= 1:
-                                                    prime_matches.append((fe.start_idx, overlap))
-                                        if len(prime_matches) == 1:
-                                            srl_state.current_entity_id = prime_matches[0][0]
-                                            srl_state.dual_entity_mode = False
-                                        elif len(prime_matches) >= 2:
-                                            prime_matches.sort(key=lambda x: x[1], reverse=True)
-                                            srl_state.dual_entity_mode = True
-                                            srl_state.dual_entity_ids = [
-                                                prime_matches[0][0],
-                                                prime_matches[1][0],
-                                            ]
-                                            srl_state.comparison_entities = list(srl_state.dual_entity_ids)
-                                            srl_state.comparison_active_idx = 0
-                                            srl_state.comparison_covered = set()
-                                            srl_state.current_entity_id = srl_state.comparison_entities[0]
-                                except Exception:
-                                    pass
-
-                            q_for_factual = 0.20 * k_torch + 0.80 * srl_state.factual_anchor_q.to(k_torch.device)
-
-                            _qbias = None
-                            if getattr(srl_state, "dual_entity_mode", False) and getattr(srl_state, "dual_entity_ids", None):
-                                _qbias = set(srl_state.dual_entity_ids)
-                            elif getattr(srl_state, "current_entity_id", -1) != -1:
-                                _qbias = {srl_state.current_entity_id}
-
-                            # ── Positional query→value linking (MLX) ───────────────
-                            # The descriptor match surfaces repeated FILLER on real
-                            # docs (proven: it biased "and confirm that…" not the
-                            # answer). Instead, bind the query's DISTINCTIVE (high-IDF)
-                            # tokens to WHERE they occur in the document, and surface
-                            # the fact spans co-located with them — i.e. connect the
-                            # queried entity to its own value span, not filler. Only
-                            # falls back to descriptor matching when no such anchor
-                            # exists. This is what makes the store help, not derail.
-                            matching_entries = None
-                            try:
-                                _inv = getattr(srl_state, "inverted_index", None)
-                                _qtoks = getattr(srl_state, "current_query_tokens", [])
-                                if (_inv is not None and _qtoks
-                                        and getattr(_inv, "occurrences", None)
-                                        and getattr(_inv, "idf", None)):
-                                    _IDF_MIN = float(os.environ.get("DKV_FACTUAL_IDF_MIN", "3.0"))
-                                    _WIN = int(os.environ.get("DKV_FACTUAL_WINDOW", "40"))
-                                    # Max TOTAL occurrences for an anchor token. Block-IDF
-                                    # alone is fooled when a whole table sits in one block
-                                    # (shared words like "module"/"key" get high block-IDF
-                                    # despite repeating); also require the token to be
-                                    # genuinely rare document-wide so only distinctive
-                                    # names (occur ~1-2×) anchor, not repeated schema words.
-                                    _MAX_OCC = int(os.environ.get("DKV_FACTUAL_MAX_OCC", "4"))
-                                    _anchors = []
-                                    for _qt in set(_qtoks):
-                                        _occ = _inv.occurrences.get(_qt)
-                                        # Distinctiveness = RARE (few total occurrences).
-                                        # Block-IDF alone is fragile: on a short doc a
-                                        # name split across the registry + question block
-                                        # dips below IDF_MIN even though it occurs ~twice.
-                                        # So very-rare tokens (≤2 occ) anchor regardless of
-                                        # block-IDF; MAX_OCC stays the primary gate.
-                                        if _occ and len(_occ) <= _MAX_OCC and (
-                                                len(_occ) <= 2 or _inv.idf.get(_qt, 0.0) >= _IDF_MIN):
-                                            _anchors.extend(p for (_s, p, _r) in _occ)
-                                    if _anchors:
-                                        # For each anchor take the SINGLE NEAREST fact
-                                        # span (min distance to the span, 0 if inside),
-                                        # not every span in the window — otherwise a
-                                        # dense table (facts <window apart) surfaces all
-                                        # of them and the bias can't discriminate.
-                                        # Skip spans that are mostly QUERY tokens — those
-                                        # are the question/instruction text at the tail
-                                        # (the query's distinctive token also occurs there,
-                                        # so its anchor would otherwise pull them in as
-                                        # noise instead of the actual fact span).
-                                        _qset = set(_qtoks)
-                                        _pos_map = {}
-                                        _primary_i, _primary_d = -1, _WIN + 1
-                                        for _p in _anchors:
-                                            _best_i, _best_d = -1, _WIN + 1
-                                            for _i, _e in enumerate(factual_store.entries):
-                                                _s0 = getattr(_e, "start_idx", -1)
-                                                _e0 = getattr(_e, "end_idx", _s0)
-                                                if _s0 < 0:
-                                                    continue
-                                                _et = getattr(_e, "tokens", None)
-                                                if _et and (len(set(_et) & _qset) / len(_et)) > 0.5:
-                                                    continue
-                                                _d = 0 if (_s0 <= _p <= _e0) else min(abs(_s0 - _p), abs(_e0 - _p))
-                                                if _d < _best_d:
-                                                    _best_d, _best_i = _d, _i
-                                            if _best_i >= 0 and _best_d <= _WIN:
-                                                _pos_map[_best_i] = factual_store.entries[_best_i]
-                                                if _best_d < _primary_d:
-                                                    _primary_d, _primary_i = _best_d, _best_i
-                                        if _pos_map:
-                                            for _e in _pos_map.values():
-                                                _e.current_sim = 1.0
-                                            matching_entries = list(_pos_map.values())
-                                            # Align entity binding with the positional
-                                            # result: the NEAREST co-located fact defines
-                                            # the queried entity. Overrides the raw-overlap
-                                            # early-binding, which goes dual/entity-0 on
-                                            # repetitive prompts and locks the wrong entity.
-                                            if _primary_i >= 0:
-                                                _peid = getattr(factual_store.entries[_primary_i], "entity_id", -1)
-                                                if _peid != -1:
-                                                    srl_state.current_entity_id = _peid
-                                                    srl_state.dual_entity_mode = False
-                                                    srl_state.dual_entity_ids = []
-                            except Exception:
-                                matching_entries = None
-
-                            # When positional linking pinned the queried entity's own
-                            # fact span(s), inject ONLY those — skip neighbor/triple
-                            # expansion, which on a dense table pulls in ADJACENT rows'
-                            # keys and re-muddies the bias.
-                            _positional_used = matching_entries is not None
-
-                            if matching_entries is None:
-                                matching_entries = factual_store.query(
-                                    Q=q_for_factual,
-                                    W_proj=pool.W_proj,
-                                    threshold=0.3,
-                                    active_slots=None,
-                                    query_entity_bias=_qbias,
-                                )
-
-                            if matching_entries:
-                                for entry in matching_entries:
-                                    srl_state.current_step_factual_tokens.update(entry.tokens)
-                                    if entry.tokens not in srl_state.current_step_factual_sequences:
-                                        srl_state.current_step_factual_sequences.append(entry.tokens)
-                                    
-                                    # RC1 — inject triple sequences from prime entries.
-                                    if getattr(entry, "is_prime", False) and not _positional_used:
-                                        for triple_seq in getattr(entry, "triple_sequences", []):
-                                            if triple_seq and triple_seq not in srl_state.current_step_factual_sequences:
-                                                srl_state.current_step_factual_sequences.append(triple_seq)
-                                                srl_state.current_step_factual_tokens.update(triple_seq)
-
-                                    # ── 1-hop neighbor injection ────────────────────────────
-                                    for nb_idx, nb_weight in (zip(entry.neighbors, entry.weights) if not _positional_used else []):
-                                        if nb_weight >= 0.35 and nb_idx < len(factual_store.entries):
-                                            nb_e = factual_store.entries[nb_idx]
-                                            if nb_e.tokens and nb_e.tokens not in srl_state.current_step_factual_sequences:
-                                                srl_state.current_step_factual_tokens.update(nb_e.tokens)
-                                                srl_state.current_step_factual_sequences.append(nb_e.tokens)
-                                            if getattr(nb_e, "is_prime", False):
-                                                for triple_seq in getattr(nb_e, "triple_sequences", []):
-                                                    if triple_seq and triple_seq not in srl_state.current_step_factual_sequences:
-                                                        srl_state.current_step_factual_sequences.append(triple_seq)
-                                                        srl_state.current_step_factual_tokens.update(triple_seq)
-                                            
-                                            # ── 2-hop neighbor injection ────────────────
-                                            for nb2_idx, nb2_weight in zip(nb_e.neighbors, nb_e.weights):
-                                                if nb2_weight >= 0.50 and nb2_idx < len(factual_store.entries):
-                                                    nb2_e = factual_store.entries[nb2_idx]
-                                                    if nb2_e.tokens and nb2_e.tokens not in srl_state.current_step_factual_sequences:
-                                                        srl_state.current_step_factual_tokens.update(nb2_e.tokens)
-                                                        srl_state.current_step_factual_sequences.append(nb2_e.tokens)
-
-                                # Coherence Cap sorting & truncation (Solution 6)
-                                session_config = getattr(manager, "session_configs", {}).get(sid, {})
-                                base_coherence = session_config.get("coherence_cap", 8)
-                                num_active = 1
-                                if getattr(srl_state, "dual_entity_mode", False):
-                                    num_active = 2
-                                coherence_cap = base_coherence + 4 * num_active
-
-                                seq_id_to_score = {}
-                                for fe_e in matching_entries:
-                                    f_sim = getattr(fe_e, "current_sim", 0.0)
-                                    if f_sim > 0:
-                                        seq_id_to_score[tuple(fe_e.tokens)] = f_sim
-                                        # 1-hop neighbors inherit score
-                                        for nb_idx, nb_w in zip(fe_e.neighbors, fe_e.weights):
-                                            if nb_w >= 0.35 and nb_idx < len(factual_store.entries):
-                                                nb_toks = tuple(factual_store.entries[nb_idx].tokens)
-                                                if nb_toks not in seq_id_to_score:
-                                                    seq_id_to_score[nb_toks] = f_sim * nb_w
-                                        # Triple sequences inherit prime's score
-                                        if getattr(fe_e, "is_prime", False):
-                                            for ts in getattr(fe_e, "triple_sequences", []):
-                                                seq_id_to_score[tuple(ts)] = f_sim
-
-                                srl_state.current_step_factual_sequences.sort(
-                                    key=lambda s: seq_id_to_score.get(tuple(s), 0.0), reverse=True
-                                )
-                                srl_state.current_step_factual_sequences = srl_state.current_step_factual_sequences[:coherence_cap]
+                                matching_entries = []
                                 srl_state.current_step_factual_tokens = set()
-                                for s in srl_state.current_step_factual_sequences:
-                                    srl_state.current_step_factual_tokens.update(s)
+                                srl_state.current_step_factual_sequences = []
+                                srl_state.current_step_max_similarity = 0.0
+                                srl_state.current_step_sequence_entity_ids = []
+                                srl_state.current_step_sequence_is_prime = []
+                                srl_state.current_step_sequence_prefixes = []
 
-                                # ── Entity-Subgraph Tagging ───────────────────────────────────
-                                entry_meta = {}
-                                for fe in factual_store.entries:
-                                    tup = tuple(fe.tokens)
-                                    entry_meta[tup] = (
-                                        getattr(fe, "entity_id", -1),
-                                        getattr(fe, "is_prime", False),
-                                        getattr(fe, "prefix_tokens", []),
-                                    )
-                                triple_to_entity = {}
-                                for fe in factual_store.entries:
-                                    if getattr(fe, "is_prime", False):
-                                        p_entity = getattr(fe, "entity_id", -1)
-                                        for ts in getattr(fe, "triple_sequences", []):
-                                            triple_to_entity[tuple(ts)] = p_entity
+                                if srl_state.factual_anchor_q is None:
+                                    srl_state.factual_anchor_q = k_torch.detach().clone()
+                                    
+                                    try:
+                                        query_toks = set(getattr(srl_state, "current_query_tokens", []))
+                                        inv_index = getattr(srl_state, "inverted_index", None)
+                                        if query_toks and factual_store is not None and inv_index is not None:
+                                            important_query_toks = query_toks & inv_index.important_vocab
+                                            prime_matches = []
+                                            for fe in factual_store.entries:
+                                                if getattr(fe, "is_prime", False):
+                                                    fe_important = set(fe.tokens) & inv_index.important_vocab
+                                                    overlap = len(important_query_toks & fe_important)
+                                                    if overlap >= 1:
+                                                        prime_matches.append((fe.start_idx, overlap))
+                                            if len(prime_matches) == 1:
+                                                srl_state.current_entity_id = prime_matches[0][0]
+                                                srl_state.dual_entity_mode = False
+                                            elif len(prime_matches) >= 2:
+                                                prime_matches.sort(key=lambda x: x[1], reverse=True)
+                                                srl_state.dual_entity_mode = True
+                                                srl_state.dual_entity_ids = [
+                                                    prime_matches[0][0],
+                                                    prime_matches[1][0],
+                                                ]
+                                                srl_state.comparison_entities = list(srl_state.dual_entity_ids)
+                                                srl_state.comparison_active_idx = 0
+                                                srl_state.comparison_covered = set()
+                                                srl_state.current_entity_id = srl_state.comparison_entities[0]
+                                    except Exception:
+                                        pass
 
-                                entity_ids = []
-                                is_prime_flags = []
-                                seq_prefixes = []
-                                for seq in srl_state.current_step_factual_sequences:
-                                    tup = tuple(seq)
-                                    if tup in entry_meta:
-                                        eid, isp, pref = entry_meta[tup]
-                                    elif tup in triple_to_entity:
-                                        eid, isp, pref = triple_to_entity[tup], False, []
-                                    else:
-                                        eid, isp, pref = -1, False, []
-                                    entity_ids.append(eid)
-                                    is_prime_flags.append(isp)
-                                    seq_prefixes.append(list(pref))
-                                srl_state.current_step_sequence_entity_ids = entity_ids
-                                srl_state.current_step_sequence_is_prime = is_prime_flags
-                                srl_state.current_step_sequence_prefixes = seq_prefixes
+                                q_for_factual = 0.20 * k_torch + 0.80 * srl_state.factual_anchor_q.to(k_torch.device)
 
-                                sims = [getattr(e, "current_sim", 0.0) for e in matching_entries]
-                                if sims:
-                                    srl_state.current_step_max_similarity = max(sims)
+                                _qbias = None
+                                if getattr(srl_state, "dual_entity_mode", False) and getattr(srl_state, "dual_entity_ids", None):
+                                    _qbias = set(srl_state.dual_entity_ids)
+                                elif getattr(srl_state, "current_entity_id", -1) != -1:
+                                    _qbias = {srl_state.current_entity_id}
 
-                            if os.environ.get("DKV_FACTUAL_DBG") == "1":
+                                matching_entries = None
                                 try:
-                                    _tk = getattr(manager, "tokenizer", None)
-                                    _seqs = srl_state.current_step_factual_sequences[:6]
-                                    _dec = [(_tk.decode(s) if _tk else s) for s in _seqs]
-                                    print(f"[FDBG] eid={getattr(srl_state,'current_entity_id',-1)} "
-                                          f"dual={getattr(srl_state,'dual_entity_mode',False)} "
-                                          f"maxsim={getattr(srl_state,'current_step_max_similarity',0):.2f} "
-                                          f"nseq={len(srl_state.current_step_factual_sequences)} seqs={_dec}", flush=True)
+                                    _inv = getattr(srl_state, "inverted_index", None)
+                                    _qtoks = getattr(srl_state, "current_query_tokens", [])
+                                    if (_inv is not None and _qtoks
+                                            and getattr(_inv, "occurrences", None)
+                                            and getattr(_inv, "idf", None)):
+                                        _IDF_MIN = float(os.environ.get("DKV_FACTUAL_IDF_MIN", "3.0"))
+                                        _WIN = int(os.environ.get("DKV_FACTUAL_WINDOW", "40"))
+                                        _MAX_OCC = int(os.environ.get("DKV_FACTUAL_MAX_OCC", "4"))
+                                        _anchors = []
+                                        for _qt in set(_qtoks):
+                                            _occ = _inv.occurrences.get(_qt)
+                                            if _occ and len(_occ) <= _MAX_OCC and (
+                                                    len(_occ) <= 2 or _inv.idf.get(_qt, 0.0) >= _IDF_MIN):
+                                                _anchors.extend(p for (_s, p, _r) in _occ)
+                                        if _anchors:
+                                            _qset = set(_qtoks)
+                                            _pos_map = {}
+                                            _primary_i, _primary_d = -1, _WIN + 1
+                                            for _p in _anchors:
+                                                _best_i, _best_d = -1, _WIN + 1
+                                                for _i, _e in enumerate(factual_store.entries):
+                                                    _s0 = getattr(_e, "start_idx", -1)
+                                                    _e0 = getattr(_e, "end_idx", _s0)
+                                                    if _s0 < 0:
+                                                        continue
+                                                    _et = getattr(_e, "tokens", None)
+                                                    if _et and (len(set(_et) & _qset) / len(_et)) > 0.5:
+                                                        continue
+                                                    _d = 0 if (_s0 <= _p <= _e0) else min(abs(_s0 - _p), abs(_e0 - _p))
+                                                    if _d < _best_d:
+                                                        _best_d, _best_i = _d, _i
+                                                if _best_i >= 0 and _best_d <= _WIN:
+                                                    _pos_map[_best_i] = factual_store.entries[_best_i]
+                                                    if _best_d < _primary_d:
+                                                        _primary_d, _primary_i = _best_d, _best_i
+                                            if _pos_map:
+                                                for _e in _pos_map.values():
+                                                    _e.current_sim = 1.0
+                                                matching_entries = list(_pos_map.values())
+                                                if _primary_i >= 0:
+                                                    _peid = getattr(factual_store.entries[_primary_i], "entity_id", -1)
+                                                    if _peid != -1:
+                                                        srl_state.current_entity_id = _peid
+                                                        srl_state.dual_entity_mode = False
+                                                        srl_state.dual_entity_ids = []
                                 except Exception:
-                                    pass
-                    except Exception as e:
-                        import traceback
-                        traceback.print_exc()
-                        print(f"[DKV MLX Exception] SRL update failed: {e}")
-                # ────────────────────────────────────────────────────────────
+                                    matching_entries = None
+
+                                _positional_used = matching_entries is not None
+
+                                if matching_entries is None:
+                                    matching_entries = factual_store.query(
+                                        Q=q_for_factual,
+                                        W_proj=pool.W_proj,
+                                        threshold=0.3,
+                                        active_slots=None,
+                                        query_entity_bias=_qbias,
+                                    )
+
+                                if matching_entries:
+                                    for entry in matching_entries:
+                                        srl_state.current_step_factual_tokens.update(entry.tokens)
+                                        if entry.tokens not in srl_state.current_step_factual_sequences:
+                                            srl_state.current_step_factual_sequences.append(entry.tokens)
+                                        
+                                        if getattr(entry, "is_prime", False) and not _positional_used:
+                                            for triple_seq in getattr(entry, "triple_sequences", []):
+                                                if triple_seq and triple_seq not in srl_state.current_step_factual_sequences:
+                                                    srl_state.current_step_factual_sequences.append(triple_seq)
+                                                    srl_state.current_step_factual_tokens.update(triple_seq)
+
+                                        for nb_idx, nb_weight in (zip(entry.neighbors, entry.weights) if not _positional_used else []):
+                                            if nb_weight >= 0.35 and nb_idx < len(factual_store.entries):
+                                                nb_e = factual_store.entries[nb_idx]
+                                                if nb_e.tokens and nb_e.tokens not in srl_state.current_step_factual_sequences:
+                                                    srl_state.current_step_factual_tokens.update(nb_e.tokens)
+                                                    srl_state.current_step_factual_sequences.append(nb_e.tokens)
+                                                if getattr(nb_e, "is_prime", False):
+                                                    for triple_seq in getattr(nb_e, "triple_sequences", []):
+                                                        if triple_seq and triple_seq not in srl_state.current_step_factual_sequences:
+                                                            srl_state.current_step_factual_sequences.append(triple_seq)
+                                                            srl_state.current_step_factual_tokens.update(triple_seq)
+                                                
+                                                for nb2_idx, nb2_weight in zip(nb_e.neighbors, nb_e.weights):
+                                                    if nb2_weight >= 0.50 and nb2_idx < len(factual_store.entries):
+                                                        nb2_e = factual_store.entries[nb2_idx]
+                                                        if nb2_e.tokens and nb2_e.tokens not in srl_state.current_step_factual_sequences:
+                                                            srl_state.current_step_factual_tokens.update(nb2_e.tokens)
+                                                            srl_state.current_step_factual_sequences.append(nb2_e.tokens)
+
+                                    session_config = getattr(manager, "session_configs", {}).get(sid, {})
+                                    base_coherence = session_config.get("coherence_cap", 8)
+                                    num_active = 1
+                                    if getattr(srl_state, "dual_entity_mode", False):
+                                        num_active = 2
+                                    coherence_cap = base_coherence + 4 * num_active
+
+                                    seq_id_to_score = {}
+                                    for fe_e in matching_entries:
+                                        f_sim = getattr(fe_e, "current_sim", 0.0)
+                                        if f_sim > 0:
+                                            seq_id_to_score[tuple(fe_e.tokens)] = f_sim
+                                            for nb_idx, nb_w in zip(fe_e.neighbors, fe_e.weights):
+                                                if nb_w >= 0.35 and nb_idx < len(factual_store.entries):
+                                                    nb_toks = tuple(factual_store.entries[nb_idx].tokens)
+                                                    if nb_toks not in seq_id_to_score:
+                                                        seq_id_to_score[nb_toks] = f_sim * nb_w
+                                            if getattr(fe_e, "is_prime", False):
+                                                for ts in getattr(fe_e, "triple_sequences", []):
+                                                    seq_id_to_score[tuple(ts)] = f_sim
+
+                                    srl_state.current_step_factual_sequences.sort(
+                                        key=lambda s: seq_id_to_score.get(tuple(s), 0.0), reverse=True
+                                    )
+                                    srl_state.current_step_factual_sequences = srl_state.current_step_factual_sequences[:coherence_cap]
+                                    srl_state.current_step_factual_tokens = set()
+                                    for s in srl_state.current_step_factual_sequences:
+                                        srl_state.current_step_factual_tokens.update(s)
+
+                                    entry_meta = {}
+                                    for fe in factual_store.entries:
+                                        tup = tuple(fe.tokens)
+                                        entry_meta[tup] = (
+                                            getattr(fe, "entity_id", -1),
+                                            getattr(fe, "is_prime", False),
+                                            getattr(fe, "prefix_tokens", []),
+                                        )
+                                    triple_to_entity = {}
+                                    for fe in factual_store.entries:
+                                        if getattr(fe, "is_prime", False):
+                                            p_entity = getattr(fe, "entity_id", -1)
+                                            for ts in getattr(fe, "triple_sequences", []):
+                                                triple_to_entity[tuple(ts)] = p_entity
+
+                                    entity_ids = []
+                                    is_prime_flags = []
+                                    seq_prefixes = []
+                                    for seq in srl_state.current_step_factual_sequences:
+                                        tup = tuple(seq)
+                                        if tup in entry_meta:
+                                            eid, isp, pref = entry_meta[tup]
+                                        elif tup in triple_to_entity:
+                                            eid, isp, pref = triple_to_entity[tup], False, []
+                                        else:
+                                            eid, isp, pref = -1, False, []
+                                        entity_ids.append(eid)
+                                        is_prime_flags.append(isp)
+                                        seq_prefixes.append(list(pref))
+                                    srl_state.current_step_sequence_entity_ids = entity_ids
+                                    srl_state.current_step_sequence_is_prime = is_prime_flags
+                                    srl_state.current_step_sequence_prefixes = seq_prefixes
+
+                                    sims = [getattr(e, "current_sim", 0.0) for e in matching_entries]
+                                    if sims:
+                                        srl_state.current_step_max_similarity = max(sims)
+
+                                if os.environ.get("DKV_FACTUAL_DBG") == "1":
+                                    try:
+                                        _tk = getattr(manager, "tokenizer", None)
+                                        _seqs = srl_state.current_step_factual_sequences[:6]
+                                        _dec = [(_tk.decode(s) if _tk else s) for s in _seqs]
+                                        print(f"[FDBG] eid={getattr(srl_state,'current_entity_id',-1)} "
+                                              f"dual={getattr(srl_state,'dual_entity_mode',False)} "
+                                              f"maxsim={getattr(srl_state,'current_step_max_similarity',0):.2f} "
+                                              f"nseq={len(srl_state.current_step_factual_sequences)} seqs={_dec}", flush=True)
+                                    except Exception:
+                                        pass
+                        except Exception as e:
+                            import traceback
+                            traceback.print_exc()
+                            print(f"[DKV MLX Exception] SRL update failed: {e}")
 
         # ── Compute the attention output AFTER the ingest loop ──
         if _use_compressed_decode:
@@ -6073,10 +6031,12 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
             for b_idx in range(B):
                 sid = session_ids[b_idx]
                 if sid == "dummy_session":
-                    # No DKV state for this element — fall back to exact attention.
                     if cache is not None:
-                        ak, av = _cache_fetch(
-                            cache, keys_rot[b_idx:b_idx + 1], values[b_idx:b_idx + 1])
+                        if is_kv_shared and (keys_rot is None or values is None):
+                            ak, av = getattr(cache, "keys", None), getattr(cache, "values", None)
+                        else:
+                            ak, av = _cache_fetch(
+                                cache, keys_rot[b_idx:b_idx + 1], values[b_idx:b_idx + 1])
                     else:
                         ak, av = keys_rot[b_idx:b_idx + 1], values[b_idx:b_idx + 1]
                     outs.append(mx.fast.scaled_dot_product_attention(
@@ -6084,16 +6044,39 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                         scale=self.scale, mask=mask))
                 else:
                     outs.append(manager.execute_decode_attention(
-                        sid, layer_idx, queries_rot[b_idx:b_idx + 1],
+                        sid, kv_layer_idx, queries_rot[b_idx:b_idx + 1],
                         self.rope, self.scale, self.n_heads // self.n_kv_heads))
             out_b = mx.concatenate(outs, axis=0)
         else:
             if cache is not None:
-                all_k, all_v = _cache_fetch(cache, keys_rot, values)
+                if is_kv_shared and (keys_rot is None or values is None):
+                    all_k, all_v = getattr(cache, "keys", None), getattr(cache, "values", None)
+                    if (all_k is None or all_v is None) and isinstance(cache, (list, tuple)) and kv_layer_idx < len(cache):
+                        target_c = cache[kv_layer_idx]
+                        all_k = getattr(target_c, "keys", None)
+                        all_v = getattr(target_c, "values", None)
+                else:
+                    all_k, all_v = _cache_fetch(cache, keys_rot, values)
             else:
-                all_k, all_v = keys_rot, values
-            out_b = mx.fast.scaled_dot_product_attention(
-                queries_rot, all_k, all_v, scale=self.scale, mask=mask)
+                if is_kv_shared:
+                    sid = session_ids[0] if session_ids else "default"
+                    sess = manager.sessions.get(sid)
+                    if sess is not None and sess["dense_lens"][kv_layer_idx] > 0:
+                        dl = sess["dense_lens"][kv_layer_idx]
+                        all_k = sess["dense_keys"][kv_layer_idx][:, :, :dl, :]
+                        all_v = sess["dense_values"][kv_layer_idx][:, :, :dl, :]
+                    elif sess is not None and sess["prefill_K_chunks"][kv_layer_idx]:
+                        all_k = mx.concatenate(sess["prefill_K_chunks"][kv_layer_idx], axis=2)
+                        all_v = mx.concatenate(sess["prefill_V_chunks"][kv_layer_idx], axis=2)
+                    else:
+                        all_k, all_v = None, None
+                else:
+                    all_k, all_v = keys_rot, values
+            if all_k is not None and all_v is not None:
+                out_b = mx.fast.scaled_dot_product_attention(
+                    queries_rot, all_k, all_v, scale=self.scale, mask=mask)
+            else:
+                out_b = mx.zeros_like(queries_rot)
 
         output = out_b.transpose(0, 2, 1, 3).reshape(B, L, -1)
         if attn_gate is not None:
@@ -6101,122 +6084,124 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
         return self.o_proj(output)
 
     else:
-        # ── PREFILL PATH ── use native MLX cache for correct causal attention,
-        #                   then also capture K/V into DKV store.
-        #
-        # The original qwen2.py does:
-        #   keys, values = cache.update_and_fetch(keys, values)
-        #   output = scaled_dot_product_attention(queries, keys, values, ...)
-        #
-        # update_and_fetch accumulates all past KV into the cache and returns
-        # the full [1, kv_heads, total_seq_len, head_dim] tensor, so every
-        # chunk attends over ALL previous tokens correctly.
-
-        # ── LEGO streaming prefill (DKV_LEGO_PREFILL) ──
-        # Once engaged, the chunk attends [raw sinks | routed compressed far blocks |
-        # raw recency ring | self] entirely from the session state; the raw prompt
-        # cache is NOT updated (and is dropped by MLXQwenModel.__call__), bounding
-        # prefill raw KV by O(sinks + ring + chunk) instead of O(T).
-        _lego_out = None
-        if manager._lego_prefill and B == 1 and session_ids[0] != "dummy_session":
-            _lego_sess = manager.sessions.get(session_ids[0])
-            _cur_start_lego = int(position_ids[0, 0]) if position_ids is not None else 0
-            if _lego_sess is not None and manager._lego_session_ready(
-                    _lego_sess, layer_idx, _cur_start_lego):
-                if layer_idx == 0:
-                    _lego_sess["lego_engaged"] = True
-                _lego_out = _lego_prefill_attend(
-                    manager, _lego_sess, layer_idx,
-                    queries_rot, keys_rot, values, _cur_start_lego,
-                    self.scale, self.n_heads // self.n_kv_heads, manager._sp_dbg,
-                )
-
-        # DKV_LEGO_SHADOW=1 — parity diagnostic: compute the lego attention but
-        # USE the raw path's output (cache keeps updating), printing lego-vs-exact
-        # error per layer with identical inputs. Isolates attend-time bugs from
-        # compounding capture drift.
-        _lego_shadow = _lego_out is not None and os.environ.get("DKV_LEGO_SHADOW", "0") == "1"
-        if _lego_out is not None and not _lego_shadow:
-            out_b = _lego_out
-        else:
+        # ── PREFILL PATH ──
+        if is_kv_shared:
+            # Shared global layer attends to target layer's cache state
+            all_k, all_v = None, None
             if cache is not None:
-                all_k, all_v = _cache_fetch(cache, keys_rot, values)
-            else:
-                all_k, all_v = keys_rot, values
-            if _lego_shadow:
-                _a = _lego_out.astype(mx.float32).reshape(-1)
-                _ref = mx.fast.scaled_dot_product_attention(
+                all_k = getattr(cache, "keys", None)
+                all_v = getattr(cache, "values", None)
+                if (all_k is None or all_v is None) and isinstance(cache, (list, tuple)) and kv_layer_idx < len(cache):
+                    target_c = cache[kv_layer_idx]
+                    all_k = getattr(target_c, "keys", None)
+                    all_v = getattr(target_c, "values", None)
+
+            if (all_k is None or all_v is None) and session_ids:
+                sid = session_ids[0]
+                sess = manager.sessions.get(sid)
+                if sess is not None and sess["prefill_K_chunks"][kv_layer_idx]:
+                    all_k = mx.concatenate(sess["prefill_K_chunks"][kv_layer_idx], axis=2)
+                    all_v = mx.concatenate(sess["prefill_V_chunks"][kv_layer_idx], axis=2)
+
+            if all_k is not None and all_v is not None:
+                out_b = mx.fast.scaled_dot_product_attention(
                     queries_rot, all_k, all_v, scale=self.scale, mask=mask)
-                _b = _ref.astype(mx.float32).reshape(-1)
-                _cos = mx.sum(_a * _b) / (mx.sqrt(mx.sum(_a * _a)) * mx.sqrt(mx.sum(_b * _b)) + 1e-9)
-                _md = mx.max(mx.abs(_a - _b))
-                if layer_idx in (0, 13, 27):
-                    # Also profile the VALIDATED sparse prefill against the same
-                    # dense reference — the acceptance bar for lego's error.
-                    _cur0 = int(position_ids[0, 0])
-                    _pinned_par = manager._sp_pinned_blocks.get(
-                        session_ids[0] if session_ids else "", ())
-                    _sp = _sparse_prefill_attend(
-                        queries_rot, all_k, all_v, _cur0,
+            else:
+                out_b = mx.zeros_like(queries_rot)
+            # Shared layers do NOT capture KV (layer 14 already did)
+        else:
+            _first_attended = (
+                manager._attended_layers[0]
+                if getattr(manager, "_attended_layers", None)
+                else 0
+            )
+            # ── LEGO streaming prefill (DKV_LEGO_PREFILL) ──
+            _lego_out = None
+            if manager._lego_prefill and B == 1 and session_ids[0] != "dummy_session":
+                _lego_sess = manager.sessions.get(session_ids[0])
+                _cur_start_lego = int(position_ids[0, 0]) if position_ids is not None else 0
+                if _lego_sess is not None and manager._lego_session_ready(
+                        _lego_sess, kv_layer_idx, _cur_start_lego):
+                    if kv_layer_idx == _first_attended:
+                        _lego_sess["lego_engaged"] = True
+                    _lego_out = _lego_prefill_attend(
+                        manager, _lego_sess, kv_layer_idx,
+                        queries_rot, keys_rot, values, _cur_start_lego,
+                        self.scale, self.n_heads // self.n_kv_heads, manager._sp_dbg,
+                    )
+
+            _lego_shadow = _lego_out is not None and os.environ.get("DKV_LEGO_SHADOW", "0") == "1"
+            if _lego_out is not None and not _lego_shadow:
+                out_b = _lego_out
+            else:
+                if cache is not None:
+                    all_k, all_v = _cache_fetch(cache, keys_rot, values)
+                else:
+                    all_k, all_v = keys_rot, values
+                if _lego_shadow:
+                    _a = _lego_out.astype(mx.float32).reshape(-1)
+                    _ref = mx.fast.scaled_dot_product_attention(
+                        queries_rot, all_k, all_v, scale=self.scale, mask=mask)
+                    _b = _ref.astype(mx.float32).reshape(-1)
+                    _cos = mx.sum(_a * _b) / (mx.sqrt(mx.sum(_a * _a)) * mx.sqrt(mx.sum(_b * _b)) + 1e-9)
+                    _md = mx.max(mx.abs(_a - _b))
+                    if kv_layer_idx in (0, 13, 27):
+                        _cur0 = int(position_ids[0, 0])
+                        _pinned_par = manager._sp_pinned_blocks.get(
+                            session_ids[0] if session_ids else "", ())
+                        _sp = _sparse_prefill_attend(
+                            queries_rot, all_k, all_v, _cur0,
+                            self.scale, self.n_heads // self.n_kv_heads,
+                            manager.block_size, manager._sp_window, manager._sp_sink_blocks,
+                            manager._sp_kmin, manager._sp_frac, False,
+                            pinned_blk_abs=_pinned_par)
+                        _c = _sp.astype(mx.float32).reshape(-1)
+                        _cos_sp = mx.sum(_c * _b) / (mx.sqrt(mx.sum(_c * _c)) * mx.sqrt(mx.sum(_b * _b)) + 1e-9)
+                        _md_sp = mx.max(mx.abs(_c - _b))
+                        print(f"[LEGO-PAR] cur={_cur0} l={kv_layer_idx} "
+                              f"lego: cos={float(_cos):.6f} max|d|={float(_md):.4f}  "
+                              f"sparse: cos={float(_cos_sp):.6f} max|d|={float(_md_sp):.4f}", flush=True)
+
+                # ── DSA/NSA-style sparse prefill (DKV_SPARSE_PREFILL) ──
+                _T = all_k.shape[2]
+                _cur_start = _T - L
+                if (manager._sparse_prefill and _cur_start >= manager._sp_min_ctx):
+                    _sid_pin = session_ids[0] if session_ids else ""
+                    _pinned_blks = manager._sp_pinned_blocks.get(_sid_pin, ())
+                    out_b = _sparse_prefill_attend(
+                        queries_rot, all_k, all_v, _cur_start,
                         self.scale, self.n_heads // self.n_kv_heads,
                         manager.block_size, manager._sp_window, manager._sp_sink_blocks,
-                        manager._sp_kmin, manager._sp_frac, False,
-                        pinned_blk_abs=_pinned_par)
-                    _c = _sp.astype(mx.float32).reshape(-1)
-                    _cos_sp = mx.sum(_c * _b) / (mx.sqrt(mx.sum(_c * _c)) * mx.sqrt(mx.sum(_b * _b)) + 1e-9)
-                    _md_sp = mx.max(mx.abs(_c - _b))
-                    print(f"[LEGO-PAR] cur={_cur0} l={layer_idx} "
-                          f"lego: cos={float(_cos):.6f} max|d|={float(_md):.4f}  "
-                          f"sparse: cos={float(_cos_sp):.6f} max|d|={float(_md_sp):.4f}", flush=True)
+                        manager._sp_kmin, manager._sp_frac, manager._sp_dbg,
+                        pinned_blk_abs=_pinned_blks,
+                    )
+                else:
+                    out_b = mx.fast.scaled_dot_product_attention(
+                        queries_rot,
+                        all_k,
+                        all_v,
+                        scale=self.scale,
+                        mask=mask
+                    )
 
-            # ── DSA/NSA-style sparse prefill (DKV_SPARSE_PREFILL) ──
-            # Attend to [sink blocks + top-K routed history blocks + recency window + self]
-            # instead of the full accumulated KV, once the chunk is far enough in that there
-            # is prunable history. Default OFF; verified via niah_recall before any default flip.
-            _T = all_k.shape[2]
-            _cur_start = _T - L
-            if (manager._sparse_prefill and _cur_start >= manager._sp_min_ctx):
-                _sid_pin = session_ids[0] if session_ids else ""
-                _pinned_blks = manager._sp_pinned_blocks.get(_sid_pin, ())
-                out_b = _sparse_prefill_attend(
-                    queries_rot, all_k, all_v, _cur_start,
-                    self.scale, self.n_heads // self.n_kv_heads,
-                    manager.block_size, manager._sp_window, manager._sp_sink_blocks,
-                    manager._sp_kmin, manager._sp_frac, manager._sp_dbg,
-                    pinned_blk_abs=_pinned_blks,
+            # Capture current chunk's K/V into DKV store (non-shared layers only)
+            for b_idx in range(B):
+                sid = session_ids[b_idx]
+                if sid == "dummy_session":
+                    continue
+                manager.capture_prefill_kv(
+                    sid, kv_layer_idx,
+                    keys_rot[b_idx:b_idx+1],
+                    values[ b_idx:b_idx+1],
+                    K_unrot=(None if manager.rotated_pool else keys[b_idx:b_idx+1])
                 )
-            else:
-                out_b = mx.fast.scaled_dot_product_attention(
-                    queries_rot,
-                    all_k,
-                    all_v,
-                    scale=self.scale,
-                    mask=mask
+                manager.capture_factual_prefill_kv(
+                    sid, kv_layer_idx,
+                    keys[b_idx:b_idx+1],
+                    values[b_idx:b_idx+1]
                 )
-
-        # 2. Capture ONLY the current chunk's K/V into DKV store
-        #    (all_k/all_v grow with every chunk; we store incrementally)
-        for b_idx in range(B):
-            sid = session_ids[b_idx]
-            if sid == "dummy_session":
-                continue
-            manager.capture_prefill_kv(
-                sid, layer_idx,
-                keys_rot[b_idx:b_idx+1],
-                values[ b_idx:b_idx+1],
-                K_unrot=(None if manager.rotated_pool else keys[b_idx:b_idx+1])
-            )
-            # Stash UNROTATED K/V (layers 0 + middle only) for the optional factual
-            # store — its descriptors must share the unrotated layer-0 space the
-            # decode-time query uses. No-op unless DKV_FACTUAL_STORE is enabled.
-            manager.capture_factual_prefill_kv(
-                sid, layer_idx,
-                keys[b_idx:b_idx+1],
-                values[b_idx:b_idx+1]
-            )
-            # Compress during the forward pass:
-            if os.environ.get("DKV_STREAMING_COMPRESS", "1") != "0":
-                manager.compress_deferred_prefill_blocks_for_layer(sid, layer_idx)
+                if os.environ.get("DKV_STREAMING_COMPRESS", "1") != "0":
+                    manager.compress_deferred_prefill_blocks_for_layer(sid, kv_layer_idx)
 
         output = out_b.transpose(0, 2, 1, 3).reshape(B, L, -1)
         if attn_gate is not None:
@@ -6389,12 +6374,25 @@ class MLXQwenModel:
                     # self_attn slots; leave everything else alone.
                     _cache_list = self._prefill_caches.get(cache_key)
                     if _cache_list is not None:
-                        _all_attn = all(hasattr(l, "self_attn") for l in self.mlx_model.layers)
-                        if _all_attn:
+                        _has_unpatched_or_sliding = any(
+                            not hasattr(l, "self_attn")
+                            or getattr(l, "is_sliding", False)
+                            or getattr(getattr(l, "self_attn", None), "is_sliding", False)
+                            or getattr(l, "layer_type", "") == "sliding_attention"
+                            or getattr(getattr(l, "self_attn", None), "layer_type", "") == "sliding_attention"
+                            for l in self.mlx_model.layers
+                        )
+                        if not _has_unpatched_or_sliding:
                             self._prefill_caches.pop(cache_key, None)
                         else:
                             for _i, _layer in enumerate(self.mlx_model.layers):
-                                if hasattr(_layer, "self_attn"):
+                                _attn = getattr(_layer, "self_attn", None)
+                                if _attn is not None and not (
+                                    getattr(_layer, "is_sliding", False)
+                                    or getattr(_attn, "is_sliding", False)
+                                    or getattr(_layer, "layer_type", "") == "sliding_attention"
+                                    or getattr(_attn, "layer_type", "") == "sliding_attention"
+                                ):
                                     _cache_list[_i] = None
                     # Lego prefill state (raw sinks + recency-ring buffers, up to
                     # ~250 MB at ring 4096 on a 28-layer model) is prefill-only —
@@ -6654,9 +6652,9 @@ class MLXDKVWrapper:
             if tok_id is not None and tok_id != self.tokenizer.unk_token_id:
                 self.stop_token_ids.add(tok_id)
 
-        # Use the first layer that actually exposes `self_attn` to derive shapes —
-        # hybrid architectures (Qwen3-Next/Qwen3.5-style) interleave attention-free
-        # linear/gated-delta-net layers that have no KV cache and no `self_attn`.
+        # Use the first global (non-sliding) layer that actually exposes `self_attn` to derive shapes —
+        # hybrid architectures (e.g. Gemma 4) interleave bounded sliding-window layers (head_dim=256)
+        # with full-attention global layers (head_dim=512) that DKV actually compresses.
         _attn_layers = [l for l in model.layers if hasattr(l, "self_attn")]
         if not _attn_layers:
             raise RuntimeError(
@@ -6664,7 +6662,18 @@ class MLXDKVWrapper:
                 "layers — it may use a fully non-standard attention/state layout "
                 "that DKV's KV-compression patching doesn't support yet."
             )
-        _ref_attn = _attn_layers[0].self_attn
+
+        def _is_sliding_layer(layer_or_attn):
+            return (
+                getattr(layer_or_attn, "is_sliding", False)
+                or getattr(getattr(layer_or_attn, "self_attn", None), "is_sliding", False)
+                or getattr(layer_or_attn, "layer_type", "") == "sliding_attention"
+                or getattr(getattr(layer_or_attn, "self_attn", None), "layer_type", "") == "sliding_attention"
+            )
+
+        _global_layers = [l for l in _attn_layers if not _is_sliding_layer(l)]
+        _ref_target_layers = _global_layers if _global_layers else _attn_layers
+        _ref_attn = _ref_target_layers[0].self_attn
         _ref_heads, _ref_kv_heads, _ref_head_dim = _resolve_attn_dims(_ref_attn)
 
         self.manager = MLXKVBlockManager(
@@ -6700,54 +6709,117 @@ class MLXDKVWrapper:
         self.manager.patched_model = self.model
 
     def _patch_attention_layers(self, model):
-        # Dynamically find and patch the attention class(es) of the loaded model.
-        # Hybrid architectures (e.g. gated-delta-net / linear-attention layers
-        # interleaved with full attention, as in Qwen3-Next/Qwen3.5) mean not
-        # every decoder layer has a `self_attn` submodule — only the layers
-        # that expose one have a KV cache DKV can compress, so only patch those.
-        patched_classes = set()
-        for layer in model.layers:
-            attn = getattr(layer, "self_attn", None)
-            if attn is None:
-                continue
-            attn_class = attn.__class__
-            if attn_class not in patched_classes:
-                if not hasattr(attn_class, "original_call"):
-                    attn_class.original_call = attn_class.__call__
-                attn_class.__call__ = attention_forward
-                patched_classes.add(attn_class)
+        import types
+
+        def _is_sliding(layer, attn):
+            return (
+                getattr(layer, "is_sliding", False)
+                or getattr(attn, "is_sliding", False)
+                or getattr(layer, "layer_type", "") == "sliding_attention"
+                or getattr(attn, "layer_type", "") == "sliding_attention"
+            )
+
+        def _is_kv_shared(layer, attn):
+            if getattr(attn, "is_kv_shared_layer", False) or getattr(layer, "is_kv_shared_layer", False):
+                return True
+            if not hasattr(attn, "k_proj") or attn.k_proj is None:
+                return True
+            return False
 
         attended = []
+        global_layers = []
+        last_non_shared_layer_idx = None
+        current_kv_slot = 0
+
+        # Classify layers and configure mapping
         for layer_idx, layer in enumerate(model.layers):
             attn = getattr(layer, "self_attn", None)
             if attn is None:
                 continue
+
+            if _is_sliding(layer, attn):
+                attn.is_sliding = True
+                attn.layer_idx = layer_idx
+                continue
+
+            attn.is_sliding = False
+            is_shared = _is_kv_shared(layer, attn)
+            attn.is_kv_shared_layer = is_shared
+
+            if is_shared:
+                # Shared global full-attention layer (e.g. layers [19, 24, 29, 34] in Gemma 4)
+                target_idx = (
+                    getattr(attn, "kv_layer_idx", None)
+                    or getattr(layer, "kv_layer_idx", None)
+                    or getattr(attn, "target_layer_idx", None)
+                    or getattr(layer, "target_layer_idx", None)
+                    or last_non_shared_layer_idx
+                )
+                attn.kv_layer_idx = target_idx
+                target_attn = getattr(model.layers[target_idx], "self_attn", None) if target_idx is not None else None
+                attn.kv_slot = getattr(target_attn, "kv_slot", max(0, current_kv_slot - 1)) if target_attn is not None else max(0, current_kv_slot - 1)
+            else:
+                # Non-shared global full-attention layer (e.g. layers [4, 9, 14] in Gemma 4)
+                attn.kv_layer_idx = layer_idx
+                attn.kv_slot = current_kv_slot
+                last_non_shared_layer_idx = layer_idx
+                attended.append(layer_idx)
+                current_kv_slot += 1
+
             attn.layer_idx = layer_idx
             attn.kv_manager = self.manager
-            attn.n_heads, attn.n_kv_heads, attn.head_dim = _resolve_attn_dims(attn)
-            attended.append(layer_idx)
 
-        # Publish the attended-layer set so the manager sizes each session's pool
-        # from the layers that can actually fill it rather than from the model's
-        # total layer count (MLX_PORT item 3). This loop is where the answer is
-        # already known, and it runs before any session exists, which is the
-        # ordering the sizing depends on.
+            h, kv_h, hd = _resolve_attn_dims(attn)
+            if is_shared and (kv_h is None or kv_h == h) and target_idx is not None:
+                target_attn = getattr(model.layers[target_idx], "self_attn", None)
+                if target_attn is not None:
+                    _, target_kv_h, _ = _resolve_attn_dims(target_attn)
+                    if target_kv_h is not None:
+                        kv_h = target_kv_h
+            attn.n_heads = h
+            attn.n_kv_heads = kv_h
+            attn.head_dim = hd
+            global_layers.append((layer_idx, layer, attn))
+
+        # Selective patching
+        patched_classes = set()
+        for layer_idx, layer, attn in global_layers:
+            attn_class = attn.__class__
+            if not hasattr(attn_class, "original_call"):
+                attn_class.original_call = attn_class.__call__
+            attn_class.__call__ = attention_forward
+            patched_classes.add(attn_class)
+
+            if not hasattr(attn, "original_call"):
+                attn.original_call = getattr(attn_class, "original_call", attn_class.__call__)
+
+        for layer in model.layers:
+            attn = getattr(layer, "self_attn", None)
+            if attn is not None and _is_sliding(layer, attn):
+                if not hasattr(attn.__class__, "original_call"):
+                    attn.__class__.original_call = attn.__class__.__call__
+                if not hasattr(attn, "original_call"):
+                    attn.original_call = getattr(attn.__class__, "original_call", attn.__class__.__call__)
+
         if self.manager is not None:
             self.manager.set_attended_layers(attended)
 
-        # Publish the model's RoPE geometry. Only DKV_ROTATED_POOL=0 consumes it
-        # (to rotate pool keys to their absolute positions at read time), but read
-        # it unconditionally so a model whose rope layout is unsupported is caught
-        # at load rather than mid-generation.
+        # RoPE resolution: prefer global full-attention layer RoPE (head_dim=512)
         _rope = None
-        for layer in model.layers:
-            _a = getattr(layer, "self_attn", None)
-            if _a is not None and getattr(_a, "rope", None) is not None:
-                _rope = _a.rope
+        for _, _, attn in global_layers:
+            if getattr(attn, "rope", None) is not None:
+                _rope = attn.rope
                 break
+        if _rope is None:
+            for layer in model.layers:
+                _a = getattr(layer, "self_attn", None)
+                if _a is not None and getattr(_a, "rope", None) is not None:
+                    _rope = _a.rope
+                    break
+
         if _rope is not None and self.manager is not None:
             self.manager.set_rope_params(
-                dims=getattr(_rope, "dims", None),
+                dims=getattr(_rope, "dims", None) or getattr(_rope, "dim", None),
                 base=getattr(_rope, "base", None),
                 scale=getattr(_rope, "scale", 1.0),
                 traditional=bool(getattr(_rope, "traditional", False)),
@@ -6757,7 +6829,7 @@ class MLXDKVWrapper:
                 "DKV_ROTATED_POOL=0 needs the model's RoPE module to rotate pool "
                 "keys on read, and no `rope` was found on any attention layer.")
 
-        if not patched_classes:
+        if not global_layers and not attended:
             raise RuntimeError(
                 "DKV could not find any `self_attn` module on this model's decoder "
                 "layers — it may use a fully non-standard attention/state layout "
