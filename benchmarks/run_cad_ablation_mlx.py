@@ -256,7 +256,7 @@ def run_cad_ablation(
         print(f"ERROR: cannot import MLX stack: {e}", flush=True)
         sys.exit(1)
 
-    wrapper = MLXDKVWrapper(model_id=model_id, config={"rank": 32, "block_size": 256})
+    wrapper = MLXDKVWrapper(model_id=model_id, config={"rank": 32, "block_size": 1024})
     wrapper.ensure_loaded()
     tokenizer = wrapper.tokenizer
 

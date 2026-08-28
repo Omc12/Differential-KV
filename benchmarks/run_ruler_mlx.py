@@ -210,7 +210,7 @@ def run_ruler(
     from serving.mlx_dkv_wrapper import MLXDKVWrapper
 
     # Load wrapper once (shared model weights)
-    wrapper = MLXDKVWrapper(model_id=model_id, config={"rank": 32, "block_size": 256})
+    wrapper = MLXDKVWrapper(model_id=model_id, config={"rank": 32, "block_size": 1024})
     wrapper.ensure_loaded()
     tokenizer = wrapper.tokenizer
 
