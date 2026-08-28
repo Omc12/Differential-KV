@@ -6456,7 +6456,7 @@ class MLXDKVWrapper:
     def __init__(
         self, 
         model_id: str,
-        config: Dict[str, Any],
+        config: Dict[str, Any] = None,
         device: str = None,
         quantization_config: Any = None,
         torch_dtype: Any = None,
