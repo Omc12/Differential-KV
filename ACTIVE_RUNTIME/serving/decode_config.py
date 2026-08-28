@@ -50,6 +50,7 @@ BEST_DECODE_DEFAULTS = {
     # unchanged.
     "DKV_DISABLE_CUDA_GRAPH": "0",     # 1 disables capture entirely
     "DKV_GRAPH_SAFE_DECODE": "1",      # sync-free decode step (bypass capture)
+    "DKV_RESIDUAL_QUANT": "int4",       # 4-bit asymmetric group quantized residuals by default
 }
 
 
@@ -70,7 +71,9 @@ BEST_DECODE_DEFAULTS = {
 # `mlx_dkv_wrapper.MLXDKVWrapper.__init__`, with the measurements attached; this
 # dict is the single place that OWNS the number.
 MLX_CONSTRUCTOR_DEFAULTS = {
-    "block_size": 1024,   # MLX-measured, paired vs a dense control on identical
+    "block_size": 1024,
+    "max_residual": 128,
+    "residual_quant": "int4",   # MLX-measured, paired vs a dense control on identical
                           # prompts: linkbench 9/21 -> 21/21 = dense (p=5.3e-05),
                           # pool 1.08x -> 0.48x of the KV it replaces.
     "rank": 32,           # a CEILING, not a target; the rank sweep that suggested

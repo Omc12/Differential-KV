@@ -71,11 +71,21 @@ class TestQuantizedResiduals:
         assert diff_k > 0.0, "Expected non-zero difference from quantization"
         assert diff_k < 0.5, f"Max difference too large: {diff_k}"
 
-    def test_manager_disabled_by_default(self, monkeypatch):
-        """When DKV_RESIDUAL_QUANT is unset, quantization hook is a bit-exact no-op."""
+    def test_manager_enabled_by_default(self, monkeypatch):
+        """When DKV_RESIDUAL_QUANT is unset, it defaults to 'int4'."""
         from mlx_dkv_wrapper import MLXKVBlockManager
         
         monkeypatch.delenv("DKV_RESIDUAL_QUANT", raising=False)
+        mgr = MLXKVBlockManager(
+            num_layers=4, heads=16, kv_heads=8, head_dim=128, rank=32, block_size=256
+        )
+        assert mgr.residual_quant == "int4"
+
+    def test_manager_explicitly_disabled(self, monkeypatch):
+        """When DKV_RESIDUAL_QUANT='none', quantization hook is a bit-exact no-op."""
+        from mlx_dkv_wrapper import MLXKVBlockManager
+        
+        monkeypatch.setenv("DKV_RESIDUAL_QUANT", "none")
         mgr = MLXKVBlockManager(
             num_layers=4, heads=16, kv_heads=8, head_dim=128, rank=32, block_size=256
         )

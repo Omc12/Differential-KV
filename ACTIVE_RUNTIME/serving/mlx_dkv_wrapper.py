@@ -2076,7 +2076,7 @@ class MLXKVBlockManager:
         # When enabled ("int4", "q4", "4bit"), residuals are compressed via 4-bit
         # asymmetric group quantization (group_size=64, bits=4). Memory footprint
         # drops by ~3.6x, enabling 4x higher residual capacity in the same budget.
-        self.residual_quant = os.environ.get("DKV_RESIDUAL_QUANT", "none").strip().lower()
+        self.residual_quant = os.environ.get("DKV_RESIDUAL_QUANT", "int4").strip().lower()
         self.residual_quant_group_size = int(os.environ.get("DKV_RESIDUAL_QUANT_GROUP_SIZE", "64"))
         self.residual_quant_bits = int(os.environ.get("DKV_RESIDUAL_QUANT_BITS", "4"))
         self.max_dense_len = self.recency_window + self.block_size
@@ -6547,6 +6547,13 @@ class MLXDKVWrapper:
         quant = self.config.get("quantization")
         
         preset = self.config.get("preset", os.environ.get("DKV_PRESET", "mid")).lower()
+        if "max_residual" not in self.config and "DKV_MAX_RESIDUAL" not in os.environ and "DKV_MAX_RESIDUAL_TOKENS" not in os.environ:
+            if preset == "low":
+                self.config["max_residual"] = 64
+            elif preset in ("high", "ultra"):
+                self.config["max_residual"] = 256
+            else: # mid
+                self.config["max_residual"] = 128
         if preset == "low" and not quant and not os.environ.get("DKV_QUANTIZATION"):
             quant = "int4"
             print("[DKV MLX] Low preset: auto-enabling 4-bit quantization")
