@@ -87,3 +87,45 @@ class TestQuantizedResiduals:
         rk_out, rv_out = mgr._apply_residual_quantization(rk, rv)
         diff_k = mx.max(mx.abs(rk - rk_out)).item()
         assert diff_k == 0.0, "Expected bit-exact identity when quantization is disabled"
+
+    def test_physical_packed_int4_allocation(self, monkeypatch):
+        """When DKV_RESIDUAL_QUANT=int4, session residual buffers must be physically packed uint32 + scales/biases."""
+        from mlx_dkv_wrapper import MLXKVBlockManager
+        
+        # FP16 Manager
+        monkeypatch.setenv("DKV_RESIDUAL_QUANT", "none")
+        mgr_fp16 = MLXKVBlockManager(
+            num_layers=4, heads=16, kv_heads=8, head_dim=128, rank=32, block_size=256
+        )
+        sess_fp16 = mgr_fp16._create_empty_session(max_blocks=16)
+        assert sess_fp16["comp_res_k"] is not None
+        assert sess_fp16["comp_res_k_q"] is None
+        fp16_bytes = sum(t.nbytes for t in sess_fp16["comp_res_k"]) + sum(t.nbytes for t in sess_fp16["comp_res_v"])
+
+        # INT4 Manager
+        monkeypatch.setenv("DKV_RESIDUAL_QUANT", "int4")
+        mgr_int4 = MLXKVBlockManager(
+            num_layers=4, heads=16, kv_heads=8, head_dim=128, rank=32, block_size=256
+        )
+        sess_int4 = mgr_int4._create_empty_session(max_blocks=16)
+        assert sess_int4["comp_res_k"] is None
+        assert sess_int4["comp_res_k_q"] is not None
+        assert sess_int4["comp_res_k_q"][0].dtype == mx.uint32
+        
+        int4_bytes = (
+            sum(q.nbytes + s.nbytes + b.nbytes for q, s, b in zip(sess_int4["comp_res_k_q"], sess_int4["comp_res_k_s"], sess_int4["comp_res_k_b"])) +
+            sum(q.nbytes + s.nbytes + b.nbytes for q, s, b in zip(sess_int4["comp_res_v_q"], sess_int4["comp_res_v_s"], sess_int4["comp_res_v_b"]))
+        )
+        
+        ratio = fp16_bytes / int4_bytes
+        assert ratio >= 3.5, f"Expected >=3.5x physical buffer compression, got {ratio:.2f}x"
+        
+        # Test store and fetch round trip
+        rk_raw = mx.random.normal((2, 128, 8, 128), dtype=mx.float16) * 0.05
+        rv_raw = mx.random.normal((2, 128, 8, 128), dtype=mx.float16) * 0.05
+        mgr_int4._store_residuals(sess_int4, 0, slice(0, 2), rk_raw, rv_raw)
+        
+        rk_fetched = mgr_int4._fetch_res_k(sess_int4, 0, nb=2)
+        assert rk_fetched.shape == rk_raw.shape
+        diff = mx.max(mx.abs(rk_raw - rk_fetched)).item()
+        assert diff < 0.2, f"Fetched difference too large: {diff}"

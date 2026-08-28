@@ -1638,7 +1638,7 @@ def _lego_prefill_attend(
     else:
         if R > 0 and manager._lego_router != "minmax":
             R_route = min(manager.route_residuals, R)
-            rk_all = session["comp_res_k"][layer_idx][sb:far_nb, :R_route]  # [nb_r, R_route, H_kv, D]
+            rk_all = self._fetch_res_k(session, layer_idx, nb=far_nb, r_max=R_route)[sb:far_nb]
             res_n_np = np.asarray(session["comp_res_n"][layer_idx][sb:far_nb], dtype=np.int32)
             rvld = mx.expand_dims(mx.arange(R_route), 0) < mx.expand_dims(
                 mx.minimum(mx.array(res_n_np), R_route), 1)
@@ -1710,8 +1710,8 @@ def _lego_prefill_attend(
     mask_parts = [mx.broadcast_to(zero, (S0,)), blk_add]
 
     if R > 0:
-        rk = mx.take(session["comp_res_k"][layer_idx], sel_abs, 0)   # [K, R, H_kv, D]
-        rv = mx.take(session["comp_res_v"][layer_idx], sel_abs, 0)
+        rk = self._fetch_res_k(session, layer_idx, sel=sel_abs)
+        rv = self._fetch_res_v(session, layer_idx, sel=sel_abs)
         res_n_all = mx.array(np.asarray(session["comp_res_n"][layer_idx], dtype=np.int32))
         res_n_sel = mx.take(res_n_all, sel_abs)
         res_valid = (mx.arange(R).reshape(1, R) < res_n_sel.reshape(K_route, 1)).reshape(K_route * R)
@@ -2413,6 +2413,95 @@ class MLXKVBlockManager:
             return True
         return l in self._attended_layers
 
+    def _store_residuals(self, session: Dict, layer_idx: int, slice_idx, res_k: mx.array, res_v: mx.array):
+        """Physically store residuals either as FP16 or packed INT4 (uint32 + scales + biases)."""
+        if session.get("comp_res_k") is not None and session["comp_res_k"][layer_idx] is not None:
+            session["comp_res_k"][layer_idx][slice_idx] = res_k
+            session["comp_res_v"][layer_idx][slice_idx] = res_v
+        else:
+            gs = self.residual_quant_group_size
+            bits = self.residual_quant_bits
+            if res_k.size > 0:
+                qk, sk, bk = mx.quantize(res_k, group_size=gs, bits=bits)
+                qv, sv, bv = mx.quantize(res_v, group_size=gs, bits=bits)
+                session["comp_res_k_q"][layer_idx][slice_idx] = qk
+                session["comp_res_k_s"][layer_idx][slice_idx] = sk
+                session["comp_res_k_b"][layer_idx][slice_idx] = bk
+                session["comp_res_v_q"][layer_idx][slice_idx] = qv
+                session["comp_res_v_s"][layer_idx][slice_idx] = sv
+                session["comp_res_v_b"][layer_idx][slice_idx] = bv
+
+    def _fetch_res_k(self, session: Dict, layer_idx: int, sel=None, nb=None, r_max=None) -> mx.array:
+        """Fetch and dequantize key residuals on the fly."""
+        if session.get("comp_res_k") is not None and session["comp_res_k"][layer_idx] is not None:
+            arr = session["comp_res_k"][layer_idx]
+            if sel is not None:
+                out = mx.take(arr[:nb] if nb is not None else arr, sel, axis=0)
+            elif nb is not None:
+                out = arr[:nb]
+            else:
+                out = arr
+            return out[:, :r_max] if r_max is not None else out
+        else:
+            gs = self.residual_quant_group_size
+            bits = self.residual_quant_bits
+            q = session["comp_res_k_q"][layer_idx]
+            s = session["comp_res_k_s"][layer_idx]
+            b = session["comp_res_k_b"][layer_idx]
+            if sel is not None:
+                q = mx.take(q[:nb] if nb is not None else q, sel, axis=0)
+                s = mx.take(s[:nb] if nb is not None else s, sel, axis=0)
+                b = mx.take(b[:nb] if nb is not None else b, sel, axis=0)
+            elif nb is not None:
+                q, s, b = q[:nb], s[:nb], b[:nb]
+            if r_max is not None:
+                q = q[:, :r_max]
+                s = s[:, :r_max]
+                b = b[:, :r_max]
+            return mx.dequantize(q, s, b, group_size=gs, bits=bits)
+
+    def _fetch_res_v(self, session: Dict, layer_idx: int, sel=None, nb=None, r_max=None) -> mx.array:
+        """Fetch and dequantize value residuals on the fly."""
+        if session.get("comp_res_v") is not None and session["comp_res_v"][layer_idx] is not None:
+            arr = session["comp_res_v"][layer_idx]
+            if sel is not None:
+                out = mx.take(arr[:nb] if nb is not None else arr, sel, axis=0)
+            elif nb is not None:
+                out = arr[:nb]
+            else:
+                out = arr
+            return out[:, :r_max] if r_max is not None else out
+        else:
+            gs = self.residual_quant_group_size
+            bits = self.residual_quant_bits
+            q = session["comp_res_v_q"][layer_idx]
+            s = session["comp_res_v_s"][layer_idx]
+            b = session["comp_res_v_b"][layer_idx]
+            if sel is not None:
+                q = mx.take(q[:nb] if nb is not None else q, sel, axis=0)
+                s = mx.take(s[:nb] if nb is not None else s, sel, axis=0)
+                b = mx.take(b[:nb] if nb is not None else b, sel, axis=0)
+            elif nb is not None:
+                q, s, b = q[:nb], s[:nb], b[:nb]
+            if r_max is not None:
+                q = q[:, :r_max]
+                s = s[:, :r_max]
+                b = b[:, :r_max]
+            return mx.dequantize(q, s, b, group_size=gs, bits=bits)
+
+    def _clear_residuals(self, session: Dict, layer_idx: int, slice_idx):
+        """Zero out residuals for evicted/truncated blocks."""
+        if session.get("comp_res_k") is not None and session["comp_res_k"][layer_idx] is not None:
+            session["comp_res_k"][layer_idx][slice_idx] = 0.0
+            session["comp_res_v"][layer_idx][slice_idx] = 0.0
+        else:
+            session["comp_res_k_q"][layer_idx][slice_idx] = 0
+            session["comp_res_k_s"][layer_idx][slice_idx] = 0.0
+            session["comp_res_k_b"][layer_idx][slice_idx] = 0.0
+            session["comp_res_v_q"][layer_idx][slice_idx] = 0
+            session["comp_res_v_s"][layer_idx][slice_idx] = 0.0
+            session["comp_res_v_b"][layer_idx][slice_idx] = 0.0
+
     def _apply_residual_quantization(self, res_k: mx.array, res_v: mx.array) -> Tuple[mx.array, mx.array]:
         """Quantize residual tensors to 4-bit/8-bit if DKV_RESIDUAL_QUANT is enabled."""
         if self.residual_quant in ("int4", "q4", "4bit", "int8", "q8", "8bit"):
@@ -2703,8 +2792,22 @@ class MLXKVBlockManager:
             "comp_scale":    self._per_layer((max_blocks,), mx.float32),
             "comp_seq_len": self._per_layer((max_blocks,), mx.int32),
             
-            "comp_res_k": self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype),
-            "comp_res_v": self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype),
+            "comp_res_k": (None if self.residual_quant in ("int4", "q4", "4bit")
+                           else self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype)),
+            "comp_res_v": (None if self.residual_quant in ("int4", "q4", "4bit")
+                           else self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype)),
+            "comp_res_k_q": (self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim * self.residual_quant_bits // 32), mx.uint32)
+                             if self.residual_quant in ("int4", "q4", "4bit") else None),
+            "comp_res_k_s": (self._per_layer((max_blocks, self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), dtype)
+                             if self.residual_quant in ("int4", "q4", "4bit") else None),
+            "comp_res_k_b": (self._per_layer((max_blocks, self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), dtype)
+                             if self.residual_quant in ("int4", "q4", "4bit") else None),
+            "comp_res_v_q": (self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim * self.residual_quant_bits // 32), mx.uint32)
+                             if self.residual_quant in ("int4", "q4", "4bit") else None),
+            "comp_res_v_s": (self._per_layer((max_blocks, self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), dtype)
+                             if self.residual_quant in ("int4", "q4", "4bit") else None),
+            "comp_res_v_b": (self._per_layer((max_blocks, self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), dtype)
+                             if self.residual_quant in ("int4", "q4", "4bit") else None),
             "comp_res_n": [[0] * (max_blocks if self._layer_attended(l) else 0) for l in range(self.num_layers)],
             # Per-block boolean mask of which delta positions (0..block_size-2) are kept
             # as EXACT residuals — used to exclude them from the SVD pool at decode.
@@ -2762,6 +2865,12 @@ class MLXKVBlockManager:
             "comp_seq_len": ((), mx.int32),
             "comp_res_k":   ((self.max_residual, self.kv_heads, self.head_dim), f16),
             "comp_res_v":   ((self.max_residual, self.kv_heads, self.head_dim), f16),
+            "comp_res_k_q": ((self.max_residual, self.kv_heads, self.head_dim * self.residual_quant_bits // 32), mx.uint32),
+            "comp_res_k_s": ((self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), f16),
+            "comp_res_k_b": ((self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), f16),
+            "comp_res_v_q": ((self.max_residual, self.kv_heads, self.head_dim * self.residual_quant_bits // 32), mx.uint32),
+            "comp_res_v_s": ((self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), f16),
+            "comp_res_v_b": ((self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), f16),
             "comp_res_mask": ((self.block_size - 1,), mx.bool_),
             "comp_res_pos":  ((self.max_residual,), mx.int32),
         }
@@ -3006,8 +3115,7 @@ class MLXKVBlockManager:
                 session["comp_max_k"][layer_idx][keep_blocks:] = 0.0
                 session["comp_scale"][layer_idx][keep_blocks:] = 0.0
                 session["comp_seq_len"][layer_idx][keep_blocks:] = 0
-                session["comp_res_k"][layer_idx][keep_blocks:] = 0.0
-                session["comp_res_v"][layer_idx][keep_blocks:] = 0.0
+                self._clear_residuals(session, layer_idx, slice(keep_blocks, None))
                 if "comp_res_mask" in session:
                     session["comp_res_mask"][layer_idx][keep_blocks:] = False
                 for b_i in range(keep_blocks, session.get("max_blocks", self.max_blocks)):
@@ -3036,8 +3144,8 @@ class MLXKVBlockManager:
                 session["comp_anc_v"][layer_idx],
                 session["comp_min_k"][layer_idx],
                 session["comp_max_k"][layer_idx],
-                session["comp_res_k"][layer_idx],
-                session["comp_res_v"][layer_idx]
+                (session["comp_res_k"][layer_idx] if session.get("comp_res_k") is not None and session["comp_res_k"][layer_idx] is not None else session["comp_res_k_q"][layer_idx]),
+                (session["comp_res_v"][layer_idx] if session.get("comp_res_v") is not None and session["comp_res_v"][layer_idx] is not None else session["comp_res_v_q"][layer_idx])
             )
                 
         if "token_ids" in session and session["token_ids"]:
@@ -3768,9 +3876,7 @@ class MLXKVBlockManager:
             session["comp_scale"][l][start_idx:start_idx+num_blocks] = scales_batch[l_slice]
             session["comp_seq_len"][l][start_idx:start_idx+num_blocks] = self.block_size - 1  # S_comp: number of delta rows (excludes anchor)
             
-            rk_to_store, rv_to_store = self._apply_residual_quantization(res_k_padded[l_slice], res_v_padded[l_slice])
-            session["comp_res_k"][l][start_idx:start_idx+num_blocks] = rk_to_store
-            session["comp_res_v"][l][start_idx:start_idx+num_blocks] = rv_to_store
+            self._store_residuals(session, l, slice(start_idx, start_idx+num_blocks), res_k_padded[l_slice], res_v_padded[l_slice])
             for b_idx in range(num_blocks):
                 # n_res_batch is a BATCH-ordered list — index it by the ordinal `i`,
                 # not by the layer index `l`, which is sparse on a hybrid model.
@@ -3808,8 +3914,10 @@ class MLXKVBlockManager:
                 session["comp_anc_v"][l],
                 session["comp_min_k"][l],
                 session["comp_max_k"][l],
-                session["comp_res_k"][l],
-                session["comp_res_v"][l],
+                (session["comp_res_k"][l] if session.get("comp_res_k") is not None and session["comp_res_k"][l] is not None
+                 else session["comp_res_k_q"][l]),
+                (session["comp_res_v"][l] if session.get("comp_res_v") is not None and session["comp_res_v"][l] is not None
+                 else session["comp_res_v_q"][l]),
                 session["dense_keys"][l],
                 session["dense_values"][l],
             ])
@@ -4230,9 +4338,7 @@ class MLXKVBlockManager:
         session["comp_scale"][layer_idx][start_idx:start_idx+num_blocks] = scales_batch
         session["comp_seq_len"][layer_idx][start_idx:start_idx+num_blocks] = self.block_size - 1
 
-        rk_to_store, rv_to_store = self._apply_residual_quantization(res_k_padded, res_v_padded)
-        session["comp_res_k"][layer_idx][start_idx:start_idx+num_blocks] = rk_to_store
-        session["comp_res_v"][layer_idx][start_idx:start_idx+num_blocks] = rv_to_store
+        self._store_residuals(session, layer_idx, slice(start_idx, start_idx+num_blocks), res_k_padded, res_v_padded)
         for b_idx in range(num_blocks):
             session["comp_res_n"][layer_idx][start_idx + b_idx] = n_res_batch[b_idx]
         if "comp_res_mask" in session:
@@ -4274,8 +4380,8 @@ class MLXKVBlockManager:
             session["comp_anc_v"][layer_idx],
             session["comp_min_k"][layer_idx],
             session["comp_max_k"][layer_idx],
-            session["comp_res_k"][layer_idx],
-            session["comp_res_v"][layer_idx],
+            (session["comp_res_k"][layer_idx] if session.get("comp_res_k") is not None and session["comp_res_k"][layer_idx] is not None else session["comp_res_k_q"][layer_idx]),
+            (session["comp_res_v"][layer_idx] if session.get("comp_res_v") is not None and session["comp_res_v"][layer_idx] is not None else session["comp_res_v_q"][layer_idx]),
             session["dense_keys"][layer_idx],
             session["dense_values"][layer_idx],
         ]
@@ -4548,8 +4654,16 @@ class MLXKVBlockManager:
             session["comp_anc_v"][layer_idx][:-1] = session["comp_anc_v"][layer_idx][1:]
             session["comp_min_k"][layer_idx][:-1] = session["comp_min_k"][layer_idx][1:]
             session["comp_max_k"][layer_idx][:-1] = session["comp_max_k"][layer_idx][1:]
-            session["comp_res_k"][layer_idx][:-1] = session["comp_res_k"][layer_idx][1:]
-            session["comp_res_v"][layer_idx][:-1] = session["comp_res_v"][layer_idx][1:]
+            if session.get("comp_res_k") is not None and session["comp_res_k"][layer_idx] is not None:
+                session["comp_res_k"][layer_idx][:-1] = session["comp_res_k"][layer_idx][1:]
+                session["comp_res_v"][layer_idx][:-1] = session["comp_res_v"][layer_idx][1:]
+            else:
+                session["comp_res_k_q"][layer_idx][:-1] = session["comp_res_k_q"][layer_idx][1:]
+                session["comp_res_k_s"][layer_idx][:-1] = session["comp_res_k_s"][layer_idx][1:]
+                session["comp_res_k_b"][layer_idx][:-1] = session["comp_res_k_b"][layer_idx][1:]
+                session["comp_res_v_q"][layer_idx][:-1] = session["comp_res_v_q"][layer_idx][1:]
+                session["comp_res_v_s"][layer_idx][:-1] = session["comp_res_v_s"][layer_idx][1:]
+                session["comp_res_v_b"][layer_idx][:-1] = session["comp_res_v_b"][layer_idx][1:]
             session["comp_res_n"][layer_idx][:-1] = session["comp_res_n"][layer_idx][1:]
             if "comp_res_mask" in session:
                 session["comp_res_mask"][layer_idx][:-1] = session["comp_res_mask"][layer_idx][1:]
@@ -4879,9 +4993,7 @@ class MLXKVBlockManager:
         session["comp_scale"][layer_idx][num_blocks]   = svd_scale
         session["comp_seq_len"][layer_idx][num_blocks] = self.block_size - 1  # S_comp: number of delta rows (excludes anchor)
         
-        rk_to_store, rv_to_store = self._apply_residual_quantization(res_k_padded, res_v_padded)
-        session["comp_res_k"][layer_idx][num_blocks] = rk_to_store
-        session["comp_res_v"][layer_idx][num_blocks] = rv_to_store
+        self._store_residuals(session, layer_idx, num_blocks, res_k_padded, res_v_padded)
         session["comp_res_n"][layer_idx][num_blocks] = n_res
         # Mark which delta positions are kept exact (top_k indexes into the S_comp
         # deltas, aligned with the kernel's delta_s axis) so decode can drop their
@@ -4998,8 +5110,8 @@ class MLXKVBlockManager:
             av = session["comp_anc_v"][layer_idx][:nb]
             sc = session["comp_scale"][layer_idx][:nb]
             csl = session["comp_seq_len"][layer_idx][:nb]
-            rk = session["comp_res_k"][layer_idx][:nb]
-            rv = session["comp_res_v"][layer_idx][:nb]
+            rk = self._fetch_res_k(session, layer_idx, nb=nb)
+            rv = self._fetch_res_v(session, layer_idx, nb=nb)
             res_n = mx.array(session["comp_res_n"][layer_idx][:nb], dtype=mx.int32)
             res_mask = session["comp_res_mask"][layer_idx][:nb] if "comp_res_mask" in session else None
 
@@ -5276,8 +5388,8 @@ class MLXKVBlockManager:
                 session["comp_max_k"][layer_idx][:nb_padded],
                 session["comp_scale"][layer_idx][:nb_padded],
                 session["comp_seq_len"][layer_idx][:nb_padded],
-                session["comp_res_k"][layer_idx][:nb_padded],
-                session["comp_res_v"][layer_idx][:nb_padded],
+                self._fetch_res_k(session, layer_idx, nb=nb_padded),
+                self._fetch_res_v(session, layer_idx, nb=nb_padded),
                 comp_res_n_arr,
                 res_mask,
                 cached_sel,
@@ -5353,7 +5465,7 @@ class MLXKVBlockManager:
                         relevance = _block_relevance_residual(
                             q,
                             session["comp_anc_k"][layer_idx][:nb],
-                            session["comp_res_k"][layer_idx][:nb, :R],
+                            self._fetch_res_k(session, layer_idx, nb=nb, r_max=R),
                             res_valid,
                             scale, gpk,
                         )
@@ -5392,8 +5504,8 @@ class MLXKVBlockManager:
             total_res = 0
             if self.max_residual > 0 and nb > 0:
                 if topk_sel is not None and all_blocks_full:
-                    rk = mx.take(session["comp_res_k"][layer_idx][:nb], topk_sel, axis=0)
-                    rv = mx.take(session["comp_res_v"][layer_idx][:nb], topk_sel, axis=0)
+                    rk = self._fetch_res_k(session, layer_idx, sel=topk_sel, nb=nb)
+                    rv = self._fetch_res_v(session, layer_idx, sel=topk_sel, nb=nb)
                     Ksel, Rw = rk.shape[0], rk.shape[1]
                     res_k_all = rk.transpose(2, 0, 1, 3).reshape(self.kv_heads, Ksel * Rw, self.head_dim)
                     res_v_all = rv.transpose(2, 0, 1, 3).reshape(self.kv_heads, Ksel * Rw, self.head_dim)
@@ -5404,8 +5516,10 @@ class MLXKVBlockManager:
                     for bi in res_blocks:
                         n_res = session["comp_res_n"][layer_idx][bi]
                         if n_res > 0:
-                            res_k_parts.append(session["comp_res_k"][layer_idx][bi, :n_res].transpose(1, 0, 2))
-                            res_v_parts.append(session["comp_res_v"][layer_idx][bi, :n_res].transpose(1, 0, 2))
+                            rk_b = self._fetch_res_k(session, layer_idx, nb=bi+1)[bi, :n_res]
+                            rv_b = self._fetch_res_v(session, layer_idx, nb=bi+1)[bi, :n_res]
+                            res_k_parts.append(rk_b.transpose(1, 0, 2))
+                            res_v_parts.append(rv_b.transpose(1, 0, 2))
                     if res_k_parts:
                         res_k_all = mx.concatenate(res_k_parts, axis=1)
                         res_v_all = mx.concatenate(res_v_parts, axis=1)
@@ -5420,8 +5534,10 @@ class MLXKVBlockManager:
                         for bi in range(nb):
                             n_res = session["comp_res_n"][layer_idx][bi]
                             if n_res > 0:
-                                res_k_parts.append(session["comp_res_k"][layer_idx][bi, :n_res].transpose(1, 0, 2))
-                                res_v_parts.append(session["comp_res_v"][layer_idx][bi, :n_res].transpose(1, 0, 2))
+                                rk_b = self._fetch_res_k(session, layer_idx, nb=bi+1)[bi, :n_res]
+                                rv_b = self._fetch_res_v(session, layer_idx, nb=bi+1)[bi, :n_res]
+                                res_k_parts.append(rk_b.transpose(1, 0, 2))
+                                res_v_parts.append(rv_b.transpose(1, 0, 2))
                         if res_k_parts:
                             res_k_all = mx.concatenate(res_k_parts, axis=1)   # [kv_heads, total_res, D]
                             res_v_all = mx.concatenate(res_v_parts, axis=1)
@@ -6549,6 +6665,10 @@ class MLXDKVWrapper:
         )
         self.manager.base_rank = self.base_rank
         self.manager.layer_adaptive_rank = self.layer_adaptive_rank
+        if "max_residual" in self.config:
+            self.manager.max_residual = int(self.config["max_residual"])
+        if "residual_quant" in self.config:
+            self.manager.residual_quant = str(self.config["residual_quant"]).strip().lower()
         if self.layer_adaptive_rank:
             self.manager.rank = int(round(self.base_rank * 1.5))
         else:
