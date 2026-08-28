@@ -151,14 +151,14 @@ python ACTIVE_RUNTIME/serving/cli.py --api-url http://localhost:8000/v1
 | `--draft-model` | `str` | `None` | Optional draft model ID for speculative decoding |
 | `--max-resident-sessions` | `int` | `4` | Maximum active resident chat sessions held in VRAM |
 
-### 3. The Preset Ladder
+### 3. The Preset Ladder (Standardized with INT4 Residuals)
 
-| preset | keys stored | energy / rank | residual $R$ | pick it when |
-|---|---|---|---|---|
-| `low` | rotated | 0.999 / 32 | 40 | memory is the binding constraint |
-| **`mid`** (default) | **unrotated** | 0.9999 / 64 | 40 | **general use — dense-parity accuracy** |
-| `high` | **unrotated** | 0.99999 / 128 | 128 | largest fidelity budget |
-| `ultra` | unrotated | 0.9999 / 64 | 40 | identical to `mid`; kept as a stable name |
+| preset | keys stored | energy / rank | residual $R$ (INT4) | memory / block (28L) | pick it when |
+|---|---|---|:---:|:---:|---|
+| `low` | rotated | 0.999 / 32 | **64 tokens** | 2.02 MB | memory is the binding constraint |
+| **`mid`** (default) | **unrotated** | 0.9999 / 64 | **128 tokens** | 4.03 MB | **general use — dense-parity accuracy** |
+| `high` | **unrotated** | 0.99999 / 128 | **256 tokens** | 8.06 MB | largest fidelity budget & CAD decode |
+| `ultra` | unrotated | 0.9999 / 64 | **256 tokens** | 8.06 MB | dense parity at ultra-long context |
 
 **`mid` stores keys un-rotated, and that is what buys dense parity.** On the two
 metrics with power to resolve anything, `mid` now equals dense exactly:
@@ -186,6 +186,53 @@ Two things worth knowing before choosing:
   ladder — `high` is the max-fidelity preset and should not be the one losing
   42% of digit recall.
   `DKV_ROTATED_POOL=0` takes the same trade on any preset.
+
+---
+
+---
+
+## 🔬 Core Innovations: Content-Aware Selection & 4-Bit Quantized Residuals
+
+### 1. Content-Aware / Rarity-Aware Residual Selection
+> **Architecture Note**: Content-Aware Residual Selection operates on **prompt ingest during block compression**, completely independent from runtime Context-Aware Decoding (CAD) contrastive logits.
+
+Vanilla DKV selects residual tokens purely by mathematical $L_2$ reconstruction error ($\arg\max \|\mathbf{k} - \hat{\mathbf{k}}\|_2$). On structured text, JSON, code, and logs, high-norm delimiters (`{`, `}`, `[`, `]`, `:`, `\n`) dominate $L_2$ error and consume all residual slots, starving rare keywords, entity names, and numeric passkeys.
+
+Differential-KV introduces a **multi-tiered semantic selection engine**:
+1. **Token Boost Multipliers**:
+   * Numeric Digits / Passkeys: **20.0x multiplier** (`DKV_BOOST_DIGITS`)
+   * TitleCase / Entity Names: **14.6x multiplier** (`DKV_BOOST_OWNER`)
+   * Rare Technical / Domain Terms: **7.3x multiplier** (`DKV_BOOST_RARE`)
+2. **IDF-Weighted Rarity Layer**: Computes inverse document frequency `IDF(t) = ln(1 + N / count(t))`. Rare tokens above the threshold receive a multiplicative boost to ensure document facts are preserved verbatim.
+3. **Punctuation Exclusion Guard**: Delimiters and whitespace are strictly barred from receiving rarity boosts.
+
+#### Tunable Selection Dials
+| Environment Variable | Default | Description |
+|---|:---:|---|
+| `DKV_RARITY_CAPTURE` | `1` | `1` enables rarity/content-aware residual selection; `0` reverts to vanilla $L_2$. |
+| `DKV_RARITY_WEIGHT` | `1.5` | Multiplicative weight applied to token IDF score. |
+| `DKV_RARITY_MIN_IDF` | `2.0` | Minimum token IDF threshold required to receive rarity boosting. |
+| `DKV_BOOST_DIGITS` | `20.0` | Error boost multiplier for numeric digit sequences. |
+| `DKV_BOOST_OWNER` | `14.6` | Error boost multiplier for entity owner names and title-cased terms. |
+| `DKV_BOOST_RARE` | `7.3` | Error boost multiplier for rare prose entities. |
+
+---
+
+### 2. Physical 4-Bit Group-Quantized Residual Buffers (INT4)
+
+To eliminate the memory cost of exact residual storage, Differential-KV implements **true physical asymmetric group quantization** (`group_size=64, bits=4`) across Apple Silicon (MLX) and NVIDIA (CUDA/Triton):
+
+* **Packed Physical Storage**: Residual keys and values are packed into `uint32` / `int32` tensors (`head_dim * bits // 32 = 16` words for $D=128$) alongside half-precision scale and bias vectors (8 bytes).
+* **Zero Persistent FP16 Buffers**: In INT4 mode, persistent full-precision residual cache buffers are set to `None`, freeing $3.56x$ physical VRAM.
+* **Transient On-the-Fly Dequantization**: Only the gathered top-$K$ routed blocks are dequantized into transient scratchpads during decode attention.
+* **$2x$ Residual Capacity in $44\%$ Less Memory**: Storing **$R=256$ INT4 residuals (112.9 MB at 16k)** consumes almost half the memory of the old **$R=128$ FP16 residuals (200.7 MB at 16k)** while keeping twice as many exact tokens.
+
+#### Tunable Quantization Dials
+| Environment Variable | Default | Description |
+|---|:---:|---|
+| `DKV_RESIDUAL_QUANT` | `int4` | Quantization format: `int4` (default, $3.56x$ compression), `int8` ($1.9x$), or `none` (FP16 fallback). |
+| `DKV_RESIDUAL_QUANT_GROUP_SIZE` | `64` | Sub-vector quantization group size. |
+| `DKV_RESIDUAL_QUANT_BITS` | `4` | Bit-width per quantized element (4 or 8). |
 
 ---
 

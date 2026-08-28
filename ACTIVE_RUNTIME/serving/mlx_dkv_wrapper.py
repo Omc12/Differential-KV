@@ -705,19 +705,20 @@ def _apply_rarity_capture(boost_multipliers, tok_strs, tids, counts,
     get the shape-based passes only.
 
     Returns the number of newly-boosted tokens."""
-    if os.environ.get("DKV_RESIDUAL_RARITY_CAPTURE", "1") != "1":
+    enabled = os.environ.get("DKV_RARITY_CAPTURE", os.environ.get("DKV_RESIDUAL_RARITY_CAPTURE", "1")).strip().lower()
+    if enabled in ("0", "off", "false", "no"):
         return 0
     if not counts:          # no frequency information → skip (see docstring)
         return 0
     import math
     try:
-        rarity_w = float(os.environ.get("DKV_RESIDUAL_RARITY_WEIGHT", "0.5"))
+        rarity_w = float(os.environ.get("DKV_RARITY_WEIGHT", os.environ.get("DKV_RESIDUAL_RARITY_WEIGHT", "0.5")))
     except ValueError:
         rarity_w = 0.5
     try:
-        rarity_min_idf = float(os.environ.get("DKV_RESIDUAL_RARITY_MIN_IDF", "3.0"))
+        rarity_min_idf = float(os.environ.get("DKV_RARITY_MIN_IDF", os.environ.get("DKV_RESIDUAL_RARITY_MIN_IDF", "2.0")))
     except ValueError:
-        rarity_min_idf = 3.0
+        rarity_min_idf = 2.0
     S = len(tok_strs)
     n_boosted = 0
     for i in range(S):
