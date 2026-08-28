@@ -999,6 +999,29 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                     return true;
                 };
 
+                auto strip_of = [](const std::string& s) {
+                    size_t b = s.find_first_not_of(" \t\n\r");
+                    if (b == std::string::npos) return std::string();
+                    size_t e = s.find_last_not_of(" \t\n\r");
+                    return s.substr(b, e - b + 1);
+                };
+
+                static const float boost_digits = []() {
+                    const char* e = std::getenv("DKV_BOOST_DIGITS");
+                    if (e) { try { return std::stof(e); } catch (...) {} }
+                    return 20.0f;
+                }();
+                static const float boost_owner = []() {
+                    const char* e = std::getenv("DKV_BOOST_OWNER");
+                    if (e) { try { return std::stof(e); } catch (...) {} }
+                    return 14.6f;
+                }();
+                static const float boost_rare = []() {
+                    const char* e = std::getenv("DKV_BOOST_RARE");
+                    if (e) { try { return std::stof(e); } catch (...) {} }
+                    return 7.3f;
+                }();
+
                 std::vector<bool> is_core(S_deltas, false);
                 std::vector<bool> is_prose(S_deltas, false);
 
@@ -1110,7 +1133,7 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                             }
                             float idf = std::log(static_cast<float>(std::max(params.session_len, 2)) / (count + 0.1f));
                             float rarity_weight = std::max(1.0f, std::min(idf, 6.0f));
-                            boost_multipliers[idx] = tok_boost * (rarity_weight / 2.0f);
+                            boost_multipliers[idx] = std::max(boost_digits, tok_boost * (rarity_weight / 2.0f));
                         }
                     }
                 }
@@ -1147,12 +1170,6 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                     auto lower_of = [](std::string s) {
                         for (auto& c : s) c = std::tolower(static_cast<unsigned char>(c));
                         return s;
-                    };
-                    auto strip_of = [](const std::string& s) {
-                        size_t b = s.find_first_not_of(" \t\n\r");
-                        if (b == std::string::npos) return std::string();
-                        size_t e = s.find_last_not_of(" \t\n\r");
-                        return s.substr(b, e - b + 1);
                     };
                     // Uppercase check accepts ASCII A-Z plus the Latin-1
                     // supplement capitals (À-Þ, UTF-8 lead 0xC3 + 0x80-0x9E) so
@@ -1220,7 +1237,7 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                                 if (it != token_counts.end()) count = it->second;
                                 float idf = std::log(static_cast<float>(std::max(params.session_len, 2)) / (count + 0.1f));
                                 float rarity_weight = std::max(1.0f, std::min(idf, 6.0f));
-                                boost_multipliers[i2] = tok_boost * (rarity_weight / 2.0f);
+                                boost_multipliers[i2] = std::max(boost_owner, tok_boost * (rarity_weight / 2.0f));
                             }
                         }
                     }
@@ -1416,6 +1433,57 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+
+                // ── Rarity pass — RARE PROSE WORDS (Content-Aware Selection) ─────────────
+                static const bool rarity_on = []() {
+                    const char* e1 = std::getenv("DKV_RARITY_CAPTURE");
+                    if (e1) return !(std::string(e1) == "0");
+                    const char* e2 = std::getenv("DKV_RESIDUAL_RARITY_CAPTURE");
+                    if (e2) return !(std::string(e2) == "0");
+                    return true;
+                }();
+                static const float rarity_weight_mult = []() {
+                    const char* e1 = std::getenv("DKV_RARITY_WEIGHT");
+                    if (e1) { try { return std::stof(e1); } catch (...) {} }
+                    const char* e2 = std::getenv("DKV_RESIDUAL_RARITY_WEIGHT");
+                    if (e2) { try { return std::stof(e2); } catch (...) {} }
+                    return 1.5f;
+                }();
+                static const float rarity_min_idf = []() {
+                    const char* e1 = std::getenv("DKV_RARITY_MIN_IDF");
+                    if (e1) { try { return std::stof(e1); } catch (...) {} }
+                    const char* e2 = std::getenv("DKV_RESIDUAL_RARITY_MIN_IDF");
+                    if (e2) { try { return std::stof(e2); } catch (...) {} }
+                    return 2.0f;
+                }();
+
+                if (rarity_on && !token_counts.empty()) {
+                    for (int s = 0; s < S_deltas; ++s) {
+                        if (boost_multipliers[s] > 1.0f) {
+                            continue; // already protected by a shape rule
+                        }
+                        std::string sc = strip_of(tok_strs[s]);
+                        bool has_alnum = false;
+                        for (char c : sc) {
+                            if (std::isalnum(static_cast<unsigned char>(c))) {
+                                has_alnum = true;
+                                break;
+                            }
+                        }
+                        if (sc.empty() || !has_alnum) {
+                            continue; // exclusion guard: pure punctuation / whitespace strictly filtered
+                        }
+                        int32_t tid = params.token_ids[s + 1];
+                        int count = 1;
+                        auto it = token_counts.find(tid);
+                        if (it != token_counts.end()) count = it->second;
+                        float idf = std::log(1.0f + static_cast<float>(std::max(params.session_len, 1)) / static_cast<float>(std::max(count, 1)));
+                        if (idf >= rarity_min_idf) {
+                            float score_mult = 1.0f + rarity_weight_mult * idf;
+                            boost_multipliers[s] = std::max(boost_multipliers[s], std::max(score_mult, boost_rare));
                         }
                     }
                 }
