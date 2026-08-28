@@ -40,6 +40,25 @@ _GOOD_DKV_TEST_DEFAULTS = {
 }
 
 
+# ── Keys we do NOT set, but MUST restore ─────────────────────────────────────
+# native_core/config.py:814,819 EXPORT preset-derived values into the process
+# environment with setdefault(), because pool_stores_rotated_k() and
+# _svd_energy_target() read them at call time. setdefault means the FIRST
+# DKVConfig built in the process wins for the whole process -- and
+# MLXKVBlockManager.__init__ resolves `self.rotated_pool` from that same
+# variable (mlx_dkv_wrapper.py:1783, default "1").
+#
+# So one test building a config on a preset whose rotated_pool is False (`high`,
+# `mid` and `ultra` all are) silently flips the pool frame for every MLX manager
+# constructed later in the same process. Measured: at test_residual_budget_clamp
+# the environment holds DKV_ROTATED_POOL='0' and DKV_SVD_ENERGY='0.9999', a fresh
+# manager reports rotated_pool=False, and its five tests fail on
+# ingest_streaming's unrotated-key guard -- while all five PASS when the file is
+# run alone. Same class as the DKV_POOL_BUDGET_GB pin above, and same reasoning:
+# an ISOLATION fix, not a tuning knob.
+_ISOLATED_ENV_KEYS = ("DKV_ROTATED_POOL", "DKV_SVD_ENERGY")
+
+
 def pytest_collection_modifyitems(items):
     for item in items:
         if inspect.iscoroutinefunction(item.obj):
@@ -51,7 +70,8 @@ def good_dkv_defaults():
     """Run every test with the production DKV levers on (sparse path forced),
     then restore the prior environment so tests that set their own values (e.g.
     test_vscale_parity toggling DKV_V_SCALE) are unaffected and nothing leaks."""
-    saved = {k: os.environ.get(k) for k in _GOOD_DKV_TEST_DEFAULTS}
+    saved = {k: os.environ.get(k)
+             for k in (*_GOOD_DKV_TEST_DEFAULTS, *_ISOLATED_ENV_KEYS)}
     for k, v in _GOOD_DKV_TEST_DEFAULTS.items():
         os.environ.setdefault(k, v)
     yield

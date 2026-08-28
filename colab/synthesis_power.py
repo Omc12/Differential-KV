@@ -46,7 +46,10 @@ import os
 import statistics
 import sys
 
-import torch
+try:                       # CUDA arms only; a Mac run never reaches them
+    import torch
+except ImportError:        # noqa: BLE001
+    torch = None
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, "ACTIVE_RUNTIME"))
@@ -183,6 +186,86 @@ def run_dense(a, reps):
     return out
 
 
+# ── MLX arms ─────────────────────────────────────────────────────────────────
+# The statistics (replicates, pairing, the CI, the power calculation) are shared
+# with the CUDA arms above ON PURPOSE. The point of this harness is that both
+# runtimes are judged by the same procedure; forking it into a second file is how
+# two "comparable" numbers stop being comparable.
+#
+# The one genuine difference is the SEED VARIABLE. CUDA's randomised SVD reads
+# DKV_RSVD_SEED, MLX's reads DKV_SVD_SEED (compress_mlx_block_batched), and both
+# read it at CALL time so setting it per replicate really does redraw the
+# projection for the prefill that follows. Vary it: temperature-0 replication is
+# deterministic and therefore proves nothing -- the seed is the axis that has to
+# move, and at a FIXED config it alone spans ~30 synthesis points.
+
+def run_dkv_mlx(a, reps):
+    os.environ.setdefault("DKV_ENGAGE_THRESHOLD", "1024")
+    from serving.decode_config import BEST_DECODE_DEFAULTS
+    for k, v in BEST_DECODE_DEFAULTS.items():
+        os.environ.setdefault(k, v)
+    from serving.mlx_dkv_wrapper import MLXDKVWrapper
+    cfg = {"preset": os.environ.get("DKV_PRESET", "mid")}
+    # Constructor arguments, not environment knobs the runtime re-reads. Forgetting
+    # to forward them silently runs the default for every arm of a sweep and
+    # returns identical numbers, which is exactly how the CUDA omission was caught.
+    if os.environ.get("BLOCK"):
+        cfg["micro_block_size"] = int(os.environ["BLOCK"])
+        cfg["block_size"] = int(os.environ["BLOCK"])
+    if os.environ.get("RANK"):
+        cfg["rank"] = int(os.environ["RANK"])
+    w = MLXDKVWrapper(model_id=a.model, config=cfg)
+    w.ensure_loaded()
+    print(f"  [mlx dkv] preset={cfg['preset']} "
+          f"rotated_pool={w.manager.rotated_pool} "
+          f"block_size={w.manager.block_size}", flush=True)
+    tok = w.tokenizer
+    out = []
+    for i, (off, seed) in enumerate(reps):
+        os.environ["DKV_SVD_SEED"] = str(seed)
+        for sid in list(getattr(w.manager, "sessions", {}) or {}):
+            try:
+                w.manager.clear_session(sid)
+            except Exception:                                    # noqa: BLE001
+                pass
+        body = build_body(tok, a.ctx, off)
+        txt = w.generate(prompt=chat(tok, body), max_new_tokens=a.new,
+                         temperature=0.0, top_p=1.0, repetition_penalty=1.0)
+        txt = txt.rsplit("assistant", 1)[-1]
+        sc, nf, nl = score(txt)
+        out.append(sc)
+        print(f"  rep {i}: off={off} seed={seed} score={sc:.1f} "
+              f"(facts {nf}/15, links {nl}/5)", flush=True)
+    return out
+
+
+def run_dense_mlx(a, reps):
+    """The control arm: mlx_lm with DKV not loaded.
+
+    Replicates vary the DOCUMENT WINDOW here as well as the SVD seed. Dense has no
+    randomised SVD, so a fixed window would give it n=1 BY CONSTRUCTION and leave
+    the DKV distribution with nothing to be compared against — that was one of the
+    three defects in the harness this file replaced.
+    """
+    from mlx_lm import generate as mlx_generate, load as mlx_load
+    model, tok_w = mlx_load(a.model)
+    # mlx_lm returns a TokenizerWrapper, which is NOT callable — build_body() calls
+    # tok(text).input_ids. Unwrap for tokenisation, keep the wrapper for generate(),
+    # so both arms are sized by the same builder on the same token counts.
+    tok = getattr(tok_w, "_tokenizer", tok_w)
+    out = []
+    for i, (off, _seed) in enumerate(reps):
+        body = build_body(tok, a.ctx, off)
+        txt = mlx_generate(model, tok_w, prompt=chat(tok, body),
+                           max_tokens=a.new, verbose=False)
+        txt = txt.rsplit("assistant", 1)[-1]
+        sc, nf, nl = score(txt)
+        out.append(sc)
+        print(f"  rep {i}: off={off} score={sc:.1f} (facts {nf}/15, links {nl}/5)",
+              flush=True)
+    return out
+
+
 def summarise(name, xs):
     n = len(xs)
     m = statistics.mean(xs)
@@ -225,13 +308,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arm", choices=["dkv", "dense"])
     ap.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"))
-    ap.add_argument("--model", default="Qwen/Qwen3.5-2B")
+    ap.add_argument("--model", default="")
+    ap.add_argument("--runtime", choices=["auto", "cuda", "mlx"], default="auto",
+                    help="auto picks mlx on Apple silicon, cuda elsewhere.")
     ap.add_argument("--ctx", type=int, default=16384)
     ap.add_argument("--reps", type=int, default=8)
     ap.add_argument("--new", type=int, default=320)
     ap.add_argument("--chunk", type=int, default=1024)
     ap.add_argument("--out", default="")
     a = ap.parse_args()
+
+    runtime = a.runtime
+    if runtime == "auto":
+        runtime = "mlx" if sys.platform == "darwin" else "cuda"
+    if not a.model:
+        a.model = ("mlx-community/Qwen3.5-2B-4bit" if runtime == "mlx"
+                   else "Qwen/Qwen3.5-2B")
 
     if a.compare:
         compare(*a.compare)
@@ -247,8 +339,15 @@ def main():
                    "DKV_PREFILL_CHUNK_SIZE"):
             if os.environ.get(_k):
                 label += f" {_k}={os.environ[_k]}"
-    print(f"ARM {label}  model={a.model} ctx={a.ctx} reps={a.reps}", flush=True)
-    xs = (run_dense if a.arm == "dense" else run_dkv)(a, reps)
+    # RECORD THE CONFIGURATION NEXT TO THE SCORE. A number compared against one
+    # taken under a different runtime, preset or pool mode is not a comparison.
+    if runtime == "mlx" and a.arm != "dense":
+        label += f" rotated_pool={os.environ.get('DKV_ROTATED_POOL', '1')}"
+    print(f"ARM {label}  runtime={runtime} model={a.model} ctx={a.ctx} "
+          f"reps={a.reps}", flush=True)
+    _runners = {("cuda", "dense"): run_dense, ("cuda", "dkv"): run_dkv,
+                ("mlx", "dense"): run_dense_mlx, ("mlx", "dkv"): run_dkv_mlx}
+    xs = _runners[(runtime, a.arm)](a, reps)
     print()
     summarise(label, xs)
     if a.out:

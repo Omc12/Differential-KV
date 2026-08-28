@@ -98,6 +98,61 @@ async def test_formatting():
     # Include the OUTPUT in every message. Without it a failure here says only
     # "no newlines" and the text that caused it is gone, which is why this test
     # stayed intermittent-and-undiagnosed across several suite runs.
+    #
+    # UPDATE 2026-08-18, two causes found, one fixed:
+    #
+    #   1. FIXED. The engine had no KV cache, so a short prompt decoded with no
+    #      history and produced word salad that contained a list marker about
+    #      half the time. It now threads its own cache and the output is real
+    #      prose ('- Red: A vibrant, intense hue that symbolizes passion...').
+    #      A second, separate cause was the CUDA graph replaying a forward
+    #      captured WITHOUT that cache, which made it depend on warmup timing;
+    #      the graph is now kept off the cache-owning path. This test is 6/6
+    #      green in ISOLATION as a result, where it used to be ~50/50.
+    #
+    #   2. STILL OPEN, and PROBABILISTIC rather than order-dependent. Measured:
+    #
+    #        alone                              6/6 pass
+    #        first 6 preceding files + it       pass
+    #        next 7 preceding files + it        pass
+    #        the two engine tests + it          pass
+    #        all 15 preceding files + it        FAILED once, PASSED once
+    #        the FULL suite (43 files)          failed 2/2
+    #
+    #      An earlier read of that table called it suite isolation, on the
+    #      strength of the one failing 15-file run. The rerun passed, so that
+    #      was over-read: no file set flips it deterministically, and the rate
+    #      simply rises with how much has run before.
+    #
+    #      WHAT THE FAILURE IS: not corruption. The generated text is coherent,
+    #      on-topic and punctuated -- it is simply not a LIST:
+    #
+    #        fails:  '连云港 united red, Beijing sky blue, Tokyo cherry blossom.'
+    #        passes: '- Red: A vibrant, intense hue that symbolizes passion...'
+    #
+    #      Same prompt, temperature 0.0, completely different continuation. The
+    #      only assertion that trips is has_newlines.
+    #
+    #      WHAT CAUSES IT: UNKNOWN. The obvious candidate was kernel selection --
+    #      greedy decode is only reproducible while the kernels are, and cuBLAS
+    #      and SDPA choose partly on free workspace, so a process holding many
+    #      models could choose differently. TESTED AND DISPROVEN:
+    #      DKV_DETERMINISTIC=1, which pins the SDPA backend for exactly this
+    #      class of problem, does NOT fix it (2/2 runs still fail) and
+    #      additionally breaks test_predictive_paging. So the SDPA reduction is
+    #      not the source and there is currently no knob that turns this off.
+    #
+    #      One real leak WAS found on the way and is fixed: _MUTATION_OUT_ACTIVE
+    #      is a module global republished only inside the wrapper's decode loop,
+    #      so anything calling model() directly inherited the last generate()'s
+    #      value. Cleared at prefill now.
+    #
+    #      So do not reach for DKV_DETERMINISTIC here: it costs decode speed
+    #      (which is why it is not the default), it costs another test, and it
+    #      does not buy the thing it looks like it should buy.
+    #
+    # Do not "fix" this by loosening the assertions again. What it catches is
+    # gone; what remains is the suite needing per-test isolation.
     _ctx = f" | generated {len(generated_text)} chars: {generated_text[:300]!r}"
     assert has_newlines, "Formatting failure: No newlines generated!" + _ctx
     assert has_bullets, "Formatting failure: No list markers generated!" + _ctx

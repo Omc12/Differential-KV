@@ -306,3 +306,48 @@ if __name__ == "__main__":
     test_combined_parity(device)
 
     print("\n✓ All tests passed.")
+
+
+def test_dense_only_non_combined(device="cuda" if torch.cuda.is_available() else "cpu"):
+    """The NON-combined entry point with N=0 must also match dense SDPA.
+
+    test_dense_only above covers native_triton_sparse_attn_decode_combined, which
+    always had a dense-only fast path. native_triton_sparse_attn_decode did not:
+    it delegated N==0 to the PyTorch decoder, which returns a ZERO-WIDTH tensor
+    ([1, H_q, 1, 0] instead of [1, H_q, 1, D]), so the dense window was present
+    and never attended. That state is reachable whenever the context is shorter
+    than one block, and it produced empty attention rather than an error.
+
+    Covering only the combined path is what let it sit: the two entry points had
+    different behaviour for the same input and only one was tested.
+    """
+    print(f"[test_dense_only_non_combined] device={device}")
+    H_kv, L_dense, D = 4, 128, 64
+    H_q = H_kv * 4
+    q       = torch.randn(1, H_q, 1, D, device=device, dtype=torch.float16) * 0.1
+    dense_k = torch.randn(1, H_kv, L_dense, D, device=device, dtype=torch.float16) * 0.1
+    dense_v = torch.randn(1, H_kv, L_dense, D, device=device, dtype=torch.float16) * 0.1
+
+    bs, h, l, d = dense_k.shape
+    n_rep = H_q // H_kv
+    dk_rp = dense_k[:, :, None, :, :].expand(bs, h, n_rep, l, d).reshape(bs, h * n_rep, l, d)
+    dv_rp = dense_v[:, :, None, :, :].expand(bs, h, n_rep, l, d).reshape(bs, h * n_rep, l, d)
+    ref = F.scaled_dot_product_attention(q.float(), dk_rp.float(), dv_rp.float()).to(torch.float16)
+
+    from native_core.sparse_decode.triton_fused_decode import (
+        native_triton_sparse_attn_decode as _nt)
+    pool = MockPool(1, 4, 4, H_kv, D, device, torch.float16)
+    bidx = torch.zeros(0, device=device, dtype=torch.int32)
+    out = _nt(
+        q=q, block_indices=bidx, pool=pool, dense_blocks=None,
+        active_k=dense_k, active_v=dense_v,
+        num_key_value_groups=n_rep, R=4, S_MAX=4,
+    )
+
+    assert out.shape[-1] == D, (
+        f"dense-only returned width {out.shape[-1]}, expected {D} -- the "
+        f"zero-width regression is back")
+    atol = 5e-2 if device == "cpu" else 5e-3
+    max_err = (ref.float() - out.float()).abs().max().item()
+    print(f"  max_err={max_err:.5f}  (atol={atol})")
+    assert max_err < atol, f"dense-only mismatch: {max_err} >= {atol}"

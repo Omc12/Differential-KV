@@ -324,8 +324,31 @@ def pool_stores_rotated_k() -> bool:
     was read at the time as a broken unrotated READ path rather than a real
     fidelity trade, and that reading was right: it is now fixed. Re-measured
     with DKV_ROTATED_POOL=0 on the current build, the sweep is 9/9 with 9/9
-    determinism on BOTH Qwen3.5-2B and Qwen2.5-1.5B-Instruct, at every depth
-    and every length.
+    determinism on BOTH Qwen3.5-2B and Qwen2.5-1.5B-Instruct.
+
+    "AT EVERY DEPTH AND EVERY LENGTH" IS AN OVERCLAIM, corrected 2026-08-25.
+    That sweep is validate_cuda_dkv.py's nine cases, which are
+    [2k, 8k, 32k] x [0.0, 0.5, 0.9] -- THREE depths on a coarse grid, not every
+    depth. The claim reads as coverage the suite does not have, and the gap is
+    not hypothetical: colab/needle_suite_cuda.py samples 0.1 and fails there on
+    Qwen2.5-1.5B while all three validator depths pass.
+
+    That matters MOST for this flag, because the phase error described above is
+    depth-dependent BY CONSTRUCTION -- it grows with a token's offset from its
+    block anchor, and _ingest_k's docstring records the same gradient from the
+    other side ("at depth 0.0 the block sits near position 0 where RoPE is
+    ~identity, so it passed while deeper needles degraded"). A three-point grid
+    that happens to include 0.0 is the weakest possible test of a defect whose
+    signature is a gradient. Do not read the 9/9 as "no depth gradient"; it is
+    "no gradient visible at 0.0, 0.5 and 0.9".
+
+    The open question this leaves is whether the remaining unrotated-pool
+    failures are the phase error or the needle's tokenisation
+    (niah_recall's OMEGA-7741-DELTA splits ' O'|'ME'|'GA', which
+    _assert_needle_unambiguous exists to reject). colab/needle_depth_sweep.py
+    separates them: a fine depth grid, an unambiguous needle, and a DENSE
+    control at every point, so a depth where both fail is the prompt and a
+    depth where only DKV fails is DKV.
 
     With that gone, unrotated is strictly better on accuracy. linkbench at 32k
     over 48 seeds on Qwen3.5-2B -- 48 samples per point, unlike multifact whose
@@ -340,6 +363,20 @@ def pool_stores_rotated_k() -> bool:
     (-18% to -24%), and device VRAM 5.21 -> 6.31 GB. So the DEFAULT stays
     rotated and the `ultra` preset sets rotated_pool=False, which is where a
     speed-for-accuracy trade of that size belongs.
+
+    THAT -18% TO -24% IS AN UNDERSTATEMENT, corrected 2026-08-17. It was
+    cross-process wall INCLUDING prefill, which dilutes a decode-only effect.
+    Measured paired and in-process (EXPERIMENT=rotated_pool), 32k, 8 rounds:
+
+        Qwen3.5-2B   ( 6 of 24 attended)  39.72 -> 57.39 ms/tok    +43%
+        Qwen2.5-1.5B (28 of 28 attended)  51.48 -> 122.54 ms/tok   +137%
+
+    THE COST SCALES WITH ATTENDED-LAYER COUNT -- the rotation avoided at store
+    is applied at read on every attended layer -- so a dense-attention model
+    pays about 2.4x decode where a hybrid pays 43%. Any figure quoted for one
+    model tells you nothing about the other. The conclusion is unchanged and now
+    rests on the real number: rotated by default, `ultra` for content that needs
+    otherwise.
     """
     # DEFAULT 0. This shipped as "1" while EVERY prefill capture site stored
     # `unrot_key_states` unconditionally, so the pool held PRE-RoPE keys and this
@@ -1435,6 +1472,13 @@ if use_compile == "1":
                       flush=True)
                 state["use"] = eager
                 return eager(*a, **kw)
+        # Let callers ask whether the fallback actually fired. warm_up_jit used
+        # to announce "Inductor compilation finished" unconditionally, because
+        # the guard swallows the backend failure and the warmup call therefore
+        # RETURNS NORMALLY -- so a box without cl.exe was told compilation had
+        # succeeded while every decode ran eager. Two contradictory lines in the
+        # same log, and the reassuring one came last.
+        _run._dkv_eager_fallback = lambda: state["use"] is eager
         return _run
 
     try:
@@ -1576,7 +1620,20 @@ def warm_up_jit(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        print("[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.", flush=True)
+        # Report what the guard actually settled on, not what we attempted.
+        _fell_back = [
+            _n for _n, _fn in (("_reconstruct_and_score", _reconstruct_and_score),
+                               ("_attend_and_reconstruct_v", _attend_and_reconstruct_v))
+            if getattr(_fn, "_dkv_eager_fallback", None) is not None
+            and _fn._dkv_eager_fallback()
+        ]
+        if _fell_back:
+            print(f"[DKV JIT] Decode kernel warmup finished, but Inductor did NOT "
+                  f"compile: {', '.join(_fell_back)} fell back to eager for the "
+                  f"rest of the process. Decode is correct but unfused; on Windows "
+                  f"this is usually a missing cl.exe (MSVC Build Tools).", flush=True)
+        else:
+            print("[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.", flush=True)
 
     except Exception as e:
         # Non-fatal: warmup failure just means first real call will compile.
@@ -1755,7 +1812,8 @@ def _build_stratified_U_for_triton(
 _gathered_rot_cache: dict = {}
 
 
-def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indices, cos, sin):
+def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indices, cos, sin,
+                                     raw_k=False):
     """Gather the [N] routed rows of every per-block tensor the Triton kernels
     read, pre-rotating the K-side rows (anchors_K, V_K, res_k) by each block
     anchor's RoPE when rotation inputs are provided. Returns a dict of compact
@@ -1787,12 +1845,24 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     else:
         _G = lambda src, nm: src[indices]                            # noqa: E731
 
+    # V is indexed by BASIS ROW, everything else by slot. Under DKV_SHARED_BASIS
+    # several slots resolve to the same row, so the V gather MATERIALISES one
+    # copy per selected block -- the sharing saves resident VRAM in the pool,
+    # not transient bytes in the gather. basis_index is the identity when the
+    # feature is off, and _Gv is then the same call _G was.
+    _v_indices = (base_pool.basis_index(indices)
+                  if hasattr(base_pool, "basis_index") else indices)
+    if _reuse:
+        _Gv = lambda src, nm: _gather_into(src, _v_indices, _bufs, nm)   # noqa: E731
+    else:
+        _Gv = lambda src, nm: src[_v_indices]                            # noqa: E731
+
     # anchors_K / V_K are ROTATED below, which produces new tensors anyway; the
     # gather buffer only saves the pre-rotation copy.
     anchors_K = _G(pool_for_kernel.anchors_K, "anchors_K")   # [N, H_kv, D]
-    V_K       = _G(pool_for_kernel.V_K,       "V_K")         # [N, R, H_kv, D]
+    V_K       = _Gv(pool_for_kernel.V_K,      "V_K")         # [N, R, H_kv, D]
     g["anchors_V"] = _G(pool_for_kernel.anchors_V, "anchors_V")
-    g["V_V"]       = _G(pool_for_kernel.V_V,       "V_V")
+    g["V_V"]       = _Gv(pool_for_kernel.V_V,      "V_V")
     g["U"]         = _G(pool_for_kernel.U,         "U")
     g["U_scale"]   = _G(pool_for_kernel.U_scale,   "U_scale")
     g["scales"]    = _G(pool_for_kernel.scales,    "scales")
@@ -1802,8 +1872,65 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     # convention), so every rotation below would be a SECOND rotation. Skipping
     # it is not an optimisation, it is required for correctness -- and it is
     # also strictly cheaper.
+    # MAKING THIS CHEAPER: the obvious lever is already taken, and lengthening it
+    # buys nothing. The rotation below is applied at each block's ANCHOR position,
+    # which is fixed per block, so its result does not depend on the decode step --
+    # it looks like something that should be computed once and reused. It already
+    # is: this whole gather sits behind the remat cache, whose key is
+    # `step // DKV_REMAT_INTERVAL`, so it recomputes once every 4 tokens rather
+    # than every token.
+    #
+    # Raising that interval 4 -> 16 under an UNROTATED pool, paired in-process,
+    # Qwen3.5-2B at 32k, 8 rounds: mean_diff +0.019 ms, 95% CI [-2.918, +2.956].
+    # No effect. So the unrotated pool's 43-137% is NOT recompute frequency, and
+    # caching the rotated basis harder will not recover it.
+    #
+    # PROFILED. THE COST IS NOT THE ROTATION, AND NOT ANYWHERE NEAR IT.
+    #
+    # Four hypotheses were measured and all four are dead. Recompute frequency
+    # (remat interval 4 -> 16): +0.019 ms, CI [-2.918, +2.956]. The router's own
+    # rotation, which only runs unrotated (DKV_ROUTER_ROPE): +0.210 ms, CI
+    # [-4.111, +4.531]. The residual exact-RoPE gather, likewise unrotated-only
+    # (DKV_RESIDUAL_EXACT_ROPE): -0.641 ms, CI [-2.046, +0.764]. All no-effect.
+    #
+    # torch.profiler over 24 decode steps, Qwen3.5-2B at 32k, top CUDA kernels by
+    # self time. Total self-CUDA 4401 ms rotated against 4684 ms unrotated, and
+    # the delta is one kernel:
+    #
+    #   fmha_cutlassF_f16_aligned_32x128   rotated  501.95 ms / 342 calls
+    #                                      UNROTAT  729.07 ms / 198 calls
+    #
+    # +227 ms of a +283 ms total -- 80% of the whole regression -- inside SDPA
+    # itself. NO RoPE kernel appears in the delta. Note the direction: unrotated
+    # makes FEWER attention calls (198 vs 342) that each cost 2.5x more (3.68 vs
+    # 1.47 ms/call). The operand is bigger, not the arithmetic on the way in.
+    #
+    # So "make the rotation cheaper" is the wrong target and every version of it
+    # will keep measuring zero. The open question is why an unrotated pool hands
+    # SDPA more to chew on -- a longer materialised K/V, or a different mix of
+    # remat versus fused-kernel paths (the unrotated profile also shows
+    # _fused_sparse_decode_kernel at 144 calls where the rotated one does not).
+    # Start there, with the profiler, not here.
+    # raw_k: hand back the PRE-RoPE frame untouched, for a caller that will
+    # MATERIALISE the keys and can therefore rotate each one at its OWN absolute
+    # position. That is strictly better than what `do_rot` does below, which
+    # rotates the anchor and the whole V_K basis at the ANCHOR's position and
+    # leaves every token in the block carrying a RoPE phase error of up to a
+    # full block -- the Project-Then-Attend approximation MLX does not make.
+    #
+    # It also removes a frame SPLIT that no amount of residual budget can fix:
+    # with do_rot the exact residuals are rotated at their TRUE positions while
+    # the low-rank base they correct is rotated at the anchor, so the correction
+    # and the thing it corrects live in different frames and their sum is the
+    # exact key in neither. Raw keeps base and residual in ONE frame and rotates
+    # the sum, which is what makes the residual actually cancel.
+    #
+    # Only the remat path can use this: project-then-attend never forms the key,
+    # so it cannot rotate per token without a D-dim reconstruction per token,
+    # which is the whole cost the low-rank form exists to avoid.
     do_rot = (anchor_indices is not None and cos is not None and sin is not None
-              and not pool_stores_rotated_k())
+              and not pool_stores_rotated_k() and not raw_k)
+    g["raw_k"] = bool(raw_k and not pool_stores_rotated_k())
     cos_anc = sin_anc = None
     if do_rot:
         cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
@@ -2015,8 +2142,10 @@ def fused_decode_mps(
     S_comp = U_a.shape[1]
     AncK_a = pool.anchors_K[idx].float()
     AncV_a = pool.anchors_V[idx].float()
-    VK_a   = pool.V_K[idx].float()
-    VV_a   = pool.V_V[idx].float()
+    # V is indexed by BASIS ROW (identity when DKV_SHARED_BASIS is off).
+    _v_idx = pool.basis_index(idx) if hasattr(pool, "basis_index") else idx
+    VK_a   = pool.V_K[_v_idx].float()
+    VV_a   = pool.V_V[_v_idx].float()
 
     if anchor_indices is not None and cos is not None and sin is not None:
         cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
@@ -2396,7 +2525,10 @@ def _pytorch_vectorized_sparse_attn_decode(
         else:
             U = reconstruct_batch_U(pool, indices).to(q.dtype)
             
-            V_K_raw = pool.V_K[indices]
+            # V is indexed by BASIS ROW, not by slot. With DKV_SHARED_BASIS off
+            # basis_index is the identity and this is the same gather as before.
+            _v_idx = pool.basis_index(indices) if hasattr(pool, "basis_index") else indices
+            V_K_raw = pool.V_K[_v_idx]
             anchors_K_raw = pool.anchors_K[indices]
             
             if anchor_indices is not None and cos is not None and sin is not None:
@@ -2419,7 +2551,7 @@ def _pytorch_vectorized_sparse_attn_decode(
                 anchors_K_raw = _partial_rope_apply(anchors_K_raw, cos_anc_2d, sin_anc_2d)
                 
             V_K = repeat_kv_at_dim(V_K_raw, num_key_value_groups, dim=2)
-            V_V = repeat_kv_at_dim(pool.V_V[indices], num_key_value_groups, dim=2)
+            V_V = repeat_kv_at_dim(pool.V_V[_v_idx], num_key_value_groups, dim=2)
             anchors_K = repeat_kv_at_dim(anchors_K_raw, num_key_value_groups, dim=1)
             anchors_V = repeat_kv_at_dim(pool.anchors_V[indices], num_key_value_groups, dim=1)
             scales = pool.scales[indices].view(N, 1, 1)
@@ -2809,6 +2941,71 @@ def build_dense_residual_rows(g, dtype=None):
     return out_k.to(dt), out_v.to(dt), n_rows
 
 
+def _dense_only_attend(q, dense_blocks, active_k, active_v, active_len,
+                       num_key_value_groups, cos, sin):
+    """Attend the DENSE WINDOW alone, for a step that routed zero blocks.
+
+    native_triton_sparse_attn_decode used to delegate N==0 to the PyTorch
+    decoder, which returns a ZERO-WIDTH tensor -- [1, H_q, 1, 0] instead of
+    [1, H_q, 1, D]. The dense window was present and simply never attended, so a
+    zero-block step produced empty attention. That is reachable whenever the
+    context is shorter than one block: it is why DKV_ENGAGE_THRESHOLD exists, and
+    why forcing engagement below it could not work.
+
+    The assembly and the rotation are the SAME as the N>0 branch further down --
+    prefer the pre-assembled active_k workspace sliced to its valid length, else
+    concatenate the dense blocks' anchor+active, and rotate at each token's TRUE
+    absolute position when the pool holds PRE-RoPE keys. Getting that wrong does
+    not raise; it silently corrupts the recent window, which is the failure the
+    N>0 branch's own comment records.
+
+    Returns None when there is no dense window to attend, so the caller can fall
+    through to its previous behaviour rather than inventing an answer.
+    """
+    if active_k is not None and active_k.shape[2] > 0:
+        _alen = active_len if (active_len and active_len > 0) else active_k.shape[2]
+        k_kv = active_k[:, :, :_alen]
+        v_kv = active_v[:, :, :_alen]
+    elif dense_blocks:
+        kp, vp = [], []
+        for blk in dense_blocks:
+            if getattr(blk, "anchor_kv", None) is not None:
+                kp.append(blk.anchor_kv[:, 0].unsqueeze(2))
+                vp.append(blk.anchor_kv[:, 1].unsqueeze(2))
+            if getattr(blk, "active_k", None) is not None and blk.active_k.shape[2] > 0:
+                kp.append(blk.active_k)
+                vp.append(blk.active_v)
+        if not kp:
+            return None
+        k_kv = torch.cat(kp, dim=2)
+        v_kv = torch.cat(vp, dim=2)
+    else:
+        return None
+    if k_kv.shape[2] == 0:
+        return None
+
+    # Rotate at TRUE positions when the pool stores PRE-RoPE keys. The length
+    # check is the N>0 branch's: a mismatch means the positions do not describe
+    # these rows, and rotating anyway would be worse than not rotating.
+    if (dense_blocks and cos is not None and sin is not None
+            and not pool_stores_rotated_k()):
+        _pos = []
+        for blk in dense_blocks:
+            _pos.extend(getattr(blk, "token_indices", ()) or ())
+        if _pos and len(_pos) == k_kv.shape[2]:
+            _dp = torch.tensor(_pos, dtype=torch.long, device=k_kv.device)
+            _c = cos[0, _dp.clamp(max=cos.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+            _s = sin[0, _dp.clamp(max=sin.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+            k_kv = _partial_rope_apply(k_kv, _c.to(k_kv.dtype), _s.to(k_kv.dtype))
+
+    if num_key_value_groups and num_key_value_groups > 1:
+        k_kv = k_kv.repeat_interleave(num_key_value_groups, dim=1)
+        v_kv = v_kv.repeat_interleave(num_key_value_groups, dim=1)
+    out = torch.nn.functional.scaled_dot_product_attention(
+        q.float(), k_kv.float(), v_kv.float())
+    return out.to(q.dtype)
+
+
 def native_triton_sparse_attn_decode(
     q:                    torch.Tensor,
     block_indices:        torch.Tensor,
@@ -2835,6 +3032,23 @@ def native_triton_sparse_attn_decode(
     assert bsz == 1 and q_len == 1
     
     if not HAS_TRITON:
+        # SAME N==0 GUARD the Triton branch grew at the `else` further down.
+        # Without it this early return lands in
+        # _pytorch_vectorized_sparse_attn_decode, which returns a ZERO-WIDTH
+        # tensor ([1, H_q, 1, 0]) for a zero-block step: the dense window is
+        # present and simply never attended.
+        #
+        # CUDA cannot observe this. HAS_TRITON is always true there, so the
+        # 2026-08-17 dense-only fix was written into the Triton path alone and
+        # this branch -- the one taken on Apple silicon and CPU -- kept the
+        # original bug. Caught by test_triton_combined.py, which fails on a Mac
+        # and passes on CUDA for that reason.
+        if block_indices is None or block_indices.shape[0] == 0:
+            _dense_only = _dense_only_attend(
+                q, dense_blocks, active_k, active_v, active_len,
+                num_key_value_groups, cos, sin)
+            if _dense_only is not None:
+                return _dense_only
         return _pytorch_vectorized_sparse_attn_decode(
             q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
             anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
@@ -3186,11 +3400,21 @@ def native_triton_sparse_attn_decode(
         # one, so a zero-block step silently produces a zero-width attention
         # output rather than attending the dense window.
         #
-        # NOT fixed here on purpose: the correct fix is that dense-only fast path,
-        # and `active_k` on this branch has not been through the RoPE rotation the
-        # N>0 branch applies, so writing it without a GPU to verify against would
-        # be guessing. Made LOUD instead — a wrong shape that announces itself is
-        # recoverable; a silent one is what let this sit behind a failing test.
+        # FIXED 2026-08-17. _dense_only_attend does exactly that fast path,
+        # including the RoPE rotation at true token positions that this branch's
+        # `active_k` has not been through -- which was the stated reason it was
+        # left undone. Verified on GPU rather than reasoned about: the engine
+        # tests reach this path with a sub-block prompt and now produce real text
+        # instead of empty attention.
+        #
+        # Falls through to the old delegation only when there is genuinely no
+        # dense window to attend, so the previous behaviour is still reachable
+        # rather than replaced by a guess.
+        _dense_only = _dense_only_attend(
+            q, dense_blocks, active_k, active_v, active_len,
+            num_key_value_groups, cos, sin)
+        if _dense_only is not None:
+            return _dense_only
         return _pytorch_vectorized_sparse_attn_decode(
             q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
             anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,

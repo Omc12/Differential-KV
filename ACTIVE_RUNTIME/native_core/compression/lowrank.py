@@ -319,6 +319,274 @@ def _topk_with_coverage(rel_err_vec: torch.Tensor, n_budget: int, cov_frac: floa
     return _TopKCov(indices=combined, values=vals[order])
 
 
+def _run_atomic_enabled() -> bool:
+    """DKV_RESIDUAL_RUN_ATOMIC — take a token RUN whole, or not at all.
+
+    Read as a function rather than a module constant so a test can toggle it
+    per-process, same as _exact_keys_enabled.
+    """
+    return os.environ.get("DKV_RESIDUAL_RUN_ATOMIC", "1") == "1"
+
+
+def _greedy_whole_runs(s_np, runs, T, budget):
+    """Fill `budget` slots with WHOLE runs, best run first. Host-side only.
+
+    Returns (front_rows, taken_set). A run that does not fit in what is left is
+    SKIPPED, not partially taken: `atomic_runs`' docstring records why -- a code
+    kept through 'Falcon-9427-' and dropped from there answers
+    "Falcon-9427-6137", which is worth exactly as much as answering nothing while
+    costing seven of the forty slots.
+    """
+    # CLAMP THE SPANS TO THE SCORE VECTOR. `runs` is built from the block's
+    # decoded token strings and the scores from its delta rows -- two lengths
+    # this codebase has already had disagree once (token_indices carries the
+    # anchor, active_k does not, so a full block compared 257 against 256 and
+    # silently skipped the whole content boost).
+    # Spans arrive as (lo, hi) or, when a query was pinned at prefill, as
+    # (lo, hi, priority) from residual_capture.rank_runs_by_query.
+    # A 3-tuple means residual_capture.rank_runs_by_query actually ran with a
+    # usable query. A bare 2-tuple means it did not: no query was pinned, or the
+    # one that was matched more than half the block's runs and was dropped as
+    # carrying no ranking information.
+    _has_priority = any(len(r) > 2 for r in runs)
+    spans = [(r[0], min(r[1], T), (r[2] if len(r) > 2 else 0)) for r in runs
+             if 0 <= r[0] < T and r[1] > r[0]]
+    if not spans or budget <= 0:
+        return [], set()
+    # A run's claim is as strong as its most distinctive token, not as long as
+    # the run: ranking by SUM would let a long bland span outbid a short code.
+    #
+    # NUMPY, not torch, for the per-run maximum. `float(t[lo:hi].max())` on a CPU
+    # TENSOR still pays the PyTorch dispatcher, ~15 us a call -- and this runs
+    # once per run per block per layer, which is ~21k calls on an 8k prefill and
+    # measured as most of a 314 ms (11.6%) prefill regression. The same slice in
+    # numpy is a couple of microseconds.
+    # PRIORITY FIRST, then error. Reconstruction error cannot express "does
+    # anyone want this", and in a block whose competitors are a paper's title,
+    # authors and a URL that is the only question that separates them from the
+    # answer. `priority` is 0 for every run unless a query was pinned, so this
+    # reduces to the pure error order whenever there is no query to ask.
+    ranked = sorted(((prio, float(s_np[lo:hi].max()), lo, hi)
+                     for lo, hi, prio in spans),
+                    key=lambda t: (t[0], t[1]), reverse=True)
+    # DKV_RESIDUAL_RUN_RESERVE — WHICH runs may claim slots all-or-nothing.
+    #
+    #   query  (default) ONLY runs the pinned query points at; if none is
+    #          marked, reserve nothing and leave the whole budget to the
+    #          per-token ranking
+    #   all    every run, best-scoring first (priority still breaks ties)
+    #
+    # THE RESERVATION'S COST IS ENTIRELY COMPOSITIONAL, and this is what fixes
+    # it. `all` bought needle recall at the price of document synthesis, and
+    # nothing AROUND the selection could recover that: on multifact synthesis at
+    # 16k, attend-all reads 6.7, DKV_REMAT_CACHE=0 reads 6.7, both together read
+    # 6.7, and run-atomic off reads 13.3. Only WHICH forty rows are spent moves
+    # it. Reserving whole runs for content nobody asked for is what costs
+    # synthesis its scattered rare-prose rows, so scoping the reservation to the
+    # query keeps the guarantee exactly where an answer needs it and hands the
+    # rest of the budget straight back.
+    #
+    # It is strictly better on every gate, not a trade (dense control 12/12 at
+    # every point, twelve depths):
+    #
+    #                          all      query
+    #     needle 8k natural    12/12    12/12
+    #     needle 32k natural   11/12    12/12   <- dense parity
+    #     needle 8k tiled      12/12    12/12
+    #     needle 32k tiled     12/12    12/12
+    #     multifact relational   4/4      4/4
+    #     multifact multi-needle 3/3      3/3
+    #     multifact synthesis    6.7     13.3   <- 4f's regression, gone
+    #     validate_cuda_dkv --long  ALL CHECKS PASSED both
+    #
+    # The 32k row is the interesting one: `all` left depth 0.58 failing and no
+    # other lever reached it, including DKV_TOPK_BLOCKS=32 and a doubled residual
+    # budget. Handing the un-asked-for runs' slots back to the error ranking did.
+    _mode = os.environ.get("DKV_RESIDUAL_RUN_RESERVE", "query_first").strip().lower()
+    if _mode in ("query", "query_first"):
+        if _has_priority or _mode == "query":
+            # A USABLE QUERY WAS CONSULTED. Scope the reservation to what it
+            # points at -- reserving for content nobody asked for is what cost
+            # 4f its synthesis rows.
+            _marked = [r for r in ranked if r[0]]
+            if _marked:
+                ranked = _marked
+            elif not _has_priority:
+                pass          # NO query at all -> reserve by error, untouched.
+            elif _mode == "query":
+                return [], set()
+            else:
+                # NOTHING MARKED IN THIS BLOCK. Two very different situations
+                # produce that and they are NOT separable per block:
+                #
+                #   * the block is filler and the query rightly ignores it;
+                #   * the query is right about the block and WRONG about the
+                #     words, because the answer is phrased differently from the
+                #     question.
+                #
+                # The relevance signal is lexical, so the second is not exotic.
+                # Measured on the 8k natural sweep with the needle reworded to
+                # share no content word with the question ('The vault
+                # combination is ...' against 'What is the secret passcode?'),
+                # reserving nothing for unmarked blocks scores **2/12** against
+                # 12/12 when the wording matches. A retrieval feature that only
+                # works when the asker guesses the document's vocabulary is not
+                # a retrieval feature.
+                #
+                # DKV_RESIDUAL_RUN_UNMARKED lets an unmarked block reserve its
+                # best N runs anyway -- bounded crowd-out, on the reasoning that
+                # a buried code is typically its block's worst-reconstructed
+                # span, so one run is usually the right one.
+                #
+                # DEFAULT 0 (reserve nothing), because the measurement does not
+                # support paying for it by default. Twelve depths, dense control
+                # 12/12, `same` = the question shares 'secret passcode' with the
+                # needle sentence, `reworded` = the needle says 'vault
+                # combination' instead:
+                #
+                #                      N=0                  N=1
+                #     8k  same        12/12                12/12
+                #     8k  reworded     2/12                11/12
+                #     32k same        12/12                10/12
+                #     32k reworded     2/12                 2/12
+                #
+                # N=1 buys the 8k reworded column and costs two depths at 32k,
+                # and it does NOT rescue 32k reworded -- there the block is lost
+                # in ROUTING, which scores the same residual keys, so a
+                # reservation cannot reach it. Since 32k reworded is 2/12 either
+                # way, N=1's benefit is narrow and its cost is on the headline
+                # gate, so the default keeps dense parity at both contexts and
+                # the knob is there for callers whose questions do not share
+                # vocabulary with their documents at <= 8k.
+                try:
+                    _n_unmarked = int(os.environ.get(
+                        "DKV_RESIDUAL_RUN_UNMARKED", "0"))
+                except ValueError:
+                    _n_unmarked = 0
+                if _n_unmarked <= 0:
+                    return [], set()
+                ranked = ranked[:_n_unmarked]
+        # NO USABLE QUERY -> fall through and reserve by error (4f's behaviour).
+        #
+        # WITHOUT THIS FALLBACK THE WHOLE FIX HANGS ON THE QUERY PIN, which is
+        # best-effort: hf_dkv_wrapper fills `_pending_query` from an explicit
+        # query_text, else from _extract_query_token_ids over the chat messages,
+        # else not at all, and the whole thing sits under `except: pass`. A
+        # caller that does not go through the chat template would silently lose
+        # every gain in 4f-4h. Measured by neutering the signal
+        # (DKV_RESIDUAL_RUN_QUERY_WINDOW=0) on the 8k natural sweep: **3/12**,
+        # straight back to the pre-4f defect.
+        #
+        # So the degradation is graceful in the case that actually happens: a
+        # usable query scopes the reservation and synthesis keeps its rows; no
+        # query at all gets 4f's guarantee, which is worse for synthesis but
+        # 11/12 for recall rather than 3/12.
+        #
+        # `query` (strict) keeps the old behaviour for A/B: scope even when there
+        # was nothing to scope by.
+
+    front, seen, remaining = [], set(), budget
+    for _prio, _sc, lo, hi in ranked:
+        rows = [r for r in range(lo, hi) if r not in seen]
+        if not rows or len(rows) > remaining:
+            continue
+        front.extend(rows)
+        seen.update(rows)
+        remaining -= len(rows)
+        if remaining <= 0:
+            break
+    return front, seen
+
+
+def _reorder_runs_first(base, scores, runs, res_cap, scores_cpu=None):
+    """Promote whole RUNS to the front of an already-built selection.
+
+    Used only when a coverage quota is in play (DKV_RESIDUAL_COVERAGE_FRAC > 0),
+    where the base order is not a plain descending sort and has to come from
+    `_topk_with_coverage`. The default path decides everything on the host in
+    `_select_residual_rows` instead, because reading `base.indices` back costs a
+    device SYNC -- see the note there.
+    """
+    T = int(scores.shape[0])
+    n = int(base.indices.numel())
+    eff = max(0, min(n, int(res_cap)))
+    if eff <= 0 or not runs:
+        return base
+    if scores_cpu is not None and int(scores_cpu.shape[0]) != T:
+        scores_cpu = None
+    s_cpu = scores.detach().float().cpu() if scores_cpu is None else scores_cpu
+    front, seen = _greedy_whole_runs(s_cpu.numpy(), runs, T, eff)
+    if not front:
+        return base
+    order = front + [int(i) for i in base.indices.tolist() if int(i) not in seen]
+    idx = torch.as_tensor(order[:n], device=scores.device, dtype=torch.long)
+    return _TopKCov(indices=idx, values=scores[idx])
+
+
+def _select_residual_rows(scores, n_budget, cov_frac, runs=None, res_cap=None,
+                          scores_cpu=None):
+    """Error-ranked residual selection, with whole runs promoted to the front.
+
+    Returns the SAME NUMBER of rows as the plain ranking, in a different ORDER:
+    the leading `res_cap` slots -- the ones
+    `native_block_pool.write_blocks_batched` actually keeps
+    (`res_K_positions[:, :mr]`) -- are filled run-by-run, all-or-nothing, and
+    everything else keeps its existing relative order behind them. Nothing is
+    added to the budget and nothing is dropped from it.
+
+    A run cut by the block edge needs no special case: it is whole WITHIN this
+    block, its other half is whole within the neighbouring block, and neither
+    needs to know about the other -- which is what lets a straddled answer
+    survive two independent 40-slot budgets.
+
+    NO DEVICE SYNC ON THE DEFAULT PATH. Every earlier form of this read something
+    back per block -- `scores.cpu()`, then `base.indices.tolist()`, then a
+    boolean mask index (whose output shape is data-dependent, so it synchronises
+    too). Any of them drains the stream once per block per layer, ~900 times on
+    an 8k prefill, and each drain waits on that block's queued int8-recon matmul
+    rather than letting the pipeline run ahead. Measured with
+    colab/bench_prefill_paired.py, A/A control first: **15.5-15.9% slower
+    prefill**, +420 ms on 8k. The whole selection is therefore decided on the
+    host from ONE batched score transfer and uploaded once.
+    """
+    if not runs or not _run_atomic_enabled():
+        return _topk_with_coverage(scores, n_budget, cov_frac)
+
+    T = int(scores.shape[0])
+    n = min(int(n_budget), T)
+    eff = n if (res_cap is None or int(res_cap) <= 0) else max(0, min(n, int(res_cap)))
+
+    if cov_frac and cov_frac > 0.0:
+        # The coverage scaffold makes the base order something other than a
+        # descending sort, so it has to be built on device and read back.
+        base = _topk_with_coverage(scores, n_budget, cov_frac)
+        return _reorder_runs_first(base, scores, runs, eff, scores_cpu)
+
+    import numpy as _np
+    if scores_cpu is None:
+        s_np = scores.detach().float().cpu().numpy()
+    elif isinstance(scores_cpu, _np.ndarray):
+        s_np = scores_cpu
+    else:
+        s_np = scores_cpu.numpy()
+    if s_np.shape[0] != T:                   # verify the caller, do not trust it
+        s_np = scores.detach().float().cpu().numpy()
+    front, seen = _greedy_whole_runs(s_np, runs, T, eff)
+    if not front:
+        return _topk_with_coverage(scores, n_budget, cov_frac)
+    # Vectorised. The obvious form -- argsort().tolist() then a comprehension
+    # filtering on a set -- is a 256-iteration Python loop per block per layer,
+    # and at ~900 blocks an 8k prefill that is the difference between 6.6% and
+    # 2.5% added prefill time. Same result, no interpreter in the inner loop.
+    _front = _np.asarray(front, dtype=_np.int64)
+    _order = _np.argsort(-s_np, kind="stable")
+    _keep = _np.ones(T, dtype=bool)
+    _keep[_front] = False
+    order = _np.concatenate([_front, _order[_keep[_order]]])[:n]
+    idx = torch.from_numpy(order).to(scores.device, non_blocking=True)
+    return _TopKCov(indices=idx, values=scores[idx])
+
+
 def compress_lowrank(
     deltas: torch.Tensor,
     rank: int,
@@ -1040,6 +1308,19 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         return _compress_layer_blocks_gpu_inner(blocks_list, rank, manager)
 
 
+def _batch_layer_idx(blocks_list) -> int:
+    """Layer these blocks belong to, or -1 if unknown.
+
+    `getattr(b, "layer_idx", -1) or -1` is wrong here: layer 0 is falsy, so
+    every layer-0 block reported -1 and shared a shared-basis search space with
+    genuinely unknown blocks. Grouping still worked, it just grouped the wrong
+    set -- the kind of thing that shows up as a fidelity number nobody can
+    explain.
+    """
+    v = getattr(blocks_list[0], "layer_idx", None) if blocks_list else None
+    return -1 if v is None else int(v)
+
+
 def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> bool:
 
     T_active = blocks_list[0].active_k.shape[2]
@@ -1324,6 +1605,65 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     U_masked = U_scaled * rank_mask.unsqueeze(1)           # zero cols ≥ k[i]
     V_masked = Vh_fp16 * rank_mask.unsqueeze(2)            # [N, r_proj, feat]
 
+    # ── Shared basis, assigned HERE and not at write time ────────────────────
+    # Residual selection below scores `delta - recon`, and under a shared basis
+    # the recon that decode rebuilds comes from the GROUP basis, not from this
+    # block's own SVD factor. Assigning inside write_blocks_batched would leave
+    # every residual chosen against a reconstruction that is not the one stored
+    # -- the budget would be spent repairing errors that do not exist and would
+    # miss the ones the shared basis actually introduced.
+    #
+    # So: assign, re-project, and let everything downstream (recon_all, the
+    # error/tier arithmetic, residual selection, the int8-exact recompute) see
+    # the real stored factorisation. The rows are handed to the pool, which then
+    # only records the map.
+    _basis_rows = None
+    _basis_kept = None
+    if pool is not None and getattr(pool, "shared_basis_active", False):
+        try:
+            from native_core.compression.basis_group import reproject_U
+            # The group basis is as wide as the STORE (pool rank), which is not
+            # the same as this batch's r_proj: r_proj is
+            # min(max_rank + oversamples, T_active, feat_dim), so a short block
+            # or a small rank schedule makes it NARROWER than the pool rank.
+            # U' comes back with one column per basis direction, i.e. r_store
+            # columns, which do not fit in an [N, T, r_proj] buffer. Rebuild at
+            # the store's width instead of slicing into the old one.
+            _rs = int(pool.V_KV.shape[2])
+            _pr = min(_rs, r_proj)
+            # Slots are normally allocated at WRITE time, ~600 lines below, so
+            # every block's pool_idx is still None here. A basis claim is
+            # refcounted PER SLOT, so the slot has to exist before the claim
+            # does -- allocate now and let the write-time block find nothing
+            # left to do. Only under shared bases: moving the allocation
+            # earlier for everyone would widen the window in which a failed
+            # compress leaks slots.
+            _need = [b for b in blocks_list if getattr(b, "pool_idx", None) is None]
+            if _need:
+                for _b, _s in zip(_need, pool.allocate_blocks(len(_need))):
+                    _b.pool_idx = _s
+            _slots = [b.pool_idx for b in blocks_list]
+            _U_in = U_masked[:, :, :_pr].float()
+            _V_in = V_masked[:, :_pr, :].float()
+            _basis_rows, _bases, _basis_kept = pool.assign_basis(
+                _U_in, _V_in,
+                layer_idx=_batch_layer_idx(blocks_list),
+                pool_indices=_slots)
+            U_masked = reproject_U(_U_in, _V_in, _bases.float()).to(U_masked.dtype)
+            V_masked = _bases.to(V_masked.dtype)
+            # U' occupies every column the group basis spans, so the per-block
+            # rank truncation no longer describes it. Columns past the group's
+            # own rank come out ~0 anyway (their basis rows are zero), so this
+            # widens the recorded rank without storing anything new.
+            ranks = [_rs] * N_blocks
+            Vh_fp16 = V_masked
+            U_scaled = U_masked
+        except Exception as _be:                                 # noqa: BLE001
+            print(f"[DKV] shared-basis assignment failed ({_be}); "
+                  f"blocks keep their own bases.", flush=True)
+            _basis_rows = None
+            _basis_kept = None
+
     # One batched recon over all blocks (replaces N per-block matmuls).
     recon_all = torch.bmm(U_masked.float(), V_masked.float())   # [N, T, feat]
     delta_K_all = deltas[:, :, :half_d]
@@ -1339,13 +1679,64 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     rel_error_V_all = error_V_all / norm_V_all
 
     if T_active > 0:
-        med_K_all = torch.median(rel_error_K_all, dim=1).values   # [N]
-        med_V_all = torch.median(rel_error_V_all, dim=1).values
+        # TIER ON THE TAIL, NOT THE MEDIAN.
+        #
+        # The tier classifier below decides how many tokens are kept EXACT, and
+        # residuals exist precisely to correct the tokens the SVD reconstructs
+        # WORST. The median describes the typical token, so it answers a
+        # different question -- and it gets the important case backwards.
+        #
+        # A block that is 95% prose filler with one ledger line of digits has a
+        # LOW median: nearly every token is easy. It was therefore classified
+        # "easy" and capped at 8 residuals, discarding exactly the digits that
+        # needed keeping. That is not hypothetical -- it is why the residual
+        # budget measured INERT four separate times (linkbench 24 and 48 seeds,
+        # prose synthesis, and a digit-table benchmark): the tier capped at 8 or
+        # 16 long before max_residual_tokens of 40 or 128 could bind, so the
+        # "main quality dial" was not connected to anything.
+        #
+        # The 0.90 quantile asks "how bad are the worst tokens here", which is
+        # the question the budget is answering, and it costs no VRAM to act on:
+        # the slots are preallocated UNIFORMLY per block, so filling more of
+        # them is free apart from the writes.
+        #
+        # MEASURED, AND IT CHANGES NOTHING -- so the DEFAULT STAYS THE HISTORICAL
+        # MEDIAN. Digit-table benchmark, Qwen3.5-2B at 32k, 24 seeds:
+        #
+        #     median tiering (q=0.0)   14/24
+        #     tail tiering   (q=0.90)  14/24
+        #     dense                    24/24
+        #
+        # The reasoning above is still sound -- the median really does misfile a
+        # prose block carrying a few digits -- but fixing it does not recover the
+        # digits, so the tier was not what was losing them. Kept as a knob
+        # because it isolates one variable cleanly, not shipped as a change,
+        # since a default that alters compression for no measured gain is
+        # exactly what this project keeps having to retract.
+        _q = float(os.environ.get("DKV_RESIDUAL_TIER_Q", "0.0"))
+        if _q >= 1.0:
+            med_K_all = rel_error_K_all.max(dim=1).values
+            med_V_all = rel_error_V_all.max(dim=1).values
+        elif _q <= 0.0:
+            # Restores the historical median behaviour, for A/B.
+            med_K_all = torch.median(rel_error_K_all, dim=1).values
+            med_V_all = torch.median(rel_error_V_all, dim=1).values
+        else:
+            med_K_all = torch.quantile(rel_error_K_all.float(), _q, dim=1)
+            med_V_all = torch.quantile(rel_error_V_all.float(), _q, dim=1)
     else:
         med_K_all = torch.zeros(N_blocks, device=gpu_device)
         med_V_all = torch.zeros(N_blocks, device=gpu_device)
     # One batched device→host transfer for every block's medians (was N).
     _meds_cpu = torch.stack((med_K_all, med_V_all), dim=1).float().cpu()   # [N, 2]
+
+    # Energy a block LOST to a shared basis, per block. This is a new error
+    # source the shared-basis change introduces, and residuals are the thing
+    # that repairs it, so the coupling is causal rather than a retune -- a
+    # force-joined block gets the full budget back.
+    _basis_loss_cpu = None
+    if _basis_kept is not None:
+        _basis_loss_cpu = (1.0 - _basis_kept.float()).cpu()           # [N] in [0, 1]
 
     # n_semantic per block (metadata parity only — dead on this path).  Computed
     # batched on the already-transferred CPU singular values: count values above
@@ -1370,6 +1761,24 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         block._active_buf_v = None
         block.state = "COMPRESSED"
         block.dirty = True
+
+    # UNBOOSTED joint error for EVERY block, transferred ONCE.
+    #
+    # Run-atomic selection ranks whole runs, which is host-side logic, so it
+    # needs the scores on the host. Reading them per block cost a device->host
+    # copy inside the finalization loop -- and a copy is a stream DRAIN, so each
+    # one waited on that block's queued int8-recon matmul instead of letting the
+    # pipeline run ahead. Measured with colab/bench_prefill_paired.py (A/A
+    # control first, CI contained 0 at +-1.9% of a prefill): **15.9% slower
+    # prefill**, +427 ms on 8k, CI [+362, +492] ms. One [N, T] transfer here is
+    # ~64 KB for a full batch and one sync instead of ~900.
+    _joint_all_cpu = None
+    if T_active > 0 and _run_atomic_enabled():
+        _eV_bal_all = error_V_all
+        if _v_gain is not None:
+            _eV_bal_all = error_V_all * _v_gain.to(error_V_all.dtype).view(-1, 1)
+        _joint_all_cpu = torch.sqrt(
+            error_K_all.float() ** 2 + _eV_bal_all.float() ** 2).cpu().numpy()
 
     # Collect per-block residual selections for one batched pool write below.
     _rk_pos, _rk_val, _rv_pos, _rv_val = [], [], [], []
@@ -1403,16 +1812,29 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
             n_max_residual = min(int(_pool_max_res), T_active)
         else:
             n_max_residual = int(T_active * 0.15)
-        median_err_K = float(_meds_cpu[i, 0])
-        median_err_V = float(_meds_cpu[i, 1])
-        max_median_err = max(median_err_K, median_err_V)
-        if max_median_err < 0.05:
+        # These are the TAIL error per block now (see the quantile above), not
+        # the median, so "easy" means "even the worst tokens reconstruct well"
+        # rather than "most tokens do". The thresholds are unchanged, which
+        # deliberately moves mixed blocks -- prose carrying a few digits -- out
+        # of the 8-residual tier they were being misfiled into.
+        tail_err_K = float(_meds_cpu[i, 0])
+        tail_err_V = float(_meds_cpu[i, 1])
+        max_tail_err = max(tail_err_K, tail_err_V)
+        _full_budget = n_max_residual
+        if max_tail_err < 0.05:
             # Easy block (prose filler / repeated text): cap at 8 residuals.
             n_max_residual = min(8, n_max_residual)
-        elif max_median_err < 0.15:
+        elif max_tail_err < 0.15:
             # Medium complexity: cap at 16 residuals.
             n_max_residual = min(16, n_max_residual)
         # Hard block (factual / code / numbers): keep full budget unchanged.
+
+        # Energy this block lost to a shared basis is error the tier cannot see
+        # -- it was measured on a reconstruction the tier's own inputs describe
+        # correctly, but the LOSS is what residuals now have to carry. A block
+        # that was force-joined gets the full budget back.
+        if _basis_loss_cpu is not None and float(_basis_loss_cpu[i]) > 0.02:
+            n_max_residual = _full_budget
 
         # Content-aware residual capture (C10 remediation): the same token
         # boost + owner capture + table capture the MLX wrapper and lowrank.cpp
@@ -1434,6 +1856,12 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         # loop variable — the same failure already called out above for
         # block_token_ids.
         _boost_vec = None
+        _boost_row_cpu = None
+        # Atomic token runs for this block, in the same DELTA-row index space as
+        # _boost_vec. Reset per block for the same reason _boost_vec is: leaking
+        # one block's spans into the next block's selection would silently
+        # protect the wrong rows.
+        _runs = None
 
         block_token_ids = _gather_block_token_ids(block, manager)
 
@@ -1485,7 +1913,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                     _cached_boost = _session_boosts.get(_anchor_key)
 
                 if _cached_boost is not None:
-                    boost_row, n_boosted = _cached_boost
+                    boost_row, n_boosted, _runs = _cached_boost
                 else:
                     from native_core.compression.residual_capture import compute_boost_multipliers
                     _tok = manager.tokenizer
@@ -1512,13 +1940,84 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                             _counts[_t] = _counts.get(_t, 0) + 1
                         _counts_cache.clear()   # keep only the latest session state
                         _counts_cache[_ckey] = _counts
+                    # The QUERY, pinned by the wrapper before prefill. Residual
+                    # selection is otherwise blind to it -- it ranks by how badly
+                    # the low-rank basis fits a token, never by whether anyone
+                    # will ask for it. See the query-proximity pass in
+                    # residual_capture for the measurement that motivates it.
+                    # _pending_query is a DICT keyed by session id, not a list.
+                    # Passing the dict itself would iterate its KEYS and match
+                    # session names against token ids -- silently no-op.
+                    _pq_map = getattr(manager, "_pending_query", None) or {}
+                    _q_ids = _pq_map.get(_sid) if isinstance(_pq_map, dict) else None
                     boost_row, n_boosted = compute_boost_multipliers(
-                        tok_strs, block_token_ids, _counts or {}, _total)
+                        tok_strs, block_token_ids, _counts or {}, _total,
+                        query_ids=_q_ids)
+                    # The spans the ranking below must not cut in half. Derived
+                    # from the SAME tok_strs, so it costs one more pass over a
+                    # list that is already decoded and cached.
+                    # Guarded SEPARATELY from the boost. Sharing the outer
+                    # handler would let a fault in this new pass disable the
+                    # boost as well -- and losing the boost loses the budget
+                    # FLOOR with it, dropping an easy-tier block from 40 slots to
+                    # 8. A new pass must not be able to take an old one down.
+                    try:
+                        # Gated on the flag so turning the feature OFF removes its
+                        # COST as well as its effect -- otherwise an A/B of the
+                        # flag times the selection and silently pays for this pass
+                        # in both arms, and reports a change it never made.
+                        if _run_atomic_enabled():
+                            from native_core.compression.residual_capture import (
+                                atomic_runs, rank_runs_by_query, usable_query,
+                            )
+                            _runs = atomic_runs(tok_strs)
+                            # Which of those runs anyone is going to ASK for.
+                            # Selection is all-or-nothing now, so the only
+                            # question left is which run wins the slots -- and
+                            # that is the one question reconstruction error
+                            # cannot answer. Same pinned query the boost reads.
+                            #
+                            # `usable_query` rejects the full-prompt fallback:
+                            # pinning that and treating it as a real question
+                            # scores 3/12 on the 8k natural sweep, because it
+                            # points everywhere and so reserves nothing.
+                            _q_eff = _q_ids if usable_query(_q_ids, _total) else None
+                            if _q_eff is None and _all is not None:
+                                # TAIL-OF-PROMPT FALLBACK. When no short
+                                # question span can be pinned -- either nothing
+                                # was supplied, or the request is one huge user
+                                # turn ending in its instruction, which is what a
+                                # summarisation prompt looks like -- the last
+                                # tokens of the prompt ARE the question in both
+                                # shapes, so use them as one.
+                                #
+                                # Without this the block has no query at all and
+                                # falls back to reserving by error, which is 4f's
+                                # behaviour: fine for recall, and what costs
+                                # document synthesis its scattered rare-prose
+                                # rows.
+                                try:
+                                    _tail = int(os.environ.get(
+                                        "DKV_RESIDUAL_QUERY_TAIL", "64"))
+                                except ValueError:
+                                    _tail = 64
+                                if _tail > 0 and int(_all.numel()) > _tail:
+                                    _q_eff = _all[-_tail:].tolist()
+                            if _runs and _q_eff:
+                                _runs = rank_runs_by_query(
+                                    tok_strs, block_token_ids, _q_eff, _runs)
+                    except Exception:                            # noqa: BLE001
+                        _runs = None
+                        if os.environ.get("DKV_DBG_RESIDUAL_ERRORS") == "1":
+                            import traceback
+                            print("[DKV] atomic_runs FAILED (run-atomic "
+                                  "selection skipped):", flush=True)
+                            traceback.print_exc()
                     # Store only when there IS a key to store under; the same
                     # reasoning as the lookup above -- no key means no caching,
                     # not no boost.
                     if _session_boosts is not None:
-                        _session_boosts[_anchor_key] = (boost_row, n_boosted)
+                        _session_boosts[_anchor_key] = (boost_row, n_boosted, _runs)
 
                 if boost_row is not None and n_boosted > 0:
                     _bt = torch.tensor(boost_row, device=rel_error_K.device,
@@ -1526,6 +2025,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                     rel_error_K = rel_error_K * _bt
                     rel_error_V = rel_error_V * _bt
                     _boost_vec = _bt
+                    _boost_row_cpu = boost_row
                     try:
                         _margin = int(os.environ.get("DKV_RESIDUAL_FLOOR_MARGIN", "4"))
                     except ValueError:
@@ -1697,7 +2197,24 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                 if _boost_vec is not None:
                     joint_err = joint_err * _boost_vec.to(joint_err.dtype)
 
-                top_k_J = _topk_with_coverage(joint_err, n_max_residual, _cov_frac_batch)
+                # RUN-ATOMIC. `_res_cap` -- not n_max_residual -- is what the pool
+                # actually keeps, and the budget FLOOR above can raise
+                # n_max_residual to the full 256 whenever the content boost fires
+                # on most of the block. Filling runs against the larger number
+                # would push whole runs past the pool's truncation point and cut
+                # them there instead, which is the same defect one layer down.
+                # Host-side twin of `joint_err`: the same formula on the same
+                # inputs, from the batch transfer above, boosted by the same row.
+                _joint_cpu_i = None
+                if _joint_all_cpu is not None:
+                    import numpy as _np_l
+                    _joint_cpu_i = _joint_all_cpu[i]
+                    if _boost_row_cpu is not None:
+                        _joint_cpu_i = _joint_cpu_i * _np_l.asarray(
+                            _boost_row_cpu, dtype=_joint_cpu_i.dtype)
+                top_k_J = _select_residual_rows(
+                    joint_err, n_max_residual, _cov_frac_batch,
+                    runs=_runs, res_cap=_res_cap, scores_cpu=_joint_cpu_i)
 
                 _err_thr = _residual_error_threshold()   # MLX: 0.0, see resolver
                 # A token qualifies if EITHER half is non-degenerate; with one
@@ -1913,6 +2430,13 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
             seq_len=T_active,
             res_K_positions=_rk_pos_pad, res_K_values=_rk_val_pad,
             res_V_positions=_rv_pos_pad, res_V_values=_rv_val_pad,
+            # Shared-basis grouping is keyed by layer: a block only searches
+            # bases founded by blocks of the same layer. Cross-layer subspaces
+            # are unrelated and the exact energy test would reject them anyway
+            # -- this just keeps the search small. Ignored when the feature is
+            # off. Every block in a compress batch belongs to one layer.
+            layer_idx=_batch_layer_idx(blocks_list),
+            basis_rows=_basis_rows,
         )
         # Clear local GPU tensors on blocks to prevent VRAM leak.
         for _b in blocks_list:

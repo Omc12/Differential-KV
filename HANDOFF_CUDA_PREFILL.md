@@ -95,6 +95,25 @@ blocks — the two-GEMM form plus the RoPE work the fix REMOVES roughly cancel i
 Both TTFT deltas are inside run-to-run spread (the 3 reps overlap), so read them
 as "no measurable prefill cost", not as a 1% regression.
 
+> **RETRACTED 2026-08-24 — the -12% is not a measurement.** Every decode tok/s
+> on this page comes from `(GEN - 1) / (total_s - ttft_s)` over two separate
+> `generate()` calls that each run a full prefill. Decode streams every weight
+> once per token, so `tok/s <= bandwidth / weight_bytes`: Qwen3.5-2B is 1.882 B
+> params fp16 = 3.76 GB and this card is 504 GB/s, a ceiling of **133.9 tok/s**
+> (183.5 even if the embedding table is excluded entirely, which is
+> over-generous because it is tied). 309.0 / 259.8 / 229.4 are 1.68x / 1.42x /
+> 1.25x that ceiling. None of them is a decode rate, so the -12% and the -26%
+> below are differences between impossible numbers.
+>
+> The estimator's spread is the PREFILL wall's spread, amplified by
+> prefill/decode: measured against itself on one build it ranged 17.2% with
+> clocks ramping and 0.3% warm, and read 25% low both times.
+> `colab/bench_decode_estimator_check.py` reproduces this and prints the
+> bandwidth ceiling beside whatever it measured. The real figure for this
+> configuration is **27.4 tok/s (36.5 ms/token)**. Use
+> `colab/bench_decode_paired.py` for any comparison — A/A resolves ±0.3% of a
+> token. Full account: `ACTIVE_RUNTIME/docs/cuda_work_record.md` §4a.
+
 Decode is ~12% slower and that is NOT yet explained. A prefill-only change moving
 decode at all points at the working set: correct routing retains a different set
 of blocks, so decode gathers differently. Worth a look before this matters for
@@ -127,7 +146,7 @@ Cost, 8k (11,007 tok), 128 new tokens, both arms measured by the SAME harness:
 | metric | dense | DKV (fixed) | DKV vs dense |
 |---|---|---|---|
 | TTFT (prefill) | 2.013 s | 5.128 s | **2.5x slower** |
-| decode | 309.0 tok/s | 229.4 tok/s | **26% slower** |
+| decode | 309.0 tok/s | 229.4 tok/s | **26% slower** — RETRACTED, both above the 133.9 tok/s bandwidth ceiling |
 | peak VRAM | 5.21 GB | 4.62 GB | 11% lower |
 | 32k | OOM | 5.06 GB | dense cannot run |
 
@@ -690,30 +709,116 @@ position-alignment change. Delete `/tmp/dkv_qprobe_*.pt` and re-run both passes.
 
 ## 8. OPEN ITEMS
 
-* **Re-run `validate_cuda_dkv.py --long` on Qwen3.5-2B/32k.** Both §0.5 fixes are
-  in, and 8k NIAH went 4/6 -> 6/6 on Qwen2.5-0.5B, but the model in §1's table has
-  not been touched since. Pre-decided reading: 9/9 with `fallback_count=0` and
-  `DKV_SP_TRACE_TOKEN` still showing `k_eff < nb` means both defects were the
-  whole story; 8/9 with the needle's block RANKED but dropped means K is too small
-  (a parameter, `DKV_SPARSE_PREFILL_FRAC`); 8/9 with it kept means a third defect
-  downstream of routing.
-* **Controlled prefill-throughput measurement.** Wall clock on the 3 8k cases was
+> **STATUS 2026-08-23.** Items re-checked against the tree on an RTX 4070 SUPER.
+> Several were already fixed and the list had gone stale; each is now marked.
+> `[CLOSED]` means verified this date, `[OPEN]` means still outstanding,
+> `[MLX]` means it moved to the MLX side because it cannot be tested from CUDA.
+> Those items are now ANSWERED — see `ACTIVE_RUNTIME/docs/mlx_work_record.md`
+> for the measurements and `CUDA_TODO.md` for what came back for CUDA to do.
+
+* **[CLOSED] Re-run `validate_cuda_dkv.py --long` on Qwen3.5-2B/32k.**
+  **ALL CHECKS PASSED**, 2026-08-23, RTX 4070 SUPER, Qwen3.5-2B:
+
+      2k  @ 0.0 / 0.5 / 0.9   3/3 each, 1 distinct output across 3 runs
+      8k  @ 0.0 / 0.5 / 0.9   3/3 each, 1 distinct output across 3 runs
+      32k @ 0.0 / 0.5 / 0.9   3/3 each, 1 distinct output across 3 runs
+      Triton kernel used, fallback_count=0
+      partial-RoPE vs reference: max|diff| 9.5e-07 on both rope shapes
+
+  That is **9/9 with `fallback_count=0`**, the first of the three pre-decided
+  readings: both §0.5 defects were the whole story. Note `32k@0.9` — the case
+  §1 and the `DKV_RESIDUALS_IN_DENSE` entry both cite as the stubborn failure —
+  now passes 3/3 with deterministic output.
+
+  *Coverage, stated rather than implied:* the reading's `fallback_count=0` half
+  is verified directly by the validator. Its `DKV_SP_TRACE_TOKEN` /
+  `k_eff < nb` half was **not** separately checked, so "sparse prefill was
+  genuinely selective rather than degenerating to attend-all" is inferred from
+  the recall result, not measured.
+
+  **MEASURED 2026-08-24, and it degenerates.** Counting every call to
+  `_sparse_prefill_filter_blocks` rather than trusting a trace that prints only
+  after its four early returns:
+
+      pool        ctx   selective calls   what prefill attended
+      unrotated    8k   0 of 196          every block, every chunk
+      unrotated   32k   0 of 868          every block, every chunk
+      rotated      8k   0 of 196          every block (k_eff >= nb)
+      rotated     32k   616 of 868        nb 9-30, k_eff 8, dropping 10-71%
+
+  Unrotated is the DEFAULT — `mid`, `high` and `ultra` all set
+  `rotated_pool=False` and `config.py` exports it into the environment; only
+  `low` keeps a rotated pool. So on the shipped configuration there is NO
+  prefill sparsity at any context, and even rotated it does not engage below
+  ~32k. The `k_eff=30 of 120` quoted above is the 32k rotated case and does not
+  generalise. See `ACTIVE_RUNTIME/docs/cuda_work_record.md` §4b.
+
+  **The unrotated decline is now optional** (`DKV_SPARSE_PREFILL_ROTATE=1`,
+  default off). Its stated blocker — "the keys cannot be rotated without their
+  true per-token positions" — was false; the positions follow from `anchor_idx`.
+  With the flag on, the unrotated pool matches the rotated column (616 of 868
+  selective at 32k) and `--long` is 9/9 including all three 32k cases. It stays
+  off because paired A/B puts it at NO RESOLVABLE effect there against 9.2%
+  faster on a rotated pool, while costing first-token KL 0.00024 → 0.00585.
+  Work record §4c has the reason the two cancel.
+* **[CLOSED, as far as it can be] Controlled prefill-throughput measurement.**
+  The comparison this item asks for is no longer POSSIBLE: it wanted HEAD vs
+  fixed, both §0.5 fixes are now permanent, and the pre-fix HEAD's outputs
+  differ so the two runs were never comparing the same amount of work. What was
+  actually missing is an INSTRUMENT, and there now is one:
+  `colab/bench_prefill_paired.py` — same design as the decode harness (one
+  process, interleaved arms, alternating order, paired statistic, min
+  estimator).
+
+  Calibrated A/A at 8k on Qwen2.5-1.5B: mean_diff −25.2 ms, 95% CI
+  [−75.6, +25.3], **resolution ±1.8% of a prefill**, correctly reporting no
+  effect. Prefill throughput at that point is **~2915 tok/s**.
+
+  First real use, sizing shared bases' compress-time cost: **+36.0 ms, 95% CI
+  [−13.9, +85.9]** — not resolvable; point estimate +1.3%, upper bound +3.2%.
+
+  Original note kept below, because its reasoning about WHY the old number was
+  not a throughput result is the part worth remembering.
+
+  **[HISTORICAL]** Wall clock on the 3 8k cases was
   47.0s (HEAD) vs 48.7s (fixed), but the two runs emit different text once one of
   them starts answering correctly, so that number is not a throughput result. The
   RoPE fix strictly REMOVES work (no gather + rotate of dense history per chunk
   per layer); the router adds a cached min/max plus two GEMMs in place of one
   einsum. Measure it properly before quoting a number.
-* **`_apply_rope_single` at `dkv_attention.py:3344`** — same double-rotation
-  shape, but it is inside the MPS `_validate_this_step` branch, not production
-  CUDA, so it was left alone. Fix it if that validation path is ever trusted.
-* **`ingest_streaming` frame is inconsistent across prefill paths.** The
-  chunked-sparse path (the one that fails --long) captures via `_ingest_k`, but
-  INCREMENTAL prefill (`dkv_attention.py:3526`) passes raw `unrot_key_states` and
-  `finalize_contiguous_prefill` inverse-RoPEs before calling `capture_prefill_kv`.
-  Under the rotated-pool default those two write the pool in the OPPOSITE frame
-  from the first. Not exercised by 1st-turn NIAH; a 2nd-turn session is where it
-  would show. Route every capture site through `_ingest_k`.
-* **`tests/test_niah.py` is only meaningful RUN ALONE.** Run as part of the full
+* **[MLX] `_apply_rope_single`** (now `dkv_attention.py:4746`) — still open, and
+  confirmed to sit inside `if _is_mps_decode:`, so it is unreachable from CUDA
+  and cannot be tested here at all. The helper itself is now partial-RoPE
+  correct (slices by `cos.shape[-1]`), and its sibling caller at `:1699` is
+  guarded by `_pool_rotated_k()`; the `:4746` site is not obviously guarded.
+  **[CLOSED 2026-08-23 on the Mac.]** It was NOT validation-only: the
+  production `_is_mps_decode` path had the same double rotation, and `low` —
+  the one preset keeping `rotated_pool=True` — also sets
+  `approximate_attn=True` on macOS, which is exactly that gate. Both sites now
+  consult `_pool_rotated_k()`; `tests/test_mps_dense_rope_guard.py` pins it.
+  See `ACTIVE_RUNTIME/docs/mlx_work_record.md` §4.
+* **[CLOSED] `ingest_streaming` frame is inconsistent across prefill paths.**
+  Fixed 2026-08-23. FOUR sites still bypassed `_ingest_k` and passed raw
+  unrotated keys: the dense/bypass path, the chunked incremental-prefill path,
+  and two more fed from a single `curr_unrot_k` variable assigned ~700 lines
+  earlier — the last two look clean at the call site, which is why they
+  survived the first pass. All now route through `_ingest_k(rot, unrot)`.
+  Pinned by `tests/test_ingest_frame_consistency.py` (4 tests), which checks
+  the ASSIGNMENTS as well as the call sites. The test is source-level on
+  purpose: RoPE is orthogonal, so a wrong frame preserves norms and corrupts
+  only angles — nothing raises and no shape changes, so there is no runtime
+  signature to assert on.
+* **[CLOSED] `tests/test_niah.py` suite isolation.** The leading hypothesis in
+  the note below — "the pool budget is computed from FREE VRAM at init, so
+  earlier tests holding memory change `max_blocks`, block sizing and therefore
+  routing" — was correct and has been acted on: `tests/conftest.py` now pins
+  `DKV_POOL_BUDGET_GB=2.0` for the whole suite, with a comment naming this as an
+  ISOLATION fix rather than a tuning knob. The full suite runs **216 passed,
+  6 skipped, 0 failed** including `test_niah`, so the file no longer needs to be
+  run alone and the suite result does discriminate. Original note kept below for
+  the reasoning.
+
+  **[HISTORICAL] `tests/test_niah.py` is only meaningful RUN ALONE.** Run as part of the full
   suite it fails all three 8k cases — *identically at HEAD and with both §0.5
   fixes in*, so it is cross-test state contamination, not a regression, and the
   full-suite NIAH result cannot discriminate anything. Ruled out by measurement:
@@ -725,15 +830,27 @@ position-alignment change. Delete `/tmp/dkv_qprobe_*.pt` and re-run both passes.
   holding memory change `max_blocks`, block sizing and therefore routing. Same
   full-suite-only pattern hits `test_triton_combined`. Whoever needs the suite
   green should fix the isolation, and until then A/B the FILE, never the suite.
-* `tests/test_facter_retention.py::test_localized_vertical_factual_retrieval` is
-  FLAKY, unrelated to any of this: unseeded `torch.randn`, ~1-in-5 failures on the
-  relaxed-threshold fallback assertion. Seed it before it costs someone a
-  bisect.
+* **[CLOSED]** `tests/test_facter_retention.py::test_localized_vertical_factual_retrieval`
+  flakiness. Already fixed before this pass: a `_deterministic_numerics` fixture
+  seeds the RNG *and* pins TF32, and its docstring records both leaks — the
+  unseeded `torch.randn` (the root cause) and `torch.set_float32_matmul_precision
+  ("high")` being set globally on DKV import (an independent second trigger).
 * **Prefill router alignment** — section 2. Done; see §0.5.
-* **64k** — untested. Depth 0.9 there puts the needle in the same relative
-  position, so the same failure is *expected* but unverified. Re-check after the
-  fix. Note the routed-row count does not grow with context (K=16 regardless), so
-  "more context = more competitors" is NOT the mechanism.
+* **[CLOSED] 64k.** Tested 2026-08-23, RTX 4070 SUPER, Qwen3.5-2B, via the new
+  `validate_cuda_dkv.py --x64` flag:
+
+      64k @ 0.0 (65251 tok)   3/3, 1 distinct output across 3 runs
+      64k @ 0.5 (65454 tok)   3/3, 1 distinct output across 3 runs
+      64k @ 0.9 (65499 tok)   3/3, 1 distinct output across 3 runs
+      Triton kernel used, fallback_count=0
+
+  The note below expected `64k@0.9` to fail, on the reasoning that depth 0.9
+  puts the needle in the same RELATIVE position as the then-failing `32k@0.9`.
+  It passes. Both were fixed by the same §0.5 work, which is consistent with
+  the note's own caveat that the routed-row count does not grow with context
+  (K=16 regardless), so "more context = more competitors" was never the
+  mechanism. It fits in 12 GB, contrary to the concern that motivated putting
+  it behind its own flag.
 * **`DKV_RESIDUALS_IN_DENSE`** (commits `53d928d`, `6dab025`) — real MLX parity:
   exact residual rows belong in the DENSE half (`mlx_dkv_wrapper.py:1031`), and
   with them in the sparse half `DKV_SPARSE_BIAS=auto` had the wrong sign and was

@@ -64,6 +64,49 @@ def _ingest_k(rot_k, unrot_k):
 # Falls back silently to the existing Python paths if the extension is absent
 # or built without the Phase 1 ops. No behavioral change on fallback.
 try:
+    # ── Windows: make the built extension FINDABLE before importing it ────────
+    # Two separate reasons this failed on Windows, and the error message only
+    # ever named the first:
+    #
+    #   1. build_ext --inplace leaves dkv_core.cp313-win_amd64.pyd in
+    #      native_core/dkv_core/, which is not on sys.path. Reported as
+    #      "No module named 'dkv_core'", which reads as "not built".
+    #   2. Once found, it raised "DLL load failed" instead: the extension links
+    #      cuSOLVER/cuBLAS from the CUDA TOOLKIT, while torch ships its own
+    #      (different) CUDA runtime. The toolkit's bin/ has to be on the DLL
+    #      search path, and since Python 3.8 that means add_dll_directory --
+    #      PATH alone is not enough.
+    #
+    # Both are best-effort: any failure here just leaves the import to fail as
+    # before and the Python fallbacks take over, which is the documented
+    # behaviour when the extension is absent.
+    # OPT-IN, via DKV_USE_CORE=1. Making the built extension auto-discoverable
+    # was a regression: it put dkv_core on sys.path for EVERY import site, and
+    # test_cloning_decode_isolation then failed with "DLL load failed while
+    # importing dkv_core" -- findable but not loadable in that context, where
+    # before it was simply not found and the Python fallback ran. Holding the
+    # add_dll_directory cookies for the process lifetime did not fix it either.
+    #
+    # The extension is an OPTIONAL accelerator and the Python paths are the
+    # supported route, so the default must be the one that always works. Build
+    # it with vcvars64 + `py setup.py build_ext --inplace` and set DKV_USE_CORE=1
+    # to use it; the CUDA-toolkit bin directory is registered here because the
+    # extension links cuSOLVER/cuBLAS from the toolkit while torch ships its own.
+    if os.name == "nt" and os.environ.get("DKV_USE_CORE") == "1":
+        import glob as _glob
+        _ext_dir = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "native_core", "dkv_core")
+        if os.path.isdir(_ext_dir) and _ext_dir not in sys.path:
+            if _glob.glob(os.path.join(_ext_dir, "dkv_core*.pyd")):
+                sys.path.append(_ext_dir)      # APPEND: never outrank a real install
+        for _cuda_bin in sorted(_glob.glob(
+                r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*\bin"),
+                reverse=True):
+            try:
+                os.add_dll_directory(_cuda_bin)
+            except Exception:                                # noqa: BLE001
+                pass
+
     import dkv_core as _dkv_core
 
     # ── Stale-binary guard ────────────────────────────────────────────────────
@@ -118,6 +161,25 @@ except Exception as e:
     _DKV_HAS_SRL_ROUTER    = False
     _DKV_HAS_METAL_ATTN    = False
 
+
+def _compiled_kernel_ok(pool) -> bool:
+    """False when a compiled kernel must NOT be handed this pool.
+
+    The dkv_core / Metal decode kernels take the WHOLE pool.V_K and pool.V_V and
+    index them by SLOT internally.  Under DKV_SHARED_BASIS that indexing is
+    wrong twice over: several slots share one basis row, and the V store is
+    SHORTER than the slot count, so a slot id past n_basis reads out of bounds.
+    Neither can be redirected from Python -- the map lives in `basis_of` and the
+    kernel signature has nowhere to put it.
+
+    So those paths decline and decode falls through to the Triton/PyTorch
+    gather, which resolves V through pool.basis_index().  Porting shared bases
+    to a compiled kernel means adding the map to its signature; until then this
+    is the guard that keeps the two features from silently corrupting each
+    other.
+    """
+    return not getattr(pool, "shared_basis_active", False)
+
 # ── SRL routing configuration ─────────────────────────────────────────────────
 # DKV_SRL_THRESHOLD: minimum N_blocks before SRL kicks in (default 50).
 # DKV_VALIDATE_SRL:  enable accuracy validation mode (0/1, default 0).
@@ -149,6 +211,125 @@ _DECODE_CACHE_CUDA = os.environ.get("DKV_DECODE_CACHE_CUDA", "0") == "1"
 # consult it run per layer per decode step, and an environ lookup there is the
 # same host overhead the flag exists to eliminate.
 _GRAPH_SAFE_DECODE = os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"
+
+# DKV_GRAPH_MUTATION_OUT=1 — move the decode step's Python MUTATION out of the
+# forward so a captured CUDA graph replays correctly.
+#
+# Capture already succeeds and replay is already 1.41x; what makes replay WRONG
+# is that replay executes no Python, and the forward mutates state on every
+# token: it ingests the new K/V into the tail block and rebuilds the dense
+# window. Neither synchronises, so a clean sync probe does not reveal them.
+#
+# With this on, the forward becomes read-only with respect to that state:
+#   * the current token is attended from an explicit curr_kv row rather than by
+#     having been ingested into the window first (attend_with_remat);
+#   * the dense window is taken whole and masked by a DEVICE-resident length,
+#     rather than sliced by a host int that a graph would bake in;
+#   * ingest and window assembly are performed by the caller BETWEEN forwards,
+#     where Python is allowed to run.
+#
+# Default OFF. The three changes are only correct together -- with the curr row
+# but without the ingest move the current token is attended twice.
+# DKV_FAST_DECODE=1 -- one switch for the decode-optimised path, instead of
+# requiring two obscure flags to be set together and in agreement.
+#
+# It turns on mutation-out (this module) and routed CUDA-graph capture (the
+# wrapper). Those two are useless apart: capture needs a forward that does not
+# mutate KV state, and mutation-out without capture is pure overhead.
+#
+# WHAT IT IS NOT: a prefill-versus-decode trade. TTFT is unaffected either way.
+# The cost it can carry is a DECODE cost -- moving per-layer ingest and window
+# assembly into a Python loop in the wrapper, which runs once per ATTENDED LAYER
+# per token. Measured at 32k: Qwen3.5-2B (6 attended layers) is slightly faster
+# with it, Qwen2.5-1.5B (28 layers) about 9% slower, because at 32k the
+# selectivity gate declines the graph so the loop buys nothing.
+#
+# DEFAULT ON since 2026-08-17. It was opt-in for a long time on two objections,
+# and both are now answered by measurement rather than argument.
+#
+# OBJECTION 1, "it is slower at short context". It WAS -- 2.0x at 4k and 1.8x at
+# 8k -- because remat declined under mutation-out and every step fell back to
+# the Triton kernel. That was three chained bugs (a guard comparing positions
+# against the PADDED window width, a priming order that left step 1 without a
+# rotated window, and a leftover unconditional `_ok = False`), all fixed. Paired
+# in-process, Qwen2.5-1.5B, 6 rounds:
+#
+#      4k   -11.220 ms  CI [-11.893, -10.547]   25.4% FASTER
+#      8k    -4.168 ms  CI [ -4.464,  -3.873]    9.3% faster
+#     16k    +2.803 ms  CI [ +2.513,  +3.094]    5.2% slower
+#     32k    +0.128 ms  CI [ -4.030,  +4.287]    no effect
+#
+# One regression, 5.2% at 16k, against 25% and 9% gains below it and nothing
+# above. Worth taking.
+#
+# OBJECTION 2, "it does not reproduce eager". It does not, and it never can. The
+# first divergence is at STEP 1 and it is ONE ULP (fp16 max 29.203125 replayed
+# against 29.218750 eager); the argmax survives it for 31 tokens and flips on
+# the 32nd. A CUDA graph makes no bit-identity promise -- kernel selection can
+# differ between a capture warmup and an eager call -- so this is a DISTRIBUTION
+# difference, the same class DKV_DETERMINISTIC already exists to manage for the
+# decode attention's own reduction. Accuracy is unaffected where it can be
+# measured: digit-table 24/24 and linkbench 23/48 with it on, both identical to
+# off and both equal to dense.
+#
+# DKV_FAST_DECODE=0 turns it off for anyone who needs the old path.
+_FAST_DECODE = os.environ.get("DKV_FAST_DECODE", "1") == "1"
+_MUTATION_OUT = os.environ.get(
+    "DKV_GRAPH_MUTATION_OUT", "1" if _FAST_DECODE else "0") == "1"
+
+# _GRAPH_SAFE_DECODE has TWO groups of use sites and they do not cost the same.
+#
+# On the BYPASS path it builds the StaticCache, its full-buffer mask, the
+# position-derived cache_position and the contiguous mask. That machinery is
+# what makes capture possible at all, and it is free when no graph is captured
+# because the bypass path only runs below the engage threshold.
+#
+# On the ROUTED path it also forces `changed = True` every step, which throws
+# away the gather cache on every token. That was shipped without a speed check
+# and it costs ~7% of routed decode -- measured interleaved on Qwen3.5-2B at
+# 32k, 10.49/10.07 tok/s with it on against 10.93/11.18 with it off.
+#
+# The routed relaxation only BUYS anything if a graph is going to be captured
+# over the routed forward, and that needs mutation-out. Without it the routed
+# forward mutates state the replay cannot reproduce, so capture is refused and
+# the sync removal purchases nothing at all -- it is pure cost. So the routed
+# sites test the narrower condition while the bypass sites keep the broad one.
+#
+# NOT PRECOMPUTED INTO A CONSTANT, and that distinction is load-bearing. It was
+# a constant folded from _MUTATION_OUT -- the REQUESTED flag -- which meant that
+# under --fastdc it stayed True even on sessions where the per-session gate had
+# turned mutation-out off. Those sessions then took the relaxed branch anyway:
+# the gather cache was cleared every step and the SRL recent-key trail was
+# skipped, which changes routing and therefore the TEXT. Caught at 32k, where
+# --fastdc returned md5 9a9cbc07 against eager's 7c291f42 with
+# DKV_DETERMINISTIC=1 on both.
+#
+# The routed sites must therefore read _MUTATION_OUT_ACTIVE, which the wrapper
+# rebinds per session. Two module-global reads, no environment lookup, so this
+# is still cheap enough for a per-layer per-step site.
+def _graph_safe_routed() -> bool:
+    """Is the routed sync-removal in force for the step about to run?"""
+    return _GRAPH_SAFE_DECODE and _MUTATION_OUT_ACTIVE
+
+# _MUTATION_OUT is what the USER ASKED FOR. _MUTATION_OUT_ACTIVE is what is
+# actually in force right now, and the decode path reads THIS one.
+#
+# Deferring the forward's mutation is not free: it moves per-layer work into the
+# host loop, so it costs in proportion to attended-layer count. That buys a large
+# win when a graph is captured (16k, Qwen2.5-1.5B: 17.3 -> 10.2 s wall, byte
+# identical) and buys NOTHING when the selectivity gate declines the graph -- at
+# which point it is a pure ~9% loss on wide models at 32k. That asymmetry is why
+# --fastdc could not simply be turned on for everyone.
+#
+# So the wrapper republishes this per session, per step, from the same gate that
+# decides whether to capture: request AND graph-will-engage. Non-selective
+# sessions get the win, selective ones stop paying for it, and --fastdc becomes
+# safe to leave on. The wrapper OWNS this value; nothing else should assign it.
+#
+# Rebound rather than read from the environment because the decode forward
+# resolves module globals at call time -- the same mechanism bench_decode_paired
+# relies on to flip a constant between arms inside one process.
+_MUTATION_OUT_ACTIVE = _MUTATION_OUT
 # Fixed-shape routing, for CUDA graph capture of the ROUTED decode path.
 # The two compactions in dkv_forward use torch.nonzero, whose output LENGTH
 # depends on its input values, so every shape downstream is data-dependent. A
@@ -328,10 +509,120 @@ def _coarse_scale_kv(kv_manager, sid, layer_idx, pool, cos_all, sin_all,
         return None
 
 
+def _stabilise_routed_set(kv_manager, sid, layer_idx, block_indices, anchor_indices):
+    """Pin the routed set into FIXED-ADDRESS buffers so a graph can read it.
+
+    The last thing that stops routed replay being correct is that block_indices
+    and anchor_indices are freshly allocated by Python on every decode step, so a
+    captured graph holds pointers to whichever pair existed at capture time and
+    routing never advances again.
+
+    Copying them into persistent per-(session, layer) buffers fixes the ADDRESS.
+    The graph then reads those buffers, and anything that writes them later --
+    an eager step, which is how this design refreshes routing -- is visible to
+    every subsequent replay without re-capture.
+
+    Deliberately NOT a re-routing path: the forward keeps doing the routing, so
+    there is no second implementation to drift from the first. That was the
+    failure mode of the alternative (a wrapper-side router that would have had to
+    replicate the forward's router-mode, k_eff and srl-threshold guards).
+
+    Returns the buffers to use, or the originals when the shape is not stable
+    (short context, where the graph is not used anyway).
+    """
+    if block_indices is None or anchor_indices is None:
+        return block_indices, anchor_indices
+    ws = kv_manager.decode_workspace.setdefault(sid, {})
+    bufs = ws.setdefault("_routed_buf", {})
+    ent = bufs.get(layer_idx)
+    n = int(block_indices.shape[0])
+    if ent is None or int(ent[0].shape[0]) != n:
+        # First use, or the routed count changed (still filling up early in a
+        # session). Allocate at the CURRENT size and hand back the originals this
+        # step; a size change also means any existing graph is stale, which the
+        # caller handles by invalidating on shape change.
+        bufs[layer_idx] = (block_indices.clone(), anchor_indices.clone())
+        if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1" and layer_idx == 0:
+            import sys as _s
+            print(f"[PTR] routed L{layer_idx} (RE)ALLOC n={n} -> returning ORIGINAL "
+                  f"0x{block_indices.data_ptr():x}", flush=True, file=_s.stderr)
+        return block_indices, anchor_indices
+    bi_buf, ai_buf = ent
+    bi_buf.copy_(block_indices)
+    ai_buf.copy_(anchor_indices)
+    if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+        import sys as _s
+        print(f"[PTR] routed L{layer_idx} buf=0x{bi_buf.data_ptr():x} "
+              f"src=0x{block_indices.data_ptr():x} n={n}", flush=True, file=_s.stderr)
+    return bi_buf, ai_buf
+
+
+# Reason codes for every way _remat_attend can decline. DKV_REMAT_WHY=1 prints
+# each one ONCE. Added because the function has five exits and four of them were
+# indistinguishable from the outside: the caller only sees None and silently
+# falls back to the Triton kernel, which is a DIFFERENT attention implementation
+# -- so a decline does not fail, it quietly changes the numerics. Three separate
+# debugging passes were spent bisecting hypotheses that this would have answered
+# in one run.
+_REMAT_WHY_SEEN = set()
+
+# DKV_EXACT_ROPE_REMAT — rotate each MATERIALISED key at its own absolute
+# position instead of rotating the basis at the block anchor.
+#
+# It removes the Project-Then-Attend phase error on an unrotated pool: the basis
+# rotation lands every token of a block in the ANCHOR's frame, so a token j into
+# its block carries j positions of RoPE error, and the exact residual (rotated at
+# its TRUE position) ends up correcting a base in a different frame. Rotating the
+# materialised key instead gives R(true_pos)(anchor_raw + delta_raw + res_raw),
+# which is MLX's form and whose only error is low-rank truncation.
+#
+# DEFAULT ON since cuda_work_record.md 4g. It was OFF, on this measurement:
+#
+#   colab/logit_fidelity.py, 8k, decode step   ON 0.00029   OFF 0.00125
+#   colab/needle_depth_sweep.py, 8k, 11 depths ON 11/11     OFF 11/11
+#   colab/needle_depth_sweep.py, 32k,11 depths ON 10/11     OFF 11/11
+#
+# -- the more accurate keys measured 4.3x closer to dense in KL and lost a needle
+# anyway, at 32k depth 0.80, deterministic over repeats. The note here called
+# that NOT UNDERSTOOD and guessed "the anchor-frame error was suppressing a
+# competitor to the needle's digit token ... the old path was lucky at a
+# coin-flip margin".
+#
+# THAT GUESS WAS RIGHT, AND THE MARGIN IS GONE. Both rows above were measured on
+# the TILED filler -- the haystack 4d showed cannot see this defect, because a
+# random code in one repeated sentence is a guaranteed outlier that wins its
+# residual slots at any budget -- and with the run-atomic capture of 4f the
+# 32k tiled sweep now reads 12/12 with this ON, so the regression that kept it
+# off does not reproduce. Re-measured, twelve depths, dense control 12/12:
+#
+#   natural filler 32k    OFF 10/12   ON 11/12
+#   natural filler 8k     OFF 12/12   ON 12/12
+#   tiled filler 8k/32k   ON 12/12 / 12/12
+#   validate_cuda_dkv --long (Qwen3.5-2B)   ALL CHECKS PASSED
+#   multifact 16k   relational 4/4, multi-needle 3/3, synthesis 6.7 (unchanged)
+#
+# FREE on decode: colab/bench_decode_paired.py MODE=AB EXPERIMENT=exact_rope_remat
+# reads -0.055 ms/token, CI [-0.655, +0.545], NO EFFECT RESOLVABLE, with the A/A
+# control validated at +-1.4% of a token. It is paid inside the RematCache entry,
+# so once per refresh rather than once per token.
+#
+# Set DKV_EXACT_ROPE_REMAT=0 to restore the anchor-frame basis rotation.
+_EXACT_ROPE_REMAT = os.environ.get("DKV_EXACT_ROPE_REMAT", "1") != "0"
+
+
+def _remat_why(code, extra=""):
+    if os.environ.get("DKV_REMAT_WHY") != "1" or code in _REMAT_WHY_SEEN:
+        return
+    _REMAT_WHY_SEEN.add(code)
+    print(f"[REMAT-NO] {code}{(' ' + extra) if extra else ''}",
+          file=sys.stderr, flush=True)
+
+
 def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                   pool, block_indices, anchor_indices, cos_all, sin_all,
                   layer_active_rank, q, dense_k, dense_v, dense_len,
-                  num_key_value_groups):
+                  num_key_value_groups, curr_kv=None, dense_mask=None,
+                  dense_blocks=None):
     """MLX's decode form: materialise the routed blocks, then plain SDPA.
 
     MLX builds each routed block's real keys and values --
@@ -360,25 +651,358 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
     unrotated dense keys -- it declines instead of silently attending garbage.
     """
     global _REMAT_UNROTATED_WARNED
+    # ── WHICH DENSE WINDOW THIS FUNCTION REQUIRES ───────────────────────────
+    # `dense_k` must be in the POOL's frame -- the frame the pool stores, NOT the
+    # true per-token frame. Both call sites pass `dense_k_assembled`, which is it.
+    #
+    # That matters most on an UNROTATED pool, which is the DEFAULT (`mid`, `high`
+    # and `ultra` all set rotated_pool=False; only `low` keeps it on). There the
+    # pool holds PRE-RoPE keys, and the `if not _psr():` branch below rotates the
+    # dense window ITSELF, at the positions from dense_blocks[].token_indices, to
+    # match the compressed half it also rotates. Hand it a window that is ALREADY
+    # rotated and it rotates a second time -- the same defect family as §0.5's
+    # double-RoPE-on-history, at a new site.
+    #
+    # THE COMBINED BRANCH USED TO PASS `_dk_combined` INSTEAD, and that is a
+    # different tensor: it is built for native_triton_sparse_attn_decode_combined,
+    # which wants the window PRE-ROTATED, so it already carries the rotation this
+    # function would apply. Measured at layer 0, 8k, against a dense control's own
+    # post-RoPE keys -- note which one is "closer to truth", and that it is the
+    # wrong one to pass here precisely because it is:
+    #
+    #     _dk_combined          mean |dk - K_true|  0.047
+    #     dense_k_assembled     mean |dk - K_true| 43.79
+    #
+    # `_dk_combined` is already in the true frame, so rotating it again put the
+    # dense rows in no frame at all while the compressed rows landed correctly --
+    # one plain SDPA over a union of two frames, which is meaningless whichever
+    # frame is "right". Nothing raised, the shapes were correct, and the pool
+    # reported the same block count; the only symptom was the answer. At 8k that
+    # read KL 11.76 against a dense control with top-1 agreement 0/5 and the
+    # needle lost outright, against KL 0.00125 and 5/5 once the frames agree.
+    #
+    # It only ever fired on the combined branch -- DKV_SPARSE_BIAS unset or
+    # "0.0", the LIBRARY DEFAULT. BEST_DECODE_DEFAULTS sets it to "auto", which
+    # takes the production branch, so everything going through the serving
+    # defaults (validate_cuda_dkv.py included) was unaffected and never saw it.
+    #
+    # Declining here was tried first and REJECTED on measurement: it is correct
+    # but hands the branch back to its own kernel, and remat is worth 29.9% of
+    # decode there (54.75 vs 78.43 ms/token at 8.4k, paired, CI +-0.7%).
+    if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+        import sys as _s
+        print(f"[PTR] _remat_attend ENTER L{captured_layer_idx} "
+              f"enabled={_REMAT_ENABLED} bi={None if block_indices is None else int(block_indices.numel())} "
+              f"dlen={dense_len}", flush=True, file=_s.stderr)
     if not _REMAT_ENABLED:
+        _remat_why("disabled")
         return None
     if block_indices is None or block_indices.numel() == 0:
+        _remat_why("no-blocks")
         return None
     if dense_k is None or not dense_len:
-        return None
+        # Under DKV_GRAPH_MUTATION_OUT the caller has not assembled a window yet
+        # on the first decode token, but curr_kv still carries the current token,
+        # so there IS something to attend. Only decline when neither is present.
+        if curr_kv is None:
+            _remat_why("no-window-no-curr")
+            return None
     try:
         from native_core.sparse_decode.triton_fused_decode import (
             pool_stores_rotated_k as _psr,
         )
+        # THIS LINE IS WHAT `ultra` ACTUALLY COSTS. It is not the rotation.
+        #
+        # Declining here disables the remat cache for the WHOLE session, and
+        # remat is worth a lot: this module's own docstring records 6.95 -> 10.18
+        # tok/s at 32k on Qwen2.5-1.5B, ~46%. The unrotated pool measures 43%
+        # slower on Qwen3.5-2B and 137% on Qwen2.5-1.5B, which is that number,
+        # not a rotation bill.
+        #
+        # Confirmed by profile (colab/profile_rotated_pool.py), 24 steps at 32k:
+        #
+        #   rotated     fmha 520.47 ms / 342 calls,  fused kernel ABSENT
+        #   unrotated   fmha 751.69 ms / 198 calls,  fused kernel 62.61 / 144
+        #
+        # 342 - 198 = 144 = 24 tokens x 6 attended layers: exactly the DKV layers
+        # moving off this path onto the Triton one. And no RoPE kernel appears in
+        # the delta at all -- three separate rotation hypotheses each measured
+        # no-effect before this was found (see the do_rot site in
+        # triton_fused_decode.py).
+        #
+        # TO FIX, and it is worth fixing -- it would make dense-parity accuracy
+        # nearly free and let `ultra` become the default:
+        #   1. plumb the dense window's ABSOLUTE TOKEN POSITIONS into this
+        #      function. They exist on dense_blocks[].token_indices, which is
+        #      where the sparse path reads them; assemble_dense_window_kv builds
+        #      the workspace and would have to publish them alongside it.
+        #   2. rotate dense_k with _partial_rope_apply at those positions, the
+        #      same call the sparse path makes.
+        #   3. then delete this decline.
+        # Do NOT skip step 1 and rotate at a guessed position. Every comment in
+        # triton_fused_decode.py around this describes the same failure mode from
+        # the other direction: a dense window rotated at the wrong positions, or
+        # left unrotated, produces confident garbage rather than an error.
         if not _psr():
-            if not _REMAT_UNROTATED_WARNED:
-                _REMAT_UNROTATED_WARNED = True
-                print("[DKV] DKV_REMAT_CACHE ignored: the pool holds UNROTATED "
-                      "keys (DKV_ROTATED_POOL=0), and this path's dense window "
-                      "is only rotated inside the sparse kernel. Declining "
-                      "rather than attending unrotated dense keys.", flush=True)
-            return None
-    except Exception:                                            # noqa: BLE001
+            # ROTATE THE DENSE WINDOW HERE instead of declining. The compressed
+            # side is already handled -- _gather_routed_blocks_for_kernel rotates
+            # anchors and V_K when the pool is unrotated -- so the dense window
+            # was the only reason this path could not serve an unrotated pool.
+            #
+            # Positions come from dense_blocks[].token_indices, the SAME source
+            # the sparse path uses, laid out in the same order the assembler
+            # writes (anchor then active, packed from row 0). They are not
+            # derivable from a start offset: the assembler's trim loop protects
+            # block 0 and drops the SECOND-oldest, which leaves a real gap.
+            #
+            # Rotate into a persistent per-layer buffer, never in place. dense_k
+            # is the assembler's CACHED workspace, reused across steps, so an
+            # in-place rotate would compound every step -- rotating a key twice
+            # does not raise, it just returns confident nonsense.
+            from native_core.sparse_decode.triton_fused_decode import (
+                _partial_rope_apply as _pra,
+            )
+            _dbs = dense_blocks
+            if not _dbs:
+                # Mutation-out path: the WRAPPER assembled the window, so the
+                # forward was not handed the block list. It publishes the trimmed
+                # list here for exactly this reason.
+                _dbs = (kv_manager.decode_workspace.get(sid, {})
+                        .get("dense_blocks_trimmed", {})
+                        .get(captured_layer_idx))
+            _pos = []
+            for _blk in (_dbs or []):
+                _pos.extend(getattr(_blk, "token_indices", ()) or ())
+            # Split into named conditions. As ONE boolean this reported
+            # "no-positions" for six different failures, which sent three
+            # debugging passes after the wrong one.
+            _why_parts = []
+            if dense_k is None:
+                _why_parts.append("dense_k=None")
+            if not dense_len or dense_len <= 0:
+                _why_parts.append(f"dense_len={dense_len}")
+            if cos_all is None:
+                _why_parts.append("cos_all=None")
+            if sin_all is None:
+                _why_parts.append("sin_all=None")
+            if cos_all is not None and cos_all.dim() != 3:
+                _why_parts.append(f"cos_dim={cos_all.dim()}")
+            # COMPARE AGAINST THE VALID EXTENT, NOT THE PADDED WIDTH.
+            #
+            # Under mutation-out `dense_len` is deliberately the FULL workspace
+            # width -- the caller assembles the window and carries validity in
+            # dense_mask instead, so shapes stay static for graph capture. The
+            # token positions describe only the REAL rows. Comparing the two
+            # asked "are there 3072 positions for 1462 tokens", which can never
+            # be true, so this guard declined on every single step and sent
+            # --fastdc to the Triton kernel forever. Measured: npos=1462 against
+            # dlen=3072.
+            #
+            # The valid count is what positions there are. Rotate exactly those
+            # rows; the mask already discards the rest.
+            _vlen = min(len(_pos), int(dense_len or 0))
+            if _vlen <= 0:
+                _why_parts.append(f"vlen=0 npos={len(_pos)} dlen={dense_len} "
+                                  f"nblk={len(_dbs or [])}")
+            _ok = not _why_parts
+            if _why_parts:
+                _remat_why("unrotated-guard", ",".join(_why_parts))
+            # NOT GRAPH-SAFE, so refuse to run inside a capturable forward.
+            # The rotation below builds its position tensor from a PYTHON LIST
+            # and gathers cos/sin with it. A captured graph replays no Python, so
+            # every replayed step would rotate the dense window at the positions
+            # frozen at capture time -- and a wrongly-rotated key does not raise,
+            # it returns confident nonsense. Declining hands the step to the
+            # Triton sparse path, which rotates inside the kernel and is what
+            # served this case before the remat path could.
+            #
+            # Making it capturable means pinning _dp/cos/sin into fixed-address
+            # buffers written by the WRAPPER between forwards, the same pattern
+            # _remat_pin and _pending_ingest already use. The wrapper can do it:
+            # _history_cos_sin is module-level and _dkv_apply_pending_mutation
+            # already assembles the window and publishes dense_len_dev the same
+            # way.
+            #
+            # THIS GUARD IS THE WHOLE --fastdc DIVERGENCE, and the replay is not
+            # at fault. Declining here sends mutation-out to the Triton kernel
+            # while eager takes remat: two different attention implementations,
+            # so the two arms were never computing the same thing.
+            #
+            # Established by elimination, not inference:
+            #   * DKV_ROTATED_POOL=1, where both arms take remat and no rotation
+            #     is needed, gives eager and replayed the SAME md5
+            #     (1c58b822b4983e8d). So replay reproduces eager exactly.
+            #   * DKV_GRAPH_DEBUG_PTR=1 shows every replayed input correct:
+            #     ingest advancing at a fixed address, window advancing with
+            #     dlen 1463->1474, cos stable, and the routed set frozen but
+            #     COMPLETE -- checksum 105 = 0+1+...+14, i.e. all 15 blocks, so
+            #     freezing it is a no-op exactly as the selectivity gate intends.
+            #   * [POOL] shows the compressed pool bit-identical at generation 47
+            #     across every step: V_K, anchors_K and residuals never move.
+            # Nothing is stale. Frozen routing was the wrong suspect.
+            #
+            # THE FIX is to rotate the dense window in the WRAPPER, into a
+            # fixed-address buffer, so remat can serve mutation-out and both arms
+            # run the same path. Built twice, reverted twice, and the second
+            # attempt got far enough to rule out everything obvious:
+            #
+            #   * the publish GUARD is fine. Instrumented at 16k layer 0:
+            #     rotated=False, dk=True, dlen=1463, npos=1463 -- token_indices
+            #     covers the assembled extent EXACTLY, over blocks of 1025 + 438.
+            #   * the publish ITSELF is fine. It writes shape (1, 2, 3072, 128)
+            #     to a pointer that never moves (0xbf4e55200) on every step.
+            #   * the READ is fine. With a MISS probe on the lookup, no miss is
+            #     ever reported after the first step -- the forward finds the
+            #     buffer it was given.
+            #   * and the md5 STILL does not move off the Triton-path value
+            #     (566e1b26cf578c92).
+            #
+            # So there is a FURTHER decline between finding the buffer and remat
+            # actually serving -- _remat_attend has several later `return None`
+            # paths, and one of them is firing. Instrument those next, not this
+            # guard and not the publish. Reverted rather than left in because it
+            # costs a copy-and-rotate per layer per step and, until that last
+            # decline is found, buys nothing for it.
+            # CAPTURE ORDERING: SOLVED. --fastdc reproduces eager at 4 of 5
+            # contexts, where before it matched at NONE that engaged the graph.
+            #
+            # The sequencing bug was real and is now understood.
+            # _dkv_apply_pending_mutation runs AFTER a forward AND returns early
+            # when `_pending_ingest` is empty, so before the first decode step
+            # nothing had assembled or pre-rotated the window. remat declined on
+            # step 1, the forward fell back to the Triton kernel, and capture
+            # froze THAT path into the graph -- after which no forward ever ran
+            # again, so nothing published later could be read.
+            #
+            # Two changes fix the ordering, both verified by the reason codes:
+            #   1. call _dkv_apply_pending_mutation once BEFORE the first
+            #      forward, to assemble and publish the window; and
+            #   2. let its `if not pend: return` fall through when the rotation
+            #      is still owed -- "nothing to ingest" is not "nothing to do",
+            #      and on the priming call pend is empty by definition.
+            # With both, "prerot-missing" stops firing: the buffer exists before
+            # anything is captured.
+            #
+            # A THIRD bug hid behind those two: a leftover unconditional
+            # `_ok = False` sat directly after the pre-rotation check, so _ok was
+            # always false and NO reason code fired -- the guard printed
+            # "no-positions" while the split conditions it was built from all
+            # passed. That contradiction is what exposed it. Removing it is what
+            # finally let remat serve.
+            #
+            # Qwen2.5-1.5B, DKV_DETERMINISTIC=1, eager against replayed:
+            #
+            #      4k   a98e5634 == a98e5634    and 8.8 -> 5.5 s
+            #      8k   3b03a854 != 90d1e9e0    STILL DIFFERS
+            #     16k   0fec68e1 == 0fec68e1    and 11.5 -> 10.8 s
+            #     32k   dab29f7d == dab29f7d
+            #     64k   42a41224 == 42a41224
+            #
+            # 8k IS THE ONE LEFT, and IT IS NOT ABOUT 8k. Measured:
+            #
+            #   8k,  8 tokens   invalidation FIRES (6 -> 7), output MATCHES
+            #   8k, 48 tokens   invalidation fires,          output DIFFERS
+            #   16k, 650 tokens no invalidation,             output MATCHES
+            #
+            # So the trigger is a block FINALISING during generation, and how
+            # many replays run after it -- not the context length. Whether that
+            # happens depends on where the prompt sits relative to a block
+            # boundary, so any context reaches it with a long enough generation;
+            # 16k is exact over 650 replayed steps only because it never gets
+            # there. 32k and 64k agree for a different reason again: the
+            # selectivity gate declines the graph, so nothing replays.
+            #
+            # TWO FIXES TRIED, NEITHER WORKS. Re-capturing into the new block set
+            # gives the same wrong md5. Retiring the graph and finishing in eager
+            # ALSO gives the same wrong md5, which is the more informative of the
+            # two: falling back cannot repair it, so the divergence is already
+            # present in the replays BEFORE the crossing -- and it is invisible
+            # at 8 tokens only because too few replays follow to accumulate.
+            # Switching mutation-out off mid-session is its own hazard as well,
+            # since the deferred ingest and the window assembly change owner
+            # while state is live.
+            #
+            # ANSWERED, by DKV_LOGIT_TRACE=1 on both arms at 8k:
+            #
+            #     first NUMERIC difference   step  1
+            #     first ARGMAX difference    step 32
+            #
+            # Step 1, replayed against eager: max 29.203125 vs 29.218750, i.e.
+            # 0.015625 = 2^-6, which at fp16 magnitude 29 is exactly ONE ULP. The
+            # replayed decode is not stale and is not attending the wrong thing;
+            # it is computing the same quantity to a slightly different rounding
+            # from the very first step. The argmax survives that for 31 tokens
+            # and flips on the 32nd, after which the two trajectories separate
+            # and the gap grows to 6.34.
+            #
+            # THAT EXPLAINS EVERY EARLIER OBSERVATION and retires the ones built
+            # on the wrong model. 8 tokens "matched" because the flip is at 32.
+            # 48 tokens "differed" because it is not. The 6 -> 7 block crossing
+            # was a coincidence of timing, which is why neither re-capturing nor
+            # retiring the graph changed the md5: there was nothing stale to
+            # repair.
+            #
+            # So BYTE-EXACT REPLAY IS THE WRONG GOAL. A captured graph does not
+            # promise bit-identical arithmetic -- kernel selection can differ
+            # between a capture-warmup and an eager call (Triton autotune,
+            # cuBLAS heuristics), and one ULP is all it takes. The honest
+            # question is whether a 1-ULP decode is acceptable, and this project
+            # already answers it elsewhere: DKV_DETERMINISTIC exists precisely
+            # because the decode attention's own reduction is not reproducible at
+            # long context either, and greedy decode there flips tokens for the
+            # same reason.
+            #
+            # Do not spend more time hunting staleness here. If --fastdc is to
+            # ship on, it ships as "same distribution, not same tokens", with the
+            # 4k-64k speed sweep as the argument.
+            _prerot = None
+            if _ok and _MUTATION_OUT_ACTIVE:
+                _prerot = (kv_manager.decode_workspace.get(sid, {})
+                           .get("dense_rot_dev", {}).get(captured_layer_idx))
+                if _prerot is None or _prerot.shape != dense_k.shape:
+                    _remat_why("prerot-missing",
+                               f"have={_prerot is not None} L{captured_layer_idx}")
+                    _ok = False
+            if not _ok:
+                # Same decline as before, for the cases this cannot serve --
+                # notably mutation-out, where the caller assembles the window and
+                # does not hand back the block list. Correctness first: attending
+                # an unrotated dense window is silently wrong, not slow.
+                if not _REMAT_UNROTATED_WARNED:
+                    _REMAT_UNROTATED_WARNED = True
+                    print("[DKV] DKV_REMAT_CACHE declined for this step: pool is "
+                          "UNROTATED and the dense window's token positions are "
+                          "unavailable, so its keys could not be rotated.",
+                          file=sys.stderr, flush=True)
+                _remat_why("unrotated-no-positions")
+                return None
+            if _prerot is not None:
+                dense_k = _prerot
+            else:
+                _wsr = kv_manager.decode_workspace.setdefault(sid, {})
+                _rbuf_d = _wsr.setdefault("_dense_rot_buf", {})
+                _rbuf = _rbuf_d.get(captured_layer_idx)
+                if (_rbuf is None or _rbuf.shape != dense_k.shape
+                        or _rbuf.dtype != dense_k.dtype):
+                    _rbuf = torch.empty_like(dense_k)
+                    _rbuf_d[captured_layer_idx] = _rbuf
+                _rbuf.copy_(dense_k)
+                _dp = torch.as_tensor(_pos[:_vlen], dtype=torch.long,
+                                      device=dense_k.device)
+                _cosd = cos_all[0, _dp.clamp(max=cos_all.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+                _sind = sin_all[0, _dp.clamp(max=sin_all.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+                _rbuf[:, :, :_vlen] = _pra(dense_k[:, :, :_vlen],
+                                           _cosd.to(dense_k.dtype),
+                                           _sind.to(dense_k.dtype))
+                dense_k = _rbuf
+    except Exception as _why_err:                                # noqa: BLE001
+        # THE ONE THAT HID EVERYTHING. This wraps the whole setup block, so any
+        # error in the gather, the reconstruction or the dense rotation returned
+        # None and looked exactly like a deliberate decline.
+        import traceback as _tb
+        _remat_why("exception",
+                   f"{type(_why_err).__name__}: {_why_err} | "
+                   + _tb.format_exc().strip().replace(chr(10), " ~ ")[-400:])
         return None
 
     from native_core.sparse_decode.remat_cache import (
@@ -406,7 +1030,13 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
     _rkey = _RC.make_key(captured_layer_idx, current_version, _poolgen, _step)
     _hit = _rc.get(_rkey)
     if _hit is None:
-        _g = _grb(pool, block_indices, anchor_indices, cos_all, sin_all)
+        # RAW on an unrotated pool -- see the rotation right after _rb below, and
+        # the `raw_k` note in _gather_routed_blocks_for_kernel. On a rotated pool
+        # the pool already holds post-RoPE keys and nothing rotates either way,
+        # so this flag is inert there.
+        _raw = (not _psr()) and _EXACT_ROPE_REMAT
+        _g = _grb(pool, block_indices, anchor_indices, cos_all, sin_all,
+                  raw_k=_raw)
         # The residuals are a CORRECTNESS requirement, not a refinement: they
         # carry the exact values of the tokens the SVD reconstructs worst (codes,
         # digits). Dropping them attends every routed block at pure low-rank
@@ -420,6 +1050,55 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             res_pos=_g["res_pos"] if _has_res else None,
             res_v=_g["res_v"] if _has_res else None,
             res_pos_v=_g["res_pos_v"] if _has_res else None)
+        if _g.get("raw_k") and anchor_indices is not None and cos_all is not None:
+            # ── EVERY KEY AT ITS OWN POSITION, which is MLX's form ───────────
+            # _Km is now R-free: anchor_raw + delta_recon_raw + res_raw, one
+            # frame throughout. Rotating it here at each row's TRUE absolute
+            # position gives R(true_pos) . (anchor_raw + delta_raw), so the only
+            # error left is low-rank truncation -- exactly what MLX has, and
+            # what the anchor-position rotation this replaces did not.
+            #
+            # The old path rotated V_K and anchors_K at the ANCHOR's position,
+            # so a token j into its block carried a RoPE phase error of j
+            # positions. That error grows with the offset, which is why it reads
+            # as a DEPTH GRADIENT: a needle near position 0 sits where RoPE is
+            # ~identity and survives, a deeper one does not. _ingest_k's
+            # docstring records the same gradient from the other side.
+            #
+            # AFFORDABLE ONLY HERE, and only because remat already materialised
+            # the keys. It is one RoPE over the [N, 1+S, H_kv, D] it just built,
+            # and it sits INSIDE the RematCache entry, so it is paid once per
+            # refresh rather than once per token.
+            #
+            # Row 0 of each block is its ANCHOR, at anchor_idx exactly; row 1+j
+            # is active token j, at anchor_idx + 1 + j. Same layout the residual
+            # scatter and the trace resolver both use.
+            _cf = cos_all.squeeze(0) if cos_all.dim() == 3 else cos_all
+            _sf = sin_all.squeeze(0) if sin_all.dim() == 3 else sin_all
+            _S1 = _Km.shape[1]
+            _pos = (anchor_indices.to(_Km.device).long().unsqueeze(1)
+                    + torch.arange(_S1, device=_Km.device).unsqueeze(0))  # [N, S1]
+            # Clamping here would rotate an out-of-range row at the LAST table
+            # row instead of its own position -- value-exact and silently in the
+            # wrong frame. Decline the whole optimisation instead; the caller
+            # falls back to the anchor rotation, which is worse but honest.
+            if int(_pos.max().item()) < _cf.shape[0]:
+                _Km = _apply_rope_single(
+                    _Km, _cf[_pos].unsqueeze(2).to(_Km.dtype),
+                    _sf[_pos].unsqueeze(2).to(_Km.dtype))
+            else:
+                _remat_why("exact-rope-table-short",
+                           f"need {int(_pos.max().item()) + 1} rows, table has "
+                           f"{_cf.shape[0]}")
+                _g2 = _grb(pool, block_indices, anchor_indices, cos_all, sin_all)
+                _Km, _Vm = _rb(
+                    _g2["U"], _g2["V_K"], _g2["V_V"], _g2["anchors_K"],
+                    _g2["anchors_V"], _g2["scales"], _g2["U_scale"],
+                    layer_active_rank,
+                    res_k=_g2["res_k"] if _g2.get("has_res") else None,
+                    res_pos=_g2["res_pos"] if _g2.get("has_res") else None,
+                    res_v=_g2["res_v"] if _g2.get("has_res") else None,
+                    res_pos_v=_g2["res_pos_v"] if _g2.get("has_res") else None)
         _rc.put(_rkey, _Km, _Vm)
         # clone: under DKV_STATIC_GATHER the gather returns a PERSISTENT buffer
         # that the next layer's gather overwrites, and this is held across
@@ -491,6 +1170,39 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                           flush=True)
         except Exception:                                        # noqa: BLE001
             _trace_row = None
+    # Pin the MATERIALISED blocks too. Fixing the routed indices was not enough:
+    # _Km/_Vm are fresh bmm outputs (or fresh cache entries) every step, so a
+    # captured graph held whichever pair existed at capture time and the
+    # reconstruction never advanced even when routing did. Same fix, same reason
+    # -- the graph needs a stable ADDRESS, and the periodic eager step rewrites
+    # the contents in place.
+    if _MUTATION_OUT_ACTIVE:
+        _ws_pin = kv_manager.decode_workspace.setdefault(sid, {})
+        _pin = _ws_pin.setdefault("_remat_pin", {})
+        _ent = _pin.get(captured_layer_idx)
+        # _ent is (K, V, seq_lens). Comparing _ent[1] -- which is V -- against
+        # _seq_cached.shape made this test ALWAYS true, so the buffers were
+        # reallocated on every call and the pin never took effect: the graph kept
+        # binding whichever fresh tensor existed at capture. Found by dumping
+        # data_ptr per layer, not by reading the code.
+        if (_ent is None or _ent[0].shape != _Km.shape
+                or _ent[2].shape != _seq_cached.shape):
+            _pin[captured_layer_idx] = (_Km.clone(), _Vm.clone(), _seq_cached.clone())
+            if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+                import sys as _s
+                print(f"[PTR] remat L{captured_layer_idx} (RE)ALLOC shape={tuple(_Km.shape)} "
+                      f"-> ORIGINAL 0x{_Km.data_ptr():x}", flush=True, file=_s.stderr)
+        else:
+            _kb, _vb, _sb = _ent
+            _kb.copy_(_Km)
+            _vb.copy_(_Vm)
+            _sb.copy_(_seq_cached)
+            if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+                import sys as _s
+                print(f"[PTR] remat L{captured_layer_idx} buf=0x{_kb.data_ptr():x} "
+                      f"src=0x{_Km.data_ptr():x} shape={tuple(_Km.shape)}", flush=True, file=_s.stderr)
+            _Km, _Vm, _seq_cached = _kb, _vb, _sb
+
     # Dual-scale: attend the union of both block scales in ONE softmax.
     _extra = None
     # DKV_DUAL_SCALE_ATTEND=0 keeps the coarse INGEST and the widened pool but
@@ -519,9 +1231,21 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                 _nd = int(_drop.sum().item()) if _drop is not None else 0
                 print(f"[DKV] dual-scale ACTIVE — {_cK.shape[0]} coarse blocks "
                       f"replace {_nd} of {_Km.shape[0]} fine", flush=True)
+    # Record what the FORWARD actually binds. This is the one view the
+    # wrapper-side probes could not give: if these addresses differ from the dict
+    # entries the wrapper updates between steps, the graph is reading tensors
+    # nothing refreshes -- which no amount of wrapper-side checking can reveal.
+    if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+        _fp = kv_manager.__dict__.setdefault("_fwd_ptrs", {})
+        _fp[captured_layer_idx] = {
+            "Km": _Km.data_ptr(),
+            "dense": None if dense_k is None else dense_k.data_ptr(),
+            "bi": None if block_indices is None else block_indices.data_ptr(),
+            "mask": None if dense_mask is None else dense_mask.data_ptr(),
+        }
     out = _awr(q, _Km, _Vm, _seq_cached, dense_k, dense_v, dense_len,
                num_key_value_groups, trace_row=_trace_row, trace_tok=_trace_tok,
-               extra=_extra)
+               extra=_extra, curr_kv=curr_kv, dense_mask=dense_mask)
     # Advance once per token, on the LAST DKV layer. _LAST_DKV_LAYER learns the
     # max layer index by watching layers go by, so on the FIRST token it equals
     # the current layer at every layer; only advance once it has stopped growing.
@@ -576,7 +1300,7 @@ def _get_engage_threshold():
     return int(os.environ.get("DKV_ENGAGE_THRESHOLD", "4096"))
 
 
-def _prefill_block_key_boxes(blocks, device):
+def _prefill_block_key_boxes(blocks, device, rope=None):
     """Elementwise (min, max) of each block's EXACT keys -> two [nb, H_kv, D].
 
     MLX's prefill router scores blocks from a per-block key min/max computed over
@@ -600,6 +1324,23 @@ def _prefill_block_key_boxes(blocks, device):
     The box is cached on the block keyed by its active length, so a block that
     has stopped growing is measured once and re-used by every later chunk of
     every layer; a block still accumulating is re-measured when it grows.
+
+    `rope` — UNROTATED POOLS. When the pool stores PRE-RoPE keys (the default:
+    `mid`, `high` and `ultra` all set rotated_pool=False) the box would be in a
+    different frame from the post-RoPE `chunk_q` that scores against it, and the
+    router declined outright rather than rank on that. Pass
+    ``rope(max_pos) -> (cos, sin)`` and each key is rotated at its OWN absolute
+    position first, which puts the box back in the query's frame.
+
+    The positions are not guessed. A block's anchor is token `anchor_idx`, its
+    active row j is `anchor_idx + 1 + j`, and a COMPRESSED block's residual j
+    sits at `anchor_idx + 1 + residual_K_positions[j]` — the same mapping
+    `_remat_attend`'s trace resolves (`j == offset - 1` against the anchor).
+
+    Rotation is by ABSOLUTE position, which never changes for a token, so the
+    rotated box caches exactly like the unrotated one. The cache probe carries a
+    rotation marker regardless, because a box measured in one frame must never
+    be served to a reader expecting the other.
     """
     from collections import defaultdict
 
@@ -615,6 +1356,7 @@ def _prefill_block_key_boxes(blocks, device):
     # couple of batched kernels rather than one launch pair per block (a 32k
     # prompt has ~128 blocks per layer x 28 layers per chunk).
     pending = defaultdict(list)                        # n_keys -> [(i, keys[H_kv,n,D])]
+    deferred = []                                      # rope path: (i, keys, probe, pos)
 
     for i, b in enumerate(blocks):
         # Cheap cache probe FIRST. Gathering the keys before checking would re-run
@@ -627,25 +1369,54 @@ def _prefill_block_key_boxes(blocks, device):
         # that can be recycled to a different block (tests/test_pool_recycle_
         # aliasing.py), so the slot id has to be part of the key or a stale box
         # could outlive the content it describes.
+        _rot = rope is not None
         if getattr(b, "active_k", None) is not None:
-            probe = ("act", int(b.active_k.shape[2]))
+            probe = ("act", int(b.active_k.shape[2]), _rot)
         elif getattr(b, "active_k_cpu", None) is not None:
-            probe = ("cpu", int(b.active_k_cpu.shape[2]))
+            probe = ("cpu", int(b.active_k_cpu.shape[2]), _rot)
         elif getattr(b, "state", None) == "COMPRESSED":
-            probe = ("cmp", getattr(b, "pool_idx", None))
+            probe = ("cmp", getattr(b, "pool_idx", None), _rot)
         else:
-            probe = ("anc", 0)
+            probe = ("anc", 0, _rot)
         cached = getattr(b, "_sp_key_box", None)
         if cached is not None and cached[0] == probe and cached[1].device == device:
             mins[i], maxs[i] = cached[1], cached[2]
             continue
 
+        # GROWTH: measure only the rows that are NEW since the cached box.
+        #
+        # An accumulating block is re-measured on every chunk because its length
+        # is part of the probe, and the old code re-read and re-reduced ALL of
+        # its keys each time -- O(n) work per growth, so O(n^2) over a prefill.
+        # That was tolerable while the reduction was the only cost. With `rope`
+        # it is not: every rebuild re-rotated every key, and the measured result
+        # was sparse prefill going from 9.1% FASTER on a rotated pool to 3.1%
+        # SLOWER on an unrotated one -- the rotation ate the whole win.
+        #
+        # A block's already-written keys never change, and min/max is
+        # associative, so the cached box folds with a box over just the new
+        # rows. Each key is then rotated and reduced exactly ONCE.
+        grow = None
+        if (cached is not None and cached[1].device == device
+                and probe[0] in ("act", "cpu") and cached[0][0] == probe[0]
+                and cached[0][2] == probe[2]
+                and isinstance(cached[0][1], int) and probe[1] > cached[0][1]):
+            grow = int(cached[0][1])
+
         ak = b.anchor_kv[0, 0].to(device)                          # [H_kv, D]
         k_blk = None
+        off = None            # within-block ACTIVE index of each k_blk row
         if getattr(b, "active_k", None) is not None:
             k_blk = b.active_k[0].to(device)
+            off = torch.arange(k_blk.shape[1], device=device)
         elif getattr(b, "active_k_cpu", None) is not None:
             k_blk = b.active_k_cpu[0].to(device, non_blocking=True)
+            off = torch.arange(k_blk.shape[1], device=device)
+        if grow is not None and k_blk is not None and k_blk.shape[1] > grow:
+            k_blk = k_blk[:, grow:]                                # new rows only
+            off = off[grow:]
+        elif grow is not None:
+            grow = None                                            # nothing new
         elif probe[0] == "cmp":
             rk = getattr(b, "residual_K_values", None)             # [R, H_kv, D]
             rp = getattr(b, "residual_K_positions", None)          # [R]
@@ -653,6 +1424,7 @@ def _prefill_block_key_boxes(blocks, device):
                 rk = rk.to(device)
                 valid_r = (rp.to(device) >= 0)
                 if bool(valid_r.any()):
+                    off = rp.to(device)[valid_r].long()            # [r]
                     rk = rk[valid_r]                               # [r, H_kv, D]
                     # Residuals are stored ANCHOR-RELATIVE under the exact-keys
                     # default (compression/lowrank.py:673) -- the true key is
@@ -664,16 +1436,63 @@ def _prefill_block_key_boxes(blocks, device):
                         rk = rk + ak.unsqueeze(0)
                     k_blk = rk.permute(1, 0, 2)                    # [H_kv, r, D]
 
-        keys = ak.unsqueeze(1) if k_blk is None else torch.cat(
-            [ak.unsqueeze(1), k_blk.to(ak.dtype)], dim=1)          # [H_kv, 1+act, D]
-        pending[keys.shape[1]].append((i, keys, probe))
+        if grow is not None:
+            keys = k_blk.to(ak.dtype)                              # [H_kv, new, D]
+        else:
+            keys = ak.unsqueeze(1) if k_blk is None else torch.cat(
+                [ak.unsqueeze(1), k_blk.to(ak.dtype)], dim=1)      # [H_kv, 1+act, D]
+        base = None if grow is None else (cached[1], cached[2])
+        if rope is not None:
+            a0 = int(getattr(b, "anchor_idx", 0) or 0)
+            # One position per ROW OF `keys`, and on the growth path the anchor
+            # row is not one of them -- it is already folded into the cached box.
+            # Prepending it there gave 19 positions for 18 keys.
+            _anc_pos = ([] if grow is not None
+                        else [torch.tensor([a0], device=device, dtype=torch.long)])
+            _act_pos = ([] if off is None
+                        else [a0 + 1 + off.to(device).long()])
+            pos = torch.cat(_anc_pos + _act_pos) if (_anc_pos or _act_pos) else                 torch.tensor([a0], device=device, dtype=torch.long)
+            deferred.append((i, keys, probe, pos, base))
+            continue
+        pending[keys.shape[1]].append((i, keys, probe, base))
+
+    # Rotate every uncached block in ONE pass. cos/sin are requested once, at the
+    # largest position any of them needs, because building the table is the
+    # expensive half and it is shared across blocks (and, via _history_cos_sin's
+    # cache, across layers).
+    if deferred:
+        _need = max(int(pz.max().item()) for _, _, _, pz, _ in deferred) + 1
+        _cos, _sin = rope(_need)
+        _cf = _cos[0] if _cos.dim() == 3 else _cos                 # [max_pos, rot]
+        _sf = _sin[0] if _sin.dim() == 3 else _sin
+        _lim = _cf.shape[0] - 1
+        # BATCHED BY KEY-COUNT, for the same reason the min/max below is: this
+        # runs per block per layer per chunk, and rotating one block at a time
+        # issued a handful of small kernels each -- ~30 blocks x 28 layers of
+        # launch overhead on a path this repo already measures as launch-bound.
+        # Stacking first makes it a few kernels per distinct block length.
+        _byn = defaultdict(list)
+        for _item in deferred:
+            _byn[_item[1].shape[1]].append(_item)
+        for _n, _grp in _byn.items():
+            _ks = torch.stack([g[1] for g in _grp], dim=0)         # [g, H_kv, n, D]
+            _pz = torch.stack([g[3].clamp(0, _lim) for g in _grp], dim=0)  # [g, n]
+            _ks = _apply_rope_single(
+                _ks, _cf[_pz].unsqueeze(1).to(_ks.dtype),          # [g, 1, n, rot]
+                _sf[_pz].unsqueeze(1).to(_ks.dtype))
+            for _j, (i, _k, probe, _p, base) in enumerate(_grp):
+                pending[_n].append((i, _ks[_j], probe, base))
 
     for _n, group in pending.items():
         stacked = torch.stack([g[1] for g in group], dim=0)        # [g, H_kv, n, D]
         g_min = stacked.amin(dim=2)                                # [g, H_kv, D]
         g_max = stacked.amax(dim=2)
-        for j, (i, _keys, probe) in enumerate(group):
-            mins[i], maxs[i] = g_min[j], g_max[j]
+        for j, (i, _keys, probe, base) in enumerate(group):
+            if base is None:
+                mins[i], maxs[i] = g_min[j], g_max[j]
+            else:
+                mins[i] = torch.minimum(base[0], g_min[j])
+                maxs[i] = torch.maximum(base[1], g_max[j])
             # Cache on the block: identical boxes are re-scored by every later
             # chunk, and blocks stop changing once they are full.
             try:
@@ -729,7 +1548,7 @@ def _sparse_prefill_relevance(chunk_q, k_min, k_max, scale: float,
 
 
 def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
-                                  chunk_start: int = None):
+                                  chunk_start: int = None, rope=None):
     """DSA/NSA-style block-sparse PREFILL (MLX parity: DKV_SPARSE_PREFILL).
 
     The "CHUNKED SPARSE PREFILL" path below cross-attends EVERY history block
@@ -805,11 +1624,132 @@ def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
     # and q cannot be un-rotated because prefill only clones the LAST token's
     # pre-RoPE query (unrot_query_states, the q_len>1 branch). Scoring across
     # frames is what the anchor router did; rather than rank on numbers with no
-    # defined relationship to the query, decline and attend every block --
-    # correct, just without the speedup. DKV_ROTATED_POOL=0 is a non-default
-    # diagnostic path, and this is checked FIRST so the fallback cannot be
-    # confused with the recency-window pass-through below.
-    if not _pool_rotated_k():
+    # defined relationship to the query, this used to decline and attend every
+    # block -- correct, just without the speedup.
+    #
+    # IT NO LONGER HAS TO. The blocker was stated as "the keys cannot be rotated
+    # without their true per-token positions", and that premise was wrong: a
+    # block's anchor IS token `anchor_idx`, its active row j is
+    # `anchor_idx + 1 + j`, and a compressed block's residual j is at
+    # `anchor_idx + 1 + residual_K_positions[j]`. `_prefill_block_key_boxes`
+    # takes a `rope` callback and rotates each key at its OWN position before the
+    # min/max, which puts the box in the same frame as the post-RoPE chunk_q.
+    # Rotation is by ABSOLUTE position, so the rotated box caches exactly like
+    # the unrotated one -- this is not a per-chunk cost.
+    #
+    # The other stated blocker -- "q cannot be un-rotated" -- is moot: nothing
+    # un-rotates q, the KEYS move instead.
+    #
+    # Without a `rope` callback the old decline still stands, so a caller that
+    # cannot supply one degrades to attend-all rather than to scoring across
+    # frames. Checked FIRST so it cannot be confused with the recency-window
+    # pass-through below.
+    #
+    # THE OLD NOTE HERE CALLED DKV_ROTATED_POOL=0 "a non-default diagnostic
+    # path". It is not, and that stale premise hid how much this decline costs.
+    # `mid` is the DEFAULT preset and sets rotated_pool=False, which config.py
+    # then EXPORTS into the environment; so do `high` and `ultra`. Only `low`
+    # keeps a rotated pool. Measured on Qwen2.5-1.5B, counting every call to
+    # this function:
+    #
+    #   pool        ctx   selective calls   what prefill actually attended
+    #   unrotated    8k   0 of 196          every block, every chunk
+    #   unrotated   32k   0 of 868          every block, every chunk
+    #   rotated      8k   0 of 196          every block -- k_eff >= nb, because
+    #                                       only 1-8 candidates survive the
+    #                                       sinks and the 1024-token window
+    #   rotated     32k   616 of 868        nb 9-30, k_eff 8, dropping 10-71%
+    #                                       of the block list
+    #
+    # That was the state before DKV_SPARSE_PREFILL_ROTATE (below) existed. With
+    # it ON the unrotated pool reaches 616 of 868 selective at 32k, matching the
+    # rotated column exactly. It is still OFF by default, on the throughput and
+    # fidelity numbers recorded at that flag. 8k does not engage on either pool:
+    # that is `k_eff = max(8, 0.25*nb)` against a small candidate count, not the
+    # frame. HANDOFF_CUDA_PREFILL §8's "prefill is STILL SPARSE -- k_eff=30 of
+    # 120" is the 32k ROTATED case and does not describe the default.
+    # DKV_SPARSE_PREFILL_ROTATE — OPT-IN, and the default is OFF on evidence.
+    #
+    # The capability works: 616 of 868 calls become selective at 32k, dropping
+    # 10-71% of the block list, and recall is unchanged (validate_cuda_dkv.py
+    # --long 9/9, all three 32k cases 3/3 and deterministic). It is off by
+    # default because on an unrotated pool it does not PAY:
+    #
+    #   rotated pool, 32k    sparse prefill 9.1% FASTER  (CI +-1.1%)
+    #   unrotated pool, 32k  no effect resolvable        (CI [-241, +87] ms)
+    #
+    # The reason is that an unrotated pool's history reader has to rotate keys
+    # for the attention anyway, so skipping blocks saves rotation -- and the
+    # router has to rotate to decide which to skip. The saving and the cost are
+    # the same work, and they cancel.
+    #
+    # It is not free either: with block_size 256 at 8k the router engages and
+    # the first-token KL against a dense control goes 0.00024 -> 0.00585 (still
+    # 5/5 top-1 with dense's top-1 at rank 0, but 24x). Paying any fidelity for
+    # a throughput change that measures as zero is the wrong default.
+    #
+    # MEASURED AT ONE OPERATING POINT. An earlier note here claimed the
+    # throughput and fidelity numbers came from different block sizes; that was
+    # wrong -- colab/bench_prefill_paired.py and colab/logit_fidelity.py both
+    # run block_size 256, preset mid. What DID differ was the context, so both
+    # were re-taken at 32k, which is where routing actually engages:
+    #
+    #     32k, first token, against a plain-transformers dense control
+    #     ROTATE off   KL 0.00036   top-1 3/3   dense-top1 rank 0
+    #     ROTATE on    KL 0.10580   top-1 3/3   dense-top1 rank 0
+    #
+    # 294x the KL at the very context where the paired throughput A/B reports
+    # no resolvable change. That is the clearest form of the argument for the
+    # default: the fidelity is spent and nothing is bought with it.
+    #
+    # ── TWO WAYS OUT WERE TRIED AND BOTH FAIL. Do not re-walk them. ──────────
+    #
+    # 1. "DECIDE WITHOUT ROTATING" -- transform the BOX instead of the keys.
+    #    A box is [nb, H_kv, D] against keys at [nb, S, H_kv, D], so it is 257x
+    #    less work, and RoPE acts on 2-D pairs so a rectangle maps to a rotated
+    #    rectangle whose enclosing box is exact AT ONE ANGLE. The block is the
+    #    problem: it spans S positions, so pair i sweeps theta_i * S, and with
+    #    Qwen's theta=1e6 at S=257 the fast pairs wrap many times -- pair 0
+    #    sweeps 257 radians. No single angle encloses them, and the only
+    #    enclosure that holds at every position is the RADIUS (|(y1,y2)| is
+    #    rotation-invariant), which throws away direction.
+    #
+    #    Counting how many of the 64 pairs keep a tight box as a function of the
+    #    sweep a single angle is allowed to cover:
+    #
+    #        sweep <= 0.5    35/64 tight  -- but NOT SOUND; a built enclosure
+    #                                       test catches keys outside the box
+    #        sweep <= 0.05   24/64 tight
+    #        sweep <= 0.001   6/64 tight  -- sound, and 58/64 on the radius,
+    #                                       i.e. ranking on magnitude alone
+    #
+    #    Sound and discriminative are mutually exclusive here. Sub-block boxes
+    #    do not rescue it either: pair 0 wraps within ~6 positions. Soundness
+    #    requires per-token rotation, which is what this path already does.
+    #
+    # 2. LOWER THE FLOOR. k_eff = max(KMIN, 0.25*nb) with KMIN=8 against nb=9-30
+    #    is what actually caps the win: at k_eff~2 the unrotated pool DOES pay,
+    #    5.1% at 32k (CI +-1.2%). Recall survives it -- needle suite unchanged
+    #    and validate_cuda_dkv.py --long 9/9 including all three 32k cases at
+    #    KMIN=2. It still must not ship, because the harness those two cannot
+    #    see through does:
+    #
+    #        colab/multifact_eval_cuda.py, 16k, Qwen2.5-1.5B
+    #        KMIN=8   multi-needle 3/3   relational 4/4   synthesis 13.3
+    #        KMIN=2   multi-needle 3/3   relational 3/4   synthesis 30.0
+    #
+    #    The relational failure is a BINDING failure -- asked for Dr.
+    #    Quillfeather's number it returns 8857, which is Dr. Braxanible's. That
+    #    is the characteristic compressed-KV failure and NIAH cannot see it by
+    #    construction. Synthesis improving at the same time is not a
+    #    counterweight: 13.3 is this model's floor with routing OFF as well, so
+    #    it was never measuring the router.
+    #
+    #    KMIN=8 stays. If it is ever revisited, gate it on multifact, not on
+    #    the needle suite.
+    _rot_ok = os.environ.get("DKV_SPARSE_PREFILL_ROTATE", "0").strip().lower() in (
+        "1", "true", "on", "yes")
+    if not _pool_rotated_k() and (rope is None or not _rot_ok):
         return history_blocks
 
     # MLX: `if manager._sparse_prefill and _cur_start >= manager._sp_min_ctx`.
@@ -858,7 +1798,9 @@ def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
         return history_blocks
 
     device = chunk_q.device
-    k_min, k_max = _prefill_block_key_boxes([b for _, b in valid], device)
+    k_min, k_max = _prefill_block_key_boxes(
+        [b for _, b in valid], device,
+        rope=None if _pool_rotated_k() else rope)
     scale = 1.0 / math.sqrt(chunk_q.shape[-1])
     scores = _sparse_prefill_relevance(chunk_q, k_min, k_max, scale)   # [nb]
     top_idx = torch.topk(scores, k=k_eff).indices.tolist()  # single sync, not per-block
@@ -1015,20 +1957,29 @@ def _history_cos_sin(model, ref, max_pos: int, device):
     the rotary forward, 28 times per prefill chunk on a non-hybrid model, for 28
     identical results. At 32k the last chunk builds a 32k-long table each time.
 
-    Cached on one entry keyed by (model, max_pos, device, dtype). max_pos grows
-    monotonically through a prefill, so the entry is naturally replaced once per
-    chunk and the cache never holds more than one table. Keeping it keyed by
-    max_pos rather than cleared per chunk also means a repeat prefill of the same
-    length reuses it.
+    Cached on one entry keyed by (model, device, dtype) — NOT by max_pos. The
+    table for a longer extent already contains every shorter one, so a request
+    that fits is served by SLICING, which is a view. The returned shape is
+    exactly the max_pos asked for, as before.
+
+    MAX_POS WAS PART OF THE KEY AND THAT MADE IT THRASH. Two callers inside the
+    same prefill chunk ask for different extents -- the sparse-prefill router
+    asks for the largest position among the blocks it is scoring, and the
+    history reconstruction below asks for one derived from the compressed
+    blocks. With max_pos in the key each MISSED the other's entry, and the miss
+    path calls .clear(), so the two evicted each other and rebuilt a
+    context-length rotary table every layer of every chunk. It went unnoticed
+    while only one caller existed.
     """
-    key = (id(model), int(max_pos), str(device), ref.dtype)
+    key = (id(model), str(device), ref.dtype)
+    max_pos = int(max_pos)
     hit = _HIST_ROPE_CACHE.get(key)
-    if hit is not None:
-        return hit
+    if hit is not None and hit[0] >= max_pos:
+        return hit[1][:, :max_pos], hit[2][:, :max_pos]
     _HIST_ROPE_CACHE.clear()             # only ever one live table
     hist_pos = torch.arange(max_pos, device=device, dtype=torch.long).unsqueeze(0)
     cos_all, sin_all = _resolve_rotary_emb(model)(ref, hist_pos)
-    _HIST_ROPE_CACHE[key] = (cos_all, sin_all)
+    _HIST_ROPE_CACHE[key] = (max_pos, cos_all, sin_all)
     return cos_all, sin_all
 
 
@@ -1623,8 +2574,14 @@ def apply_dkv_attention_patch(model, kv_manager):
 
                     # Gather block data from the pool
                     U_stack    = reconstruct_batch_U(pool, pool_indices_t).to(q.dtype)
-                    V_K_stack  = pool.V_K[pool_indices_t].to(q.dtype)        # [N, R, num_kv_heads, D]
-                    V_V_stack  = pool.V_V[pool_indices_t].to(q.dtype)        # [N, R, num_kv_heads, D]
+                    # V is indexed by BASIS ROW, not by slot -- under
+                    # DKV_SHARED_BASIS several slots share a row and the store
+                    # is SHORTER than the slot count, so a raw slot gather
+                    # reads out of bounds. Identity when the feature is off.
+                    _v_rows = (pool.basis_index(pool_indices_t)
+                               if hasattr(pool, "basis_index") else pool_indices_t)
+                    V_K_stack  = pool.V_K[_v_rows].to(q.dtype)               # [N, R, num_kv_heads, D]
+                    V_V_stack  = pool.V_V[_v_rows].to(q.dtype)               # [N, R, num_kv_heads, D]
                     anc_K      = torch.stack([b.anchor_kv[0, 0] for b in comp_blocks], dim=0).to(q.dtype)  # [N, num_kv_heads, D]
                     anc_V      = torch.stack([b.anchor_kv[0, 1] for b in comp_blocks], dim=0).to(q.dtype)  # [N, num_kv_heads, D]
                     scales_1d  = pool.scales[pool_indices_t]     # [N]
@@ -1956,7 +2913,17 @@ def apply_dkv_attention_patch(model, kv_manager):
                         curr_k = (key_states[b_idx:b_idx+1] if _pool_rotated_k()
                                   else unrot_key_states[b_idx:b_idx+1])
                         curr_v = value_states[b_idx:b_idx+1]
-                        kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
+                        if _MUTATION_OUT_ACTIVE and q_len == 1:
+                            # Stash instead of ingesting. The REFERENCES are what
+                            # matter: under graph replay this line does not run,
+                            # but the tensors it recorded at capture time live at
+                            # fixed addresses inside the graph and hold the values
+                            # the replay just produced, so the caller can ingest
+                            # from them after the forward returns.
+                            _pend = kv_manager.__dict__.setdefault("_pending_ingest", {})
+                            _pend[captured_layer_idx] = (sid, curr_k, curr_v)
+                        else:
+                            kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
                         if captured_layer_idx == _first_dkv_layer:
                             srl_state = kv_manager.get_srl_state(sid)
                             if srl_state is not None:
@@ -1965,13 +2932,19 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # so coarse sampling is fine.
                                 # CUDA-graph stage 1: this .cpu() is the one host sync on the
                                 # SRL decode path (the base low/mid/high presets never enter
-                                # here — srl_state is None).  DKV_GRAPH_SAFE_DECODE=1 skips
-                                # it so the whole decode forward is provably sync-free and can
-                                # be captured; the only cost is the SRL re-routing heuristic
-                                # loses its recent-key trail (routing still works from anchors).
+                                # here — srl_state is None).  Skipping it makes the decode
+                                # forward provably sync-free so it can be captured; the only
+                                # cost is the SRL re-routing heuristic loses its recent-key
+                                # trail (routing still works from anchors). Gated on the
+                                # ROUTED flag: without mutation-out no graph is captured over
+                                # this forward, so dropping the trail would buy nothing.
+                                #
+                                # Read from the module constant, not os.environ. This line
+                                # runs per decode step, and an environ lookup here is the
+                                # same host-side cost the flag exists to remove.
                                 _step_ctr = getattr(srl_state, "_decode_step_ctr", 0)
                                 srl_state._decode_step_ctr = _step_ctr + 1
-                                if _step_ctr % 8 == 0 and os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") != "1":
+                                if _step_ctr % 8 == 0 and not _graph_safe_routed():
                                     k_avg = curr_k[0].mean(dim=0).squeeze(0).float().cpu() # [head_dim]
                                     srl_state.recent_decode_keys.append(k_avg)
                                     if len(srl_state.recent_decode_keys) > 512:
@@ -2119,11 +3092,18 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             f"needs > {_route_min}")
                                 else:
                                     _why = None
+                                # stderr, like every other DKV probe. This one
+                                # printed ~one line per layer to STDOUT on every
+                                # run, which is the output stream the eval
+                                # harnesses parse -- the same trap that made an
+                                # earlier probe in this file look like it never
+                                # ran when the harness had redirected stdout.
                                 print(f"[DKV] ROUTE PROBE layer={captured_layer_idx} "
                                       f"session={sid} candidates={_n_blocks} "
                                       f"router={_router_mode_gate} "
                                       + ("ROUTING RUNS" if _why is None
-                                         else f"ROUTER SKIPPED: {_why}"), flush=True)
+                                         else f"ROUTER SKIPPED: {_why}"),
+                                      file=sys.stderr, flush=True)
 
                         if (
                             srl_enabled
@@ -2513,7 +3493,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # step, so the slots are provably unchanged. Pure
                                 # identity check, no device read.
                                 changed = False
-                            elif _GRAPH_SAFE_DECODE:
+                            elif _graph_safe_routed():
                                 # torch.equal on CUDA tensors returns a PYTHON bool,
                                 # so it is a device->host sync -- one per decode step.
                                 # It is also what invalidated CUDA-graph capture:
@@ -2525,8 +3505,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # and otherwise assume changed. That is conservative
                                 # in the safe direction: treating an unchanged set as
                                 # changed only clears a cache early, while the reverse
-                                # would serve stale routing. Off by default so the
-                                # exact comparison remains the shipping behaviour.
+                                # would serve stale routing.
+                                #
+                                # But "clears a cache early" is not free -- it is the
+                                # gather cache, and forcing it every token costs ~7%
+                                # of routed decode. So this additionally requires
+                                # mutation-out to be ACTIVE for this session: the
+                                # exact comparison stays the shipping behaviour
+                                # unless a graph is really being captured here.
                                 changed = (block_indices.shape != last_slots.shape) or True
                             else:
                                 changed = not torch.equal(block_indices, last_slots)
@@ -2571,7 +3557,62 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # be caught. 0 is the correct "no routing yet" value and
                         # matches what the cache read at :1794 falls back to.
                         current_version = 0
-                        if dense_blocks:
+                        _dense_mask = None
+                        if _MUTATION_OUT_ACTIVE and q_len == 1:
+                            # Read the workspace the CALLER assembled between
+                            # forwards; do not rebuild it here. dense_len becomes
+                            # the full buffer width and validity is carried by a
+                            # device mask, because a host-side length would be
+                            # baked into a captured graph and freeze the window.
+                            _ws = kv_manager.decode_workspace.get(sid, {})
+                            dense_k_assembled = (_ws.get("dense_workspace_k") or {}).get(captured_layer_idx)
+                            dense_v_assembled = (_ws.get("dense_workspace_v") or {}).get(captured_layer_idx)
+                            _dlen_dev = (_ws.get("dense_len_dev") or {}).get(captured_layer_idx)
+                            if dense_k_assembled is not None and _dlen_dev is not None:
+                                dense_len = int(dense_k_assembled.shape[2])
+                                _dense_mask = (torch.arange(dense_len, device=dense_k_assembled.device)
+                                               < _dlen_dev)
+                            elif dense_blocks:
+                                # FIRST decode token: the caller has not run yet,
+                                # so there is no published window or length. Fall
+                                # back to assembling in-forward for this one step.
+                                # Dropping the window instead would make the first
+                                # token attend only routed blocks and itself, which
+                                # silently changes the text -- it is what made the
+                                # first version of this path diverge from eager.
+                                # Capture happens after this step, so the one
+                                # non-capturable call costs nothing.
+                                dense_k_assembled, dense_v_assembled, dense_len, dense_blocks =                                     kv_manager.assemble_dense_window_kv(
+                                        sid, captured_layer_idx, dense_blocks,
+                                        query_states.dtype)
+                                # Publish the length and build the MASK here too.
+                                # Leaving dense_mask None on this branch made
+                                # attend_with_remat slice with a Python int, which
+                                # a captured graph bakes in -- so if capture landed
+                                # on this branch the window was frozen at its
+                                # capture width for every later replay, while every
+                                # buffer the wrapper updated looked perfectly
+                                # healthy. That is exactly the symptom that
+                                # survived four rounds of wrapper-side probing.
+                                if dense_k_assembled is not None:
+                                    _lens = _ws.setdefault("dense_len_dev", {})
+                                    _cur = _lens.get(captured_layer_idx)
+                                    if _cur is None:
+                                        _cur = torch.tensor(
+                                            int(dense_len),
+                                            device=dense_k_assembled.device,
+                                            dtype=torch.long)
+                                        _lens[captured_layer_idx] = _cur
+                                    else:
+                                        _cur.fill_(int(dense_len))
+                                    dense_len = int(dense_k_assembled.shape[2])
+                                    _dense_mask = (torch.arange(
+                                        dense_len,
+                                        device=dense_k_assembled.device) < _cur)
+                            else:
+                                dense_k_assembled = dense_v_assembled = None
+                                dense_len = 0
+                        elif dense_blocks:
                             dense_k_assembled, dense_v_assembled, dense_len, dense_blocks = kv_manager.assemble_dense_window_kv(
                                 sid, captured_layer_idx, dense_blocks, query_states.dtype
                             )
@@ -3178,13 +4219,33 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # Dense window tokens still receive exact pre-rotated attention.
                         _is_mps_decode = (query_states.device.type == "mps" and pool is not None and os.environ.get("DKV_MPS_APPROXIMATE_ATTN", "0") == "1")
                         if _is_mps_decode:
-                            if _DKV_CORE_AVAILABLE and hasattr(_dkv_core, "fused_decode_attention_combined"):
+                            if _DKV_CORE_AVAILABLE and hasattr(_dkv_core, "fused_decode_attention_combined") and _compiled_kernel_ok(pool):
                                 _scale = 1.0 / math.sqrt(head_dim)
                                 _q_val = query_states[b_idx, :, 0, :]
                                 _dk = dense_k_assembled if dense_k_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                 _dv = dense_v_assembled if dense_v_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                 
-                                if dense_k_assembled is not None:
+                                # `and not _pool_rotated_k()` -- DOUBLE-ROTATION GUARD.
+                                # dense_k_assembled comes from assemble_dense_window_kv,
+                                # i.e. the blocks' active_k. When the pool stores POST-RoPE
+                                # keys those rows are ALREADY in their true rotational
+                                # frame, and handing cos/sin to the shader rotates them a
+                                # second time.
+                                #
+                                # Reachable in production, not hypothetically: `low` is the
+                                # only preset that keeps rotated_pool=True (config.py:143)
+                                # and it also sets approximate_attn=True on macOS
+                                # (config.py:37), which is exactly the _is_mps_decode gate
+                                # above. So `low` on Apple silicon double-rotated its whole
+                                # dense window. CUDA cannot see it -- this branch needs MPS.
+                                #
+                                # Passing EMPTY cos/sin is the right disable: metal_runtime.mm
+                                # :453 derives has_dense_rope separately from has_dense, so
+                                # the dense window is still attended, just not rotated.
+                                #
+                                # Silent by construction: RoPE is orthogonal, so a second
+                                # rotation preserves every norm and only corrupts angles.
+                                if dense_k_assembled is not None and not _pool_rotated_k():
                                     # OPT (P1-7): reuse cached position tensor (shared with CUDA combined path)
                                     _cache_key = (session_dict.get("routing_version", 0), dense_len)
                                     _dp_cache  = session_dict.get("dense_pos_tensor_cache")
@@ -3431,7 +4492,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _fact_val_K = pool.fact_anchors_K if pool.fact_anchors_K is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                     _fact_val_V = pool.fact_anchors_V if pool.fact_anchors_V is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
 
-                                    if _DKV_HAS_METAL_ATTN and pool is not None:
+                                    if _DKV_HAS_METAL_ATTN and pool is not None and _compiled_kernel_ok(pool):
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         # Binding grew 4 trailing dense-window args (dense_K/V +
                                         # cos/sin_dense); this caller merges dense separately, so
@@ -3449,7 +4510,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             pool.scales.contiguous(),
                                             _ca,
                                             _sa,
-                                            block_indices.contiguous(),
+                                            # int32: dkv_decode.metal reads slot_indices through a
+                                            # typed pointer, and the binding REJECTS Long rather than
+                                            # reading past the allocation (the guard added with the
+                                            # fp16-RoPE-table fix, 39a4a9d1). That commit converted
+                                            # anchor_indices here and left this one raw, so the
+                                            # conversion its own error message prescribes was never
+                                            # applied at the call site.
+                                            block_indices.to(torch.int32).contiguous(),
                                             _scale,
                                             num_heads,
                                             num_key_value_heads,
@@ -3464,7 +4532,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             _ed, _ed, _ed, _ed,
                                             _anchor_rotary_dim,
                                         )
-                                    elif _DKV_HAS_DECODE_ATTN and pool is not None and not has_residual:
+                                    elif _DKV_HAS_DECODE_ATTN and pool is not None and not has_residual and _compiled_kernel_ok(pool):
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         out_sparse = _decode_attention_aten(
                                             _Q_sq.contiguous(),
@@ -3478,7 +4546,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             pool.scales.contiguous(),
                                             _ca_true,
                                             _sa_true,
-                                            block_indices.contiguous(),
+                                            # int32: dkv_decode.metal reads slot_indices through a
+                                            # typed pointer, and the binding REJECTS Long rather than
+                                            # reading past the allocation (the guard added with the
+                                            # fp16-RoPE-table fix, 39a4a9d1). That commit converted
+                                            # anchor_indices here and left this one raw, so the
+                                            # conversion its own error message prescribes was never
+                                            # applied at the call site.
+                                            block_indices.to(torch.int32).contiguous(),
                                             _scale,
                                             num_heads,
                                             num_key_value_heads,
@@ -3541,7 +4616,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _fact_val_K = pool.fact_anchors_K if pool.fact_anchors_K is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                     _fact_val_V = pool.fact_anchors_V if pool.fact_anchors_V is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
 
-                                    if _DKV_HAS_METAL_ATTN and pool is not None:
+                                    if _DKV_HAS_METAL_ATTN and pool is not None and _compiled_kernel_ok(pool):
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         # Same 4 trailing dense-window args as above: dense is
                                         # merged separately here, pass empties to skip it.
@@ -3558,7 +4633,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             pool.scales.contiguous(),
                                             _ca,
                                             _sa,
-                                            block_indices.contiguous(),
+                                            # int32: dkv_decode.metal reads slot_indices through a
+                                            # typed pointer, and the binding REJECTS Long rather than
+                                            # reading past the allocation (the guard added with the
+                                            # fp16-RoPE-table fix, 39a4a9d1). That commit converted
+                                            # anchor_indices here and left this one raw, so the
+                                            # conversion its own error message prescribes was never
+                                            # applied at the call site.
+                                            block_indices.to(torch.int32).contiguous(),
                                             _scale,
                                             num_heads,
                                             num_key_value_heads,
@@ -3573,7 +4655,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             _ed, _ed, _ed, _ed,
                                             _anchor_rotary_dim,
                                         )
-                                    elif _DKV_HAS_DECODE_ATTN and pool is not None and not has_residual:
+                                    elif _DKV_HAS_DECODE_ATTN and pool is not None and not has_residual and _compiled_kernel_ok(pool):
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         out_sparse, lse_sparse = _decode_attention_aten_lse(
                                             _Q_sq.contiguous(),
@@ -3587,7 +4669,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             pool.scales.contiguous(),
                                             _ca_true,
                                             _sa_true,
-                                            block_indices.contiguous(),
+                                            # int32: dkv_decode.metal reads slot_indices through a
+                                            # typed pointer, and the binding REJECTS Long rather than
+                                            # reading past the allocation (the guard added with the
+                                            # fp16-RoPE-table fix, 39a4a9d1). That commit converted
+                                            # anchor_indices here and left this one raw, so the
+                                            # conversion its own error message prescribes was never
+                                            # applied at the call site.
+                                            block_indices.to(torch.int32).contiguous(),
                                             _scale,
                                             num_heads,
                                             num_key_value_heads,
@@ -3793,7 +4882,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _half_r = _rot_dim // 2
                                     _head_dim_full = dense_k_assembled.shape[-1]
                                     _rot_valid = (
-                                        _rot_state is not None
+                                        # isinstance, not just `is not None`: this
+                                        # key was shared with an unrelated cache in
+                                        # hf_dkv_wrapper.py that stores a TUPLE, and
+                                        # the .get() below raised rather than
+                                        # rebuilding. The keys are distinct now;
+                                        # this makes the failure mode a rebuild
+                                        # rather than a crash if it ever recurs.
+                                        isinstance(_rot_state, dict)
                                         and _rot_state.get("version") == current_version
                                         and _rot_state.get("anchors") == _anchors
                                         and len(_rot_state.get("lengths", ())) == len(_lengths)
@@ -3947,14 +5043,32 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         max_rank_early=getattr(_cfg, "max_rank_early", 0),
                                     )
                                     # MLX-parity decode form; see _remat_attend.
+                                    if _MUTATION_OUT_ACTIVE and q_len == 1:
+                                        block_indices, anchor_indices = _stabilise_routed_set(
+                                            kv_manager, sid, captured_layer_idx,
+                                            block_indices, anchor_indices)
                                     _remat_out = _remat_attend(
                                         kv_manager, sid, captured_layer_idx,
                                         current_version, pool, block_indices,
                                         anchor_indices, cos_all, sin_all,
                                         _layer_active_rank,
                                         query_states[b_idx:b_idx+1],
-                                        _dk_combined, _dv_combined, dense_len,
-                                        num_key_value_groups)
+                                        # NOT _dk_combined. That tensor is built for
+                                        # the combined Triton kernel and has been
+                                        # RoPE-rotated AGAIN, into each token's true
+                                        # frame; the compressed half _remat_attend
+                                        # materialises is in the pool's frame, and one
+                                        # SDPA over a union of two frames is
+                                        # meaningless. dense_k_assembled is the same
+                                        # window the production branch hands it, and
+                                        # is what its contract is written for.
+                                        dense_k_assembled, dense_v_assembled, dense_len,
+                                        num_key_value_groups,
+                                        curr_kv=((key_states[b_idx:b_idx+1],
+                                                  value_states[b_idx:b_idx+1])
+                                                 if _MUTATION_OUT_ACTIVE and q_len == 1 else None),
+                                        dense_mask=_dense_mask,
+                                    dense_blocks=dense_blocks)
 
                                     attn_out_b = _remat_out if _remat_out is not None else \
                                         native_triton_sparse_attn_decode_combined(
@@ -3993,6 +5107,10 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # under DKV_ROTATED_POOL (the default);
                                 # _remat_attend declines when they are not,
                                 # rather than attending unrotated keys.
+                                if _MUTATION_OUT_ACTIVE and q_len == 1:
+                                    block_indices, anchor_indices = _stabilise_routed_set(
+                                        kv_manager, sid, captured_layer_idx,
+                                        block_indices, anchor_indices)
                                 _remat_out = _remat_attend(
                                     kv_manager, sid, captured_layer_idx,
                                     current_version, pool, block_indices,
@@ -4000,7 +5118,12 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _layer_active_rank,
                                     query_states[b_idx:b_idx+1],
                                     dense_k_assembled, dense_v_assembled,
-                                    dense_len, num_key_value_groups)
+                                    dense_len, num_key_value_groups,
+                                    curr_kv=((key_states[b_idx:b_idx+1],
+                                              value_states[b_idx:b_idx+1])
+                                             if _MUTATION_OUT_ACTIVE and q_len == 1 else None),
+                                    dense_mask=_dense_mask,
+                                    dense_blocks=dense_blocks)
                                 attn_out_b = _remat_out if _remat_out is not None else \
                                     native_triton_sparse_attn_decode(
                                     q=query_states[b_idx:b_idx+1],
@@ -4049,7 +5172,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             seq_limit = cos_flat.shape[0]
                                             cos_dense = cos_flat[dense_positions.clamp(min=0, max=seq_limit - 1)].unsqueeze(0).unsqueeze(1)
                                             sin_dense = sin_flat[dense_positions.clamp(min=0, max=seq_limit - 1)].unsqueeze(0).unsqueeze(1)
-                                            dense_k_rot = _apply_rope_single(dense_k_valid, cos_dense, sin_dense)
+                                            # Same double-rotation guard as the production
+                                            # kernel path above, and it must agree with it or
+                                            # this validator reports a mismatch that is its
+                                            # own doing.
+                                            dense_k_rot = (dense_k_valid if _pool_rotated_k()
+                                                           else _apply_rope_single(
+                                                               dense_k_valid, cos_dense, sin_dense))
 
                                         _q_val = query_states[b_idx, :, 0, :]
                                         _full_bsizes = pool.seq_lens[_full_bi]
@@ -4231,7 +5360,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                             curr_q = query_states[b_idx:b_idx+1]
                             curr_k = key_states[b_idx:b_idx+1]
                             curr_v = value_states[b_idx:b_idx+1]
-                            curr_unrot_k = unrot_key_states[b_idx:b_idx+1]
+                            # _ingest_k at the SOURCE, so both capture sites fed
+                            # from this variable store the frame the decoder
+                            # expects. Under DKV_ROTATED_POOL the pool holds
+                            # POST-RoPE keys and the gather skips re-rotation,
+                            # so a site storing PRE-RoPE keys drops RoPE from
+                            # everything it ingested -- silently, since the
+                            # norms match (RoPE is orthogonal).
+                            curr_unrot_k = _ingest_k(key_states, unrot_key_states)[b_idx:b_idx+1]
 
                             num_chunks = math.ceil(q_len / _chunk_size)
                             chunk_outs = []
@@ -4256,7 +5392,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 if K_b > 0:
                                     blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
                                     history_blocks = [b for b in blocks if b.anchor_idx < K_b]
-                                    history_blocks = _sparse_prefill_filter_blocks(history_blocks, chunk_q, chunk_start=K_b)
+                                    # LAZY: only an unrotated pool with enough candidates reaches the
+                                    # rope path, and _history_cos_sin caches across layers, so the
+                                    # table is built at most once per chunk.
+                                    history_blocks = _sparse_prefill_filter_blocks(
+                                        history_blocks, chunk_q, chunk_start=K_b,
+                                        rope=lambda _mp, _m=model, _r=value_states[b_idx:b_idx + 1],
+                                        _d=query_states.device: _history_cos_sin(_m, _r, _mp, _d))
 
                                     comp_blocks = []
                                     dense_k = []
@@ -4534,7 +5676,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     if K_b > 0:
                                         blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
                                         history_blocks = [b for b in blocks if b.anchor_idx < K_b]
-                                        history_blocks = _sparse_prefill_filter_blocks(history_blocks, chunk_q, chunk_start=K_b)
+                                        # LAZY: only an unrotated pool with enough candidates reaches the
+                                        # rope path, and _history_cos_sin caches across layers, so the
+                                        # table is built at most once per chunk.
+                                        history_blocks = _sparse_prefill_filter_blocks(
+                                            history_blocks, chunk_q, chunk_start=K_b,
+                                            rope=lambda _mp, _m=model, _r=value_states[b_idx:b_idx + 1],
+                                            _d=query_states.device: _history_cos_sin(_m, _r, _mp, _d))
 
                                         comp_blocks = []
                                         dense_k = []
@@ -4775,6 +5923,17 @@ def _dkv_decode_forward_impl(
             kv_manager._contig_prefill.pop(_sid, None)
 
     # ── Ingest new decode token into pool ─────────────────────────────────────
+    # ORDER MATTERS, and it constrains the CUDA-graph work. This runs BEFORE the
+    # sparse attention dispatch below, so token t is already inside its own dense
+    # window when it attends -- i.e. the self-attention term is supplied by the
+    # window, not by a separate current-token path.
+    #
+    # Consequence for graph replay (see hf_dkv_wrapper's note): the obvious fix
+    # of "defer ingest by one step so it can happen outside the captured region"
+    # would silently DROP the self term, which degrades quality without raising
+    # anything. Deferring requires first giving attend_with_remat an explicit
+    # curr_k/curr_v row, and the two changes must land together -- with only the
+    # explicit row, token t is attended TWICE.
     for b_idx in range(bsz):
         sid = session_ids[b_idx]
         if sid == "dummy_session":
@@ -4910,9 +6069,17 @@ def _dkv_prefill_forward_impl(
         )
         for b_idx, sid in enumerate(session_ids):
             if sid != "dummy_session":
+                # _ingest_k, not raw unrot_key. Under DKV_ROTATED_POOL the pool
+                # holds POST-RoPE keys and the decode gather skips re-rotation;
+                # a site that always stores PRE-RoPE keys therefore writes the
+                # pool in the OPPOSITE frame from every other capture site, and
+                # RoPE goes missing from whatever that path ingested. This is
+                # the bypass/dense-fallback path, so it is reached on short
+                # contexts and on second-turn sessions rather than on the
+                # first-turn NIAH that the suite exercises.
                 kv_manager.capture_prefill_kv(
                     sid, layer_idx,
-                    unrot_key[b_idx:b_idx+1].detach(),
+                    _ingest_k(key, unrot_key)[b_idx:b_idx+1].detach(),
                     value[b_idx:b_idx+1].detach(),
                 )
         return attn_out  # [B, H, q_len, D]
@@ -4962,7 +6129,10 @@ def _dkv_prefill_forward_impl(
             chunk_q     = query[b_idx:b_idx+1, :, c_start:c_end, :]
             chunk_k     = key[b_idx:b_idx+1, :, c_start:c_end, :]
             chunk_v     = value[b_idx:b_idx+1, :, c_start:c_end, :]
-            chunk_uk    = unrot_key[b_idx:b_idx+1, :, c_start:c_end, :]
+            # _ingest_k, not raw unrot_key -- same frame-consistency reason as
+            # the bypass path above. This is the chunked incremental-prefill
+            # path, which is exactly where a second-turn session lands.
+            chunk_uk    = _ingest_k(key, unrot_key)[b_idx:b_idx+1, :, c_start:c_end, :]
             c_len       = c_end - c_start
 
             # Local causal attention over new chunk

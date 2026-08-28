@@ -196,28 +196,195 @@ class CUDAGraphDecodeRunner:
                           its own warmup writes, so it refuses rather than leave
                           the cache misaligned and produce silently wrong text.
         """
+        import time as _t
+        _t_cap0 = _t.perf_counter()
         if not self._capture_enabled:
             return
 
         # The ROUTED path has no dense_cache to snapshot: its decode state is the
-        # block pool and the dense window, not a StaticCache. Warmup is safe
-        # there for a different reason -- every warmup pass and the capture run
-        # with the SAME input_ids and position_ids, so each writes the same token
-        # to the same slot rather than advancing, exactly as the bypass path
-        # relies on. Correctness is checked by comparing generated text against
-        # the eager path, not assumed.
-        _routed_ok = os.environ.get("DKV_GRAPH_SAFE_ROUTING", "0") == "1"
+        # block pool and the dense window, not a StaticCache. What makes warmup
+        # safe there is that the forward DOES NOT MUTATE -- mutation-out moves
+        # ingest and window assembly to the wrapper, between forwards -- so the
+        # three warmup passes and the capture run write nothing to roll back.
+        # Correctness is checked by comparing generated text against the eager
+        # path, not assumed.
+        #
+        # This used to read DKV_GRAPH_SAFE_ROUTING with a default of "0" while
+        # dkv_attention reads the SAME variable with a default of "1", and the
+        # variable is not in BEST_DECODE_DEFAULTS so it is normally unset. The
+        # two modules therefore disagreed: fixed-shape routing was on, and the
+        # capture that needs it refused anyway. That mismatch, not any missing
+        # machinery, is why the routed graph never captured in the wrapper path.
+        #
+        # Gating on mutation-out instead is also the CORRECT condition rather
+        # than merely a working one. Fixed-shape routing keeps shapes static,
+        # which capture needs, but says nothing about whether warmup writes
+        # state; mutation-out is exactly the property that makes a cache
+        # unnecessary. With it off the forward still ingests, and three warmup
+        # ingests of the same token are three appends -- which is what the
+        # rollback was protecting against.
+        _mutation_out = False
+        try:
+            import runtime.dkv_attention as _da_mod          # local: avoids a cycle
+            _mutation_out = bool(getattr(_da_mod, "_MUTATION_OUT_ACTIVE", False))
+        except Exception:                                    # noqa: BLE001
+            _mutation_out = False
+        _routed_ok = _mutation_out or os.environ.get(
+            "DKV_GRAPH_SAFE_ROUTING_CAPTURE", "0") == "1"
         if cache is None and not _routed_ok:
             if not self._unsafe_capture_warned:
                 import sys as _sys
                 print(
-                    "[DKV] CUDA graph capture skipped: no decode cache supplied, "
-                    "so capture's warmup writes could not be rolled back.",
+                    "[DKV] CUDA graph capture skipped: no decode cache supplied "
+                    "and mutation-out is not active, so capture's warmup writes "
+                    "could not be rolled back. On the routed path this means "
+                    "--fastdc / DKV_GRAPH_MUTATION_OUT is off, or the gate "
+                    "disabled it for this session.",
                     file=_sys.stderr,
                 )
                 self._unsafe_capture_warned = True
             return
 
+        # ── HOW TO MAKE THE ROUTED PATH CAPTURABLE (scoped 2026-08-16) ───────
+        # Read this before attempting it. The remaining work is ONE thing --
+        # device-resident routing -- and the two cheaper designs are already
+        # eliminated by measurement, so do not re-derive them.
+        #
+        # RULED OUT, deferred ingest: ingest_streaming() runs BEFORE the attention
+        # dispatch, so the dense window supplies the SELF-attention term and
+        # deferring drops it silently. Fixable. What is not fixable is the
+        # arithmetic: routing is recomputed in Python every step, so replay
+        # freezes it and the graph must be re-captured whenever it changes.
+        # Capture costs 288 ms (measured); replay saves ~14.7 ms/token; break-even
+        # is ~20 tokens of replay per capture, and DKV_REMAT_INTERVAL freezes
+        # routing for 4. Re-capture on routing change is a 5x NET LOSS.
+        #
+        # THE ROUTER IS ALREADY DEVICE-RESIDENT -- scoped and confirmed, so do
+        # not spend time rebuilding it. query_router.route_blocks_relevance ends
+        # in `sel = torch.topk(relevance, k=k_eff).indices` and returns
+        # `block_indices[sel].to(torch.int32)`: device tensors throughout, no
+        # .cpu() and no .tolist() on that path. The decode step also has ZERO
+        # syncs inside model.forward (colab/decode_sync_probe.py), which is why
+        # capture succeeds at all.
+        #
+        # SO WHAT ACTUALLY BLOCKS REPLAY IS MUTATION, NOT SYNCS OR ROUTING.
+        # Replay executes no Python, and four things the forward mutates per
+        # token are Python:
+        #   1. ingest_streaming()          -- appends K/V to the tail block
+        #   2. assemble_dense_window_kv()  -- rebuilds the recent-token window
+        #   3. block_indices               -- built from CPU-resident metadata
+        #                                     ("Phase 29: metadata is now
+        #                                     CPU-resident, zero CUDA syncs on
+        #                                     write") and fed INTO the device router
+        #   4. block finalise + compression trigger
+        #
+        # None of these synchronise, which is exactly why the sync probe reports
+        # a clean forward while replay is still wrong. Sync-freedom was necessary
+        # and is not sufficient.
+        #
+        # THE DESIGN THAT WORKS, given the router is already device-side:
+        #   A. give attend_with_remat an explicit curr_k/curr_v row, so the
+        #      current token is attended from IN-GRAPH tensors and no longer
+        #      depends on having been ingested into the window first;
+        #   B. move ingest_streaming OUT of the forward -- the wrapper ingests
+        #      token t after the forward returns, reading K/V from the graph's
+        #      fixed-address buffers (references stashed at capture time);
+        #   C. move assemble_dense_window_kv out the same way, writing into the
+        #      already-preallocated per-layer workspace (fixed addresses);
+        #   D. make block_indices a fixed-address buffer the wrapper refreshes
+        #      between replays, so the in-graph router reads fresh candidates.
+        # Then the graph holds only tensor math and every mutation happens
+        # between replays, where Python is allowed to run.
+        #
+        # A-D must land TOGETHER: with A alone the current token is attended
+        # twice (window + curr row); with B alone it is attended zero times.
+        #
+        # STATUS 2026-08-16: A, B and C are IMPLEMENTED and VERIFIED behind
+        # DKV_GRAPH_MUTATION_OUT (default off). With the flag on and graphs off,
+        # generated text equals eager EXACTLY (md5 1c58b822b4983e8d), so the
+        # forward is genuinely read-only with respect to KV state now: ingest and
+        # window assembly happen in the wrapper between forwards, and the current
+        # token is attended from an in-graph curr_kv row.
+        #
+        # ROUTED REPLAY IS STILL WRONG, and the cause is now isolated. With the
+        # flag on, capture succeeds but replay gives 026be52c49f9f6c0 against
+        # eager's 1c58b822b4983e8d. Turning the remat cache OFF does not fix it
+        # (replay 4f31d5fb3ed271aa vs eager 3c5bdad12dd9e50d), which RULES OUT the
+        # remat materialisation as the cause and leaves exactly one thing:
+        #
+        #   block_indices / anchor_indices are produced by
+        #   get_cached_decode_blocks INSIDE the forward, in Python. Replay freezes
+        #   them at their capture-time values, so routing never updates.
+        #
+        # THE FIX, and it is smaller than it looks. Routing needs the QUERY to
+        # score blocks, and the query is computed inside the forward -- so the
+        # wrapper cannot route before the forward. It CAN route after: stash the
+        # query the same way K/V are stashed, and between forwards compute the
+        # routing for the NEXT step into fixed-address buffers the forward reads.
+        # Routing is then ONE STEP STALE, which is strictly less staleness than
+        # the DKV_REMAT_INTERVAL=4 freeze the system already ships and accepts.
+        #
+        # WHAT THE WRAPPER WILL NEED, enumerated from the call site so the next
+        # attempt is mechanical rather than exploratory. route_blocks_relevance
+        # (dkv_attention ~2357) is called with:
+        #     Q              q_for_routing  -- stash per layer, as K/V already are
+        #     pool           kv_manager.native_pool
+        #     block_indices  from get_cached_decode_blocks(sid, layer, device)
+        #     anchor_indices same call
+        #     scale          the attention scale for this layer
+        #     cos, sin       session_dict["rope_cos"/"rope_sin"], already cached
+        #                    per session and grown to max(seq_len+1, pool.U.shape[1])
+        #     srl_state      kv_manager.get_srl_state(sid)
+        #     layer_idx      the layer
+        # Everything except q_for_routing is already reachable from the manager,
+        # so the only new plumbing is the query stash.
+        #
+        # THE TRAP TO AVOID: the forward wraps that call in conditions (router
+        # mode, the k_eff engage test, the legacy srl threshold). Calling
+        # route_blocks_relevance directly from the wrapper without them will
+        # diverge on exactly the configurations those guards exist for. Either
+        # replicate the guards or -- better -- extract the whole block into one
+        # manager method and have BOTH the forward and the wrapper call it, so
+        # they cannot drift apart.
+        #
+        # Then the same md5-vs-eager gate decides it, followed by the accuracy
+        # suite. Do not judge it on speed: replay is already 1.41x and wrong.
+        #
+        # (Superseded note: A is IMPLEMENTED and inert -- attend_with_remat now accepts
+        # curr_kv and dense_mask, both defaulting to None.)
+        #
+        # EDIT THE RIGHT FORWARD. There are two in dkv_attention.py and only one
+        # is live: `dkv_forward` defined at ~1342 INSIDE apply_dkv_attention_patch
+        # is what gets bound onto layer.self_attn.forward, and it is the one that
+        # calls _remat_attend. `_dkv_decode_forward_impl` (~4742) is a separate
+        # integration and is NOT the HF wrapper path -- an earlier revision of
+        # this note cited its line numbers by mistake. In the LIVE path the order
+        # is ingest (~1957) -> assemble_dense_window_kv (~2573) -> _remat_attend
+        # (~3948/3994), which is what makes the window supply the self term.
+        #
+        # WHY IT IS NEVERTHELESS SAFE TO ATTEMPT: routing output is DISCRETE.
+        # A device router can be built alongside the CPU one and checked for
+        # EXACT INDEX EQUALITY, which is a far stronger gate than "the text still
+        # looks fine" -- and it is the gate that catches the failure mode that
+        # matters here, silently attending the wrong blocks.
+        #
+        # ORDER, and do not reorder it:
+        #   1. Build the device router beside the CPU one. Do not wire it in.
+        #   2. Assert exact equality of the selected indices, per layer per token,
+        #      across the full needle sweep and linkbench 48 seeds. Any mismatch
+        #      is a bug in the device router, not a tolerance to widen.
+        #   3. Only then switch the read path over, and re-verify with
+        #      colab/graph_verify.py -- md5 of generated text must equal eager.
+        #   4. Only then allow capture on the routed path.
+        #
+        # Expected payoff, measured on the current build: 1.41x
+        # (16.59 -> 23.38 tok/s wall at 16k). Decode is ~39% GPU-idle, so this is
+        # launch overhead, not compute, and the ceiling is real.
+        #
+        # NEVER measure replay with DKV_TIME_ATTN. Under replay the DKV Python
+        # does not run, so it reports a fictional ~1449 tok/s. Use
+        # colab/decode_wall_vs_timer.py.
+        #
         # A full DKV model is not a static CUDA-graph workload yet.  Its
         # attention interception updates Python/session state (KV blocks,
         # routing slots, dense-window membership and SRL state) on every
@@ -364,12 +531,14 @@ class CUDAGraphDecodeRunner:
             self._restore_cache(cache, _snap)
 
         self._captured_shape_sig = sig
+        self._last_capture_seconds = _t.perf_counter() - _t_cap0
         # POSITIVE confirmation. Capture is wrapped in `except Exception: pass`
         # by the caller, so a failure is silent and indistinguishable from eager
         # decode -- which means a benchmark can appear to measure graph replay
         # while measuring nothing of the sort. Say so explicitly.
         import sys as _sys
-        print(f"[DKV] CUDA graph CAPTURED for shape {sig} — replay active",
+        print(f"[DKV] CUDA graph CAPTURED for shape {sig} in "
+              f"{self._last_capture_seconds * 1000:.0f} ms — replay active",
               file=_sys.stderr, flush=True)
 
     def run(self, input_ids: torch.Tensor, position_ids: torch.Tensor):

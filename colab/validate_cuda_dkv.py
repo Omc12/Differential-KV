@@ -232,7 +232,7 @@ def _assert_needle_unambiguous(tokenizer, needle, check_fn):
              if bad else f"{len(parts)} tokens, all whole-word/digit/separator")
 
 
-def test_4_needle(quick=False, long_ctx=False, dense=False,
+def test_4_needle(quick=False, long_ctx=False, x64=False, dense=False,
                   model_id="Qwen/Qwen3.5-2B", chunk=0,
                   no_serving_defaults=False):
     """End-to-end recall + determinism at temperature 0."""
@@ -451,6 +451,16 @@ def test_4_needle(quick=False, long_ctx=False, dense=False,
         # choice that was safe at 8k is not evidence it is safe here, which is why
         # 8k passing is not sufficient to flip the default.
         cases += [("32k", 2400, 0.0), ("32k", 2400, 0.5), ("32k", 2400, 0.9)]
+    if x64:
+        # ~64k — the last untested rung (HANDOFF §8). Depth 0.9 puts the needle
+        # in the same RELATIVE position as 32k@0.9, so if the failure mode there
+        # were positional the same failure would be expected here. It is not
+        # positional: the routed-row count does NOT grow with context (K=16
+        # regardless), so "more context = more competitors" is not the
+        # mechanism. Separate flag rather than folded into --long because it
+        # roughly doubles the pool and can OOM on a 12 GB card, and an OOM
+        # halfway through --long would cost the 32k result too.
+        cases += [("64k", 4800, 0.0), ("64k", 4800, 0.5), ("64k", 4800, 0.9)]
     for label, n_filler, depth in cases:
         label = f"{label}@depth{depth:.1f}"
         ctx = build(n_filler, depth)
@@ -586,6 +596,9 @@ if __name__ == "__main__":
                          "DKV_REMAT_CACHE default-ON: the cache freezes the routed "
                          "block set, and that risk scales with how many blocks the "
                          "router chooses between (16 of ~43 at 8k, 16 of ~170 at 32k).")
+    ap.add_argument("--x64", action="store_true",
+                    help="add ~64k cases (HANDOFF 8: the last untested rung). "
+                         "Roughly doubles the pool; can OOM on a 12 GB card.")
     ap.add_argument("--dense", action="store_true",
                     help="run the needle cases on plain HF attention with DKV NOT "
                          "loaded. The control that separates 'DKV lost the needle' "
@@ -611,7 +624,7 @@ if __name__ == "__main__":
         # Both inspect DKV internals; neither is meaningful with DKV unloaded.
         test_2_exact_keys_default()
         test_3_rank_mask()
-    test_4_needle(quick=args.quick, long_ctx=args.long,
+    test_4_needle(quick=args.quick, long_ctx=args.long, x64=args.x64,
                   dense=args.dense, model_id=args.model, chunk=args.chunk,
                   no_serving_defaults=args.no_serving_defaults)
 

@@ -221,8 +221,11 @@ class KVBlock:
             pool = self.pool
             pool_idx = self.pool_idx
             rank = self.dynamic_rank if self.dynamic_rank > 0 else pool.V_KV.shape[2]
-            vk = pool.V_KV[pool_idx, 0, :rank]
-            vv = pool.V_KV[pool_idx, 1, :rank]
+            # V lives at a BASIS ROW, which equals pool_idx unless shared bases
+            # are on (native_core/compression/basis_group.py).
+            v_row = pool.basis_row(pool_idx) if hasattr(pool, "basis_row") else pool_idx
+            vk = pool.V_KV[v_row, 0, :rank]
+            vv = pool.V_KV[v_row, 1, :rank]
             vk_flat = vk.reshape(rank, -1)
             vv_flat = vv.reshape(rank, -1)
             return torch.cat([vk_flat, vv_flat], dim=1)
@@ -632,6 +635,17 @@ class KVRuntimeManager:
 
         # Per-session SRL state (populated by finalize_srl_index)
         self._session_srl: dict = {}
+        # sid -> question-span token ids, set by the wrapper's generate() and
+        # consumed by finalize_srl_index.
+        #
+        # THIS ATTRIBUTE DID NOT EXIST ON CUDA. MLX declares it
+        # (mlx_dkv_wrapper.py:1900) and hf_dkv_wrapper.py has always written to
+        # it -- into a bare `except Exception: pass`, so every write raised
+        # AttributeError and was silently swallowed. The pin therefore never
+        # worked here at all, and `current_query_tokens` always fell back to the
+        # whole prompt. Nothing logged, nothing failed; the lexical signal was
+        # just uniformly wrong.
+        self._pending_query: dict = {}
         self._factual_stores: dict = {}
 
         # Per-session SRL custom configuration settings
@@ -890,6 +904,9 @@ class KVRuntimeManager:
             num_layers=self.num_layers,
             lazy=True,
             max_residual_tokens=self.config.max_residual_tokens,
+            # Preset-driven; DKV_SHARED_BASIS still overrides. On for `low`.
+            shared_basis=bool(getattr(self.config, "shared_basis", False)),
+            shared_basis_frac=float(getattr(self.config, "shared_basis_frac", 0.50)),
         )
         self.native_pool.config = self.config
         # Back-reference so decode-path hooks can reach k-transformers subsystems
@@ -1428,9 +1445,35 @@ class KVRuntimeManager:
             existing_srl = self._session_srl.get(session_id)
             nothing_found = getattr(existing_srl, "nothing_found", False)
 
-            # Extract latest query tokens
+            # ── Query tokens: the QUESTION span, not the whole prompt ────────
+            # MLX does this (mlx_dkv_wrapper.py:1978-1979):
+            #     pq = self._pending_query.pop(session_id, None)
+            #     current_query_tokens = pq if pq else token_ids[cached_len:]
+            # CUDA only ever did the fallback, so on a single-turn request
+            # (cached_len=0) `current_query_tokens` was the ENTIRE 8k prompt.
+            #
+            # That is not a harmless approximation. Every consumer of this field
+            # uses it as a LEXICAL query -- query_router's lexical lookup, the
+            # decode-time query_toks set, the learned router's `lex` feature.
+            # IDF over the whole prompt is ~uniform, so the field could not
+            # discriminate anything: it named every token in the document as
+            # part of the question. query_span.py exists precisely to extract
+            # the last user turn, and its own docstring says the full-prompt
+            # fallback "would pin nothing useful".
+            #
+            # `_pending_query` was previously populated on CUDA only when
+            # DKV_FACTUAL_STORE=1, which is off by default -- so the pin existed
+            # and was never filled on the default path. The wrapper now fills it
+            # unconditionally.
             current_query_tokens = getattr(existing_srl, "current_query_tokens", [])
-            if token_ids_cpu is not None:
+            _pq = None
+            try:
+                _pq = getattr(self, "_pending_query", {}).pop(session_id, None)
+            except Exception:                                    # noqa: BLE001
+                _pq = None
+            if _pq:
+                current_query_tokens = list(_pq)
+            elif token_ids_cpu is not None:
                 current_query_tokens = token_ids_cpu[cached_len:].tolist()
 
             # ── 5. Assemble SessionSRLState ──────────────────────────────
@@ -4196,7 +4239,7 @@ class KVRuntimeManager:
         
         deltas_batch = torch.stack(deltas_list, dim=0)
         
-        from native_core.compression.lowrank import compress_lowrank_batch, _topk_with_coverage
+        from native_core.compression.lowrank import compress_lowrank_batch
         U_batch, S_batch, Vh_batch, scale_batch = compress_lowrank_batch(deltas_batch, max_rank)
         try:
             _cov_frac = float(os.environ.get("DKV_RESIDUAL_COVERAGE_FRAC", "0"))
@@ -4261,6 +4304,9 @@ class KVRuntimeManager:
                 # _residual_error_threshold() defaults to 0.0 for exactly that
                 # reason. The selection below uses it.
                 _boost_vec = None
+                # Atomic token runs, same DELTA-row space as _boost_vec. Reset
+                # per block so one block's spans cannot protect another's rows.
+                _runs = None
                 n_max_residual = int(n * 0.15)
 
                 # OPT-A: Adaptive residual budget — 3-tier block classifier by median reconstruction error.
@@ -4286,7 +4332,16 @@ class KVRuntimeManager:
                             _cached_boost = _session_boosts.get(block.anchor_idx)
 
                         if _cached_boost is not None:
-                            boost_row, n_boosted = _cached_boost
+                            # THREE-tuple. This cache is the SAME dict the
+                            # batched GPU producer writes (lowrank.py stores it
+                            # as manager._res_capture_boost_rows), so the arity
+                            # has to agree across both producers. Getting it
+                            # wrong here would be INVISIBLE: the
+                            # `except Exception: pass` below swallows an unpack
+                            # error and silently drops the boost -- taking the
+                            # residual budget FLOOR with it, back to the 15%
+                            # default.
+                            boost_row, n_boosted, _runs = _cached_boost
                         else:
                             from native_core.compression.residual_capture import compute_boost_multipliers
                             _tok = self.tokenizer
@@ -4314,8 +4369,28 @@ class KVRuntimeManager:
                                 _counts_cache[_ckey] = _counts
                             boost_row, n_boosted = compute_boost_multipliers(
                                 tok_strs, block_token_ids, _counts or {}, _total)
+                            try:
+                                # Gated on the flag so turning the feature off
+                                # removes its cost too -- see the note at the
+                                # batched producer.
+                                from native_core.compression.lowrank import (
+                                    _run_atomic_enabled as _ra_on,
+                                )
+                                if _ra_on():
+                                    from native_core.compression.residual_capture import (
+                                        atomic_runs, rank_runs_by_query, usable_query,
+                                    )
+                                    _runs = atomic_runs(tok_strs)
+                                    _pq = getattr(self, "_pending_query", None) or {}
+                                    _qi = _pq.get(_sid) if isinstance(_pq, dict) else None
+                                    if _runs and usable_query(_qi, _total):
+                                        _runs = rank_runs_by_query(
+                                            tok_strs, block_token_ids, _qi, _runs)
+                            except Exception:                    # noqa: BLE001
+                                _runs = None
                             if _sid is not None:
-                                _session_boosts[block.anchor_idx] = (boost_row, n_boosted)
+                                _session_boosts[block.anchor_idx] = (
+                                    boost_row, n_boosted, _runs)
 
                         if boost_row is not None and n_boosted > 0:
                             # Carried to the JOINT score below, not multiplied
@@ -4398,8 +4473,19 @@ class KVRuntimeManager:
                         if _boost_vec is not None:
                             joint_err = joint_err * _boost_vec.to(joint_err.dtype)
 
-                        top_k_J = _topk_with_coverage(
-                            joint_err, min(n_max_residual, n), _cov_frac)
+                        # RUN-ATOMIC, same as the batched GPU producer: a code
+                        # is worth nothing captured half-way, so whole runs fill
+                        # the slots the pool will actually KEEP before the
+                        # per-token ranking gets the remainder.
+                        from native_core.compression.lowrank import (
+                            _select_residual_rows as _sel_res_rows,
+                        )
+                        _res_cap_h = getattr(
+                            getattr(self, "native_pool", None),
+                            "max_residual_tokens", None) or n
+                        top_k_J = _sel_res_rows(
+                            joint_err, min(n_max_residual, n), _cov_frac,
+                            runs=_runs, res_cap=_res_cap_h)
 
                         # A token qualifies if EITHER half is non-degenerate:
                         # with one shared index set, dropping it on K alone would
@@ -4499,12 +4585,52 @@ class KVRuntimeManager:
         comp_s  = self._compressor.summary()
         avg_cos   = (self.total_cosine_sim / max(1, self.total_compressions))
         avg_drift = (self.total_norm_drift  / max(1, self.total_compressions))
+
+        # `total_compressions` COUNTS ONLY THE CPU PATH, and on CUDA that is the
+        # path that does not run. config.gpu_compress defaults to `not is_macos`
+        # (config.py), so the CUDA default routes every block through
+        # compress_layer_blocks_gpu, which never reaches
+        # _postprocess_compressed_block -- the sole place total_compressions,
+        # vram_saved_bytes, total_cosine_sim and rank_histogram are incremented.
+        # So this dict reported "0 compressions, 0.0 MB saved" on every normal
+        # CUDA run no matter how much was compressed, and an external benchmark
+        # harness reading it concluded DKV had not engaged at all.
+        #
+        # The GPU path does keep a count, on the streaming manager, and that
+        # count is authoritative there: stats["total_compressed"] is bumped by
+        # the GPU branch AND by both sync/backpressure CPU fallbacks
+        # (streaming_sparse_ingest.py), so it is the whole total, not a second
+        # addend -- summing the two would double-count every fallback block.
+        #
+        # Reported as a SEPARATE key rather than folded into total_compressions
+        # because the GPU path computes no cosine_sim/norm_drift. Widening that
+        # denominator with blocks contributing no numerator would drag
+        # avg_cosine_sim toward 0 and read as a fidelity collapse -- swapping a
+        # visible zero for a plausible wrong number, which is worse.
+        blocks_compressed = self.total_compressions
+        quality_sampled   = self.total_compressions
+        if self._streaming_mgr is not None:
+            try:
+                blocks_compressed = int(self._streaming_mgr.stats["total_compressed"])
+            except Exception:
+                pass
+
+        # vram_saved_bytes accumulates in that same CPU-only place, so it is 0 on
+        # CUDA for the same reason. Left as measured and FLAGGED rather than
+        # estimated: the pool's own _pool_mb() is ALLOCATED capacity (sized from
+        # prefill length by ensure_allocated at create_session, before a single
+        # block is compressed), so dividing it by the dense KV yields a
+        # pool-sizing ratio, not an achieved compression ratio. For real
+        # per-layer block accounting use the `sessions` property below.
         return {
             "sessions":              len(self.session_blocks),
+            "blocks_compressed":     blocks_compressed,
             "total_compressions":    self.total_compressions,
+            "quality_sampled":       quality_sampled,
             "avg_cosine_sim":        round(avg_cos, 4),
             "avg_norm_drift":        round(avg_drift, 4),
             "vram_saved_mb":         round(self.vram_saved_bytes / 1e6, 2),
+            "vram_saved_measured":   self.vram_saved_bytes > 0,
             "fixed_rank":            self.rank,
             "rank_histogram":        dict(sorted(self.rank_histogram.items())),
             "pager":                 pager_s,

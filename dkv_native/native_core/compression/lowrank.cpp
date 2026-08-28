@@ -1460,7 +1460,7 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                     return 2.0f;
                 }();
 
-                if (rarity_on && !token_counts.empty()) {
+                if (rarity_on && !token_counts.empty() && params.session_len > 0) {
                     for (int s = 0; s < S_deltas; ++s) {
                         if (boost_multipliers[s] > 1.0f) {
                             continue; // already protected by a shape rule

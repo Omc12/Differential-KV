@@ -55,6 +55,73 @@ except ImportError:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+
+class _JointVAdapter:
+    """Presents ``V_KV`` [n, 2, r, H, D] as the [n, r, 2*H*D] joint form the
+    shared-basis registry works in.
+
+    The registry needs a basis as one [r, F] matrix — K and V halves
+    concatenated along the feature axis, which is the layout ``compress``
+    produces and the layout the projection math is written for.  The pool
+    stores the two halves split, and that split is load-bearing: ``V_K`` and
+    ``V_V`` are contiguous slices of it and every decode kernel reads them that
+    way.  Reshaping between the two needs a permute, so it cannot be a view.
+
+    Rather than change the pool's layout (which every kernel, the paging store
+    and three metadata readers depend on) this adapter pays for one small copy
+    at the boundary.  It is affordable because it only runs at COMPRESS time and
+    only over the handful of candidate groups a block is scored against —
+    never per decode step, never over the whole store.
+    """
+
+    __slots__ = ("_t", "_F")
+
+    def __init__(self, V_KV: torch.Tensor):
+        self._t = V_KV
+        self._F = int(V_KV.shape[3]) * int(V_KV.shape[4]) * 2
+
+    @property
+    def shape(self):
+        return (int(self._t.shape[0]), int(self._t.shape[2]), self._F)
+
+    @property
+    def device(self):
+        return self._t.device
+
+    @property
+    def dtype(self):
+        return self._t.dtype
+
+    def numel(self):
+        return self._t.numel()
+
+    def new_zeros(self, shape, **kw):
+        return self._t.new_zeros(shape, **kw)
+
+    def __getitem__(self, rows):
+        """[r, F] for a scalar row, [m, r, F] for a tensor/list of rows."""
+        scalar = not (torch.is_tensor(rows) or isinstance(rows, (list, tuple, slice)))
+        sel = self._t[rows]                          # [.., 2, r, H, D]
+        if scalar:
+            # [2, r, H, D] -> [r, 2*H*D]
+            return sel.permute(1, 0, 2, 3).reshape(int(sel.shape[1]), self._F)
+        return sel.permute(0, 2, 1, 3, 4).reshape(
+            int(sel.shape[0]), int(sel.shape[2]), self._F)
+
+    def __setitem__(self, row, value):
+        """value: [r, F] (or [m, r, F] for a batch of rows)."""
+        half = self._F // 2
+        H, D = int(self._t.shape[3]), int(self._t.shape[4])
+        v = value.to(self._t.dtype)
+        if v.dim() == 2:
+            r = int(v.shape[0])
+            self._t[row, 0, :r] = v[:, :half].reshape(r, H, D)
+            self._t[row, 1, :r] = v[:, half:].reshape(r, H, D)
+        else:
+            m, r = int(v.shape[0]), int(v.shape[1])
+            self._t[row, 0, :r] = v[:, :, :half].reshape(m, r, H, D)
+            self._t[row, 1, :r] = v[:, :, half:].reshape(m, r, H, D)
+
 class NativeBlockPool:
     def __init__(
         self,
@@ -69,6 +136,8 @@ class NativeBlockPool:
         num_layers: int = 28,
         lazy: bool = False,
         max_residual_tokens: Optional[int] = None,
+        shared_basis: bool = False,
+        shared_basis_frac: float = 0.50,
     ):
         # ── Phase 1: Record config — NO GPU tensors allocated yet if lazy ────────────
         # Allocation is deferred to ensure_allocated(n_tokens), called by
@@ -116,7 +185,7 @@ class NativeBlockPool:
         #
         # This was previously deferred as "<1% of the ~15 GB peak", and that
         # arithmetic was against the wrong denominator — the same denominator
-        # trap MLX_PORT_FROM_CUDA.md item 5c warns about. Measured against the
+        # trap ACTIVE_RUNTIME/docs/cuda_port_record.md warns about (report the KV-side ratio). Measured against the
         # POOL, which is the only line KV compression can move: on Qwen3.5-2B at
         # 32k the legacy slots are 52 MB of a 166 MB pool, i.e. 31% of it.
         #
@@ -153,10 +222,151 @@ class NativeBlockPool:
         else:
             _res_bytes = 2 * self.max_residual_tokens * num_kv_heads * head_dim * 2
 
-        # Bytes per block — used for n_blocks computation in ensure_allocated
+        # ── Shared low-rank bases (DKV_SHARED_BASIS, default off) ────────────
+        # When on, V_KV holds ceil(frac * n_blocks) BASIS rows instead of one
+        # per block, and `basis_of` maps a slot to the row it reads.  See
+        # native_core/compression/basis_group.py for the projection math and
+        # the capacity contract.
+        # `shared_basis` / `shared_basis_frac` come from the preset (DKVConfig
+        # turns it on for `low`, the memory-priority rung) and are overridden by
+        # DKV_SHARED_BASIS / DKV_SHARED_BASIS_FRAC. The env check has to be for
+        # an EXPLICIT setting, not a truthy one: shared_basis_enabled() returns
+        # False when the variable is absent, so consulting it unconditionally
+        # would let "unset" silently override a preset that asked for it on.
+        try:
+            from native_core.compression.basis_group import (
+                shared_basis_enabled as _sb_on,
+                shared_basis_fraction as _sb_frac,
+            )
+            if _os.environ.get("DKV_SHARED_BASIS") is not None:
+                self._shared_basis = bool(_sb_on())
+            else:
+                self._shared_basis = bool(shared_basis)
+            if _os.environ.get("DKV_SHARED_BASIS_FRAC") is not None:
+                self._basis_frac = float(_sb_frac())
+            else:
+                self._basis_frac = min(1.0, max(1e-3, float(shared_basis_frac)))
+        except Exception:                                        # noqa: BLE001
+            self._shared_basis = False
+            self._basis_frac = 1.0
+        # Residuals in CORRECTION form are a delta against the low-rank
+        # reconstruction, so re-expressing a block in a shared basis would
+        # invalidate every one of them.  In EXACT form (the default on every
+        # device) they hold the anchor-relative true K/V and do not depend on
+        # the basis at all, which is what makes sharing safe.  Refuse rather
+        # than silently corrupt.
+        if self._shared_basis:
+            try:
+                from native_core.compression.lowrank import _exact_keys_enabled
+                if not _exact_keys_enabled(device):
+                    print("[DKV] DKV_SHARED_BASIS ignored: residuals are in "
+                          "CORRECTION form (DKV_RESIDUAL_EXACT_KEYS=0), which "
+                          "is defined against a block's OWN low-rank "
+                          "reconstruction. Re-expressing the block in a shared "
+                          "basis would invalidate every stored residual.",
+                          flush=True)
+                    self._shared_basis = False
+            except Exception:                                    # noqa: BLE001
+                pass
+        # 4-bit KV quantisation and shared bases are ANTAGONISTIC, measured.
+        # The quantisation noise dominates the delta subspaces, so no two blocks
+        # clear the join threshold: on `low` (q4_0) the store fills with
+        # founders and every later block is FORCE-joined --
+        #
+        #     preset  kv_quant   groups     joined  forced  mean_kept
+        #     mid     f16        293/462       463       0      0.969
+        #     low     q4_0       462/462 FULL    0     294      0.685
+        #
+        # -- while the pool MB is IDENTICAL either way, because the saving comes
+        # from allocating fewer basis rows and not from successful grouping. So
+        # this degrades silently if you only watch memory. Say so at
+        # construction rather than leaving it to be found in basis_stats().
+        if self._shared_basis:
+            _q = str(getattr(getattr(self, "config", None), "kv_quant", "") or "")
+            if not _q:
+                _q = str(_os.environ.get("DKV_KV_QUANT", "") or "")
+            if _q.lower().startswith(("q4", "int4", "nf4")):
+                print(f"[DKV WARNING] shared bases with kv_quant={_q}: 4-bit KV "
+                      f"quantisation destroys the subspace agreement this "
+                      f"depends on. Expect ZERO voluntary joins and forced "
+                      f"lossy sharing (measured mean_kept 0.685 vs 0.969 at "
+                      f"f16). The VRAM saving is unchanged, which is why this "
+                      f"is easy to miss -- check pool.basis_stats()['joined'].",
+                      flush=True)
+        # ── SHARED BASES REQUIRE AN UNROTATED POOL ──────────────────────────
+        # Shared low-rank bases compare SUBSPACES. RoPE rotates every key by its
+        # ABSOLUTE POSITION, so two blocks holding the same text at different
+        # offsets have subspaces rotated apart and the grouping collapses.
+        # Measured on the MLX port, same document, same block size, frac=0.50,
+        # with only DKV_ROTATED_POOL differing:
+        #
+        #   pool        best-partner retained energy   founded  joined  forced
+        #   rotated     mean 0.486,  0/27 clear 0.90       560      10     186
+        #   unrotated   mean 0.972, 26/27 clear 0.90       236     520       0
+        #
+        # The unrotated row reproduces this pool's own published numbers
+        # (joined 463, forced 0, mean_kept 0.969), which is what identifies
+        # rotation as the whole mechanism.
+        #
+        # CUDA has never hit this because it got lucky: every preset that turns
+        # sharing on -- mid, high, ultra -- already sets rotated_pool=False. But
+        # `low` is the one ROTATED preset, so DKV_SHARED_BASIS=1 on `low`
+        # degenerates exactly as above.
+        #
+        # REFUSE, don't warn. The kv_quant note above warns because a 4-bit pool
+        # still produces a usable (if badly grouped) result; this one produces no
+        # error, no shape change, and the FULL memory win -- pool MB is identical
+        # either way, because the saving comes from allocating fewer basis rows
+        # rather than from grouping succeeding. A rotated run therefore reports
+        # the expected saving with its fidelity quietly bought by forced lossy
+        # joins. These are two INDEPENDENT reasons sharing fails on `low`;
+        # excusing one does not cover the other.
+        #
+        # DKV_SHARED_BASIS_ALLOW_ROTATED=1 keeps the bad configuration
+        # measurable, because a guard that cannot be turned off cannot be
+        # A/B'd against.
+        if self._shared_basis:
+            try:
+                from native_core.sparse_decode.triton_fused_decode import (
+                    pool_stores_rotated_k as _psr,
+                )
+                _rot = bool(_psr())
+            except Exception:                                    # noqa: BLE001
+                _rot = str(_os.environ.get("DKV_ROTATED_POOL", "1")).strip().lower()                     not in ("0", "false", "off", "no")
+            if _rot:
+                if str(_os.environ.get("DKV_SHARED_BASIS_ALLOW_ROTATED", "0")
+                       ).strip().lower() in ("1", "true", "on", "yes"):
+                    print("[DKV WARNING] shared bases on a ROTATED pool "
+                          "(DKV_SHARED_BASIS_ALLOW_ROTATED=1). Grouping will "
+                          "degenerate to forced lossy joins while the memory "
+                          "number looks correct -- check "
+                          "pool.basis_stats()['forced'].", flush=True)
+                else:
+                    print("[DKV] DKV_SHARED_BASIS ignored: the pool stores "
+                          "ROTATED keys (DKV_ROTATED_POOL=1, which the `low` "
+                          "preset sets). RoPE rotates each key by its absolute "
+                          "position, so blocks holding the same text at "
+                          "different offsets have subspaces rotated apart and "
+                          "no two blocks clear the join threshold -- the store "
+                          "fills with founders and everything later is "
+                          "FORCE-joined, at the full advertised memory saving. "
+                          "Set DKV_ROTATED_POOL=0 to use sharing, or "
+                          "DKV_SHARED_BASIS_ALLOW_ROTATED=1 to measure it "
+                          "anyway.", flush=True)
+                    self._shared_basis = False
+
+        self.basis_of = None          # [n_blocks] int32 device tensor, or None
+        self.basis_registry = None
+        self.basis_store = None       # _JointVAdapter over V_KV, or None
+
+        # Bytes per block — used for n_blocks computation in ensure_allocated.
+        # Under shared bases V is amortised across `1/frac` slots, so the same
+        # VRAM budget derives proportionally MORE blocks — that is where the
+        # saving is actually spent.
+        _v_share = self._basis_frac if self._shared_basis else 1.0
         self._bytes_per_block = (
             max_seq_len * rank * 1 +              # U  (int8)
-            rank * num_kv_heads * head_dim * 2 * 2 +  # V_K + V_V (fp16)
+            int(rank * num_kv_heads * head_dim * 2 * 2 * _v_share) +  # V_K + V_V (fp16)
             num_kv_heads * head_dim * 2 * 2 +     # anchors K + V (fp16)
             6 + 2 +                               # scales (2B) + seq_lens (4B) + U_scale (2B)
             self.max_residual_tokens * 2 +        # residual_K_positions (2B, int16)
@@ -291,6 +501,134 @@ class NativeBlockPool:
         print("[DKV] CPU compress path active — allocated stratified/fact slots "
               f"for {n} blocks", flush=True)
 
+    # ── Shared-basis plumbing ────────────────────────────────────────────────
+    #
+    # Every one of these is a no-op returning the identity when
+    # DKV_SHARED_BASIS is off, which is the default: `basis_of` stays None,
+    # `_n_basis_rows` returns n_blocks, and `basis_index` hands back the slot
+    # indices it was given.  The pool then allocates and behaves exactly as it
+    # did before this existed.
+
+    @property
+    def shared_basis_active(self) -> bool:
+        return bool(self._shared_basis) and self.basis_of is not None
+
+    def _n_basis_rows(self, n_blocks: int) -> int:
+        if not self._shared_basis:
+            return n_blocks
+        import math as _math
+        return max(1, min(n_blocks, int(_math.ceil(n_blocks * self._basis_frac))))
+
+    def _init_basis_map(self, n_blocks: int) -> None:
+        """(Re)build the slot -> basis-row map and its registry."""
+        if not self._shared_basis:
+            self.basis_of = None
+            self.basis_registry = None
+            self.basis_store = None
+            return
+        from native_core.compression.basis_group import SharedBasisRegistry
+        n_basis = int(self.V_KV.shape[0])
+        # Row 0, not -1: an UNWRITTEN slot must still resolve to a valid row or
+        # any gather over it indexes out of bounds.  Row 0 is safe as a landing
+        # place because an unwritten slot's U is all zeros, so it reconstructs
+        # to exactly the anchor whatever basis it points at.
+        self.basis_of = torch.zeros((n_blocks,), device=self.device, dtype=torch.int32)
+        # ...but "points at row 0" is then indistinguishable from "holds a
+        # refcount on row 0", and releasing a claim that was never made
+        # corrupts the registry: the founding block's own group gets
+        # decremented by the next slot to be written, the row returns to the
+        # free list while blocks still read it, and a later block RE-FOUNDS it
+        # with a different basis -- silently changing what those earlier blocks
+        # decompress to.  This flag is the difference.
+        self._basis_claimed = bytearray(n_blocks)
+        self.basis_store = _JointVAdapter(self.V_KV)
+        self.basis_registry = SharedBasisRegistry(
+            capacity=n_basis, device=self.V_KV.device, dtype=self.dtype)
+
+    def basis_index(self, indices):
+        """Map pool slot ids to V-store rows.  Identity when sharing is off."""
+        if self.basis_of is None:
+            return indices
+        if not torch.is_tensor(indices):
+            indices = torch.as_tensor(indices, device=self.basis_of.device)
+        idx = indices.to(device=self.basis_of.device, dtype=torch.long)
+        idx = idx.clamp(0, self.basis_of.shape[0] - 1)
+        return self.basis_of[idx].long()
+
+    def basis_row(self, pool_idx: int) -> int:
+        """Scalar form of basis_index, for the metadata readers."""
+        if self.basis_of is None:
+            return int(pool_idx)
+        if not (0 <= pool_idx < self.basis_of.shape[0]):
+            return 0
+        return int(self.basis_of[pool_idx].item())
+
+    def release_basis(self, pool_idx: int) -> None:
+        """Drop this slot's claim on its basis row so the row can be reclaimed.
+
+        No-op unless the slot actually holds a claim — see `_basis_claimed`.
+        """
+        if self.basis_registry is None or self.basis_of is None:
+            return
+        if not (0 <= pool_idx < self.basis_of.shape[0]):
+            return
+        if not self._basis_claimed[pool_idx]:
+            return
+        self._basis_claimed[pool_idx] = 0
+        try:
+            self.basis_registry.release_row(int(self.basis_of[pool_idx].item()))
+        except Exception:                                        # noqa: BLE001
+            pass
+
+    def _claim_basis(self, pool_idx: int, row: int) -> None:
+        self.basis_of[pool_idx] = int(row)
+        self._basis_claimed[pool_idx] = 1
+
+    def assign_basis(self, U, V, layer_idx: int, pool_indices):
+        """Pick a shared basis for each block and return (rows, bases, kept).
+
+        Exposed so the COMPRESS path can assign before it measures
+        reconstruction error.  It has to: residual selection scores
+        ``delta - recon``, and under a shared basis the stored recon comes from
+        the GROUP basis, not the block's own.  Assigning inside write_block
+        would leave every residual chosen against a reconstruction that is not
+        the one decode rebuilds.
+
+        Callers that pre-assign pass the returned rows back to
+        write_blocks_batched(basis_rows=...), which then only records the map.
+
+        U: [N, T, r]  V: [N, r, F]  ->  rows [N] long, bases [N, r, F], kept [N]
+        """
+        from native_core.compression.basis_group import reproject_U  # noqa: F401
+        slots = [int(x) for x in (pool_indices.tolist()
+                                  if torch.is_tensor(pool_indices) else pool_indices)]
+        for s in slots:
+            self.release_basis(s)
+        asg, gathered = self.basis_registry.assign_batch(
+            U, V, layer=int(layer_idx), basis_store=self.basis_store)
+        for s, a in zip(slots, asg):
+            self._claim_basis(s, a.row)
+        rows = torch.tensor([a.row for a in asg], device=self.V_KV.device, dtype=torch.long)
+        kept = torch.tensor([a.kept for a in asg], device=self.V_KV.device, dtype=torch.float32)
+        return rows, gathered, kept
+
+    def basis_stats(self) -> dict:
+        if self.basis_registry is None:
+            return {"enabled": False}
+        s = dict(self.basis_registry.stats())
+        s["enabled"] = True
+        s["frac"] = self._basis_frac
+        n_slots = int(self.basis_of.shape[0]) if self.basis_of is not None else 0
+        s["slots"] = n_slots
+        # Sharing factor over slots that ACTUALLY hold a basis claim, not over
+        # pool capacity. Dividing capacity by group count reports 1/frac
+        # whenever the store is full regardless of how many blocks were
+        # written -- i.e. it reports the CONFIG back, not the outcome.
+        n_claimed = int(sum(self._basis_claimed)) if self.basis_of is not None else 0
+        s["claimed"] = n_claimed
+        s["sharing_factor"] = (n_claimed / s["groups"]) if s["groups"] else 0.0
+        return s
+
     def _allocate_tensors(self, n_blocks: int) -> None:
         """Allocate (or re-allocate) all pool tensors at *n_blocks* size."""
         self.current_blocks = n_blocks
@@ -305,7 +643,9 @@ class NativeBlockPool:
             self.n_semantic = torch.zeros((n_blocks,), device=self.device, dtype=torch.int16)
         else:
             self.U_sem = self.U_sem_scale = self.U_fact = self.n_semantic = None
-        self.V_KV       = torch.zeros((n_blocks, 2, self.rank, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+        n_basis = self._n_basis_rows(n_blocks)
+        self.V_KV       = torch.zeros((n_basis, 2, self.rank, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+        self._init_basis_map(n_blocks)
         self.anchors_KV = torch.zeros((n_blocks, 2, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
         self.scales     = torch.zeros((n_blocks,), device=self.device, dtype=self.dtype)
         self.seq_lens   = torch.zeros((n_blocks,), device=self.device, dtype=torch.int32)
@@ -513,7 +853,8 @@ class NativeBlockPool:
         new_U_sem_scale = torch.zeros((new_blocks, rank), device=self.device, dtype=self.dtype) if _legacy else None
         new_U_fact = torch.zeros((new_blocks, max_seq_len, rank), device=self.device, dtype=self.dtype) if _legacy else None
         new_n_semantic = torch.zeros((new_blocks,), device=self.device, dtype=torch.int16) if _legacy else None
-        new_V_KV = torch.zeros((new_blocks, 2, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+        new_n_basis = self._n_basis_rows(new_blocks)
+        new_V_KV = torch.zeros((new_n_basis, 2, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         new_anchors_KV = torch.zeros((new_blocks, 2, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         new_scales = torch.zeros((new_blocks,), device=self.device, dtype=self.dtype)
         new_seq_lens = torch.zeros((new_blocks,), device=self.device, dtype=torch.int32)
@@ -553,7 +894,7 @@ class NativeBlockPool:
             new_U_sem_scale[:old_blocks] = self.U_sem_scale
             new_U_fact[:old_blocks] = self.U_fact
             new_n_semantic[:old_blocks] = self.n_semantic
-        new_V_KV[:old_blocks] = self.V_KV
+        new_V_KV[:self.V_KV.shape[0]] = self.V_KV
         new_anchors_KV[:old_blocks] = self.anchors_KV
         new_scales[:old_blocks] = self.scales
         new_seq_lens[:old_blocks] = self.seq_lens
@@ -593,6 +934,22 @@ class NativeBlockPool:
         self.U_fact = new_U_fact
         self.n_semantic = new_n_semantic
         self.V_KV = new_V_KV
+        # Grow the slot -> basis map and hand the registry its extra rows.  The
+        # existing map entries stay valid because growth only APPENDS rows: a
+        # basis row keeps its index, so no already-written slot has to be
+        # re-pointed or re-projected.
+        if self._shared_basis and self.basis_of is not None:
+            _old_map = self.basis_of
+            self.basis_of = torch.zeros((new_blocks,), device=self.device, dtype=torch.int32)
+            self.basis_of[:_old_map.shape[0]] = _old_map
+            self._basis_claimed = self._basis_claimed + bytearray(new_blocks - len(self._basis_claimed))
+            self.basis_store = _JointVAdapter(self.V_KV)
+            if self.basis_registry is not None:
+                _added_rows = new_n_basis - self.basis_registry.capacity
+                if _added_rows > 0:
+                    self.basis_registry.capacity = new_n_basis
+                    self.basis_registry._free_rows.extend(
+                        range(new_n_basis - 1, new_n_basis - 1 - _added_rows, -1))
         self.anchors_KV = new_anchors_KV
         self.scales = new_scales
         self.seq_lens = new_seq_lens
@@ -703,6 +1060,12 @@ class NativeBlockPool:
                 # per block per layer), on a path that is only bookkeeping.
                 # zero_() is a device-side fill and never touches the host.
                 self.seq_lens[pool_idx].zero_()
+                # Give up this slot's claim on its shared basis row. Without
+                # this the registry's refcount only ever rises, so a session
+                # that cycles topics exhausts basis capacity and every later
+                # block is FORCE-JOINED to a group it does not belong in --
+                # a fidelity cliff with no error anywhere.
+                self.release_basis(pool_idx)
                 if pool_idx not in self._free_indices_set:
                     self._free_indices.append(pool_idx)
                     self._free_indices_set.add(pool_idx)
@@ -747,6 +1110,7 @@ class NativeBlockPool:
         fact_anchors_K: Optional[torch.Tensor] = None,
         fact_anchors_V: Optional[torch.Tensor] = None,
         fact_anchor_positions: Optional[torch.Tensor] = None,
+        layer_idx: int = -1,
     ):
         """
         Copies compressed data directly into the contiguous pool.
@@ -783,21 +1147,40 @@ class NativeBlockPool:
             raise ValueError(f"V rank {V.shape[0]} exceeds pool rank capacity {pool_rank}")
 
         self.U[pool_idx] = 0
-        self.V_KV[pool_idx] = 0
-        
+
+        # ── Shared basis (see write_blocks_batched for the ordering note) ────
+        _v_row = pool_idx
+        _shared = False
+        if self._shared_basis and self.basis_of is not None:
+            from native_core.compression.basis_group import reproject_U
+            U_in = U[:write_seq, :write_rank].float().unsqueeze(0)
+            V_in = V[:write_rank, :].float().unsqueeze(0)
+            self.release_basis(pool_idx)      # before assign — see the batched path
+            asg, gathered = self.basis_registry.assign_batch(
+                U_in, V_in, layer=int(layer_idx), basis_store=self.basis_store)
+            _v_row = asg[0].row
+            self._claim_basis(pool_idx, _v_row)
+            U = U.clone()
+            U[:write_seq, :write_rank] = reproject_U(
+                U_in, V_in, gathered[:, :write_rank, :].float())[0].to(U.dtype)
+            _shared = True
+        else:
+            self.V_KV[pool_idx] = 0
+
         # Quantize U to int8
         U_sliced = U[:write_seq, :write_rank].float()
         max_abs = U_sliced.abs().max()
         scale_u = torch.clamp(max_abs / 127.0, min=1e-5).to(self.dtype)
         self.U[pool_idx, :write_seq, :write_rank] = torch.clamp(torch.round(U_sliced / scale_u), -127, 127).to(torch.int8)
         self.U_scale[pool_idx] = scale_u
-        
-        # Split V_K and V_V
-        vk = V[:write_rank, :num_kv * h_dim].view(write_rank, num_kv, h_dim)
-        vv = V[:write_rank, num_kv * h_dim:].view(write_rank, num_kv, h_dim)
-        
-        self.V_KV[pool_idx, 0, :write_rank] = vk.to(self.dtype)
-        self.V_KV[pool_idx, 1, :write_rank] = vv.to(self.dtype)
+
+        if not _shared:
+            # Split V_K and V_V
+            vk = V[:write_rank, :num_kv * h_dim].view(write_rank, num_kv, h_dim)
+            vv = V[:write_rank, num_kv * h_dim:].view(write_rank, num_kv, h_dim)
+
+            self.V_KV[pool_idx, 0, :write_rank] = vk.to(self.dtype)
+            self.V_KV[pool_idx, 1, :write_rank] = vv.to(self.dtype)
         self.anchors_KV[pool_idx, 0] = anchor_K.to(self.dtype)
         self.anchors_KV[pool_idx, 1] = anchor_V.to(self.dtype)
         self.scales[pool_idx] = scale
@@ -922,7 +1305,7 @@ class NativeBlockPool:
                     anchor_K = self.anchors_KV[pool_idx, 0],              # [kv_heads, D] fp16
                     U_int8   = self.U[pool_idx, :write_seq, :write_rank], # [S, R] int8
                     U_scale  = self.U_scale[pool_idx],                    # scalar fp16
-                    V_K      = self.V_KV[pool_idx, 0, :write_rank],       # [R, kv_heads, D] fp16
+                    V_K      = self.V_KV[_v_row, 0, :write_rank],         # [R, kv_heads, D] fp16
                     W_proj   = self.W_proj,                               # [DESC_DIM, D] fp32
                 )
             except Exception:
@@ -946,6 +1329,8 @@ class NativeBlockPool:
         res_K_values=None,       # [N, max_res, kv, hd] or None
         res_V_positions=None,
         res_V_values=None,
+        layer_idx=-1,            # int — which layer these blocks belong to
+        basis_rows=None,         # [N] long — rows from a prior assign_basis()
     ):
         """Vectorized equivalent of N write_block() calls that share seq_len.
 
@@ -974,9 +1359,42 @@ class NativeBlockPool:
         if V.shape[1] > pool_rank:
             raise ValueError(f"V rank {V.shape[1]} exceeds pool rank capacity {pool_rank}")
 
+        # ── Shared basis: assign a group BEFORE quantising U ─────────────────
+        # Order matters. Joining a group re-expresses U in that group's basis
+        # (U' = U (V Vg^T)), which changes U's magnitudes, so the int8 scale
+        # below has to be derived from the RE-PROJECTED U or the quantisation
+        # range is set from a vector that is no longer being stored.
+        U_eff = U.to(dev)
+        if basis_rows is not None:
+            # The caller already assigned (compress does, so that its residual
+            # selection scores the reconstruction that will actually be stored)
+            # and has already re-projected U. Nothing to do but honour the map.
+            basis_rows = basis_rows.to(device=dev, dtype=torch.long)
+        elif self._shared_basis and self.basis_of is not None:
+            from native_core.compression.basis_group import reproject_U
+            U_in = U_eff[:, :write_seq, :write_rank].float()
+            V_in = V.to(dev)[:, :write_rank, :].float()
+            # Release BEFORE assigning. A slot being overwritten must give up
+            # its previous claim first, so that if it was a group's last member
+            # the row is back on the free list and this write can reuse it.
+            # Releasing afterwards would decrement the group this write just
+            # joined.
+            _slots = pidx.tolist()
+            for _p in _slots:
+                self.release_basis(_p)
+            asg, gathered = self.basis_registry.assign_batch(
+                U_in, V_in, layer=int(layer_idx), basis_store=self.basis_store)
+            basis_rows = torch.tensor([a.row for a in asg], device=dev, dtype=torch.long)
+            for _p, _a in zip(_slots, asg):
+                self._claim_basis(_p, _a.row)
+            U_new = U_eff.clone()
+            U_new[:, :write_seq, :write_rank] = reproject_U(
+                U_in, V_in, gathered[:, :write_rank, :].float()).to(U_eff.dtype)
+            U_eff = U_new
+
         # ── int8 U quant with a per-block scale (matches write_block) ──
         self.U[pidx] = 0
-        U_sliced = U[:, :write_seq, :write_rank].to(dev).float()          # [N, s, r]
+        U_sliced = U_eff[:, :write_seq, :write_rank].float()              # [N, s, r]
         max_abs = U_sliced.abs().amax(dim=(1, 2))                         # [N]
         scale_u = torch.clamp(max_abs / 127.0, min=1e-5).to(self.dtype)   # [N]
         U_q = torch.clamp(
@@ -986,12 +1404,17 @@ class NativeBlockPool:
         self.U_scale[pidx] = scale_u
 
         # ── V_K / V_V split ──
-        Vd = V.to(dev)
-        vk = Vd[:, :write_rank, :num_kv * h_dim].reshape(N, write_rank, num_kv, h_dim)
-        vv = Vd[:, :write_rank, num_kv * h_dim:].reshape(N, write_rank, num_kv, h_dim)
-        self.V_KV[pidx] = 0
-        self.V_KV[pidx, 0, :write_rank] = vk.to(self.dtype)
-        self.V_KV[pidx, 1, :write_rank] = vv.to(self.dtype)
+        # Skipped entirely under shared bases: the registry already wrote the
+        # (orthonormalised, possibly pre-existing) basis into its row, and
+        # writing this block's own V there would clobber the basis every other
+        # member of the group reads.
+        if basis_rows is None:
+            Vd = V.to(dev)
+            vk = Vd[:, :write_rank, :num_kv * h_dim].reshape(N, write_rank, num_kv, h_dim)
+            vv = Vd[:, :write_rank, num_kv * h_dim:].reshape(N, write_rank, num_kv, h_dim)
+            self.V_KV[pidx] = 0
+            self.V_KV[pidx, 0, :write_rank] = vk.to(self.dtype)
+            self.V_KV[pidx, 1, :write_rank] = vv.to(self.dtype)
 
         self.anchors_KV[pidx, 0] = anchor_K.to(device=dev, dtype=self.dtype)
         self.anchors_KV[pidx, 1] = anchor_V.to(device=dev, dtype=self.dtype)
@@ -1103,7 +1526,8 @@ class NativeBlockPool:
                 U_f32 = self.U[pidx, :write_seq, :write_rank].float() \
                     * self.U_scale[pidx].float().view(N, 1, 1)                          # [N, s, r]
                 mean_u = U_f32.mean(dim=1)                                              # [N, r]
-                vk_mean = self.V_KV[pidx, 0, :write_rank].float().mean(dim=2)           # [N, r, hd]
+                _vidx = basis_rows if basis_rows is not None else pidx
+                vk_mean = self.V_KV[_vidx, 0, :write_rank].float().mean(dim=2)          # [N, r, hd]
                 delta_centroid = torch.bmm(mean_u.unsqueeze(1), vk_mean).squeeze(1)     # [N, hd]
                 centroid = anchor_mean + delta_centroid                                 # [N, hd]
                 desc = centroid @ self.W_proj.float().t()                               # [N, DESC]
@@ -1134,6 +1558,27 @@ class NativeBlockPool:
         self._ref_counts       = []
         self._last_used        = []
         self.version           = []
+        # BASIS GROUPS ARE POOL STATE AND MUST DIE WITH THE POOL.
+        #
+        # The attrs loop above deletes V_KV, but `basis_store` is a
+        # _JointVAdapter holding a reference to it, so the old tensor stays
+        # alive behind the adapter while the next allocation builds a NEW V_KV.
+        # `basis_registry` and `basis_of` were not cleared either. On the LAZY
+        # path -- which is CUDA's default -- reset() does not call
+        # _allocate_tensors, so nothing rebuilt them: the registry kept every
+        # group it had, its rows indexing a store no reader uses any more, and
+        # its capacity already spent. The next document's blocks then found
+        # nothing free and were FORCE-JOINED to the previous document's bases.
+        #
+        # This is the same defect the MLX port hit with the registry on the
+        # manager, and it is invisible to any single-session test: prefill state
+        # is byte-identical between a passing and a failing configuration, and
+        # only a several-requests-in-one-process run reaches it. That is what
+        # colab/needle_suite_cuda.py is for.
+        self.basis_of = None
+        self.basis_registry = None
+        self.basis_store = None
+        self._basis_claimed = None
         # OPT-D: Bump generation so any proxy cached against the pre-reset data
         # is automatically evicted on the next decode call.
         self._stratified_generation = getattr(self, "_stratified_generation", 0) + 1

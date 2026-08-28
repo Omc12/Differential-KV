@@ -111,6 +111,14 @@ def set_arm(arm):
         # _REMAT_ENABLED at import, so setting DKV_REMAT_CACHE here would leave
         # both arms on and the benchmark would truthfully report "no effect" for
         # a change it never actually made.
+        #
+        # Run with DKV_SPARSE_BIAS=0.0 exported to price remat on the COMBINED
+        # branch (the library default); BEST_DECODE_DEFAULTS' setdefault
+        # otherwise puts it on "auto" and measures the production branch.
+        # Measured on the combined branch at 8.4k, Qwen2.5-1.5B, 8 rounds:
+        # A=54.75 ms/tok B=78.43, mean_diff -23.459 ms, CI [-24.041, -22.876],
+        # i.e. remat is worth 29.9% there. That number is what made passing it a
+        # correctly-framed dense window the right fix rather than declining.
         DA._REMAT_ENABLED = on
     elif EXPERIMENT == "dense_ring":
         # Requires the append-only patch in assemble_dense_window_kv, which is
@@ -121,6 +129,80 @@ def set_arm(arm):
         if not hasattr(KVM, "_DENSE_RING"):
             raise SystemExit("dense_ring: append-only patch not present in tree")
         KVM._DENSE_RING = on
+    elif EXPERIMENT in ("router_rope", "residual_exact_rope"):
+        # WHERE DOES THE UNROTATED POOL SPEND ITS 43-137%? Both of these run ONLY
+        # when the pool is unrotated, so run them with DKV_ROTATED_POOL=0. A is
+        # the CHEAP side (feature off), so a negative mean_diff is what that
+        # feature costs.
+        #
+        #   router_rope         the router rotates anchors before scoring, which
+        #                       a rotated pool skips entirely (it would be a
+        #                       second rotation).
+        #   residual_exact_rope rotates each exact residual at its TRUE position
+        #                       rather than the block anchor, growing the cos/sin
+        #                       gather from [N, D] to [N, MAX_RES, D].
+        #
+        # Both are read from the environment at call time, so setting them here
+        # is enough -- no module rebinding needed.
+        _var = ("DKV_ROUTER_ROPE" if EXPERIMENT == "router_rope"
+                else "DKV_RESIDUAL_EXACT_ROPE")
+        os.environ[_var] = "0" if on else "1"
+    elif EXPERIMENT == "exact_rope_remat":
+        # Cost of rotating each MATERIALISED key at its own absolute position
+        # instead of rotating the basis once at the block anchor. Paid inside the
+        # RematCache entry, so once per refresh rather than once per token.
+        os.environ["DKV_EXACT_ROPE_REMAT"] = "1" if on else "0"
+    elif EXPERIMENT == "router_exact_key":
+        # Cost of folding the anchor into the residual key before rotating it:
+        # one broadcast add on [N, R, H_kv, D] per routing call, alongside the
+        # rotation that already runs on the same tensor.
+        os.environ["DKV_ROUTER_EXACT_KEY"] = "1" if on else "0"
+    elif EXPERIMENT == "rotated_pool":
+        # A = UNROTATED (the candidate default), B = rotated (the historical one),
+        # so a POSITIVE mean_diff is what unrotated COSTS.
+        #
+        # Safe to flip in-process only because both sides read the flag at call
+        # time -- _ingest_k() picks which K prefill STORES and the decode gather
+        # picks whether to re-rotate, both via pool_stores_rotated_k(). run()
+        # clears the session and re-prefills on every call, so each arm stores
+        # and reads consistently. If either side had captured the flag at import
+        # this would store one way and read the other, which is not a slow
+        # config -- it is RoPE missing from all compressed content, and it would
+        # show up as a timing difference rather than as the garbage it is.
+        os.environ["DKV_ROTATED_POOL"] = "0" if on else "1"
+    elif EXPERIMENT == "fastdc":
+        # --fastdc could not be A/B'd in one process before, which is why its
+        # worth was argued from cross-process walls that could not resolve it.
+        # Three things have to move together, and each for a different reason:
+        #
+        #   DKV_FAST_DECODE / DKV_GRAPH_FORCE_ROUTED are re-read from the
+        #   environment on every decode step, so setting them here is enough.
+        #
+        #   _MUTATION_OUT is captured into a module constant at import. The
+        #   wrapper's _dkv_publish_mutation_out reads it each step to decide
+        #   _MUTATION_OUT_ACTIVE, so rebinding it here really does switch the
+        #   forward's behaviour -- setting only the environment would leave both
+        #   arms identical and the harness would truthfully report "no effect"
+        #   for a change it never made (the same trap as the `remat` arm).
+        #
+        #   The CAPTURED GRAPH must not outlive the switch. Replay executes no
+        #   Python, so replaying arm A's graph while arm B expects a mutating
+        #   forward advances no state -- wrong text and a meaningless time.
+        on_ = "1" if on else "0"
+        os.environ["DKV_FAST_DECODE"] = on_
+        os.environ["DKV_GRAPH_FORCE_ROUTED"] = on_
+        DA._MUTATION_OUT = on
+        _w = globals().get("_WRAPPER")
+        if _w is not None and getattr(_w, "_cuda_graph_runner", None) is not None:
+            _w._cuda_graph_runner.invalidate()
+            _w._dkv_capture_giveup = False
+    elif EXPERIMENT == "graph_safe_routed":
+        # DKV_GRAPH_SAFE_DECODE=1 was shipped after an accuracy check but no
+        # speed check. On the routed path it forces `changed = True` every step,
+        # which discards the gather cache on every token. A is the RELAXED side
+        # (constant False = exact comparison restored), B is the shipped-broken
+        # side, so a NEGATIVE mean_diff means the fix is faster.
+        DA._GRAPH_SAFE_ROUTED = not on
     else:
         raise SystemExit(f"unknown EXPERIMENT={EXPERIMENT}")
 
@@ -140,6 +222,7 @@ def clocks():
 def main():
     w = PyTorchDKVHFWrapper(model_id=MODEL, config={"mode": "fp16"}, device="cuda")
     w.ensure_loaded()
+    globals()["_WRAPPER"] = w      # set_arm needs it to invalidate the graph
     tok = w.tokenizer
     ctx = "The archive records a long sequence of unremarkable events. " * REP
     prompt = tok.apply_chat_template(

@@ -21,6 +21,15 @@ os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 # allocator mode that has historically interacted badly with CUDA graph capture,
 # which is why the graph path stays opt-in.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+
+# Quantization spellings this wrapper accepts, at module scope so
+# tests/test_quant_alias_parity.py can assert that every value the CLI and the
+# presets actually emit appears here. The bug that motivated this was exactly a
+# divergence between the two: cli.py emitted 'int4', the wrapper matched only
+# 'nf4', and the mismatch loaded fp16 in silence.
+QUANT_4BIT_ALIASES = ("nf4", "int4", "4bit", "4-bit", "fp4")
+QUANT_8BIT_ALIASES = ("int8", "8bit", "8-bit", "llm.int8")
 """
 runtime/hf_dkv_wrapper.py
 
@@ -440,6 +449,12 @@ def _normalize_references(text: str) -> str:
         return body + '\n' + normalized_ref_block
     return normalized_ref_block
 
+import runtime.dkv_attention as _dkv_attn_mod  # noqa: E402
+from native_core.sparse_decode.remat_cache import (  # noqa: E402
+    remat_interval as _dkv_remat_interval,
+)
+
+
 class PyTorchDKVHFWrapper:
     """
     Wraps a HuggingFace model to use Differential KV cache.
@@ -537,7 +552,7 @@ class PyTorchDKVHFWrapper:
         # The real fix is dual-scale storage: the same content compressed at both
         # granularities with attention seeing both. Because routing is provably
         # irrelevant here, a multi-scale router would not help; both scales have
-        # to reach attention. See MLX_PORT_FROM_CUDA.md for the shape of it.
+        # to reach attention. See ACTIVE_RUNTIME/docs/cuda_port_record.md for the shape of it.
         self.micro_block_size = self.config.get("micro_block_size", 1024)
         
         self.local_files_only = (
@@ -622,22 +637,64 @@ class PyTorchDKVHFWrapper:
                 print("[DKV] Low preset + MPS: running in FP16 to avoid torchao NaN/stability issues on MPS")
 
         # ── 4-bit NF4 loading (BitsAndBytes) ──────────────────────────────────
-        _quant_type_early = config.get("quantization") or os.environ.get("DKV_QUANTIZATION", "")
-        if (quantization_config is None
-                and _quant_type_early == "nf4"
-                and _has_cuda()):
+        _quant_type_early = (config.get("quantization")
+                             or os.environ.get("DKV_QUANTIZATION", ""))
+        _quant_type_early = str(_quant_type_early or "").strip().lower()
+
+        # ACCEPT THE SPELLING THE CLI ACTUALLY EMITS. This branch used to fire
+        # only on the exact string "nf4", while serving/cli.py passes
+        # `'quantization': 'int4'` -- it got away with it because it ALSO builds
+        # a BitsAndBytesConfig and passes it as quantization_config. Any caller
+        # that copied the CLI's config dict WITHOUT copying that second argument
+        # matched nothing here and loaded the model in fp16, silently.
+        #
+        # The failure is quiet and expensive. Qwen2.5-7B in fp16 is 7.62B x 2 =
+        # 15.2 GB; on a 12 GB card that spills ~3.5 GB into WDDM shared memory
+        # and every touch crosses PCIe. Reported from a benchmark harness as
+        # ~195 s/query with peak allocation 15.49 GiB, against 7.6 s and
+        # 6.61 GiB for the same model and context genuinely in NF4 -- a 26x
+        # throughput difference whose whole cause was a string that did not
+        # match. `low` preset users never hit it because :623 sets the literal
+        # "nf4"; everyone else passing the CLI's own value did.
+        _q4 = _quant_type_early in QUANT_4BIT_ALIASES
+        _q8 = _quant_type_early in QUANT_8BIT_ALIASES
+        if quantization_config is None and (_q4 or _q8) and _has_cuda():
             try:
                 from transformers import BitsAndBytesConfig as _BnBConfig
-                quantization_config = _BnBConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.bfloat16,
-                    bnb_4bit_use_double_quant=True,
-                )
-                torch_dtype = torch.bfloat16
-                print("[DKV] 4-bit NF4 quantization enabled (BitsAndBytes).")
+                if _q4:
+                    quantization_config = _BnBConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type=("fp4" if _quant_type_early == "fp4"
+                                             else "nf4"),
+                        bnb_4bit_compute_dtype=torch.bfloat16,
+                        bnb_4bit_use_double_quant=True,
+                    )
+                    torch_dtype = torch.bfloat16
+                    print(f"[DKV] 4-bit quantization enabled (BitsAndBytes, "
+                          f"requested as '{_quant_type_early}').")
+                else:
+                    quantization_config = _BnBConfig(load_in_8bit=True)
+                    print(f"[DKV] 8-bit quantization enabled (BitsAndBytes, "
+                          f"requested as '{_quant_type_early}').")
             except ImportError:
                 print("[DKV] WARNING: bitsandbytes not installed — falling back to fp16.")
+
+        # NEVER LOAD FP16 SILENTLY AFTER QUANTIZATION WAS ASKED FOR. Whatever
+        # the reason -- an unrecognised spelling, no CUDA, missing bitsandbytes
+        # -- the caller asked for a smaller model and is about to get a full-size
+        # one. On a card that cannot hold it that is not a small regression, it
+        # is a 26x cliff (see above), and the only symptom is a number in a
+        # column nobody reads until something is already wrong.
+        if _quant_type_early and quantization_config is None:
+            print(f"[DKV] WARNING: quantization={_quant_type_early!r} was requested "
+                  f"but NO quantization config is in effect — the model will load "
+                  f"UNQUANTIZED (fp16). "
+                  + ("CUDA not available." if not _has_cuda()
+                     else "Unrecognised value; expected one of "
+                          "nf4/int4/4bit/fp4/int8/8bit.")
+                  + " On a card too small for full weights this spills to host "
+                    "memory and costs far more than it looks like.",
+                  file=sys.stderr, flush=True)
 
         if _has_cuda():
             _configure_cuda_allocator()
@@ -1021,6 +1078,475 @@ class PyTorchDKVHFWrapper:
 
 
     @torch.no_grad()
+    def _dkv_dump_attention_inputs(self, session_id, pend) -> None:
+        """Checksum every input the replayed attention reads, per step.
+
+        Probes from OUT here rather than inside the forward, because the forward
+        does not execute under replay -- an in-forward probe prints nothing on
+        exactly the steps in question, which is how two earlier faults stayed
+        hidden.
+
+        Read it by looking for a value that is FROZEN across replay steps and
+        moves only on the periodic eager step. That is the signature of an input
+        the graph is not re-reading, and it is what found the stale ingest refs.
+        Addresses matter as much as contents: a buffer that is REALLOCATED leaves
+        the graph reading the old address forever, and only ptr reveals that.
+        """
+        import sys as _s
+        import torch as _t
+
+        def _chk(t):
+            if t is None:
+                return "none"
+            try:
+                return f"0x{t.data_ptr():x}/{float(t.float().abs().sum()):.3f}"
+            except Exception:                                    # noqa: BLE001
+                return "err"
+
+        mgr = self.manager
+        ws = mgr.decode_workspace.get(session_id, {}) or {}
+        L = 0
+        k0 = (pend or {}).get(L)
+        dwk = (ws.get("dense_workspace_k") or {}).get(L)
+        dlen = (ws.get("dense_len_dev") or {}).get(L)
+        routed = (ws.get("_routed_buf") or {}).get(L)
+        remat = (ws.get("_remat_pin") or {}).get(L)
+        cos = ws.get("rope_cos")
+        # Compare against what CAPTURE bound, not the last eager forward.
+        fwd = ((mgr.__dict__.get("_graph_fwd_ptrs")
+                or mgr.__dict__.get("_fwd_ptrs") or {}).get(L)) or {}
+        def _cmp(name, cur):
+            f = fwd.get(name)
+            if f is None or cur is None:
+                return f"{name}:?"
+            return f"{name}:{'SAME' if f == cur else 'DIFFERENT'}"
+        print(
+            f"[BIND] step={getattr(self, '_dkv_step_idx', -1):3d} "
+            f"{_cmp('dense', None if dwk is None else dwk.data_ptr())} "
+            f"{_cmp('bi', None if routed is None else routed[0].data_ptr())} "
+            f"{_cmp('Km', None if remat is None else remat[0].data_ptr())}",
+            flush=True, file=_s.stderr)
+        print(
+            f"[DUMP] step={getattr(self, '_dkv_step_idx', -1):3d} "
+            f"replay={int(bool(getattr(self, '_dkv_last_was_replay', False)))} "
+            f"| ingestK {_chk(None if k0 is None else k0[1])} "
+            f"| window {_chk(dwk)} "
+            f"| dlen {'none' if dlen is None else int(dlen.item())} "
+            f"| routed {_chk(None if routed is None else routed[0])} "
+            f"| remat {_chk(None if remat is None else remat[0])} "
+            f"| cos {_chk(cos)}",
+            flush=True, file=_s.stderr)
+        # THE POOL ITSELF. Everything above is state the WRAPPER republishes
+        # between forwards, so it advances under replay by construction. The
+        # compressed pool is not: the gather reads pool.V_K / anchors_K and a
+        # captured graph froze whatever it held at capture, so if these move
+        # while a graph is live, replay is attending stale compressed content.
+        _pool = getattr(mgr, "native_pool", None)
+        _smgr = getattr(mgr, "_streaming_mgr", None)
+        try:
+            _gen = (_smgr._metadata_versions.get(session_id, {}).get(L)
+                    if _smgr is not None else None)
+        except Exception:                                        # noqa: BLE001
+            _gen = None
+        print(
+            f"[POOL] step={getattr(self, '_dkv_step_idx', -1):3d} "
+            f"gen {_gen} "
+            f"| V_K {_chk(None if _pool is None else getattr(_pool, 'V_K', None))} "
+            f"| ancK {_chk(None if _pool is None else getattr(_pool, 'anchors_K', None))} "
+            f"| resK {_chk(None if _pool is None else getattr(_pool, 'residual_K_values', None))}",
+            flush=True, file=_s.stderr)
+
+    def _dkv_reset_graph_step(self) -> None:
+        """Clear per-session graph state. Called from prefill, once per session."""
+        self._dkv_step_idx = 0
+        self._dkv_capture_giveup = False
+        # CLEAR THE MODULE GLOBAL TOO. _MUTATION_OUT_ACTIVE lives on
+        # runtime.dkv_attention, not on the wrapper, and it is republished per
+        # STEP by _dkv_publish_mutation_out -- which only runs inside this
+        # wrapper's decode loop. Anything that calls model() directly, as
+        # ContinuousBatchEngine does, never republishes it and therefore inherits
+        # whatever the last generate() on ANY wrapper left behind.
+        #
+        # That is a cross-session leak, and in a test process it is a cross-TEST
+        # one: it is why test_formatting passes 6/6 alone and fails after the
+        # engine tests have run. Prefill is the right place to clear it because
+        # it is the one point every session passes through.
+        try:
+            import runtime.dkv_attention as _da_reset
+            _da_reset._MUTATION_OUT_ACTIVE = False
+        except Exception:                                        # noqa: BLE001
+            pass
+        self._dkv_primed = False
+        # One-shot logs are per session too, otherwise the first session's
+        # verdict is the only one ever reported and a later session that
+        # declines for a DIFFERENT reason looks like it never happened.
+        self._dkv_mo_off_logged = False
+        self._graph_sel_logged = False
+
+    def _dkv_routing_selective(self, session_id: str) -> bool:
+        """Would a frozen routed set be WRONG for this session right now?
+
+        Replay cannot re-run the Python router, so a captured routed set is
+        frozen for the whole replay. When the router would have selected every
+        block anyway -- n_blocks <= K -- freezing it is a no-op and replay is
+        exact by construction. Above that line it drifts.
+
+        Factored out of the capture block because two decisions need it and only
+        one of them is about capturing. Capture asks once, when it is about to
+        capture; mutation-out has to ask on EVERY step, because paying to defer
+        the forward's mutation is only worth it if a graph is going to exist.
+
+        Re-evaluated per step rather than cached per session on purpose: blocks
+        keep getting compressed during decode, so a session can start at 15
+        blocks with K=16 and cross the line mid-generation. Cached, it would keep
+        deferring after the graph had already been declined -- paying the cost
+        with nothing to show for it, which is the exact failure this gate exists
+        to prevent.
+        """
+        ncomp, K = self._dkv_block_counts(session_id)
+        return bool(ncomp is None or (K > 0 and ncomp > K))
+
+    def _dkv_block_counts(self, session_id: str):
+        """(compressed blocks, routing K) for this session, or (None, K) if unknown."""
+        pool = getattr(self.manager, "native_pool", None)
+        try:
+            K = int(os.environ.get(
+                "DKV_TOPK_BLOCKS",
+                getattr(pool, "routing_topk_default", 16) or 16))
+        except Exception:                                        # noqa: BLE001
+            K = 16
+        try:
+            blocks = self.manager.get_streaming_blocks(session_id, 0) or []
+            return sum(1 for b in blocks
+                       if getattr(b, "state", "") == "COMPRESSED"), K
+        except Exception:                                        # noqa: BLE001
+            # Unknown -> caller treats this as selective. The conservative
+            # direction is to DECLINE, because wrongly deferring costs
+            # correctness under replay while wrongly not deferring costs speed.
+            return None, K
+
+    def _dkv_publish_mutation_out(self, session_id: str) -> None:
+        """Set the effective mutation-out flag for the step about to run.
+
+        --fastdc asks for mutation-out. Whether it is worth honouring depends on
+        the session: it is a large win where a graph will be captured and a ~9%
+        loss on wide models where the gate declines one. Deciding per session is
+        what lets the flag be requested globally without that loss.
+        """
+        import runtime.dkv_attention as _da
+        if not getattr(_da, "_MUTATION_OUT", False):
+            _da._MUTATION_OUT_ACTIVE = False
+            return
+
+        # GIVE-UP BEATS EVERY OTHER REASON, including the manual override.
+        # Selectivity is only ONE way to end up with no graph, and gating on it
+        # alone was wrong: measured at 16k on Qwen2.5-1.5B, routing is
+        # non-selective (15 blocks, K=16) so a selectivity-only gate keeps
+        # deferring -- while capture is refused anyway for a completely
+        # unrelated reason ("no decode cache supplied"), leaving --fastdc ~5%
+        # SLOWER than default with byte-identical output:
+        #
+        #     fastdc off  11.84 / 11.97 tok/s      fastdc on  11.33 / 11.13
+        #
+        # So the question is not "would a graph be exact here" but "did one
+        # actually take". After the first capture attempt the runner answers
+        # that directly, and it covers every failure reason at once --
+        # selectivity, missing decode cache, or a capture exception.
+        if getattr(self, "_dkv_capture_giveup", False):
+            _da._MUTATION_OUT_ACTIVE = False
+            return
+        ncomp, K = self._dkv_block_counts(session_id)
+
+        # THREE cases, not two. "Not selective" is not the same question as
+        # "mutation-out is safe here", and conflating them broke the 4k gates
+        # (3/8, with output degenerating to "29dfulfulful"):
+        #
+        #   ncomp is None  state unreadable            -> off, conservatively
+        #   ncomp == 0     DKV NOT ENGAGED at all      -> off. This is the case
+        #                  that bit. A short prompt runs the dense/bypass
+        #                  forward, which mutates its cache the ordinary way;
+        #                  mutation-out defers nothing there, so claiming the
+        #                  forward is read-only let capture skip a rollback it
+        #                  genuinely needed.
+        #   0 < ncomp <= K engaged and non-selective   -> ON, the win case
+        #   ncomp > K      engaged and selective       -> off, frozen set drifts
+        active = ncomp is not None and 0 < ncomp <= K
+        if not active and not getattr(self, "_dkv_mo_off_logged", False):
+            self._dkv_mo_off_logged = True
+            _why = ("state unreadable" if ncomp is None
+                    else "DKV routing is not engaged for this context"
+                    if ncomp == 0 else
+                    f"routing is selective ({ncomp} compressed blocks > K={K}), "
+                    f"so a frozen routed set would drift")
+            print(f"[DKV] mutation-out disabled for this session: {_why}. No "
+                  f"routed graph will be captured, and deferring the forward's "
+                  f"mutation would cost without buying anything.",
+                  file=sys.stderr, flush=True)
+        _da._MUTATION_OUT_ACTIVE = active
+
+    def _dkv_apply_pending_mutation(self, session_id: str) -> None:
+        """Perform the decode step's state mutation OUTSIDE the forward.
+
+        Only active under DKV_GRAPH_MUTATION_OUT. The forward has been made
+        read-only with respect to KV state so a CUDA graph can replay it; the
+        two mutations it used to do are performed here instead, between forwards,
+        where Python actually runs.
+
+        Order matters and mirrors what the forward used to do:
+          1. ingest the token the forward just produced, from the K/V references
+             the forward stashed. Under replay those references point into the
+             graph's fixed-address buffers and hold the values this replay
+             produced, which is what makes this work at all.
+          2. rebuild each layer's dense window and publish its length as a DEVICE
+             tensor, so the next forward can mask by it instead of slicing with a
+             host int a captured graph would bake in.
+        """
+        import runtime.dkv_attention as _da
+        # The EFFECTIVE flag, not the requested one. This must agree with what
+        # the forward that just ran actually did: if the forward did not defer
+        # (mutation-out inactive for this session) there is nothing to drain,
+        # and reading the requested flag here would have this run against a
+        # stale stash on exactly the sessions where the gate turned it off.
+        if not getattr(_da, "_MUTATION_OUT_ACTIVE", False):
+            return
+        mgr = self.manager
+        # After a REPLAY the eager stash is stale by construction (see the
+        # snapshot at capture). Prefer the capture-time refs whenever the last
+        # step was replayed.
+        if getattr(self, "_dkv_last_was_replay", False):
+            pend = mgr.__dict__.get("_graph_ingest_refs") or {}
+        else:
+            pend = mgr.__dict__.get("_pending_ingest") or {}
+
+        if not pend:
+            _owed = False
+            try:
+                from native_core.sparse_decode.triton_fused_decode import (
+                    pool_stores_rotated_k as _psr_e)
+                _owed = (not _psr_e()) and not (
+                    (mgr.decode_workspace.get(session_id, {}) or {})
+                    .get("dense_rot_dev"))
+            except Exception:                                    # noqa: BLE001
+                _owed = False
+            if not _owed:
+                return
+        import torch as _t
+        # Assert the invariant this branch should have carried from the start:
+        # layer 0's block must grow by EXACTLY ONE token per generate step. A
+        # double-ingest and a missed ingest both produce fluent-but-wrong text and
+        # are indistinguishable from the output; they are trivially
+        # distinguishable here.
+        _dbg = os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1"
+        _before = None
+        if _dbg:
+            try:
+                _b0 = [b for b in (mgr.get_streaming_blocks(session_id, 0) or [])
+                       if b.state == "ACCUMULATING"]
+                _before = sum(int(b.active_k.shape[2]) for b in _b0
+                              if b.active_k is not None)
+            except Exception:                                    # noqa: BLE001
+                _before = None
+        for layer_idx, (sid, k, v) in list(pend.items()):
+            try:
+                mgr.ingest_streaming(sid, layer_idx, k, v)
+            except Exception:                                    # noqa: BLE001
+                pass
+        if _dbg and _before is not None:
+            import sys as _s3
+            try:
+                _b1 = [b for b in (mgr.get_streaming_blocks(session_id, 0) or [])
+                       if b.state == "ACCUMULATING"]
+                _after = sum(int(b.active_k.shape[2]) for b in _b1
+                             if b.active_k is not None)
+                _d = _after - _before
+                _src = "graphrefs" if getattr(self, "_dkv_last_was_replay", False) else "pending"
+                _k0v = (pend or {}).get(0)
+                _ksum = "-" if _k0v is None else f"{float(_k0v[1].float().abs().sum()):.2f}"
+                print(f"[INGEST] step={getattr(self,'_dkv_step_idx',-1):3d} "
+                      f"replay={int(bool(getattr(self,'_dkv_last_was_replay',False)))} "
+                      f"src={_src:9s} Ksum={_ksum} "
+                      f"L0 {_before}->{_after} delta={_d}"
+                      f"{'  <-- EXPECTED 1' if _d != 1 else ''}",
+                      flush=True, file=_s3.stderr)
+            except Exception:                                    # noqa: BLE001
+                pass
+        # DO NOT clear. The entries are REFERENCES into the graph's fixed-address
+        # buffers, and the line that records them lives inside the forward -- which
+        # replay does not execute. Clearing them made every token after the first
+        # replay ingest nothing at all, silently freezing the KV store while the
+        # text stayed fluent. Keeping them is the whole point: each replay
+        # rewrites those same addresses, so re-reading them here ingests the token
+        # this step actually produced. Eager steps simply overwrite the same keys.
+
+        ws = mgr.decode_workspace.setdefault(session_id, {})
+        lens = ws.setdefault("dense_len_dev", {})
+        for layer_idx in range(mgr.num_layers):
+            try:
+                blocks = mgr.get_streaming_blocks(session_id, layer_idx)
+                dense_blocks = [b for b in (blocks or []) if b.state == "ACCUMULATING"]
+                if not dense_blocks:
+                    continue
+                # Use the dtype the WORKSPACE already has, not the model's.
+                # assemble_dense_window_kv reallocates when the dtype differs,
+                # which would rebind dense_workspace_k to a NEW tensor and leave
+                # a captured graph reading the old address forever.
+                # FORCE the copy. assemble_dense_window_kv only writes a block
+                # when blk.dirty is set, or when its growth check sees the cached
+                # per-block active_len differ from the current one. Both of those
+                # are bookkeeping the FORWARD maintains, and under replay the
+                # forward does not run -- so the function walked the blocks,
+                # recomputed a LARGER dlen from the live views, and copied
+                # nothing. Measured: each eager step added ~6400 to the window
+                # abs-sum (one token's |K|), each replay step added exactly 0
+                # while dlen still incremented.
+                #
+                # Marking the tail block dirty here is the caller taking
+                # responsibility for the invariant instead of inheriting it from
+                # a path that no longer executes.
+                for _b in dense_blocks:
+                    _b.dirty = True
+                _existing = (ws.get("dense_workspace_k") or {}).get(layer_idx)
+                _dt = _existing.dtype if _existing is not None else self.model.dtype
+                _ptr_before = None if _existing is None else _existing.data_ptr()
+                _dk, _dv, dlen, _trimmed = mgr.assemble_dense_window_kv(
+                    session_id, layer_idx, dense_blocks, _dt)
+                # PUBLISH THE TRIMMED BLOCK LIST. _remat_attend needs it to
+                # rotate the dense window when the pool is unrotated, and on this
+                # path it is the wrapper -- not the forward -- that assembles the
+                # window, so the forward has no other way to reach it.
+                #
+                # It must be the TRIMMED list the assembler returned, not the one
+                # passed in: the assembler drops blocks to fit the workspace, and
+                # the positions have to describe what was actually written.
+                #
+                # HONEST NOTE ON WHAT THIS DID AND DID NOT FIX. It was added to
+                # explain --fastdc diverging from eager at 16k on an unrotated
+                # pool (md5 0fec68e1 eager against 566e1b26 replayed, with
+                # DKV_DETERMINISTIC=1 on both), on the theory that remat was
+                # declining here for want of positions and falling back to the
+                # Triton kernel. Plumbing the list through changed NOTHING --
+                # both md5s are unchanged -- so that theory is wrong and the
+                # divergence lies in the replay itself, not in this path's
+                # attention dispatch. Kept because it is still correct (this path
+                # can now serve remat on an unrotated pool at all) but it is
+                # NOT the explanation for the --fastdc divergence.
+                ws.setdefault("dense_blocks_trimmed", {})[layer_idx] = _trimmed
+                try:
+                    from native_core.sparse_decode.triton_fused_decode import (
+                        pool_stores_rotated_k as _psr_w,
+                        _partial_rope_apply as _pra_w,
+                    )
+                    if _dk is not None and dlen and not _psr_w():
+                        _pw = []
+                        for _b in (_trimmed or []):
+                            _pw.extend(getattr(_b, "token_indices", ()) or ())
+                        _vw = min(len(_pw), int(dlen))
+                        if _vw > 0:
+                            import runtime.dkv_attention as _da_w
+                            _cw, _sw = _da_w._history_cos_sin(
+                                self.model, _dk, int(max(_pw[:_vw])) + 1, _dk.device)
+                            _rotd = ws.setdefault("dense_rot_dev", {})
+                            _bufw = _rotd.get(layer_idx)
+                            if (_bufw is None or _bufw.shape != _dk.shape
+                                    or _bufw.dtype != _dk.dtype):
+                                # ZEROS, not empty: only the valid prefix is
+                                # written below, so the tail must start defined
+                                # and stay that way. The assembler zeroes its own
+                                # tail for the same reason.
+                                _bufw = torch.zeros_like(_dk)
+                                _rotd[layer_idx] = _bufw
+                            # INCREMENTAL. A row's rotation depends only on its
+                            # own absolute position, which never changes, so a
+                            # row rotated on an earlier step is still correct on
+                            # this one. Only the rows APPENDED since last step
+                            # need doing -- normally one.
+                            #
+                            # Rotating the whole valid prefix every step was
+                            # ~1460 rows per layer per step and showed up as
+                            # ~50 ms of extra elementwise work in the 16k
+                            # profile. Copying the whole 3072-row workspace on
+                            # top of that was worse again. Both are gone.
+                            #
+                            # The layout is only stable while the BLOCK SET is:
+                            # the assembler repacks from row 0 when a block
+                            # leaves (it protects block 0 and drops the
+                            # second-oldest), which moves every row. Its own
+                            # signature says when that happened, so key the
+                            # incremental state on it and rebuild in full when
+                            # it changes.
+                            _sig = tuple(getattr(b, "anchor_idx", -1)
+                                         for b in (_trimmed or []))
+                            # KEY COLLISION, FIXED. This used to be
+                            # "dense_rot_state", which is ALSO the key
+                            # dkv_attention.py's combined branch uses for a
+                            # different cache with an incompatible value: that
+                            # one stores a dict {version, anchors, lengths,
+                            # rot}, this one a tuple (sig, valid_len). Whichever
+                            # wrote second poisoned the other, and the forward
+                            # -- unlike this block, which is inside a try --
+                            # dereferenced it unguarded and died with
+                            # "'tuple' object has no attribute 'get'".
+                            #
+                            # Only reachable when BOTH are live: the combined
+                            # branch needs DKV_SPARSE_BIAS unset or "0.0" (the
+                            # LIBRARY DEFAULT) and this pre-rotation needs the
+                            # mutation-out path. BEST_DECODE_DEFAULTS sets
+                            # DKV_SPARSE_BIAS=auto, which takes the production
+                            # branch instead -- so everything going through the
+                            # serving defaults, validate_cuda_dkv.py included,
+                            # missed it. Same blind spot as the combined-window
+                            # frame defect.
+                            _rstate = ws.setdefault("dense_prerot_state", {})
+                            _prev_sig, _prev_len = _rstate.get(layer_idx,
+                                                               (None, 0))
+                            _from = _prev_len if (_prev_sig == _sig
+                                                  and _prev_len <= _vw) else 0
+                            _rstate[layer_idx] = (_sig, _vw)
+                            if _from < _vw:
+                                _dpw = torch.as_tensor(_pw[_from:_vw],
+                                                       dtype=torch.long,
+                                                       device=_dk.device)
+                                _cd = _cw[0, _dpw.clamp(max=_cw.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+                                _sd = _sw[0, _dpw.clamp(max=_sw.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+                                _bufw[:, :, _from:_vw] = _pra_w(
+                                    _dk[:, :, _from:_vw], _cd.to(_dk.dtype),
+                                    _sd.to(_dk.dtype))
+                except Exception as _rot_err:                    # noqa: BLE001
+                    (ws.get("dense_rot_dev") or {}).pop(layer_idx, None)
+                    if not getattr(self, "_rot_pub_err_logged", False):
+                        self._rot_pub_err_logged = True
+                        print(f"[DKV] dense-window pre-rotation failed "
+                              f"({type(_rot_err).__name__}: {_rot_err})",
+                              file=sys.stderr, flush=True)
+                if (os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1"
+                        and layer_idx == 0 and _ptr_before is not None):
+                    import sys as _s2
+                    _after = (ws.get("dense_workspace_k") or {}).get(layer_idx)
+                    print(f"[DT] L0 dt={_dt} model_dt={self.model.dtype} "
+                          f"ptr {hex(_ptr_before)} -> "
+                          f"{'same' if _after is not None and _after.data_ptr() == _ptr_before else 'REALLOC'} "
+                          f"dirty={[getattr(b,'dirty',None) for b in dense_blocks][:3]} "
+                          f"dlen={dlen}", flush=True, file=_s2.stderr)
+                cur = lens.get(layer_idx)
+                if cur is None:
+                    lens[layer_idx] = _t.tensor(int(dlen), device=_dk.device,
+                                                dtype=_t.long)
+                else:
+                    # in place: the mask built in the forward reads THIS tensor,
+                    # and rebinding it would leave a captured graph reading the
+                    # old address forever.
+                    cur.fill_(int(dlen))
+            except Exception:                                    # noqa: BLE001
+                continue
+
+        # AFTER the ingest and the reassembly, not before. Printing at the top
+        # reported the window as it stood BEFORE this step's assemble, which is a
+        # one-step lag -- and a lag reads exactly like a freeze if you are looking
+        # for one. Every conclusion drawn from the earlier placement has to be
+        # re-checked against this.
+        if os.environ.get("DKV_GRAPH_DEBUG_PTR") == "1":
+            self._dkv_dump_attention_inputs(session_id, pend)
+
     def generate(
         self,
         prompt: str,
@@ -1049,7 +1575,17 @@ class PyTorchDKVHFWrapper:
         #   1. Explicit query_text from caller (highest precision).
         #   2. Auto-extracted from _last_messages (set by API gateway).
         #   3. Full prompt fallback (safe — IDF filters downstream).
-        if getattr(self.manager, "_factual_enabled", False):
+        #
+        # NO LONGER GATED ON THE FACTUAL STORE. `_pending_query` is consumed by
+        # finalize_srl_index to set `current_query_tokens`, which is read as a
+        # LEXICAL QUERY by query_router's lexical lookup, the decode-time
+        # query_toks set, and the learned router's `lex` feature -- none of
+        # which are factual-store features. Behind `_factual_enabled` (off by
+        # default) the pin was never filled on the default path, so those three
+        # consumers silently fell back to "the question is the entire prompt",
+        # whose IDF is ~uniform and discriminates nothing. MLX has never gated
+        # it this way.
+        if True:
             try:
                 if query_text:
                     _q_ids = self.tokenizer.encode(
@@ -1129,6 +1665,14 @@ class PyTorchDKVHFWrapper:
         # Invalidate CUDA graph runner — new prefill changes pool layout
         if hasattr(self, "_cuda_graph_runner") and self._cuda_graph_runner is not None:
             self._cuda_graph_runner.invalidate()
+        # …and clear the per-session graph decisions with it. _dkv_capture_giveup
+        # is sticky by design WITHIN a session, but it was being set on a wrapper
+        # that outlives the session: _dkv_reset_graph_step(), which is where it
+        # was cleared, is defined and never called. One context that cannot
+        # capture -- a short prompt, or a long one where routing is selective --
+        # therefore disabled mutation-out permanently for every LATER generate()
+        # on the same wrapper, which in a server is every subsequent request.
+        self._dkv_reset_graph_step()
 
         # ── Chunked prefill ──────────────────────────────────────────────────
         # Process the prompt in aligned chunks. Blocks remain dense through the
@@ -1716,7 +2260,20 @@ class PyTorchDKVHFWrapper:
                     self._cuda_graph_runner = CUDAGraphDecodeRunner() if _HAS_CUDA_GRAPH_RUNNER else None
 
                 if self._cuda_graph_runner is not None:
-                    if not self._cuda_graph_runner.is_captured():
+                    # Decide mutation-out for THIS step before anything runs a
+                    # forward. capture() runs the forward too, so publishing it
+                    # later would let the captured graph and the replayed steps
+                    # disagree about whether the forward mutates state.
+                    self._dkv_publish_mutation_out(session_id)
+                    if (getattr(_dkv_attn_mod, "_MUTATION_OUT_ACTIVE", False)
+                            and not getattr(self, "_dkv_primed", False)):
+                        self._dkv_primed = True
+                        try:
+                            self._dkv_apply_pending_mutation(session_id)
+                        except Exception:                        # noqa: BLE001
+                            pass
+                    if (not self._cuda_graph_runner.is_captured()
+                            and not getattr(self, "_dkv_capture_giveup", False)):
                         try:
                             # Hand capture() the cache the DKV bypass actually
                             # mutates so it can roll back its own warmup writes.
@@ -1813,15 +2370,56 @@ class PyTorchDKVHFWrapper:
                             # lines and reports a fictional 1449 tok/s. Use
                             # colab/decode_wall_vs_timer.py.)
                             #
-                            # STILL GATED OFF, for correctness only: the dense
-                            # window of recently generated tokens is assembled in
-                            # Python (assemble_dense_window_kv) with a HOST write
-                            # index, so replay freezes it at capture time and the
-                            # text diverges. The remaining work is to make that
-                            # write index a device tensor and the append an
-                            # index_copy_, exactly as cache_position already does
-                            # for StaticCache -- then the graph captures the
-                            # append instead of baking it in.
+                            # STILL GATED OFF, and the reason is bigger than the
+                            # dense window. Making that one write index device-
+                            # resident is NOT sufficient, which is worth stating
+                            # because it looks like it should be.
+                            #
+                            # dkv_forward calls kv_manager.ingest_streaming() on
+                            # every decode token, INSIDE the forward. That call
+                            # appends the new K/V to the tail block, advances
+                            # _active_fill, finalises a block when it fills, and
+                            # triggers compression. All of it is Python. Graph
+                            # replay runs NO Python, so under replay the token is
+                            # never ingested at all: _active_fill never advances,
+                            # blocks never finalise, compression never fires, and
+                            # the KV store freezes wholesale. The frozen dense
+                            # window is the visible symptom of that, not the cause.
+                            #
+                            # So routed replay needs the block LIFECYCLE to be
+                            # device-resident -- append, finalise, and compression
+                            # triggering -- not just one index. That is the
+                            # "static-state ABI" this file originally called for,
+                            # and it is a redesign.
+                            #
+                            # DEFERRED INGEST WAS EVALUATED AND DOES NOT WORK.
+                            # The idea: replay for token t, then ingest from
+                            # Python outside the captured region. Two findings
+                            # killed it, both measured rather than argued.
+                            #
+                            # 1. Ingest runs BEFORE the attention dispatch, so the
+                            #    dense window supplies the SELF-attention term.
+                            #    Deferring drops it silently -- quality decays with
+                            #    nothing raising. Fixable, by giving
+                            #    attend_with_remat an explicit curr_k/curr_v row.
+                            #
+                            # 2. ROUTING is the real blocker, and arithmetic ends
+                            #    it. Routing is recomputed in Python from block
+                            #    lists, so a replayed graph freezes it and the
+                            #    graph must be re-captured whenever it changes.
+                            #    Capture costs 288 ms (measured). Replay saves
+                            #    ~14.7 ms/token of host. Break-even is ~20 tokens
+                            #    of replay per capture -- but DKV_REMAT_INTERVAL
+                            #    freezes routing for only 4. Re-capturing on every
+                            #    routing change is a 5x NET LOSS, and holding
+                            #    routing for 20 tokens is five times the staleness
+                            #    that interval was deliberately set to avoid.
+                            #
+                            # So the routed 1.41x requires routing itself to be
+                            # DEVICE-RESIDENT -- block selection computed inside
+                            # the graph from device-resident block metadata, so no
+                            # re-capture is ever needed. That is the original
+                            # "static-state ABI" call, now with numbers behind it.
                             # DKV_GRAPH_FORCE_ROUTED=1 is a MEASUREMENT-ONLY
                             # override: it lets the routed path capture and
                             # replay so the SPEED CEILING of a correct graph can
@@ -1831,14 +2429,131 @@ class PyTorchDKVHFWrapper:
                             # build and deciding whether to fund the device-
                             # resident rewrite needs a current number, not a
                             # stale one. Never set it in a serving path.
+                            # OPT-IN, and the measurement that decided it.
+                            # Enabling routed capture by default was tried and
+                            # REVERTED: it requires DKV_GRAPH_MUTATION_OUT, which
+                            # moves per-layer ingest and window assembly out of
+                            # the forward into a Python loop in the wrapper. That
+                            # loop costs one iteration PER ATTENDED LAYER, so its
+                            # price scales with layer count while the graph payoff
+                            # does not:
+                            #
+                            #   Qwen3.5-2B  (6 attended layers)  32k: 15.80 vs
+                            #       15.57 and 15.12 vs 14.79 tok/s -- slightly
+                            #       FASTER with mutation-out
+                            #   Qwen2.5-1.5B (28 attended layers) 32k: 11.74 vs
+                            #       12.94 and 12.07 vs 13.54 tok/s -- about 9%
+                            #       SLOWER, in both interleaved rounds
+                            #
+                            # At 32k the selectivity gate declines the graph, so
+                            # that cost buys nothing there. Enabling it globally
+                            # therefore speeds up 16k (17.3 -> 10.2 s wall,
+                            # byte-identical) while regressing long context on
+                            # wide models, which is not a trade to make silently.
+                            #
+                            # Turn BOTH on together for the win where routing is
+                            # non-selective: DKV_GRAPH_MUTATION_OUT=1 and
+                            # DKV_GRAPH_FORCE_ROUTED=1.
+                            # DKV_FAST_DECODE=1 turns this on together with
+                            # mutation-out; either alone is useless (see the
+                            # note on _FAST_DECODE in dkv_attention).
+                            _fast_dec = os.environ.get("DKV_FAST_DECODE", "0") == "1"
                             _force_routed = os.environ.get(
-                                "DKV_GRAPH_FORCE_ROUTED", "0") == "1"
+                                "DKV_GRAPH_FORCE_ROUTED",
+                                "1" if _fast_dec else "0") == "1"
+                            # ROUTED CAPTURE IS EXACT ONLY WHERE ROUTING IS
+                            # NON-SELECTIVE, and that is checkable rather than
+                            # hoped for. Replay cannot re-run the Python router,
+                            # so the routed set it captured is frozen for the
+                            # whole replay. When the router would have selected
+                            # every block anyway -- n_blocks <= K -- freezing it
+                            # is a NO-OP and replay is exact by construction.
+                            #
+                            # Measured both sides of that line on Qwen2.5-1.5B:
+                            #   16k, 15 blocks, K=16 (non-selective)
+                            #       byte-identical at 48/64/96 tokens, and
+                            #       15.7 -> 10.6 s wall at 96 (1.48x)
+                            #   32k, 31 blocks, K=16 (selective)
+                            #       drifts under FORCED capture, coherent text,
+                            #       i.e. staleness not corruption
+                            #
+                            # The md5 pair originally recorded here (7c291f42
+                            # against "eager 9a9cbc07") did NOT show that. Both
+                            # arms ran without DKV_DETERMINISTIC, and at 32k the
+                            # decode attention's own reduction changes the answer
+                            # between two runs of the SAME config -- so that pair
+                            # measured the nondeterminism, not the drift. Rerun
+                            # with DKV_DETERMINISTIC=1, eager and the gated
+                            # decline both give 7c291f42ece7d897.
+                            #
+                            # Refreshing it does not rescue the selective case.
+                            # Eager alternation CORRUPTS (interval 2/4/8 breaks
+                            # after ~1/~8/~14 tokens) and frequent re-capture is
+                            # both inexact at length and slower than eager (288 ms
+                            # per capture against 14.7 ms/token saved: at
+                            # recapture=2, 25.5 s vs eager's 17.9 s and a
+                            # different md5 by 64 tokens). So the gate is the
+                            # honest ship, not a placeholder for a refresh.
+                            # ONE implementation of the gate, shared with
+                            # _dkv_publish_mutation_out. It was inlined here when
+                            # capture was its only consumer; mutation-out now asks
+                            # the same question every step, and two copies of a
+                            # correctness gate drifting apart is not a risk worth
+                            # taking for a dozen lines.
+                            _routing_selective = False
+                            if _force_routed:
+                                _routing_selective = self._dkv_routing_selective(
+                                    session_id)
+                                if _routing_selective and not getattr(
+                                        self, "_graph_sel_logged", False):
+                                    self._graph_sel_logged = True
+                                    print(f"[DKV] routed CUDA graph declined: "
+                                          f"compressed blocks exceed K, so routing "
+                                          f"is selective and a frozen routed set "
+                                          f"would drift. "
+                                          f"DKV_GRAPH_ALLOW_SELECTIVE=1 to override.",
+                                          file=sys.stderr, flush=True)
+                            if os.environ.get("DKV_GRAPH_ALLOW_SELECTIVE") == "1":
+                                _routing_selective = False
                             self.model._dkv_cuda_graph_safe = bool(
-                                _force_routed or (
+                                (_force_routed and not _routing_selective) or (
                                     _dkv_cache is not None
                                     and os.environ.get("DKV_GRAPH_SAFE_DECODE", "0") == "1"))
                             self._cuda_graph_runner.capture(
                                 self.model, input_ids, pos_tensor, cache=_dkv_cache)
+                            # SNAPSHOT the ingest references produced DURING
+                            # capture. This is the whole trick, and getting it
+                            # wrong is why replay produced degenerate text:
+                            # _pending_ingest is rewritten by every EAGER step
+                            # with ordinary torch tensors, which replay never
+                            # touches, so draining it after a replay re-ingested
+                            # the last eager token again and again. The refs
+                            # recorded during capture point into the GRAPH's own
+                            # memory pool, which replay does rewrite -- those are
+                            # the ones that carry fresh values.
+                            _pi = self.manager.__dict__.get("_pending_ingest")
+                            if _pi:
+                                self.manager.__dict__["_graph_ingest_refs"] = dict(_pi)
+                            # Record WHAT WAS ROUTABLE AT CAPTURE. The routed set
+                            # is pinned into fixed-address buffers, so a replay
+                            # attends whatever slots those buffers held when the
+                            # graph was recorded. That is exact while the block
+                            # set is unchanged -- and the selectivity gate makes
+                            # sure it starts that way -- but blocks keep being
+                            # COMPRESSED during decode, so a session that
+                            # captured at 15 blocks is attending 15 of 16 a few
+                            # tokens later, with the newest content the one thing
+                            # missing. See the invalidation below.
+                            self._graph_ncomp = self._dkv_block_counts(
+                                session_id)[0]
+                            # Snapshot WHAT THE FORWARD BOUND DURING CAPTURE.
+                            # Comparing against the live _fwd_ptrs only compares
+                            # the last EAGER forward, which says nothing about the
+                            # graph -- this is the pair that actually matters.
+                            _fp = self.manager.__dict__.get("_fwd_ptrs")
+                            if _fp:
+                                self.manager.__dict__["_graph_fwd_ptrs"] = {
+                                    k: dict(v) for k, v in _fp.items()}
                         except Exception as _cap_err:
                             # Log ONCE. A bare `pass` here makes a failed capture
                             # indistinguishable from eager decode, so a benchmark
@@ -1851,8 +2566,103 @@ class PyTorchDKVHFWrapper:
                                       f"({type(_cap_err).__name__}: {_cap_err}); "
                                       f"continuing in eager decode.",
                                       file=sys.stderr, flush=True)
-                    
-                    if self._cuda_graph_runner.is_captured():
+                        # ONE attempt decides it for the session. capture() is
+                        # retried on every step while is_captured() is False, so
+                        # without this a session that can never capture pays the
+                        # attempt AND keeps deferring mutation for a graph that
+                        # is never coming. Whatever refused it -- selectivity, a
+                        # missing decode cache, an exception -- the answer will
+                        # not change mid-session.
+                        if not self._cuda_graph_runner.is_captured():
+                            self._dkv_capture_giveup = True
+                            self._dkv_publish_mutation_out(session_id)
+
+
+                    # ROUTING REFRESH. Replay executes no Python, so the routed
+                    # set pinned in _stabilise_routed_set's buffers would never
+                    # advance. Running ONE EAGER step every N tokens lets the real
+                    # forward re-route and rewrite those buffers in place, which
+                    # every subsequent replay then reads -- no re-capture, and no
+                    # second router implementation to drift from the first.
+                    #
+                    # N is the remat interval, so routing staleness under replay is
+                    # exactly the staleness DKV_REMAT_INTERVAL already ships and
+                    # accepts (the remat cache freezes the routed set for the same
+                    # window). Not a new trade -- the same one, made explicit.
+                    if not hasattr(self, "_dkv_step_idx"):
+                        self._dkv_step_idx = 0
+                    _mo = getattr(_dkv_attn_mod, "_MUTATION_OUT_ACTIVE", False)
+                    # NEVER alternate eager and replay. Running one eager forward
+                    # between replays was the original refresh design and it is
+                    # what corrupted the state -- proven by running the cases in
+                    # order: with NO eager step at all, replay reproduces eager
+                    # byte for byte, and every interval that introduces eager
+                    # steps degrades in proportion to how many it introduces.
+                    #
+                    # Routing is instead refreshed by RE-CAPTURING, which reruns
+                    # the real forward and rebuilds every pinned buffer from
+                    # scratch. Capture costs 288 ms and replay saves ~14.7
+                    # ms/token, so re-capturing every DKV_GRAPH_RECAPTURE tokens
+                    # costs 288/N ms/token against 14.7 saved -- net positive for
+                    # any N above ~20, and 64 leaves routing staleness bounded at
+                    # 64 tokens.
+                    _force_eager = False
+                    if _mo and self._cuda_graph_runner.is_captured():
+                        try:
+                            _recap = int(os.environ.get("DKV_GRAPH_RECAPTURE", "64"))
+                        except ValueError:
+                            _recap = 64
+                        if _recap > 0 and self._dkv_step_idx > 0                                 and (self._dkv_step_idx % _recap) == 0:
+                            self._cuda_graph_runner.invalidate()
+                        # INVALIDATE WHEN THE BLOCK SET CHANGES. This is the
+                        # frozen-routing fix, and it is narrower than re-routing.
+                        #
+                        # The routed set is pinned to fixed addresses, so replay
+                        # attends the slots recorded at capture. The selectivity
+                        # gate guarantees that is EXACT at capture time -- routing
+                        # is non-selective, so "the routed set" is "every block".
+                        # What it cannot guarantee is that it stays true: blocks
+                        # keep getting compressed as decode proceeds, and the
+                        # moment block 16 appears, a graph captured over 15 is
+                        # attending everything EXCEPT the newest content. That is
+                        # a silent quality loss, not a crash.
+                        #
+                        # IT IS NOT, HOWEVER, WHY --fastdc DIVERGES FROM EAGER.
+                        # That was the hypothesis this was written to test and it
+                        # failed. Measured on Qwen2.5-1.5B with
+                        # DKV_DETERMINISTIC=1, eager against replayed: 4k and 16k
+                        # are byte-identical to their pre-fix md5s and this
+                        # invalidation never even fires there, while 8k fires
+                        # (6 -> 7 blocks), changes its md5, and still does not
+                        # match eager. So the divergence has a second cause that
+                        # is NOT the routed set going stale, and it is still
+                        # open. Kept anyway: attending 15 of 16 blocks with the
+                        # newest content missing is wrong on its own terms,
+                        # whatever else is also wrong.
+                        #
+                        # A count comparison is enough and costs 4.6 us: blocks
+                        # only ever move INTO the compressed set during decode.
+                        # Re-capture then rebuilds every pinned buffer from a
+                        # real forward, which is the refresh mechanism this
+                        # design already documents -- and unlike the eager
+                        # alternation that was tried and retracted, no step ever
+                        # runs against half-updated state.
+                        _now_ncomp = self._dkv_block_counts(session_id)[0]
+                        if (_now_ncomp is not None
+                                and getattr(self, "_graph_ncomp", None) is not None
+                                and _now_ncomp != self._graph_ncomp):
+                            self._cuda_graph_runner.invalidate()
+                            if not getattr(self, "_graph_ncomp_logged", False):
+                                self._graph_ncomp_logged = True
+                                print(f"[DKV] routed graph invalidated: compressed "
+                                      f"blocks {self._graph_ncomp} -> {_now_ncomp}, "
+                                      f"so the pinned routed set no longer covers "
+                                      f"the pool. Re-capturing.",
+                                      file=sys.stderr, flush=True)
+                    self._dkv_step_idx += 1
+                    self._dkv_last_was_replay = (
+                        self._cuda_graph_runner.is_captured() and not _force_eager)
+                    if self._cuda_graph_runner.is_captured() and not _force_eager:
                         try:
                             outputs = self._cuda_graph_runner.run(input_ids, pos_tensor)
                         except Exception:
@@ -1869,6 +2679,7 @@ class PyTorchDKVHFWrapper:
                             past_key_values=past_kv,
                             use_cache=True,
                         )
+                    self._dkv_apply_pending_mutation(session_id)
                 else:
                     outputs = self.model(
                         input_ids=input_ids,
@@ -1886,13 +2697,42 @@ class PyTorchDKVHFWrapper:
                 )
 
             if _time_attn_flag and _time_token_start is not None:
+                # SYNCHRONISE BEFORE READING THE CLOCK, on CUDA as well as MPS.
+                # Without it this is a HOST timer, and the two things worth
+                # measuring here differ mostly in host cost -- so it flatters
+                # exactly what it is used to judge. A CUDA graph replay is one
+                # launch: the host returns while the GPU is still working, and
+                # this reported 4.63 ms/token (215 tok/s) for a path measured at
+                # ~11-13 tok/s end to end, an 87% "win" that was entirely the
+                # missing sync. Eager decode happened to read about right only
+                # because that path is host-bound.
                 if self.device == "mps":
                     try: torch.mps.synchronize()
+                    except Exception: pass
+                elif self.device == "cuda":
+                    try: torch.cuda.synchronize()
                     except Exception: pass
                 _token_ms = (_tw.perf_counter() - _time_token_start) * 1000
                 print(f"[DKV_TIME_ATTN] total_token={_token_ms:.2f}ms", flush=True)
 
             logits = outputs.logits[:, -1, :]
+            # DKV_LOGIT_TRACE=1 -- per-step logit fingerprint, for finding the
+            # FIRST step at which a replayed decode parts from an eager one.
+            #
+            # Every INPUT to the replayed attention has been accounted for
+            # ([DUMP] for the wrapper-owned state, [POOL] for the compressed
+            # pool) and none of them move, so the remaining question is where the
+            # OUTPUT first differs. Diff two runs line by line: the step where
+            # argmax changes is where the text splits, but sum/max move first and
+            # by how much says whether it is drift or a wrong read.
+            if os.environ.get("DKV_LOGIT_TRACE") == "1":
+                _lf = logits.float()
+                print(f"[LOGIT] step={getattr(self, '_dkv_step_idx', -1):3d} "
+                      f"replay={int(bool(getattr(self, '_dkv_last_was_replay', False)))} "
+                      f"argmax={int(_lf.argmax())} "
+                      f"max={float(_lf.max()):.6f} "
+                      f"sum={float(_lf.sum()):.4f}",
+                      file=sys.stderr, flush=True)
             past_kv = outputs.past_key_values
             cur_pos += 1
 

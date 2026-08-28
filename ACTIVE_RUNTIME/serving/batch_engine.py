@@ -36,6 +36,19 @@ class BatchRequest:
         # and _emit_token terminates generation early.
         self.repetition_loop_detected: bool = False
         self._ngram_window: List[int] = []  # rolling window for n-gram counts
+        # THIS REQUEST'S OWN KV CACHE.
+        #
+        # The engine used to pass no past_key_values at all, which left DKV's
+        # session interception as the only thing supplying a cache -- and DKV
+        # declines below its engage threshold, so a short prompt decoded with NO
+        # history and degenerated after the first token. Forcing engagement is
+        # not the fix either: at the ranks these paths use it returns the history
+        # compressed hard enough to wreck the text ('Sure, we apologizeative
+        # severas Noorder.c...'), which is the same failure wearing a suit.
+        #
+        # Threading a real cache lets DKV bypass exactly as it is designed to at
+        # short context, and the model gets EXACT history.
+        self.past_kv = None
 
     @property
     def total_seq_len(self) -> int:
@@ -291,11 +304,31 @@ def _sample_gpu_jit(
                 scores = torch.where(scores > 0.0, scores / repetition_penalty, scores * repetition_penalty)
                 logits[0].scatter_(0, penalty_ids, scores)
 
+    # SANITISE BEFORE THE GREEDY RETURN, not after it.
+    #
+    # This used to argmax the raw logits and only nan_to_num on the SAMPLED
+    # path below, so greedy decoding -- the one mode that is supposed to be
+    # reproducible -- was the one mode with no NaN guard. torch.argmax over a
+    # tensor containing NaN returns an implementation-defined index, and which
+    # index that is can move with reduction order, so the same NaN logits chose
+    # different tokens run to run.
+    #
+    # That is measurable here: DKV_ENGINE_LOGIT_TRACE=1 on test_formatting shows
+    # 'max=nan sum=nan' on the prefill logits in one run and a finite
+    # 'max=3.412109' in another, with completely different continuations
+    # following. It also explains why DKV_DETERMINISTIC=1 did not fix that test
+    # and broke another: the flag pins the SDPA backend, but the NaN is in the
+    # logits and argmax over NaN varies independently of it.
+    #
+    # Sanitising first does not hide the NaN -- whatever produces it upstream is
+    # still wrong and still worth finding -- but it makes greedy decode a
+    # FUNCTION of the logits again, which is what callers assume.
+    logits = torch.nan_to_num(logits, nan=-100.0, posinf=100.0, neginf=-100.0)
+
     if temperature <= 0.01:
         return torch.argmax(logits, dim=-1, keepdim=True)
 
     logits = logits / temperature
-    logits = torch.nan_to_num(logits, nan=-100.0, posinf=100.0, neginf=-100.0)
     
     probs = torch.softmax(logits, dim=-1)
     probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
@@ -342,6 +375,27 @@ class CUDAStreamManager:
 
     def get_prefill_stream(self):
         return self.prefill_stream if self.device_has_cuda else None
+
+
+def _eng_logit_trace(tag, req, logits):
+    """DKV_ENGINE_LOGIT_TRACE=1 -- fingerprint the engine's own logits.
+
+    The wrapper's DKV_LOGIT_TRACE never fires on this path: the engine calls
+    model() directly rather than going through the wrapper's decode loop. This
+    is the same instrument at the engine's two sampling sites, so a passing run
+    and a failing one can be diffed token by token.
+    """
+    import os as _o, sys as _s
+    if _o.environ.get("DKV_ENGINE_LOGIT_TRACE") != "1":
+        return
+    try:
+        _l = logits.float()
+        print(f"[ENGLOGIT] {tag} sess={getattr(req, 'session_id', '?')} "
+              f"n={len(getattr(req, 'generated_ids', []))} "
+              f"argmax={int(_l.argmax())} max={float(_l.max()):.6f} "
+              f"sum={float(_l.sum()):.3f}", file=_s.stderr, flush=True)
+    except Exception:                                            # noqa: BLE001
+        pass
 
 
 class ContinuousBatchEngine:
@@ -1136,8 +1190,29 @@ class ContinuousBatchEngine:
                     out = self.wrapper.model(
                         input_ids=input_ids,
                         position_ids=position_ids,
+                        past_key_values=req.past_kv,
                         use_cache=True
                     )
+                    req.past_kv = getattr(out, "past_key_values", None)
+
+            # ORDER THE DEFAULT STREAM BEHIND THE PREFILL STREAM.
+            #
+            # The SAME race the decode path had. The prefill forward is enqueued
+            # inside `with torch.cuda.stream(prefill_stream)` and everything
+            # afterwards -- out.logits for the first token, the KV the session
+            # keeps -- is touched on the default stream, which has no dependency
+            # on it. Nothing synchronised the two.
+            #
+            # The decode fix alone left this behind, and the suite showed it: with
+            # decode ordered, the prefill logits were finite but still wrong,
+            # max=3.408203 sum=-259.834 against a standalone max=17.093750
+            # sum=-303740.188. A thousand-fold magnitude difference is a
+            # different computation, which is what reading half-written memory
+            # looks like once it is no longer producing outright NaN.
+            if torch.cuda.is_available():
+                _ps_sync = self.cuda_stream_manager.get_prefill_stream()
+                if _ps_sync is not None:
+                    torch.cuda.current_stream().wait_stream(_ps_sync)
 
             req.prefill_offset += actual_len
 
@@ -1212,6 +1287,7 @@ class ContinuousBatchEngine:
                     self.draft_wrapper.manager.compress_deferred_prefill_blocks(req.session_id + "_draft")
                     
                 logits = out.logits[:, -1, :]  # last token logits — first generated token
+                _eng_logit_trace("prefill", req, logits)
                 next_id = self._sample(logits, req)
                 req.generated_ids.append(next_id)
                 self._emit_token(req, next_id, step_start)
@@ -1420,19 +1496,58 @@ class ContinuousBatchEngine:
                     if decode_stream is not None:
                         with torch.cuda.stream(decode_stream):
                             runner = getattr(self.wrapper, "_cuda_graph_runner", None)
-                            if runner is not None and runner.is_captured():
+                            # THE GRAPH DOES NOT CARRY OUR CACHE, so it must not
+                            # run on the path that owns one.
+                            #
+                            # capture() is handed only (model, input_ids,
+                            # position_ids) -- no past_key_values -- so a replay
+                            # reproduces a forward that had NO history, while the
+                            # eager branch below threads req.past_kv. Whether a
+                            # graph happened to be captured yet therefore decided
+                            # whether this request had history at all, and that
+                            # varies with warmup and timing. It is why
+                            # test_formatting stayed intermittent (3 of 4 green)
+                            # even at temperature 0.0, where greedy decode should
+                            # be perfectly reproducible -- the nondeterminism was
+                            # never the model's.
+                            _own_cache = (len(decode_reqs) == 1)
+                            if (runner is not None and runner.is_captured()
+                                    and not _own_cache):
                                 try:
                                     out = runner.run(input_ids, position_ids)
                                     _ran_graph = True
                                 except Exception as _ge:
                                     runner.invalidate()
                             if not _ran_graph:
+                                # SINGLE-REQUEST DECODE OWNS ITS CACHE.
+                                #
+                                # Only when the bucket holds one real request:
+                                # with several, each row is at a different
+                                # sequence length and one shared past_key_values
+                                # cannot describe them -- that needs a batched
+                                # cache with per-row lengths, which is a redesign
+                                # this component does not justify. Batched decode
+                                # therefore keeps relying on DKV exactly as
+                                # before, which is correct wherever DKV engages.
+                                #
+                                # The single-request case is the one that was
+                                # broken (a short prompt decoding with no history
+                                # at all) and it is also the only one where the
+                                # cache is unambiguous, so it is the whole fix.
+                                _solo = (actual_batch_size == 1
+                                         and bucket_size == 1)
+                                _req0 = decode_reqs[0] if _solo else None
                                 out = self.wrapper.model(
                                     input_ids=input_ids,
                                     position_ids=position_ids,
+                                    past_key_values=(_req0.past_kv if _solo else None),
                                     use_cache=True,
                                 )
-                                if runner is not None and not runner.is_captured():
+                                if _solo:
+                                    _req0.past_kv = getattr(
+                                        out, "past_key_values", None)
+                                if (runner is not None and not runner.is_captured()
+                                        and not _own_cache):
                                     try:
                                         runner.capture(self.wrapper.model, input_ids, position_ids)
                                     except Exception:
@@ -1479,12 +1594,39 @@ class ContinuousBatchEngine:
                             use_cache=True,
                         )
 
+            # ORDER THE DEFAULT STREAM BEHIND THE DECODE STREAM.
+            #
+            # The forward above is enqueued inside `with
+            # torch.cuda.stream(decode_stream)`, but `out.logits` is read HERE,
+            # on the default stream, which has no dependency on it. Nothing
+            # synchronised the two: no synchronize(), no wait_stream(), no
+            # event. So the read could observe memory the decode had not
+            # finished writing -- a plain data race, and the reason the engine's
+            # logits came back NaN nondeterministically.
+            #
+            # It explains every symptom that survived the other explanations:
+            # timing-dependent (so it differs between a bare script and pytest,
+            # and gets likelier as more runs before it), immune to
+            # DKV_DETERMINISTIC / pool budget / decode path / the KV cache
+            # because none of those touch stream ordering, and confined to this
+            # engine because the wrapper's own generate() never uses a side
+            # stream.
+            #
+            # wait_stream, not synchronize: it makes the default stream wait on
+            # the decode stream's work without blocking the HOST, which is the
+            # cheap primitive for exactly this dependency.
+            if is_cuda:
+                _ds_sync = self.cuda_stream_manager.get_decode_stream()
+                if _ds_sync is not None:
+                    torch.cuda.current_stream().wait_stream(_ds_sync)
+
             logits = out.logits[:, -1, :]  # [bucket_size, vocab_size]
 
             # Extract and sample outputs ONLY for actual active requests
             for idx in range(actual_batch_size):
                 req = decode_reqs[idx]
                 req_logits = logits[idx : idx + 1]
+                _eng_logit_trace("decode", req, req_logits)
                 next_id = self._sample(req_logits, req)
                 req.generated_ids.append(next_id)
                 self._emit_token(req, next_id, step_start)

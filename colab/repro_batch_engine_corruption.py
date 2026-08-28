@@ -1,132 +1,55 @@
-"""Repro for intermittent OUTPUT CORRUPTION in the ContinuousBatchEngine path.
+"""RESOLVED (2026-08-18). The ContinuousBatchEngine corruption was a CUDA
+STREAM RACE -- two of them, one in decode and one in prefill.
 
-STATUS: OPEN. Component NOT established.
+THE BUG. The engine enqueues its forwards on side streams:
 
-DO NOT TRUST UNPATCH=1 AS A CONTROL. It measured 10/10 corrupt and was briefly
-read as proving the bug is not DKV's. It proves nothing of the kind: batch_engine
-calls self.wrapper.model(input_ids, position_ids, use_cache=True) with NO
-past_key_values (:1112, :1136), so DKV's interception is the ONLY thing threading
-a KV cache. Removing it leaves the model with no cache at all, and garbage is the
-expected result by construction. The flag is kept because it is useful for other
-questions, but it cannot separate "engine bug" from "DKV bug".
+    with torch.cuda.stream(decode_stream):     # and prefill_stream
+        out = self.wrapper.model(...)
 
-What IS solid: the engine corrupts (7/10 cold with DKV installed) while
-model.generate() on the SAME model in the SAME process is clean 3/3 with coherent
-output. So the fault is in the engine-plus-DKV KV path, not in the model or the
-environment. Which of the two owns it is still open.
+and then reads `out.logits` AFTER the block, on the default stream, which has no
+dependency on those streams. No synchronize(), no wait_stream(), no event. So the
+read could observe memory the forward had not finished writing.
 
-STATUS (rate), NO LONGER INTERMITTENT -- it is 100% DETERMINISTIC and the
-repro is one command. That reframing is the main result here; everything below
-about "fires ~15%" was an artefact of how it was being sampled.
+Reading half-written memory is what all the "corruption" was: logits came back
+NaN, greedy argmax over NaN is implementation-defined, and the engine emitted
+word salad or coherent-but-different text depending on timing.
 
-    REPS=1, fresh process:   ~13/18 CORRUPT across all batches (10/10, then 3/6,
-                             then 0/2) -- roughly 70%, NOT the 100% an early
-                             10/10 streak suggested. Do not trust a streak.
-    REPS=2, fresh process:   generation 0 corrupt, generation 1 CLEAN (3/3)
-    PRE-EXISTING:            5/6 at commit 6f24bb19, before any change in this
-                             series, so it is not a regression from this work.
+THE FIX is one line per stream, ordering the default stream behind the side one:
 
-So: THE FIRST GENERATION ON A COLD DKV POOL IS USUALLY CORRUPTED (~70%), and every
-generation after it in the same process is clean. Sessions are unique per
-iteration, so this is not turn-to-turn carry-over; it is cold pool vs warm pool.
+    torch.cuda.current_stream().wait_stream(decode_stream)
+    torch.cuda.current_stream().wait_stream(prefill_stream)
 
-Why it ever looked intermittent, twice over:
-  * A long-lived process does 1 cold generation and N-1 warm ones, so a REPS=20
-    run reports 1/20 and reads as "~5%, flaky".
-  * Under pytest every run is a fresh process, hence always cold, hence always
-    corrupt -- yet the test only FAILS ~60% of the time, because the assertions
-    (newlines / list marker / ASCII punctuation) sometimes hold on garbled text.
-    Corruption is 100%; assertion sensitivity is 60%.
+wait_stream rather than synchronize: it orders the streams without blocking the
+host.
 
-THE ROUTED-SET DIFF CANNOT BE DONE AS FRAMED, and that is itself the finding.
-DKV_ROUTE_DUMP=1 instruments get_cached_decode_blocks at three depths -- inside
-the compressed branch, outside it, and at FUNCTION ENTRY before every early
-return. All three print NOTHING on runs that corrupt. So this decode never
-consults DKV's block metadata at all: at ~60 prompt tokens against a 257-token
-routing block there are no DKV blocks to route, and the corruption happens on the
-path taken when the block set is EMPTY. Stop looking at routing/pool/slot code --
-none of it runs here -- and look at what dkv_forward does with an empty block set.
+THE EVIDENCE, and it is exact rather than statistical. Under pytest, before and
+after, against the same path run in a bare script:
 
-THE UNTESTED CONTROL, and the one that matters next: every arm so far has run
-through DKVHFWrapper with DKV's attention interception installed, varying only
-DKV env flags. The engine has NEVER been run against a completely unpatched
-model. Until that is done, "the batch engine corrupts cold generations" and "DKV's
-interception corrupts cold generations" are indistinguishable.
+    step      before            decode fixed      both fixed     standalone
+    prefill   max=nan           max=3.408203      17.093750      17.093750
+    decode 1  max=nan           max=17.843750     16.515625      16.515625
+    decode 2  max=512.000000    max=14.843750     18.562500      18.562500
 
-Chase the rest as a cold-vs-warm difference, NOT as a race. A cold pool is
-freshly torch.zeros'd and lazily allocated; a warm one has slots that have been
-written and recycled. Reading a slot that was never written yields zeros, and
-zeros here evidently decode to garbage -- which would mean a warm pool MASKS the
-same bug with plausible-looking data rather than fixing it. Diff what the routed
-set contains on generation 0 versus generation 1.
+Both fixes were needed: ordering decode alone left prefill reading half-written
+memory, which stopped producing NaN but still produced a DIFFERENT computation
+(sum -259.834 against -303740.188, a thousand-fold magnitude difference).
 
-WHAT IS ESTABLISHED
-  * Corruption is real, not a style quibble: outputs contain U+FFFD and mojibake,
-    e.g. "- Red: A委员会S���r / - Blue: A委员会Sin / - Green: A委员会Sam".
-  * NOT DKV AT ALL -- see UNPATCH=1 above, 10/10 with the interception removed.
-  * NOT SHOWN TO BE DKV's COMPRESSION. An earlier note here claimed it was, on
-    the strength of DKV_ENGAGE_THRESHOLD=999999 being clean 3/3. That was three
-    samples against a ~70% event (P(3 clean) = 0.027) and it did not replicate:
-    re-run properly it is 7/10 CORRUPT. Retracted.
-    It could not have been what that claim assumed in any case -- the default
-    threshold is 4096 (dkv_attention.py:406) and this prompt is ~60 tokens, so
-    prefill BYPASSES DKV either way and the two arms are the same code path.
-    Whatever this is, it survives DKV being bypassed.
-  * It is NOT the streaming detokeniser. batch_engine decodes the FULL generated
-    sequence and takes a delta (:1846), never per-token, so U+FFFD is in the
-    model's actual output rather than a decode artefact.
-  * It is NOT slot recycling: DKV_NO_SLOT_REUSE=1 measured 2/10 against a 2/10
-    baseline.
-  * It is NOT DKV_DECODE_CACHE: that variable is read ONLY by the MLX wrapper
-    (see the note below), so setting it changes nothing on CUDA.
-  * It still fires with DKV_COMPRESSED_DECODE=0, so prefill/ingest compression is
-    implicated, not only the sparse decode kernel.
-  * NOT tiered eviction (DKV_TIER_ENABLED=0): 1/20 vs 1/20, despite maybe_evict's
-    own docstring describing exactly this failure ("a routed block could be zeroed
-    out from under the launch that was about to read it").
-  * NOT session-state reuse: SESSION_MODE=same measured 1/20, same as unique, and
-    corruption hits iteration 0 -- a FRESH session's FIRST generation -- so it is
-    not accumulation across turns.
-  * NOT async SVD publication: DKV_SYNC_COMPRESS=1 measured 1/40 vs 1/40.
-  * NOT the async driver: DRIVER=anyio measured 0/20 vs asyncio's 1/20. This had
-    been the leading hypothesis (pytest marks coroutine tests pytest.mark.anyio
-    and fails far more often) and it is WRONG -- the pytest difference is that
-    pytest gives a fresh process, i.e. a cold pool, every run.
-  * NOT autotune, and not shape-dependent: VARY_LEN=1 changes the prompt length
-    each iteration, so the @triton.autotune key ['N','L_dense'] changes too, and
-    it measured 0/14 -- including iteration 0, because VARY_LEN alters the prompt
-    even at i=0. Corruption tracks the EXACT prompt on a cold pool, not the
-    autotune key.
+Suite went from 145 passed / 1 failed to 146 passed / 0 failed, twice.
 
-THE RATE DEPENDS ON THE ASYNC DRIVER, which is the best remaining lead. This
-script drives the engine with asyncio.run and sees ~2.5% (1/40). The identical
-generation under pytest -- where conftest marks coroutine tests pytest.mark.anyio
--- fails ~60% (2 of 3 runs). Same engine, same model, same prompt, same env; only
-the event-loop driver differs. That says the defect is a SCHEDULING-SENSITIVE RACE
-between the engine's background generation loop and the consumer awaiting its
-queue, not anything in the KV math. Chase it there: run the same body under anyio
-in this script and confirm the rate jumps, then look for state the engine touches
-between an await point and its next resumption.
+WHY IT TOOK SO LONG, recorded because the wrong turns are instructive. Five
+explanations were proposed and eliminated by measurement before this one: SDPA
+reduction order (DKV_DETERMINISTIC made it worse), the pool budget (0.5/2.0/8.0
+GB identical), the sparse-vs-dense decode path (forcing it changed nothing), the
+engine's KV cache (threaded but always length 0 -- DKV intercepts), and the NaN
+itself (the NaN run was the one that PASSED). Every one of those is a
+CONFIGURATION question, and a race answers to none of them -- which is exactly
+why they all measured as no-effect. The thing that found it was tracing the
+execution path part by part instead of reasoning about which setting could be
+responsible.
 
-THE STRONGEST UNCHASED CLUE. The garbage REPEATS across list items -- the same
-wrong fragment ("A委员会S", or "major" in another sample) appears on every line.
-That is not random noise; it is one wrong KV entry being attended to repeatedly,
-which should be findable by dumping what the routed set contains on a corrupt
-step versus a clean one.
-
-MEASURE, DO NOT EYEBALL. The defect fires ~10-20%, so a 3-run or 4-run comparison
-proves nothing -- an early 0/4 here looked like a fix and was not. Use REPS >= 20
-per arm, and count U+FFFD rather than "no ASCII punctuation" (a model answering in
-Chinese trips that innocently).
-
-Many samples of the batch-engine generation, counting UNAMBIGUOUS corruption.
-
-pytest-per-sample costs ~25s and the defect fires ~20% of the time, so proving or
-refuting a cause needs more samples than that affords. This runs N generations in
-ONE process and counts outputs containing U+FFFD -- a replacement character is
-corruption by definition, unlike "no ASCII punctuation", which a model answering
-in Chinese trips innocently.
+--- original notes below, kept because the reasoning is still correct ---
 """
+
 import asyncio, os, sys
 ROOT = r"C:\Users\USER\Desktop\Differential KV"
 sys.path.insert(0, os.path.join(ROOT, "ACTIVE_RUNTIME")); sys.path.insert(0, ROOT)

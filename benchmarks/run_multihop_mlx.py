@@ -60,7 +60,7 @@ def run_eval(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit"):
     print(f"Model: {model_id}", flush=True)
     wrapper = MLXDKVWrapper(
         model_id=model_id,
-        config={"rank": 32, "block_size": 256},
+        config={"rank": 32, "block_size": 1024},
     )
 
     contexts = [4000, 16000, 32000]

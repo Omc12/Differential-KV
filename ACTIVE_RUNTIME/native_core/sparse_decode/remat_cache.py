@@ -347,6 +347,8 @@ def attend_with_remat(
     trace_row: Optional[int] = None,   # flat row index to report mass for
     trace_tok: int = -1,               # its absolute token index, for the log
     extra: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+    curr_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    dense_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """One plain attention over [materialised routed blocks | dense window].
 
@@ -394,9 +396,37 @@ def attend_with_remat(
                            (sl2.to(dev).view(N2, 1) + 1)).reshape(N2 * S2))
 
     if dense_k is not None and dense_len > 0:
-        k_parts.append(dense_k[0, :, :dense_len].permute(1, 0, 2))
-        v_parts.append(dense_v[0, :, :dense_len].permute(1, 0, 2))
-        mask_parts.append(torch.ones(dense_len, dtype=torch.bool, device=dev))
+        if dense_mask is not None:
+            # CUDA-graph form: take the WHOLE preallocated window and mask it,
+            # instead of slicing to a host-side dense_len. A Python slice bound is
+            # baked into a captured graph, so it would freeze the window at its
+            # capture-time length; a device mask is re-read on every replay.
+            _dl = dense_k.shape[2]
+            k_parts.append(dense_k[0, :, :_dl].permute(1, 0, 2))
+            v_parts.append(dense_v[0, :, :_dl].permute(1, 0, 2))
+            mask_parts.append(dense_mask[:_dl])
+        else:
+            k_parts.append(dense_k[0, :, :dense_len].permute(1, 0, 2))
+            v_parts.append(dense_v[0, :, :dense_len].permute(1, 0, 2))
+            mask_parts.append(torch.ones(dense_len, dtype=torch.bool, device=dev))
+
+    if curr_kv is not None:
+        # The CURRENT token, attended from tensors the graph itself produced.
+        #
+        # Normally the current token reaches attention because ingest_streaming()
+        # already appended it to the dense window BEFORE this call -- so the
+        # window supplies the self-attention term. Under graph replay no Python
+        # runs, so that append never happens and the token would attend
+        # everything except itself. Passing it explicitly here removes that
+        # dependency: the self term comes from in-graph tensors and ingest is
+        # free to move outside the captured region.
+        #
+        # MUST be paired with skipping the in-forward ingest. With both, the
+        # token is attended TWICE and its own key gets double weight.
+        _ck, _cv = curr_kv
+        k_parts.append(_ck[0].permute(1, 0, 2))
+        v_parts.append(_cv[0].permute(1, 0, 2))
+        mask_parts.append(torch.ones(_ck.shape[2], dtype=torch.bool, device=dev))
 
     K_all = torch.cat(k_parts, dim=0).to(dt)                     # [T, H_kv, D]
     V_all = torch.cat(v_parts, dim=0).to(dt)
@@ -415,6 +445,43 @@ def attend_with_remat(
     if num_key_value_groups > 1:
         K_all = K_all.repeat_interleave(num_key_value_groups, dim=1)
         V_all = V_all.repeat_interleave(num_key_value_groups, dim=1)
+
+    # DKV_DETERMINISTIC=1 -- force SDPA's math backend for this call.
+    #
+    # This path is NOT reproducible at long context on its default backend:
+    # greedy decoding at 32k produced three recurring distinct outputs across
+    # runs, while the Triton kernel path (DKV_REMAT_CACHE=0) was byte-stable and
+    # 16k was byte-stable on both. The post-prefill KV state is identical run to
+    # run (same block states, same rank sum), so the divergence is not
+    # compression -- it is the reduction inside this attention, which splits
+    # differently once the concatenated key set gets large enough.
+    #
+    # DEFAULT OFF, and the reason is a measured trade rather than a preference.
+    #
+    # Greedy decoding here is not reproducible at long context: at 32k the same
+    # config produces a small set of recurring outputs across runs, while 16k is
+    # stable. The cause is this SDPA's reduction, which splits differently once
+    # the concatenated key set is large (~33k rows at 32k against ~15k at 16k).
+    # Compression is NOT involved -- post-prefill state is byte-identical run to
+    # run, and DKV_ASYNC_SVD=0, tiering off and a fixed cuBLAS workspace all fail
+    # to fix it.
+    #
+    # Only SDPBackend.MATH actually fixes it, and it costs ~8% of decode
+    # (17.17 -> 15.79 tok/s on Qwen3.5-2B at 32k, interleaved arms) because it
+    # materialises the score matrix. EFFICIENT_ATTENTION was tried and is NOT
+    # deterministic -- 6 of 8 runs agreed, which looked clean at three runs and
+    # was not. Do not re-try it on a small sample.
+    #
+    # It is OFF by default because at 32k the CUDA-graph path declines (routing
+    # is selective there), so the 8% would be paid with nothing to offset it --
+    # a straight regression for long-context users. At 16k determinism is not
+    # needed anyway, since that regime is already reproducible.
+    #
+    # SET DKV_DETERMINISTIC=1 FOR ANY RUN YOU WILL COMPARE. Roughly fifteen 32k
+    # md5 comparisons earlier in this work were made without it and were not
+    # measuring what they appeared to; that is what colab/graph_verify.py and
+    # every A/B should turn on.
+    _det = os.environ.get("DKV_DETERMINISTIC", "0") == "1"
 
     # A boolean mask rather than a float one built by masked_fill_ on a fresh
     # zeros tensor: SDPA takes bool directly (True = attend), so this is one
@@ -457,6 +524,19 @@ def attend_with_remat(
                   f"top_row={_top} top_share={float(_row_w[_top]):.3e} "
                   f"dense_rows={dense_len}", flush=True)
 
+    if _det:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        # DKV_DET_BACKEND picks WHICH deterministic backend. MATH is certainly
+        # deterministic but materialises the score matrix; EFFICIENT may also be
+        # deterministic in forward and is much cheaper. Measured, not assumed --
+        # see the determinism sweep in the commit that introduced this.
+        _bk = {"math": SDPBackend.MATH,
+               "efficient": SDPBackend.EFFICIENT_ATTENTION,
+               "flash": SDPBackend.FLASH_ATTENTION}.get(
+                   os.environ.get("DKV_DET_BACKEND", "math"), SDPBackend.MATH)
+        with sdpa_kernel(_bk):
+            return torch.nn.functional.scaled_dot_product_attention(
+                q, K_all, V_all, attn_mask=attn_mask)
     return torch.nn.functional.scaled_dot_product_attention(
         q, K_all, V_all, attn_mask=attn_mask)                    # [1, H_q, 1, D]
 

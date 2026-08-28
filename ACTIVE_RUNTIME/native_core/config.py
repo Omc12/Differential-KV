@@ -67,10 +67,42 @@ class DKVConfig:
             # WAYS. So the residual budget is not what limits `low` -- 40 stays,
             # and it is now measured rather than assumed.
             #
+            # CONFIRMED AGAIN on `mid`, at 48 seeds: 21/48 at residual 128 and
+            # 21/48 at 40, on Qwen3.5-2B at 32k. Three independent measurements
+            # now say the exact-token budget is inert on prose, so `mid` is
+            # paying for 128 of them. The untested case is the one this ladder
+            # was written for -- table- and digit-dense documents, where the
+            # residuals carry exactly what the SVD reconstructs worst -- so
+            # lowering `mid` wants that measured first, not just these two.
+            #
             # What DOES limit `low` is its energy target: 0.999 gives a realised
-            # mean per-block rank of 35 against mid's 53, and `low` scores 18/24
-            # where mid scores 20/24 and ultra 47/48. That is the memory-for-
+            # mean per-block rank of 35 against mid's 53. That is the memory-for-
             # fidelity trade the preset exists to make, working as intended.
+            #
+            # EVERY linkbench SCORE IN THIS FILE IS `QMODE=direct`. Write the
+            # mode down next to the number; it was not, and that cost an
+            # afternoon.
+            #
+            # linkbench has two question modes and `chain` (multi-hop) is the
+            # DEFAULT. `direct` names the intermediate entity outright, which
+            # collapses the chain to one lookup over the same context. Re-run in
+            # `chain` every arm roughly halves:
+            #
+            #                   direct   chain
+            #   rotated          40/48   21/48
+            #   unrotated        47/48   23/48
+            #   dense            47/48   23/48
+            #
+            # The DENSE arm halves too, and dense shares no DKV code, so this was
+            # briefly read as an environment shift with a transformers/torch
+            # update as the suspect. It was not: packages are unchanged since
+            # 2026-08-10 (before these were recorded), the transformers 5.14.1
+            # bump predates them by three weeks, and the harness has not been
+            # touched since before them. It was two different benchmarks.
+            #
+            # The ladder's ordering holds in BOTH modes. Run a dense control
+            # alongside every time -- it is what distinguished "DKV regressed"
+            # from "these are different tasks".
             self.max_residual_tokens = 40
             # Spectral energy a block's low-rank form must retain, and the rank
             # ceiling that serves it. This -- not `rank` -- is what actually sets
@@ -110,6 +142,20 @@ class DKVConfig:
             # record, MLX default) for table/factual-dense docs, accepting the
             # larger pool.  See the "mid" branch for the ladder rationale.
             self.max_residual_tokens = 128
+            # UNROTATED too, from 2026-08-17. `high` is the MAX-FIDELITY rung, and
+            # it made no sense for it to be the one preset that still lost 42% of
+            # exact digit recall -- the "table/factual-dense docs" this branch is
+            # written for are precisely the content the rotated pool damages, and
+            # its bigger rank and residual ceiling do not recover any of it
+            # (measured: residual 40 vs 128 is 14/24 either way while unrotated is
+            # 24/24). A fidelity preset that is beaten by the default on the
+            # metric it exists for is a mis-labelled preset.
+            #
+            # This leaves `low` as the only rotated preset, which is the right
+            # shape: rotated is now a SPEED choice, not a fidelity one, so it
+            # belongs on the memory/speed rung and on the DKV_ROTATED_POOL=1
+            # escape hatch rather than scattered across the ladder.
+            self.rotated_pool = False
             # Quality end: keep more of the spectrum. The supporting note here
             # used to be that DKV_RANK_BOOST=auto and DKV_REMAT_CACHE=0 "both
             # leave synthesis at 30.0"; those are single-seed numbers inside the
@@ -168,7 +214,12 @@ class DKVConfig:
             self.srl_age_penalty = 0.0
             self.kv_quant = "q8_0"
             self.max_active_dense_tokens = 2048
-            self.max_residual_tokens = 128
+            # 128 -> 40, tracking `mid`, which is what this preset is defined as
+            # plus the unrotated pool -- see the `mid` branch for the four
+            # measurements that showed the residual budget inert. Keeping ultra
+            # above mid here would reintroduce exactly the kind of unmeasured
+            # extra that 69393023 removed from this preset.
+            self.max_residual_tokens = 40
             # ENERGY IS THE DIAL. RANK IS A CEILING THAT USUALLY DOES NOT BIND.
             #
             # This block previously claimed the opposite ("rank is the driver,
@@ -256,8 +307,32 @@ class DKVConfig:
             # (realised max at this energy is 205). It is NOT claimed to beat
             # `high` on any benchmark; it is claimed to store more of the
             # spectrum, which is measured and deterministic.
-            self.svd_energy = 0.999999
-            self.rank = 224
+            # `ultra` IS MID PLUS AN UNROTATED POOL, AND NOTHING ELSE.
+            #
+            # It used to also carry rank 224 and svd_energy 0.999999. Both are
+            # removed, because measured against the version without them they
+            # bought nothing and cost a great deal. Qwen3.5-2B at 32k,
+            # interleaved arms:
+            #
+            #     with rank 224 / energy 1e-6    8.16 / 8.23 tok/s, 9.22 GB
+            #     mid settings + unrotated pool 10.05 / 10.07 tok/s, 6.28 GB
+            #
+            # 22% of decode and 2.9 GB of device memory, for NO difference on
+            # anything measurable: linkbench 47/48 either way, needle sweep clean
+            # either way, and synthesis cannot resolve it at all (+-15-point
+            # RSVD-seed band).
+            #
+            # The rank-224 choice came from a sweep later retracted as
+            # randomised-SVD projection noise, and the energy rung is nearly
+            # inert on real prose because the rank ceiling binds there. Both were
+            # carrying cost on evidence that no longer stands.
+            #
+            # What DOES stand is the unrotated pool, on the one accuracy metric
+            # with real power: linkbench at 32k over 48 seeds, 40/48 rotated
+            # against 47/48 unrotated -- exactly dense's 47/48. That single
+            # change is the whole preset.
+            self.svd_energy = 0.9999
+            self.rank = 64
             # Store keys UNROTATED. This is the one change in the project that
             # measurably closes a gap to dense on a metric that can actually
             # resolve it -- see the rotated_pool resolution below.
@@ -325,7 +400,79 @@ class DKVConfig:
             #     3.3x (fixed in KVRuntimeManager).
             # Neither was a reason to keep 64 -- both were bugs 64 happened to
             # hide. See handoff §9u.
-            self.max_residual_tokens = 128
+            #
+            # LOWERED 128 -> 40 (2026-08-17). Measured inert FOUR times, the last
+            # on the content this dial was designed for:
+            #
+            #   linkbench @32k, 24 seeds, `low`, 40 vs 128      18/24 both
+            #   linkbench @32k, 48 seeds, `mid`, 40 vs 128      21/48 both
+            #   prose synthesis @13.4k,          40 vs 128      unchanged
+            #   digit-table @32k, 24 seeds, `mid`, 40 vs 128    14/24 both
+            #
+            # The first three were all PROSE, and prose is not what residuals are
+            # for -- a low-rank approximation of flowing text is a good one, so
+            # the dial was only ever measured where it could not matter.
+            # colab/tablebench_cuda.py tests the opposite (a ledger of unrelated
+            # 4-digit codes, near full-rank blocks, exact-match scored) and 40
+            # and 128 score identically there too.
+            #
+            # The pool allocates these slots UNIFORMLY on every block, so this is
+            # a saving on every block in the session (13.4k A/B on record: pool
+            # 2.8 GB -> 1.5 GB) for no measured quality cost.
+            #
+            # Diverges from MLX's flat 128 deliberately; `high` keeps 128.
+            self.max_residual_tokens = 40
+            # `mid` KEEPS ROTATED KEYS. Decided 2026-08-17 with both halves of
+            # the trade finally measured, after trying the other way and
+            # reverting it.
+            #
+            # The unrotated pool is the only change that has ever moved accuracy
+            # in this project, and it reaches dense EXACTLY on both metrics with
+            # the power to resolve anything, Qwen3.5-2B at 32k:
+            #
+            #                       rotated   UNROTATED   dense
+            #   digit-table  24 sd    14/24     24/24     24/24
+            #   linkbench    48 sd    21/48     23/48     23/48
+            #
+            # The cost USED to be 43% / 137%, and most of it turned out to be a
+            # bug rather than a price: _remat_attend declined outright on an
+            # unrotated pool, which disabled the remat cache for the whole
+            # session. Rotating the dense window there instead (see that site)
+            # cut it to:
+            #
+            #   Qwen3.5-2B   ( 6 of 24 attended)  38.63 -> 43.02 ms/tok   +11.5%
+            #                                     CI [+2.643, +6.217]
+            #   Qwen2.5-1.5B (28 of 28 attended)  51.28 -> 65.10 ms/tok   +26.5%
+            #                                     CI [+9.360, +17.865]
+            #
+            # What remains IS the rotation, and it still scales with attended-
+            # layer count because it is applied at read on every attended layer.
+            # 11-27% is a real price but no longer a disqualifying one, so
+            # whether `mid` should take it is now a live question rather than a
+            # settled no -- revisit with a decode-throughput target in hand.
+            #
+            # DECIDED 2026-08-17, on the post-fix numbers: `mid` TAKES IT.
+            #
+            # This was declined once, at 43%/137%, and that decline was right for
+            # those numbers. It is not right for 11%/27%. What changed is that
+            # most of the old cost was _remat_attend refusing to serve an
+            # unrotated pool at all rather than the rotation itself; rotating the
+            # dense window there fixed it.
+            #
+            # The trade `mid` now makes: ~11% of decode on a hybrid model, ~27%
+            # on a dense-attention one, for EXACT dense parity on both metrics
+            # that can resolve anything -- digit-table 24/24 against dense's
+            # 24/24 where rotated scores 14/24, and linkbench 23/48 against
+            # dense's 23/48. A 42% loss of exact digit recall is not an exotic
+            # failure: it is invoices, logs, IDs, any table.
+            #
+            # `low` and `high` stay rotated, so a rotated pool is still one flag
+            # or one preset away for anyone whose decode budget cannot take it:
+            # DKV_ROTATED_POOL=1, or --preset low / high.
+            #
+            # `ultra` is now `mid` in every respect. It is kept because it is a
+            # documented name people have in scripts, not because it differs.
+            self.rotated_pool = False
 
         # 2. Individual options overrides (dict or env variables)
         self.decode_cache_enabled = self._get_bool(
@@ -416,6 +563,86 @@ class DKVConfig:
         self.max_residual_tokens = self._get_int(
             "max_residual_tokens", "DKV_MAX_RESIDUAL_TOKENS", self.max_residual_tokens, config_dict,
             alias_env="DKV_MAX_RESIDUAL",   # MLX's name for the same knob
+        )
+        self.residual_quant = self._get_str(
+            "residual_quant", "DKV_RESIDUAL_QUANT", "int4", config_dict
+        )
+        self.residual_quant_group_size = self._get_int(
+            "residual_quant_group_size", "DKV_RESIDUAL_QUANT_GROUP_SIZE", 64, config_dict
+        )
+        self.residual_quant_bits = self._get_int(
+            "residual_quant_bits", "DKV_RESIDUAL_QUANT_BITS", 4, config_dict
+        )
+        self.rarity_capture = self._get_bool(
+            "rarity_capture", "DKV_RARITY_CAPTURE", True, config_dict
+        )
+        self.rarity_weight = self._get_float(
+            "rarity_weight", "DKV_RARITY_WEIGHT", 1.5, config_dict
+        )
+        self.rarity_min_idf = self._get_float(
+            "rarity_min_idf", "DKV_RARITY_MIN_IDF", 2.0, config_dict
+        )
+        self.boost_digits = self._get_float(
+            "boost_digits", "DKV_BOOST_DIGITS", 20.0, config_dict
+        )
+        self.boost_owner = self._get_float(
+            "boost_owner", "DKV_BOOST_OWNER", 14.6, config_dict
+        )
+        self.boost_rare = self._get_float(
+            "boost_rare", "DKV_BOOST_RARE", 7.3, config_dict
+        )
+
+        # ── Shared low-rank bases ────────────────────────────────────────────
+        # Blocks whose delta subspaces agree read ONE basis row instead of each
+        # storing its own V.  V is 39% of a pool slot and is the item adjacent
+        # blocks of a document most nearly agree on, so at frac 0.50 this is
+        # 91.4 -> 69.8 MB of pool (-23.6%) with retained delta energy 0.969 and
+        # ZERO forced joins -- every merge voluntary and above threshold.
+        # `_bytes_per_block` amortises V by the same fraction, so the budget
+        # holds proportionally MORE blocks rather than the same context in less
+        # memory.
+        #
+        # OFF IN EVERY PRESET, and the obvious guess is the one that is wrong.
+        #
+        # `low` is the memory-priority preset, so it looks like the natural home
+        # -- it is not, and measurably so. `low` sets kv_quant="q4_0", and 4-bit
+        # KV quantisation destroys the subspace agreement this depends on. Same
+        # document, same frac 0.50, same 756 written blocks:
+        #
+        #     preset  kv_quant   groups     joined  forced  mean_kept
+        #     mid     f16        293/462       463       0      0.969
+        #     low     q4_0       462/462 FULL    0     294      0.685
+        #
+        # On `low` NO TWO BLOCKS ever clear the join threshold. The store fills
+        # with founders, everything after is FORCE-joined, and the feature stops
+        # being opportunistic dedup and becomes lossy V-compression at 31.5%
+        # delta-energy loss. The VRAM number is identical either way (69.8 MB)
+        # because the saving comes from allocating fewer basis ROWS, not from
+        # successful grouping -- which is exactly why this failure is invisible
+        # if you only watch pool MB.
+        #
+        # `high` is the max-fidelity rung; spending reconstruction accuracy
+        # there contradicts what the preset means.
+        #
+        # `mid` is where the trade is genuinely good -- 2.58x sharing, 463
+        # voluntary joins, ZERO forced, kept 0.969 -- but it is also the
+        # default, so enabling it there IS a default change and the accuracy
+        # evidence does not carry one. First-step logit fidelity vs a dense
+        # control (colab/logit_fidelity.py, n=5) shows no measurable harm, but
+        # the ordering is not monotone in frac (0.50 -> KL 8.27, 0.25 -> 9.93,
+        # 0.125 -> 8.61), which is the signature of noise rather than a fidelity
+        # ordering, and that instrument's own baseline already sits far from
+        # dense here (KL 10.58, dense's top-1 at rank 1255) so it cannot resolve
+        # a small change on top.
+        #
+        # So: opt-in, for fp16-KV long-context sessions, via this config key or
+        # DKV_SHARED_BASIS. Not a preset default anywhere until an accuracy
+        # instrument that can actually resolve it says otherwise.
+        self.shared_basis = self._get_bool(
+            "shared_basis", "DKV_SHARED_BASIS", False, config_dict
+        )
+        self.shared_basis_frac = self._get_float(
+            "shared_basis_frac", "DKV_SHARED_BASIS_FRAC", 0.50, config_dict
         )
 
         # Residual quantization dials (Production-Grade INT4 / INT8 Residual Buffers)
@@ -634,6 +861,28 @@ class DKVConfig:
         #     behalf of users who are not doing distractor-heavy retrieval;
         #   * the gain is specific to CONFUSABLE content. Ordinary needle recall
         #     is 9/9 either way on both models, so nothing is lost by default;
+        #     ── UPDATE 2026-08-17: "specific" is NARROWER THAN THE TRUTH. The
+        #     gain also covers EXACT DIGIT RECALL, which is not an exotic case --
+        #     invoices, logs, ledgers, IDs, any table. colab/tablebench_cuda.py,
+        #     Qwen3.5-2B at 32k, 24 seeds, asking for one 4-digit amount by its
+        #     code out of 60 scattered ledger rows:
+        #
+        #         dense                     24/24
+        #         ultra   (unrotated)       24/24   <- exact parity again
+        #         mid     (rotated)         14/24
+        #
+        #     So rotation costs 42% of exact digit recall, and the unrotated pool
+        #     recovers ALL of it. That is now the SECOND metric on which
+        #     unrotated == dense exactly and rotated sits well below.
+        #
+        #     The DECISION below is unchanged, because the ~24% decode and
+        #     +1.1 GB are unchanged and this project's stated priorities are
+        #     throughput and VRAM. What changes is the ADVICE: recommend `ultra`
+        #     for any digit-, code- or table-heavy workload, not just for
+        #     distractor-heavy retrieval. Also worth knowing that on this
+        #     benchmark NOTHING ELSE helped -- residual budget 40 vs 128 and
+        #     attend-every-block are both 14/24, so the rotation is not one
+        #     contributor among several, it is the whole gap;
         #   * `ultra` exists precisely to trade speed and memory for quality and
         #     already takes it.
         # Revisit if decode stops being host-bound (~39% GPU-idle today): the
