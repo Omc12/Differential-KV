@@ -16,6 +16,17 @@ class DKVConfig:
         import sys
         is_macos = (sys.platform == "darwin")
 
+        # Base defaults for residual quantization & rarity selection
+        self.residual_quant = "none"
+        self.residual_quant_group_size = 64
+        self.residual_quant_bits = 4
+        self.rarity_capture = True
+        self.rarity_weight = 1.5
+        self.rarity_min_idf = 2.0
+        self.boost_digits = 20.0
+        self.boost_owner = 14.6
+        self.boost_rare = 7.3
+
         # Apply preset defaults
         # NOTE on CUDA prefill_chunk_size: ingest_chunk creates full blocks of exactly
         # (1 + micro_block_size) tokens — 1 anchor + micro_block_size active keys.
@@ -406,6 +417,50 @@ class DKVConfig:
             "max_residual_tokens", "DKV_MAX_RESIDUAL_TOKENS", self.max_residual_tokens, config_dict,
             alias_env="DKV_MAX_RESIDUAL",   # MLX's name for the same knob
         )
+
+        # Residual quantization dials (Production-Grade INT4 / INT8 Residual Buffers)
+        # Default is "none" (safe production default per spec). Opt-in to "int4" or "int8".
+        self.residual_quant = self._get_str(
+            "residual_quant", "DKV_RESIDUAL_QUANT", self.residual_quant, config_dict
+        ).lower()
+        self.residual_quant_group_size = self._get_int(
+            "residual_quant_group_size", "DKV_RESIDUAL_QUANT_GROUP_SIZE",
+            self.residual_quant_group_size, config_dict
+        )
+        self.residual_quant_bits = self._get_int(
+            "residual_quant_bits", "DKV_RESIDUAL_QUANT_BITS",
+            self.residual_quant_bits, config_dict
+        )
+
+        # Content-Aware / Rarity-Aware Residual Selection dials
+        self.rarity_capture = self._get_bool(
+            "rarity_capture", "DKV_RARITY_CAPTURE",
+            self.rarity_capture, config_dict,
+            alias_env="DKV_RESIDUAL_RARITY_CAPTURE"
+        )
+        self.rarity_weight = self._get_float(
+            "rarity_weight", "DKV_RARITY_WEIGHT",
+            self.rarity_weight, config_dict,
+            alias_env="DKV_RESIDUAL_RARITY_WEIGHT"
+        )
+        self.rarity_min_idf = self._get_float(
+            "rarity_min_idf", "DKV_RARITY_MIN_IDF",
+            self.rarity_min_idf, config_dict,
+            alias_env="DKV_RESIDUAL_RARITY_MIN_IDF"
+        )
+        self.boost_digits = self._get_float(
+            "boost_digits", "DKV_BOOST_DIGITS",
+            self.boost_digits, config_dict
+        )
+        self.boost_owner = self._get_float(
+            "boost_owner", "DKV_BOOST_OWNER",
+            self.boost_owner, config_dict
+        )
+        self.boost_rare = self._get_float(
+            "boost_rare", "DKV_BOOST_RARE",
+            self.boost_rare, config_dict
+        )
+
 
         # ── CUDA-specific performance flags ──────────────────────────────────
         # These have no effect on MPS/CPU; they are documented here so that

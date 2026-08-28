@@ -1632,10 +1632,12 @@ def apply_dkv_attention_patch(model, kv_manager):
 
                     # Gather residuals
                     res_K_pos = pool.residual_K_positions[pool_indices_t]
-                    res_K_val_raw = pool.residual_K_values[pool_indices_t].to(q.dtype)
+                    _k_res = pool.get_residual_k(pool_indices_t) if hasattr(pool, "get_residual_k") else pool.residual_K_values[pool_indices_t]
+                    res_K_val_raw = _k_res.to(q.dtype)
                     res_K_val = repeat_kv(res_K_val_raw.permute(0, 2, 1, 3), num_key_value_groups).permute(0, 2, 1, 3)
                     res_V_pos = pool.residual_V_positions[pool_indices_t]
-                    res_V_val_raw = pool.residual_V_values[pool_indices_t].to(q.dtype)
+                    _v_res = pool.get_residual_v(pool_indices_t) if hasattr(pool, "get_residual_v") else pool.residual_V_values[pool_indices_t]
+                    res_V_val_raw = _v_res.to(q.dtype)
                     res_V_val = repeat_kv(res_V_val_raw.permute(0, 2, 1, 3), num_key_value_groups).permute(0, 2, 1, 3)
 
                     # GQA repeat-expansion (zero-copy expand → contiguous only if needed)

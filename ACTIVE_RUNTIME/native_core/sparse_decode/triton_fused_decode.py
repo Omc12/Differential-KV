@@ -1818,15 +1818,23 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     g["anchors_K"] = anchors_K
     g["V_K"]       = V_K
 
-    res_k   = getattr(base_pool, "residual_K_values",    None)
-    res_v   = getattr(base_pool, "residual_V_values",    None)
     res_pos = getattr(base_pool, "residual_K_positions", None)
     res_pos_v = getattr(base_pool, "residual_V_positions", None)
-    g["has_res"] = (res_k is not None and res_v is not None and
-                    res_pos is not None and res_pos_v is not None)
+    has_res_pool = (
+        (getattr(base_pool, "comp_res_k_q", None) is not None) or
+        (getattr(base_pool, "_residual_K_values", None) is not None) or
+        (getattr(base_pool, "residual_K_values", None) is not None)
+    )
+    g["has_res"] = bool(has_res_pool and res_pos is not None and res_pos_v is not None)
     if g["has_res"]:
-        res_k_g = res_k[indices]                        # [N, MAX_RES, H_kv, D]
+        if hasattr(base_pool, "get_residual_k"):
+            res_k_g = base_pool.get_residual_k(indices)
+            res_v_g = base_pool.get_residual_v(indices)
+        else:
+            res_k_g = base_pool.residual_K_values[indices]
+            res_v_g = base_pool.residual_V_values[indices]
         res_pos_g = res_pos[indices]                    # [N, MAX_RES] within-block offsets (-1 padded)
+
         if do_rot:
             # By default the residual K is rotated at the block ANCHOR position
             # (like V_K) — the PTA approximation. That scrambles the high-frequency
@@ -1894,7 +1902,7 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
                 # (reference rotates res_val_K identically). res_v is never rotated.
                 res_k_g = _partial_rope_apply(res_k_g, cos_anc, sin_anc)
         g["res_k"]     = res_k_g
-        g["res_v"]     = res_v[indices]
+        g["res_v"]     = res_v_g
         g["res_pos"]   = res_pos_g
         g["res_pos_v"] = res_pos_v[indices]
         g["res_n"]     = (g["res_pos"] >= 0).sum(dim=-1).to(torch.int32)

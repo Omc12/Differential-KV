@@ -132,6 +132,27 @@ class NativeBlockPool:
             _force_legacy == "1" if _force_legacy is not None
             else not (_is_cuda_dev and _gpu_compress))
 
+        # Residual quantization configuration (Production-Grade INT4/INT8 Residual Buffers)
+        # Default is "none" per specification; opt-in via DKV_RESIDUAL_QUANT
+        self.residual_quant = _os.environ.get("DKV_RESIDUAL_QUANT", "none").lower()
+        try:
+            self.residual_quant_group_size = int(_os.environ.get("DKV_RESIDUAL_QUANT_GROUP_SIZE", "64"))
+        except ValueError:
+            self.residual_quant_group_size = 64
+        try:
+            self.residual_quant_bits = int(_os.environ.get("DKV_RESIDUAL_QUANT_BITS", "4"))
+        except ValueError:
+            self.residual_quant_bits = 4
+
+        if self.residual_quant in ("int4", "int8"):
+            _bits = self.residual_quant_bits
+            _gs = self.residual_quant_group_size
+            _pw = (head_dim * _bits + 31) // 32
+            _ng = head_dim // _gs
+            _res_bytes = 2 * self.max_residual_tokens * num_kv_heads * (_pw * 4 + _ng * 4)
+        else:
+            _res_bytes = 2 * self.max_residual_tokens * num_kv_heads * head_dim * 2
+
         # Bytes per block — used for n_blocks computation in ensure_allocated
         self._bytes_per_block = (
             max_seq_len * rank * 1 +              # U  (int8)
@@ -140,9 +161,9 @@ class NativeBlockPool:
             6 + 2 +                               # scales (2B) + seq_lens (4B) + U_scale (2B)
             self.max_residual_tokens * 2 +        # residual_K_positions (2B, int16)
             self.max_residual_tokens * 2 +        # residual_V_positions (2B, int16)
-            self.max_residual_tokens * num_kv_heads * head_dim * 2 +  # residual_K_values (fp16)
-            self.max_residual_tokens * num_kv_heads * head_dim * 2    # residual_V_values (fp16)
+            _res_bytes
         )
+
 
         # Default token hint used as fallback when ensure_allocated is called
         # without an explicit context length (e.g. from _grow_pool before first session).
@@ -291,9 +312,28 @@ class NativeBlockPool:
         self.desc       = torch.zeros((n_blocks, _SRL_DESC_DIM), device=self.device, dtype=torch.float16)
 
         self.residual_K_positions = torch.full((n_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
-        self.residual_K_values = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
         self.residual_V_positions = torch.full((n_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
-        self.residual_V_values = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+
+        if self.residual_quant in ("int4", "int8"):
+            bits = self.residual_quant_bits
+            group_size = self.residual_quant_group_size
+            packed_width = (self.head_dim * bits + 31) // 32
+            num_groups = self.head_dim // group_size
+            self.comp_res_k_q = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, packed_width), device=self.device, dtype=torch.int32)
+            self.comp_res_v_q = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, packed_width), device=self.device, dtype=torch.int32)
+            self.comp_res_k_s = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
+            self.comp_res_k_b = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
+            self.comp_res_v_s = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
+            self.comp_res_v_b = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
+            self._residual_K_values = None
+            self._residual_V_values = None
+        else:
+            self.comp_res_k_q = None
+            self.comp_res_v_q = None
+            self.comp_res_k_s = self.comp_res_k_b = None
+            self.comp_res_v_s = self.comp_res_v_b = None
+            self._residual_K_values = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+            self._residual_V_values = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
 
         # Fact Anchors (Solution 3) — CPU-compress path only; None on the CUDA
         # GPU path so the decode kernel gets HAS_FACT=False instead of looping
@@ -320,11 +360,93 @@ class NativeBlockPool:
         if self.W_proj is not None and self.W_proj.device != torch.device("cpu"):
             pass  # W_proj is a [DESC_DIM, head_dim] matrix — shape is independent of n_blocks
 
+    @property
+    def residual_K_values(self):
+        return self.get_residual_k()
+
+    @residual_K_values.setter
+    def residual_K_values(self, val):
+        self._residual_K_values = val
+
+    @property
+    def residual_V_values(self):
+        return self.get_residual_v()
+
+    @residual_V_values.setter
+    def residual_V_values(self, val):
+        self._residual_V_values = val
+
+    def get_residual_k(self, indices=None) -> Optional[torch.Tensor]:
+        """Unified interface for retrieving K residuals for specified block indices."""
+        self._ensure()
+        if self.residual_quant in ("int4", "int8"):
+            if getattr(self, "comp_res_k_q", None) is None:
+                return None
+            if indices is None:
+                q, s, b = self.comp_res_k_q, self.comp_res_k_s, self.comp_res_k_b
+            else:
+                q = self.comp_res_k_q[indices]
+                s = self.comp_res_k_s[indices]
+                b = self.comp_res_k_b[indices]
+            from native_core.compression.residual_quant import dequantize_residuals_group_asymmetric
+            return dequantize_residuals_group_asymmetric(
+                q, s, b,
+                group_size=self.residual_quant_group_size,
+                bits=self.residual_quant_bits,
+                target_dtype=self.dtype,
+                head_dim=self.head_dim
+            )
+        else:
+            raw = getattr(self, "_residual_K_values", None)
+            if raw is None:
+                return None
+            if indices is None:
+                return raw
+            return raw[indices]
+
+    def get_residual_v(self, indices=None) -> Optional[torch.Tensor]:
+        """Unified interface for retrieving V residuals for specified block indices."""
+        self._ensure()
+        if self.residual_quant in ("int4", "int8"):
+            if getattr(self, "comp_res_v_q", None) is None:
+                return None
+            if indices is None:
+                q, s, b = self.comp_res_v_q, self.comp_res_v_s, self.comp_res_v_b
+            else:
+                q = self.comp_res_v_q[indices]
+                s = self.comp_res_v_s[indices]
+                b = self.comp_res_v_b[indices]
+            from native_core.compression.residual_quant import dequantize_residuals_group_asymmetric
+            return dequantize_residuals_group_asymmetric(
+                q, s, b,
+                group_size=self.residual_quant_group_size,
+                bits=self.residual_quant_bits,
+                target_dtype=self.dtype,
+                head_dim=self.head_dim
+            )
+        else:
+            raw = getattr(self, "_residual_V_values", None)
+            if raw is None:
+                return None
+            if indices is None:
+                return raw
+            return raw[indices]
+
+    def dequantize_residuals(self, indices, which: str = "both"):
+        """Dequantize residuals for gathered indices on the fly."""
+        if which == "k":
+            return self.get_residual_k(indices)
+        elif which == "v":
+            return self.get_residual_v(indices)
+        return self.get_residual_k(indices), self.get_residual_v(indices)
+
     def _pool_mb(self) -> float:
         """Current pool VRAM usage in megabytes."""
         total = 0
         attrs = ("U", "U_scale", "V_KV", "anchors_KV", "scales", "seq_lens", "desc",
-                 "residual_K_positions", "residual_K_values", "residual_V_positions", "residual_V_values",
+                 "residual_K_positions", "_residual_K_values", "residual_V_positions", "_residual_V_values",
+                 "comp_res_k_q", "comp_res_k_s", "comp_res_k_b",
+                 "comp_res_v_q", "comp_res_v_s", "comp_res_v_b",
                  "U_sem", "U_sem_scale", "U_fact", "n_semantic",
                  "fact_anchors_K", "fact_anchors_V", "fact_anchor_positions")
         for attr in attrs:
@@ -332,6 +454,7 @@ class NativeBlockPool:
             if t is not None:
                 total += t.numel() * t.element_size()
         return total / 1024 ** 2
+
 
     def _ensure(self) -> None:
         """Guard used by all access methods to trigger lazy allocation if needed."""
@@ -388,9 +511,27 @@ class NativeBlockPool:
         new_desc = torch.zeros((new_blocks, _SRL_DESC_DIM), device=self.device, dtype=torch.float16)
 
         new_res_K_pos = torch.full((new_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
-        new_res_K_val = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         new_res_V_pos = torch.full((new_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
-        new_res_V_val = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+
+        if self.residual_quant in ("int4", "int8"):
+            bits = self.residual_quant_bits
+            group_size = self.residual_quant_group_size
+            packed_width = (head_dim * bits + 31) // 32
+            num_groups = head_dim // group_size
+            new_comp_res_k_q = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, packed_width), device=self.device, dtype=torch.int32)
+            new_comp_res_v_q = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, packed_width), device=self.device, dtype=torch.int32)
+            new_comp_res_k_s = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
+            new_comp_res_k_b = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
+            new_comp_res_v_s = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
+            new_comp_res_v_b = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
+            new_res_K_val = None
+            new_res_V_val = None
+        else:
+            new_comp_res_k_q = new_comp_res_v_q = None
+            new_comp_res_k_s = new_comp_res_k_b = None
+            new_comp_res_v_s = new_comp_res_v_b = None
+            new_res_K_val = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+            new_res_V_val = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
 
         new_fact_anc_K = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype) if _legacy else None
         new_fact_anc_V = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype) if _legacy else None
@@ -410,9 +551,17 @@ class NativeBlockPool:
         new_desc[:old_blocks] = self.desc
 
         new_res_K_pos[:old_blocks] = self.residual_K_positions
-        new_res_K_val[:old_blocks] = self.residual_K_values
         new_res_V_pos[:old_blocks] = self.residual_V_positions
-        new_res_V_val[:old_blocks] = self.residual_V_values
+        if self.residual_quant in ("int4", "int8"):
+            new_comp_res_k_q[:old_blocks] = self.comp_res_k_q
+            new_comp_res_v_q[:old_blocks] = self.comp_res_v_q
+            new_comp_res_k_s[:old_blocks] = self.comp_res_k_s
+            new_comp_res_k_b[:old_blocks] = self.comp_res_k_b
+            new_comp_res_v_s[:old_blocks] = self.comp_res_v_s
+            new_comp_res_v_b[:old_blocks] = self.comp_res_v_b
+        else:
+            new_res_K_val[:old_blocks] = self._residual_K_values
+            new_res_V_val[:old_blocks] = self._residual_V_values
 
         if _legacy:
             new_fact_anc_K[:old_blocks] = self.fact_anchors_K
@@ -421,7 +570,10 @@ class NativeBlockPool:
 
         # Explicitly delete old tensors so the allocator can reclaim them
         del (self.U, self.U_scale, self.V_KV, self.anchors_KV, self.scales, self.seq_lens, self.desc,
-             self.residual_K_positions, self.residual_K_values, self.residual_V_positions, self.residual_V_values,
+             self.residual_K_positions, self.residual_V_positions,
+             self._residual_K_values, self._residual_V_values,
+             self.comp_res_k_q, self.comp_res_k_s, self.comp_res_k_b,
+             self.comp_res_v_q, self.comp_res_v_s, self.comp_res_v_b,
              self.U_sem, self.U_sem_scale, self.U_fact, self.n_semantic,
              self.fact_anchors_K, self.fact_anchors_V, self.fact_anchor_positions)
 
@@ -438,9 +590,15 @@ class NativeBlockPool:
         self.desc = new_desc
 
         self.residual_K_positions = new_res_K_pos
-        self.residual_K_values = new_res_K_val
         self.residual_V_positions = new_res_V_pos
-        self.residual_V_values = new_res_V_val
+        self._residual_K_values = new_res_K_val
+        self._residual_V_values = new_res_V_val
+        self.comp_res_k_q = new_comp_res_k_q
+        self.comp_res_v_q = new_comp_res_v_q
+        self.comp_res_k_s = new_comp_res_k_s
+        self.comp_res_k_b = new_comp_res_k_b
+        self.comp_res_v_s = new_comp_res_v_s
+        self.comp_res_v_b = new_comp_res_v_b
 
         self.fact_anchors_K = new_fact_anc_K
         self.fact_anchors_V = new_fact_anc_V
@@ -647,14 +805,32 @@ class NativeBlockPool:
 
         # Copy residuals
         self.residual_K_positions[pool_idx] = -1
-        self.residual_K_values[pool_idx] = 0.0
         self.residual_V_positions[pool_idx] = -1
-        self.residual_V_values[pool_idx] = 0.0
+        if self.residual_quant in ("int4", "int8"):
+            self.comp_res_k_q[pool_idx] = 0
+            self.comp_res_k_s[pool_idx] = 0.0
+            self.comp_res_k_b[pool_idx] = 0.0
+            self.comp_res_v_q[pool_idx] = 0
+            self.comp_res_v_s[pool_idx] = 0.0
+            self.comp_res_v_b[pool_idx] = 0.0
+        else:
+            self._residual_K_values[pool_idx] = 0.0
+            self._residual_V_values[pool_idx] = 0.0
 
         if residual_K_positions is not None and residual_K_positions.numel() > 0:
             n_res_k = min(residual_K_positions.numel(), self.max_residual_tokens)
             self.residual_K_positions[pool_idx, :n_res_k] = residual_K_positions[:n_res_k].to(torch.int16)
-            self.residual_K_values[pool_idx, :n_res_k] = residual_K_values[:n_res_k].view(n_res_k, num_kv, h_dim).to(self.dtype)
+            k_val = residual_K_values[:n_res_k].view(n_res_k, num_kv, h_dim).to(self.dtype)
+            if self.residual_quant in ("int4", "int8"):
+                from native_core.compression.residual_quant import quantize_residuals_group_asymmetric
+                q_k, s_k, b_k = quantize_residuals_group_asymmetric(
+                    k_val, group_size=self.residual_quant_group_size, bits=self.residual_quant_bits
+                )
+                self.comp_res_k_q[pool_idx, :n_res_k] = q_k
+                self.comp_res_k_s[pool_idx, :n_res_k] = s_k
+                self.comp_res_k_b[pool_idx, :n_res_k] = b_k
+            else:
+                self._residual_K_values[pool_idx, :n_res_k] = k_val
             # B1: update the cached flag — any valid residual position means True.
             # This is a cheap CPU bool check (residual_K_positions is a small int16 tensor).
             if not self.has_any_residual:
@@ -663,7 +839,18 @@ class NativeBlockPool:
         if residual_V_positions is not None and residual_V_positions.numel() > 0:
             n_res_v = min(residual_V_positions.numel(), self.max_residual_tokens)
             self.residual_V_positions[pool_idx, :n_res_v] = residual_V_positions[:n_res_v].to(torch.int16)
-            self.residual_V_values[pool_idx, :n_res_v] = residual_V_values[:n_res_v].view(n_res_v, num_kv, h_dim).to(self.dtype)
+            v_val = residual_V_values[:n_res_v].view(n_res_v, num_kv, h_dim).to(self.dtype)
+            if self.residual_quant in ("int4", "int8"):
+                from native_core.compression.residual_quant import quantize_residuals_group_asymmetric
+                q_v, s_v, b_v = quantize_residuals_group_asymmetric(
+                    v_val, group_size=self.residual_quant_group_size, bits=self.residual_quant_bits
+                )
+                self.comp_res_v_q[pool_idx, :n_res_v] = q_v
+                self.comp_res_v_s[pool_idx, :n_res_v] = s_v
+                self.comp_res_v_b[pool_idx, :n_res_v] = b_v
+            else:
+                self._residual_V_values[pool_idx, :n_res_v] = v_val
+
 
         # Copy stratified SVD components (Solution 2).  Skipped entirely when the
         # slots were never allocated (CUDA GPU-compress path — see
@@ -827,19 +1014,50 @@ class NativeBlockPool:
 
         # ── residuals (padded [N, max_res]; slots zeroed first) ──
         self.residual_K_positions[pidx] = -1
-        self.residual_K_values[pidx] = 0.0
         self.residual_V_positions[pidx] = -1
-        self.residual_V_values[pidx] = 0.0
+        if self.residual_quant in ("int4", "int8"):
+            self.comp_res_k_q[pidx] = 0
+            self.comp_res_k_s[pidx] = 0.0
+            self.comp_res_k_b[pidx] = 0.0
+            self.comp_res_v_q[pidx] = 0
+            self.comp_res_v_s[pidx] = 0.0
+            self.comp_res_v_b[pidx] = 0.0
+        else:
+            self._residual_K_values[pidx] = 0.0
+            self._residual_V_values[pidx] = 0.0
+
         if res_K_positions is not None and res_K_positions.numel() > 0:
             mr = min(res_K_positions.shape[1], self.max_residual_tokens)
             self.residual_K_positions[pidx, :mr] = res_K_positions[:, :mr].to(device=dev, dtype=torch.int16)
-            self.residual_K_values[pidx, :mr] = res_K_values[:, :mr].to(device=dev, dtype=self.dtype)
+            k_val = res_K_values[:, :mr].to(device=dev, dtype=self.dtype)
+            if self.residual_quant in ("int4", "int8"):
+                from native_core.compression.residual_quant import quantize_residuals_group_asymmetric
+                q_k, s_k, b_k = quantize_residuals_group_asymmetric(
+                    k_val, group_size=self.residual_quant_group_size, bits=self.residual_quant_bits
+                )
+                self.comp_res_k_q[pidx, :mr] = q_k
+                self.comp_res_k_s[pidx, :mr] = s_k
+                self.comp_res_k_b[pidx, :mr] = b_k
+            else:
+                self._residual_K_values[pidx, :mr] = k_val
             if not self.has_any_residual:
                 self.has_any_residual = bool((res_K_positions >= 0).any().item())
+
         if res_V_positions is not None and res_V_positions.numel() > 0:
             mr = min(res_V_positions.shape[1], self.max_residual_tokens)
             self.residual_V_positions[pidx, :mr] = res_V_positions[:, :mr].to(device=dev, dtype=torch.int16)
-            self.residual_V_values[pidx, :mr] = res_V_values[:, :mr].to(device=dev, dtype=self.dtype)
+            v_val = res_V_values[:, :mr].to(device=dev, dtype=self.dtype)
+            if self.residual_quant in ("int4", "int8"):
+                from native_core.compression.residual_quant import quantize_residuals_group_asymmetric
+                q_v, s_v, b_v = quantize_residuals_group_asymmetric(
+                    v_val, group_size=self.residual_quant_group_size, bits=self.residual_quant_bits
+                )
+                self.comp_res_v_q[pidx, :mr] = q_v
+                self.comp_res_v_s[pidx, :mr] = s_v
+                self.comp_res_v_b[pidx, :mr] = b_v
+            else:
+                self._residual_V_values[pidx, :mr] = v_val
+
 
         # ── stratified slots: CLEAR, exactly as write_block does ──────────────
         # write_block zeroes U_sem/U_sem_scale/U_fact and SETS n_semantic on every

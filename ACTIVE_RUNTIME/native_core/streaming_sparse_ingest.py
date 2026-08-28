@@ -353,6 +353,8 @@ class StreamingKVBlock:
         if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
             pool = self.pool
             pool_idx = self.pool_idx
+            if hasattr(pool, "get_residual_k"):
+                return pool.get_residual_k(pool_idx)
             return pool.residual_K_values[pool_idx]
         return None
 
@@ -381,6 +383,8 @@ class StreamingKVBlock:
         if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
             pool = self.pool
             pool_idx = self.pool_idx
+            if hasattr(pool, "get_residual_v"):
+                return pool.get_residual_v(pool_idx)
             return pool.residual_V_values[pool_idx]
         return None
 
