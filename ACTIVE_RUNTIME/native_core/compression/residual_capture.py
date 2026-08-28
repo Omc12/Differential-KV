@@ -42,10 +42,10 @@ def _idf_weight(tid, counts, total_tokens):
 
 
 def _compute_idf(tid, counts, total_tokens):
-    """Rarity formula: IDF(t) = ln(1 + N / count(t))"""
+    """Rarity formula: IDF(t) = ln(max(N, 2) / (count(t) + 0.1))"""
     count = counts.get(tid, 1) if counts else 1
-    N = max(total_tokens, 1)
-    return math.log(1.0 + float(N) / max(float(count), 1.0))
+    N = max(total_tokens, 2)
+    return math.log(N / (float(count) + 0.1))
 
 
 

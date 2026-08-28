@@ -1639,7 +1639,7 @@ def _lego_prefill_attend(
     else:
         if R > 0 and manager._lego_router != "minmax":
             R_route = min(manager.route_residuals, R)
-            rk_all = self._fetch_res_k(session, layer_idx, nb=far_nb, r_max=R_route)[sb:far_nb]
+            rk_all = self._fetch_res_k(session, layer_idx, nb=far_nb, r_max=R_route, sb=sb)
             res_n_np = np.asarray(session["comp_res_n"][layer_idx][sb:far_nb], dtype=np.int32)
             rvld = mx.expand_dims(mx.arange(R_route), 0) < mx.expand_dims(
                 mx.minimum(mx.array(res_n_np), R_route), 1)
@@ -2432,16 +2432,16 @@ class MLXKVBlockManager:
                 session["comp_res_v_s"][layer_idx][slice_idx] = sv
                 session["comp_res_v_b"][layer_idx][slice_idx] = bv
 
-    def _fetch_res_k(self, session: Dict, layer_idx: int, sel=None, nb=None, r_max=None) -> mx.array:
+    def _fetch_res_k(self, session: Dict, layer_idx: int, sel=None, nb=None, r_max=None, sb: int = 0) -> mx.array:
         """Fetch and dequantize key residuals on the fly."""
         if session.get("comp_res_k") is not None and session["comp_res_k"][layer_idx] is not None:
             arr = session["comp_res_k"][layer_idx]
             if sel is not None:
                 out = mx.take(arr[:nb] if nb is not None else arr, sel, axis=0)
             elif nb is not None:
-                out = arr[:nb]
+                out = arr[sb:nb]
             else:
-                out = arr
+                out = arr[sb:]
             return out[:, :r_max] if r_max is not None else out
         else:
             gs = self.residual_quant_group_size
@@ -2454,23 +2454,25 @@ class MLXKVBlockManager:
                 s = mx.take(s[:nb] if nb is not None else s, sel, axis=0)
                 b = mx.take(b[:nb] if nb is not None else b, sel, axis=0)
             elif nb is not None:
-                q, s, b = q[:nb], s[:nb], b[:nb]
+                q, s, b = q[sb:nb], s[sb:nb], b[sb:nb]
+            elif sb > 0:
+                q, s, b = q[sb:], s[sb:], b[sb:]
             if r_max is not None:
                 q = q[:, :r_max]
                 s = s[:, :r_max]
                 b = b[:, :r_max]
             return mx.dequantize(q, s, b, group_size=gs, bits=bits)
 
-    def _fetch_res_v(self, session: Dict, layer_idx: int, sel=None, nb=None, r_max=None) -> mx.array:
+    def _fetch_res_v(self, session: Dict, layer_idx: int, sel=None, nb=None, r_max=None, sb: int = 0) -> mx.array:
         """Fetch and dequantize value residuals on the fly."""
         if session.get("comp_res_v") is not None and session["comp_res_v"][layer_idx] is not None:
             arr = session["comp_res_v"][layer_idx]
             if sel is not None:
                 out = mx.take(arr[:nb] if nb is not None else arr, sel, axis=0)
             elif nb is not None:
-                out = arr[:nb]
+                out = arr[sb:nb]
             else:
-                out = arr
+                out = arr[sb:]
             return out[:, :r_max] if r_max is not None else out
         else:
             gs = self.residual_quant_group_size
@@ -2483,7 +2485,9 @@ class MLXKVBlockManager:
                 s = mx.take(s[:nb] if nb is not None else s, sel, axis=0)
                 b = mx.take(b[:nb] if nb is not None else b, sel, axis=0)
             elif nb is not None:
-                q, s, b = q[:nb], s[:nb], b[:nb]
+                q, s, b = q[sb:nb], s[sb:nb], b[sb:nb]
+            elif sb > 0:
+                q, s, b = q[sb:], s[sb:], b[sb:]
             if r_max is not None:
                 q = q[:, :r_max]
                 s = s[:, :r_max]
