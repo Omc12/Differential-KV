@@ -908,6 +908,10 @@ def route_query(
 K_FIXED = int(os.environ.get("DKV_SRL_K_FIXED", "64"))
 
 
+# Set by colab/probe_relevance_dist.py to observe the per-block relevance vector.
+# Production leaves this None. Signature: hook(relevance: Tensor[N], layer_idx).
+_ROUTE_DIST_HOOK = None
+
 # ROUTE TRACE budget: kept=True lines are capped (drops always print).
 _ROUTE_TRACE_KEPT_SHOWN = 0
 _ROUTE_TRACE_TOK = None
@@ -962,9 +966,18 @@ def route_blocks_relevance(
     # give 4096//257 -> 16 (unchanged, and the 16k measurement behind the current
     # default stays valid), while 64-token blocks now give 64 for the same token
     # budget. Falls back to the pool's static default before the first write.
+    #
+    # DIVIDE BY THE PAYLOAD, NOT payload+anchor, AND DO NOT CLAMP TO 16. K is a
+    # routed-TOKEN budget (K * span = 4096). Dividing by _span+1 gave 15 at the
+    # 256-token block, which is the only reason the `max(16, ...)` was here; by
+    # the payload it is 16 directly. The floor was simultaneously clamping every
+    # span ABOVE 256 -- at the now-default micro_block_size=1024 it forced K=16
+    # where the budget asks for 4, routing 16384 tokens instead of 4096. See
+    # kv_runtime_manager.routing_topk_default for the same fix and the MLX
+    # measurement behind it. K_MIN=2 never binds at any span <= 2048.
     _span = int(getattr(pool, "observed_block_span", 0) or 0)
     if _span > 0:
-        _pool_default = max(16, 4096 // max(1, _span + 1))   # +1 for the anchor row
+        _pool_default = max(2, 4096 // _span)
 
     # ── Measured: the default is tuned for retrieval, not for synthesis ──────
     # _pool_default works out to 16 for the usual 256-token block, which is
@@ -1007,7 +1020,12 @@ def route_blocks_relevance(
         # see the name-collision warning near this file's top).
         return block_indices  # routing disabled — attend every block
     
-    k_eff = max(topk, int(topk_frac * N))
+    # CONTEXT-ADAPTIVE K: grow K with the block count so routed coverage does not
+    # thin out as context grows. CEIL, not floor -- with frac=0.3 and N=13, floor
+    # gives 3 and ceil gives 4, and rounding a coverage floor DOWN defeats the
+    # point of asking for one. MLX's _route_k() uses ceil; keep them equal or the
+    # two runtimes route different block counts from the same DKV_TOPK_FRAC.
+    k_eff = max(topk, math.ceil(topk_frac * N))
     if N <= k_eff:
         return block_indices
 
@@ -1297,6 +1315,17 @@ def route_blocks_relevance(
     # relevance has shape [H_kv, gpk, L, N]
     # Max-reduce over L (dim=1) and H (dim=0 after reshape)
     relevance = relevance.reshape(H_kv * gpk, L, N).max(dim=1).values.max(dim=0).values   # [N]
+
+    # Opt-in observer for the per-block score DISTRIBUTION (colab/probe_relevance_dist.py).
+    # Answers "how many blocks would a mass THRESHOLD take here?", which cannot be
+    # read from this function's return value -- that is the already-selected top-K.
+    # None by default: one identity check per route when nobody is looking. The
+    # hook must not mutate `relevance`; its return value is ignored.
+    if _ROUTE_DIST_HOOK is not None:
+        try:
+            _ROUTE_DIST_HOOK(relevance, layer_idx)
+        except Exception:                                        # noqa: BLE001
+            pass
 
     # ── Edge-aware routing propagation (MLX parity) ──────────────────────────
     # MLX applies this to the SAME relevance vector, between scoring and top-K:

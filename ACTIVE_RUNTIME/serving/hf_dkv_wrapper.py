@@ -476,7 +476,12 @@ class PyTorchDKVHFWrapper:
         self.lazy = lazy
         
         self.mode = self.config.get("mode", "fp16")
-        self.block_size = self.config.get("block_size", 256)      # S=256 → 5.2× compression
+        # NOTE: there is deliberately no `self.block_size` here. It existed as a
+        # dead field defaulting to 256 -- assigned, never read -- while the value
+        # that actually reaches the runtime is `self.micro_block_size` (1024,
+        # below, passed to KVRuntimeManager). Anyone grepping this file for the
+        # CUDA block size found the 256 and concluded CUDA ran 256. Do not
+        # reintroduce a second name for this quantity.
         # Rank 32 matches the MLX wrapper (mlx_dkv_wrapper.py:4493) and the
         # paper's config of record.  This path defaulted to 16, which is the
         # exact value already diagnosed as a ~43% needle-recall floor in the

@@ -685,7 +685,17 @@ void DKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req) {
     int head_dim = model_->get_config().n_embd / model_->get_config().n_head;
     int kv_heads = model_->get_config().n_head_kv;
     int desc_dim = 64;
-    int micro_block_size = 256;
+    // 1024, matching main.cpp -- NOT 256. This default had diverged: single-stream
+    // native ran 1024 while every batch-served session silently ran 256, which is
+    // the block size measured at 9/24 on linkbench (16k, 24 seeds, Qwen3.5-2B)
+    // against 24/24 = dense at 1024. Retrieval tracks the NUMBER of blocks the
+    // context is split into, so a batch session was answering distractor-heavy
+    // lookups at a quality the same binary does not use anywhere else.
+    //
+    // Same class as the gateway that forced DKV_MICRO_BLOCK_SIZE=64 and silently
+    // undid main.cpp: a second entry point carrying its own copy of a default.
+    // If this number changes, it changes in main.cpp AND here.
+    int micro_block_size = 1024;
     if (const char* env_mbs = std::getenv("DKV_MICRO_BLOCK_SIZE")) {
         micro_block_size = std::stoi(env_mbs);
     }

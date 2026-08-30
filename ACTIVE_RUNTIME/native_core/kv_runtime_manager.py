@@ -580,7 +580,12 @@ class KVRuntimeManager:
         recon_cache_size:    int   = 64,
         async_compression:   bool  = True,
         streaming_ingest:    bool  = True,
-        micro_block_size:    int   = 256,   # S=256, R=32 → 5.2× compression ratio
+        # 1024, matching hf_dkv_wrapper and native's main.cpp. This signature
+        # default was still 256 -- the value linkbench scores 9/24 on against
+        # 24/24 = dense at 1024 -- so any caller that did not pass one silently
+        # got the bad block size. The production caller passes 1024 explicitly,
+        # which is exactly why this went unnoticed.
+        micro_block_size:    int   = 1024,
         rank:                int   = 8,
         kv_heads:            int   = None,
         serving_mode:        str   = "balanced",
@@ -588,6 +593,15 @@ class KVRuntimeManager:
         config:              dict  = None,
     ):
         from native_core.config import DKVConfig
+        # DKVConfig derives the prefill_chunk_size floor from the block size, but
+        # `micro_block_size` arrives as a KWARG and never appeared in `config`, so
+        # that floor was computed from a hardcoded 256 (257 tokens) while real
+        # block capacity was 1025 -- the guard could not do the job it exists for.
+        # Copy rather than mutate: the caller's dict is its own, and hf_dkv_wrapper
+        # keeps reading `self.config` after handing it over. An explicit
+        # config["micro_block_size"] still wins, preserving existing precedence.
+        config = dict(config or {})
+        config.setdefault("micro_block_size", micro_block_size)
         self.config      = DKVConfig(config)
         # Read before the pool is sized -- dual-scale widens every slot's U rows.
         self.dual_scale  = bool(getattr(self.config, "dual_scale", False))
@@ -927,16 +941,35 @@ class KVRuntimeManager:
         # low-rank reconstruction on every one of those tokens. That is the bulk
         # of the 13.6x decode gap vs dense: the "sparse" path was not sparse.
         #
-        # 4096 // 257 = 15 → clamped to 16, exactly MLX's K.
-        #
         # Same root cause as the max_dense_len bug fixed alongside this: two
         # different consumers both divided by the legacy self.block_size.
         # An explicit DKV_TOPK_BLOCKS still overrides this (see query_router.py).
+        #
+        # DIVIDE BY THE BLOCK'S TOKEN PAYLOAD, AND DO NOT CLAMP TO 16.
+        # K is a routed-TOKEN budget: K * block_size = the context attention sees
+        # per step, held at 4096. This previously divided by max(block, 257) --
+        # block_size PLUS the anchor row -- which gives 4096//257 = 15 at the
+        # 256-token block, and the `max(16, ...)` existed to round that back up to
+        # 16. Dividing by the payload gives 16 at 256 directly, so the floor is
+        # unnecessary there; and the floor was ALSO clamping every block size
+        # above 256, which is where the shipped default now lives:
+        #
+        #     block   budget//block   old max(16,..)   routed tokens (old)
+        #      256         16              16            4096  ok
+        #     1024          4              16           16384  4x over  <- default
+        #
+        # MLX measured the consequence of the 4x overshoot at block 1024 (see
+        # mlx_dkv_wrapper's _default_topk): at 16k the block count is BELOW K, so
+        # the top-K branch does not run at all and the whole context is
+        # materialised. Correcting K there left linkbench at 24/24 = dense while
+        # cutting the decode cache 2.5x. THIS SIDE IS NOT YET MEASURED -- CUDA
+        # validation is what decides whether it ships here.
+        # K_MIN=2 never binds at any block size <= 2048.
         _routing_block_size = max(
             self.micro_block_size if self.streaming_ingest else self.block_size,
-            257,
+            1,
         )
-        self.native_pool.routing_topk_default = max(16, 4096 // _routing_block_size)
+        self.native_pool.routing_topk_default = max(2, 4096 // _routing_block_size)
 
         # ── SRL: Initialize random projection matrix W_proj ──────────────
         # Fixed at construction time — never updated.

@@ -30,8 +30,8 @@ class DKVConfig:
         # Apply preset defaults
         # NOTE on CUDA prefill_chunk_size: ingest_chunk creates full blocks of exactly
         # (1 + micro_block_size) tokens — 1 anchor + micro_block_size active keys.
-        # micro_block_size defaults to 256, so block_capacity = 257.
-        # prefill_chunk_size MUST be >= 2 * block_capacity (= 514) so that at least one
+        # micro_block_size defaults to 1024, so block_capacity = 1025.
+        # prefill_chunk_size MUST accommodate at least one full block so that at least one
         # full block is produced per inner chunk.  On macOS/MPS the chunk size is already
         # small (256) because MLX handles compression differently; on CUDA we need larger
         # chunks or every chunk produces only a partial block and nothing is ever compressed.
@@ -485,8 +485,8 @@ class DKVConfig:
             "prefill_chunk_size", "DKV_PREFILL_CHUNK_SIZE", self.prefill_chunk_size, config_dict
         )
         # Safety guard: prefill_chunk_size must accommodate at least 2 full streaming
-        # blocks (each block = 1 anchor + micro_block_size active tokens = 257 tokens
-        # at the default micro_block_size=256).  If the resolved value is too small,
+        # block (1 anchor + micro_block_size active tokens = 1025 tokens at the
+        # default micro_block_size=1024).  If the resolved value is too small,
         # ingest_chunk produces zero full blocks → all blocks stay ACCUMULATING →
         # dense window overflows at decode → model collapse.  We clamp upward on
         # non-macOS (CUDA) only; on macOS MLX compression runs post-forward so chunks
@@ -503,8 +503,13 @@ class DKVConfig:
             # a multiple of block capacity anyway, and one block per chunk is the
             # measured-best setting for synthesis, not a degenerate case -- two
             # blocks per chunk scores 33.3 against 63.3 (see the `ultra` branch).
+            # KVRuntimeManager now seeds config_dict["micro_block_size"] from its
+            # kwarg, so this reads the REAL block size. It previously could not:
+            # the kwarg never reached config_dict and DKVConfig has no
+            # micro_block_size attribute, so both terms were None and the floor
+            # silently came from the stale literal below.
             _mbs = (config_dict.get("micro_block_size")
-                    or getattr(self, "micro_block_size", None) or 256)
+                    or getattr(self, "micro_block_size", None) or 1024)
             _min_chunk = _mbs + 1
             if self.prefill_chunk_size < _min_chunk:
                 self.prefill_chunk_size = _min_chunk

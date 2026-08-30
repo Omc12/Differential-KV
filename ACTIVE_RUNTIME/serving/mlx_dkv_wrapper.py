@@ -2028,12 +2028,42 @@ class MLXKVBlockManager:
         # a fraction does not reliably retain the needle block at 64k+ (256+ blocks),
         # so dense/all-blocks is preferred there; see COMPRESSED_DECODE_OPTIMIZATION.md.
         # topk_blocks=0 disables routing entirely (attend every block).
-        # Block_size-derived default (parity with CUDA's pool.routing_topk_default):
-        # match the routed-token budget 4096 = 16*256. At MLX's default block_size
-        # =256 this is 16 (unchanged, the validated value); if block_size ever shrinks,
-        # K grows so far-context coverage stays constant. Explicit env still wins.
-        _default_topk = max(16, 4096 // max(1, self.block_size))
+        # K IS A TOKEN BUDGET, NOT A BLOCK COUNT. The quantity that has to stay
+        # constant across block sizes is K * block_size = the number of context
+        # tokens attention actually sees per decode step; 4096 is the validated
+        # value (K=16 at the old block_size=256).
+        #
+        # This used to read `max(16, 4096 // block_size)`, and the floor silently
+        # broke the budget for every block size ABOVE 256:
+        #
+        #     block   4096//block   old max(16,..)   routed tokens (old)
+        #      256        16             16            4096  ok
+        #      512         8             16            8192  2x over
+        #     1024         4             16           16384  4x over  <- the default
+        #
+        # The floor was added for a DIFFERENT reason -- CUDA divides by
+        # block_size+1 (the anchor row), so 4096//257 = 15 and it wanted 16 back.
+        # Dividing by the block's token PAYLOAD gives 16 at 256 directly, so the
+        # floor is not needed for that and stops clamping the large-block case.
+        #
+        # Consequences of the old 4x overshoot at the shipped block_size=1024,
+        # both measured on this Mac (Qwen3.5-2B-4bit, linkbench 16k, 24 seeds):
+        #   * nb at 16k is 13 < K=16, so `nb > k_eff` was FALSE and the top-K
+        #     branch never ran -- DKV was materialising the whole context;
+        #   * the fp32 decode cache is sized by k_eff * block_size, so it held
+        #     377.9 MB against a 48.2 MB compressed store.
+        # At the budget-correct K=4: linkbench 24/24 (unchanged, = dense), decode
+        # cache 377.9 -> 151.1 MB, total session bytes 2.33x -> 1.09x of the dense
+        # KV. K_MIN=2 never binds at any block size <= 2048.
+        _ROUTED_TOKEN_BUDGET = 4096
+        _K_MIN = 2
+        _default_topk = max(_K_MIN, _ROUTED_TOKEN_BUDGET // max(1, self.block_size))
         self.topk_blocks = int(os.environ.get("DKV_TOPK_BLOCKS", str(_default_topk)))
+        # CONTEXT-ADAPTIVE K: k_eff = max(topk_blocks, ceil(topk_frac * nb)), so K
+        # grows with the block count as the context grows and the routed budget
+        # stops being a fixed token count at long context. Default 0.0 = off
+        # (fixed K) until measured -- the block-size fix above is what is
+        # validated. See _route_k(), the single place k_eff is computed.
         self.topk_frac   = float(os.environ.get("DKV_TOPK_FRAC", "0.0"))
         # High-Quality Mode (cross-runtime toggle, mirrors native src/main.cpp):
         #   DKV_HIGH_QUALITY_ROUTING = 1 -> attend ALL compressed blocks at decode
@@ -5073,6 +5103,32 @@ class MLXKVBlockManager:
         while session["dense_lens"][layer_idx] >= self.recency_window + self.block_size:
             self._flush_oldest_block(session, layer_idx)
 
+    def _route_k(self, nb: int) -> int:
+        """Blocks the router may keep for a context currently split into `nb`.
+
+        SINGLE SOURCE OF TRUTH for k_eff. This was computed inline at two decode
+        sites with identical code; identical code in two places is the shape of
+        every silent divergence in this file, and the two sites disagreeing
+        would mean the routed set and the cache that materialises it were sized
+        differently.
+
+        Two axes, both live:
+          * block-adaptive -- `self.topk_blocks` is the routed-TOKEN budget
+            divided by block_size (see __init__), so K falls as blocks widen;
+          * context-adaptive -- `topk_frac` grows K with the block count, so
+            coverage does not thin out as the context gets longer. CEIL, not
+            floor: with frac=0.3 and nb=13, floor gives 3 and ceil gives 4, and
+            rounding a coverage floor DOWN defeats the point of asking for one.
+            CUDA's query_router uses ceil for the same reason -- keep them equal.
+
+        Returns `self.topk_blocks` unchanged when topk_frac is 0 (the default),
+        and 0/negative is passed through untouched: that is the caller's
+        attend-every-block sentinel, not a K.
+        """
+        if self.topk_blocks <= 0 or self.topk_frac <= 0.0:
+            return self.topk_blocks
+        return max(self.topk_blocks, math.ceil(nb * self.topk_frac))
+
     def _execute_decode_cache(self, session, layer_idx, q, dense_k, dense_v, dense_len, scale, gpk):
         """Decompress-and-cache decode (see DKV_DECODE_CACHE). Materialises the routed blocks'
         K/V from the low-rank pool once per interval, caches it, and attends [cached blocks +
@@ -5128,9 +5184,7 @@ class MLXKVBlockManager:
             res_pos = (session["comp_res_pos"][layer_idx][:nb]
                        if session.get("comp_res_pos") is not None else None)
 
-            k_eff = self.topk_blocks
-            if self.topk_blocks > 0 and self.topk_frac > 0.0:
-                k_eff = max(self.topk_blocks, int(nb * self.topk_frac))
+            k_eff = self._route_k(nb)
             if self.topk_blocks > 0 and nb > k_eff:
                 R_route = min(self.route_residuals, self.max_residual)
                 rvld = mx.expand_dims(mx.arange(R_route), 0) < mx.expand_dims(mx.minimum(res_n, R_route), 1)
@@ -5345,9 +5399,7 @@ class MLXKVBlockManager:
         # so cost scales with K rather than total context. `topk_sel` (an mx.array of
         # selected block ids, kept lazy) carries the selection to the residual gather
         # below; None = attend all blocks.
-        k_eff = self.topk_blocks
-        if self.topk_blocks > 0 and self.topk_frac > 0.0:
-            k_eff = max(self.topk_blocks, int(nb * self.topk_frac))
+        k_eff = self._route_k(nb)
         # High-Quality Mode forces attend-all (no top-K prune) — the direct analog
         # of native's DKV_HIGH_QUALITY_ROUTING attend-all path.
         use_topk = (self.topk_blocks > 0 and nb > k_eff) and not self._high_quality_routing
