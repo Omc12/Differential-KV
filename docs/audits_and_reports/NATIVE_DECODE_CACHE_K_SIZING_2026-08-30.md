@@ -100,9 +100,20 @@ actually need answered before shipping this.
 
 ## Related
 
-* `main.cpp:2153` has a *separate* instance of the same family —
-  `std::max(16, 1024 / micro_block_size)`, which at `mbs=1024` attends 16×1024 =
-  16384 tokens against its own comment's stated "≥1024 token" budget.
+* `main.cpp:2153` held a *separate* instance of the same family —
+  `std::max(16, 1024 / micro_block_size)`. **Resolved in `92bd7da1`, and the
+  conclusion there corrects this one's first reading.** That floor looked like an
+  active 16× overshoot against its comment's stated "≥1024 token" budget, but it
+  was DEAD code: `1024 / mbs <= 16` for every `mbs >= 64`, so the expression
+  collapses to the constant 16 — which is already `srl_k_keep`'s default. The
+  comment was wrong; the value it produced never was, at any block size this repo
+  has shipped. Removing it changed nothing.
+
+  That distinction matters for the finding above, because it is the opposite
+  case: the `n_slots` gate at 4469 is **not** inert. It genuinely raises
+  `srl_k_keep` above what the block count justifies, and it feeds an allocation.
+  "Same shape as a known defect" was not sufficient evidence in either direction —
+  each had to be evaluated on what it actually computes.
 * On the CUDA Python path this whole class of concern is currently moot: the
   decode cache is gated on `DKV_DECODE_CACHE_CUDA`, which defaults to `0`.
   Measured 2026-08-30, K=4 vs K=16 gave byte-identical peak VRAM there.
