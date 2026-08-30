@@ -93,6 +93,43 @@ stays invisible either way, because the score only ever sees the **top-R** keys.
 top-R keys.** Changing the selection rule is not enough, and neither is changing
 the aggregation.
 
+## UNFINISHED — the bigger-model control, now unblocked
+
+**Qwen3.5-4B fp16 could not run at all until `940e6e57` + `fb62f362`.** Two
+head-geometry bugs stood in the way (attention output reshaped to `hidden_size`
+instead of `num_heads * head_dim`; `head_dim` derived by division instead of
+read from config). Both are fixed and the 4B now runs clean — synthesis **53.3**
+at 8k, no CPU fallbacks — but the sweep itself was started and **stopped early,
+so there is no result yet.**
+
+This is the single most valuable outstanding measurement, because every
+"more blocks do not help" conclusion above rests on the 2B, and the 4B is the
+clean control: same generation, fp16, no NF4 confound.
+
+To resume (≈1–2 h on a 4070 SUPER, 8.8 GB at 32k so it fits):
+
+```
+BLOCK=1024 DKV_TOPK_BLOCKS=<K> python colab/synthesis_power.py \
+    --arm dkv --reps 12 --ctx 32768 --model Qwen/Qwen3.5-4B --out c8_k<K>.json
+```
+
+for `K` in `4, 8, 16, 0` (0 = attend-all), plus the grow-only arm:
+
+```
+DKV_ROUTE_SCORE=lse DKV_ROUTE_TOPP=0.99 DKV_ROUTE_TOPP_KMIN=16 \
+DKV_ROUTE_TOPP_STATS=1 DKV_TOPK_BLOCKS=16 BLOCK=1024 \
+python colab/synthesis_power.py --arm dkv --reps 12 --ctx 32768 \
+    --model Qwen/Qwen3.5-4B --out c8_grow.json
+```
+
+then `--compare c8_k0.json c8_k16.json` and friends.
+
+**The decisive pair is attend-all vs K=16.** On the 2B it was −0.21, CI
+[−4.98, +4.56] — nothing above 16 helped. If the 4B shows a gradient there,
+"more blocks do not help" was a fact about the 2B's ceiling and adaptive-upward
+routing deserves another look. If it does not, the conclusion generalises and
+fixed K=16 is right for both.
+
 ## Limits of this evidence — read before overriding any of it
 
 * **One model.** Qwen3.5-2B caps near 41–44/100 with 5–10 of 15 facts *even when
