@@ -2053,10 +2053,54 @@ class MLXKVBlockManager:
         #   * the fp32 decode cache is sized by k_eff * block_size, so it held
         #     377.9 MB against a 48.2 MB compressed store.
         # At the budget-correct K=4: linkbench 24/24 (unchanged, = dense), decode
-        # cache 377.9 -> 151.1 MB, total session bytes 2.33x -> 1.09x of the dense
-        # KV. K_MIN=2 never binds at any block size <= 2048.
+        # cache 377.9 -> 151.1 MB, total session bytes 2.33x -> 1.09x of the dense KV.
+        #
+        # ── THE FLOOR IS 8, NOT 2. K=4 WAS MEASURED AND IT COSTS QUALITY ─────────
+        # The "linkbench 24/24, unchanged" above does NOT support K=4, and this is
+        # the correction. On CUDA the same benchmark was run WITH A DENSE CONTROL
+        # and dense scored the same as DKV (10/24 at 16k). When the dense arm cannot
+        # beat the routed arm, the benchmark is at the model's ceiling and has no
+        # power to detect a routing regression -- "24/24, unchanged" is equally
+        # consistent with K=4 being fine and with K=4 being much worse.
+        #
+        # Synthesis DOES have power, and it was never run here. Measured on this Mac
+        # 2026-08-30 (Qwen3.5-2B-4bit, block_size=1024, 16k, colab/synthesis_power.py,
+        # PAIRED, n=32 -- n=16 left the interval straddling 0 and n=8 has reversed on
+        # this comparison before):
+        #
+        #     K       mean   sd     vs attend-all (paired, 95% CI)
+        #     4       41.8   11.9   -5.42  [-9.99, -0.84]   RESOLVED, behind
+        #     8       44.9    7.9   -2.29  [-5.09, +0.51]   not resolvable
+        #     16      47.2    7.5   attend-all at this ctx (see below)
+        #
+        # THE TAIL DECIDES IT, more than the mean. K=4 produced 7 reps of 32 below 30
+        # points and 4 below 25, worst 16.7. K=8's worst rep was 30.0 and K=16's 36.7
+        # -- neither ever produced a catastrophic answer. K=4 does not degrade
+        # gracefully; it fails badly on roughly a fifth of inputs.
+        #
+        # So K=8: the smallest K that is not resolvably behind attend-all and never
+        # produced a catastrophic rep. It is also exactly where CUDA independently
+        # put its knee (K=8 vs K=16 unresolvable there too), which is some comfort
+        # that this is a property of the routing and not of one benchmark.
+        #
+        # READ THE K=16 ARM CORRECTLY: at 16k with block_size=1024 there are nb=15
+        # blocks, and routing is guarded by `nb > k_eff` (_route_k / the two decode
+        # sites). k_eff=16 means that guard is FALSE, so the K=16 arm above is
+        # ATTEND-ALL -- it is the quality ceiling, not "routing 16 blocks". That makes
+        # it the strictest possible control: K=8 tying it means K=8 loses nothing to
+        # routing at all at this context. It also means this measurement says nothing
+        # about K=8 vs a genuinely-routing K=16, which needs nb>16, i.e. ctx > ~18k.
+        #
+        # COST: the decode cache is sized k_eff * block_size and is ON for MLX, so
+        # this floor is not free -- it is the deliberate trade of some of the 377.9 ->
+        # 151.1 MB saving back for the quality above. CUDA keeps its floor at 16 for
+        # the mirror-image reason: its decode cache is OFF by default, so a smaller K
+        # there pays the quality cost and collects nothing.
+        #
+        # _K_MIN=8 binds only for block_size > 512; at 256 the budget still gives 16,
+        # so every pre-1024 measurement remains valid.
         _ROUTED_TOKEN_BUDGET = 4096
-        _K_MIN = 2
+        _K_MIN = 8
         _default_topk = max(_K_MIN, _ROUTED_TOKEN_BUDGET // max(1, self.block_size))
         self.topk_blocks = int(os.environ.get("DKV_TOPK_BLOCKS", str(_default_topk)))
         # CONTEXT-ADAPTIVE K: k_eff = max(topk_blocks, ceil(topk_frac * nb)), so K

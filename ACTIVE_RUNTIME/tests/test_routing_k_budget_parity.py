@@ -25,8 +25,9 @@ This asymmetry is measured, not an oversight, and this file exists partly to
 stop someone "tidying" it away. K trades synthesis quality against the DECODE
 CACHE it sizes, so a smaller K only pays where that cache is actually allocated:
 
-  * MLX -- decode cache ON. K=16 -> 4 at block 1024 left linkbench at 24/24
-    (= dense) and cut the decode cache 377.9 -> 151.1 MB. Floor 2.
+  * MLX -- decode cache ON, so K there controls MEMORY as well as quality and
+    the floor is a genuine trade rather than a free choice. Floor 8, measured;
+    see "the MLX floor was 2 and that was wrong" below.
   * CUDA -- decode cache OFF by default. `DKV_DECODE_CACHE_CUDA` defaults to
     "0" (runtime/dkv_attention.py); the `DKV_DECODE_CACHE=1` that
     serving/decode_config.py sets is read only by the MLX wrapper. So on CUDA a
@@ -44,6 +45,40 @@ observed_block_span=1024:
 No memory saved, no time saved, 16 synthesis points lost. K=8 was also measured
 (38.8; +10.8 over K=4 resolved, -5.4 vs K=16 NOT resolvable at n=8) and is the
 knee to use if the CUDA decode cache is ever enabled.
+
+THE MLX FLOOR WAS 2 AND THAT WAS WRONG
+--------------------------------------
+`1157f3a2` set MLX's floor to 2, giving K=4 at block 1024, citing "linkbench 16k,
+24 seeds: 24/24, unchanged from dense". That evidence does not support the
+conclusion. Run WITH a dense control on CUDA, dense scored the SAME as DKV on
+linkbench (10/24 at 16k, 6/12 at 32k) -- the benchmark sits at the model's ceiling
+and has no power to detect a routing regression. "24/24, unchanged" is equally
+consistent with K=4 being fine and with K=4 being much worse.
+
+Synthesis has power. Measured on Apple silicon 2026-08-30, Qwen3.5-2B-4bit,
+block_size=1024, ctx 16k, colab/synthesis_power.py, PAIRED, n=32:
+
+    K       mean   sd     vs attend-all (paired, 95% CI)   reps < 30 pts
+    4       41.8   11.9   -5.42  [-9.99, -0.84]  RESOLVED   7 of 32
+    8       44.9    7.9   -2.29  [-5.09, +0.51]  not res.   0 of 32
+    16      47.2    7.5   attend-all at this ctx            0 of 32
+
+n MATTERS HERE: at n=16 the same K=4 comparison read -6.67 with CI [-13.69, +0.35]
+-- straddling zero. Do not re-decide this at n=8 or n=16.
+
+THE TAIL, NOT THE MEAN, is the reason for the floor. K=4's worst reps were 16.7 /
+20.0 / 23.3; K=8's worst was 30.0 and K=16's 36.7. K=4 fails badly on roughly a
+fifth of inputs rather than degrading gently, which a 5-point mean understates.
+
+WHAT THE K=16 ARM ACTUALLY IS. At 16k with block 1024 there are nb=15 blocks and
+routing is guarded by `nb > k_eff`, so k_eff=16 disables the top-K branch: that arm
+is ATTEND-ALL, the quality ceiling, not "routing 16 blocks". K=8 tying it is
+therefore the strongest available statement. It says nothing about K=8 against a
+genuinely-routing K=16, which needs nb > 16 (ctx > ~18k) and was not measured.
+
+Both runtimes now put the knee at 8, reached independently (CUDA: K=8 vs K=16 also
+unresolvable). The floors still differ -- 16 vs 8 -- because CUDA's decode cache is
+OFF, so a smaller K there buys no memory and only costs quality.
 
 WHY SOURCE-LEVEL ASSERTIONS
 ---------------------------
@@ -77,7 +112,7 @@ ROUTED_TOKEN_BUDGET = 4096
 
 # Floors differ on purpose -- see the module docstring for the measurement.
 CUDA_K_FLOOR = 16
-MLX_K_FLOOR = 2
+MLX_K_FLOOR = 8
 
 
 def _read(path):
@@ -191,9 +226,10 @@ def test_floors_bind_where_the_measurement_says_they_should():
     assert max(CUDA_K_FLOOR, ROUTED_TOKEN_BUDGET // 1024) == 16, \
         "CUDA must stay at 16: a smaller K there costs 16.2 synthesis points " \
         "and saves 0 MB, because DKV_DECODE_CACHE_CUDA defaults to 0"
-    assert max(MLX_K_FLOOR, ROUTED_TOKEN_BUDGET // 1024) == 4, \
-        "MLX must take the budget K: its decode cache is real, and K=4 cut it " \
-        "377.9 -> 151.1 MB at no measured retrieval cost"
+    assert max(MLX_K_FLOOR, ROUTED_TOKEN_BUDGET // 1024) == 8, \
+        "MLX must floor at 8: the budget K of 4 is resolvably behind attend-all " \
+        "on synthesis (-5.42, CI [-9.99, -0.84], paired n=32) and produced 7 reps " \
+        "of 32 below 30 points where K=8 produced none"
 
 
 def test_both_runtimes_ceil_the_adaptive_fraction():
