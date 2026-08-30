@@ -2139,29 +2139,35 @@ int main(int argc, char ** argv) {
         }
     }
 
-    // ── N4.2 fix: scale srl_k_keep with micro_block_size ─────────────────────
-    // Item J changed micro_block_size from 64→16, so each block now covers 4× fewer
-    // tokens. The old default srl_k_keep=16 used to cover 16×64=1024 tokens; after
-    // item J it covers only 16×16=256 tokens (≈1% of a 24k prompt) — causing the
-    // model to emit EOS within 4 tokens because it sees almost no context.
+    // ── srl_k_keep: the N4.2 floor is gone; the pool sizing below is not ───────
+    // There used to be a floor here, `srl_k_keep = max(16, 1024 / micro_block_size)`,
+    // added when item J moved micro_block_size 64→16 and 16 blocks stopped covering
+    // 1024 tokens. It was removed because it never did anything at any block size we
+    // ship, and its comment described a budget it did not enforce:
     //
-    // Fix: raise srl_k_keep to at least (1024 / micro_block_size) so the attended
-    // token budget is always >= 1024 tokens regardless of mbs.  With mbs=16 that
-    // gives srl_k_keep=64 (4× more blocks, same token coverage as before item J).
-    // Users can still override upward via DKV_SRL_K_KEEP / --srl-k-keep.
+    //   * `1024 / mbs` is <= 16 for every mbs >= 64, so `max(16, ...)` collapses to the
+    //     constant 16 — which is already the default. At mbs=1024 it "enforced"
+    //     16×1024 = 16384 routed tokens against a comment promising 1024.
+    //   * It is also overwritten before it can reach attention. Measured over
+    //     mbs ∈ {64,256,1024} × L ∈ {8k,16k,32k,64k,128k} × both routing modes, the
+    //     floored and unfloored runs give bit-identical srl_k_keep, srl_k_semantic and
+    //     srl_k_host in every row: the clamp to n_slots (below), then adaptive-k /
+    //     mlx-parity / the two dense fallbacks (~line 4430-4500) all set K themselves.
+    //
+    // So this is NOT the Python-side defect it looks like. There (1157f3a2) the stale
+    // `max(16, 4096 // block)` was live and over-routing 4×; here the same shape is
+    // inert. Dropping it converges main.cpp with batch_engine.cpp, which never had it.
+    //
+    // What actually sets K at mbs=1024: n_slots = n_ctx/1024 is <= 32 for every model
+    // with n_ctx <= 32k and for all three DKV_PRESET values, so the `n_slots <= 32`
+    // dense fallback fires and routes ALL n_slots blocks. Retuning a floor here could
+    // not have changed that. Change K at those sites, not with a floor.
     {
-        int srl_k_keep_floor = std::max(16, 1024 / micro_block_size);
-        if (srl_k_keep < srl_k_keep_floor) {
-            std::cerr << "[DKV] N4.2: srl_k_keep raised from " << srl_k_keep
-                      << " → " << srl_k_keep_floor
-                      << " to preserve ≥1024 token coverage (mbs=" << micro_block_size << ")\n";
-            srl_k_keep = srl_k_keep_floor;
-        }
         // anchor_screen needs a candidate pool larger than srl_k_keep.
         // Raise srl_k_semantic so that sem_slots + host_slots >= 3 × srl_k_keep.
         int sem_floor = srl_k_keep * 3;
         if (srl_k_semantic < sem_floor) {
-            std::cerr << "[DKV] N4.2: srl_k_semantic raised from " << srl_k_semantic
+            std::cerr << "[DKV] srl_k_semantic raised from " << srl_k_semantic
                       << " → " << sem_floor << " (= 3 × srl_k_keep)\n";
             srl_k_semantic = sem_floor;
         }
