@@ -484,7 +484,7 @@ class DKVConfig:
         self.prefill_chunk_size = self._get_int(
             "prefill_chunk_size", "DKV_PREFILL_CHUNK_SIZE", self.prefill_chunk_size, config_dict
         )
-        # Safety guard: prefill_chunk_size must accommodate at least 2 full streaming
+        # Safety guard: prefill_chunk_size must accommodate at least ONE full streaming
         # block (1 anchor + micro_block_size active tokens = 1025 tokens at the
         # default micro_block_size=1024).  If the resolved value is too small,
         # ingest_chunk produces zero full blocks → all blocks stay ACCUMULATING →

@@ -91,8 +91,12 @@ def _run_cuda(seeds, model):
 
     QR._ROUTE_DIST_HOOK = hook
     try:
-        from serving.hf_dkv_wrapper import HFDKVWrapper
-        w = HFDKVWrapper(model_id=model, config={"preset": "mid"})
+        # PyTorchDKVHFWrapper, not HFDKVWrapper -- the latter name does not
+        # exist, so this path had never been executed. device= is required too;
+        # the wrapper does not infer CUDA.
+        from serving.hf_dkv_wrapper import PyTorchDKVHFWrapper
+        w = PyTorchDKVHFWrapper(model_id=model, config={"preset": "mid"},
+                                device="cuda")
         w.ensure_loaded()
         pool = getattr(w.manager, "native_pool", None)
         print(f"  [cuda] micro_block_size={w.micro_block_size} "

@@ -962,14 +962,39 @@ class KVRuntimeManager:
         # mlx_dkv_wrapper's _default_topk): at 16k the block count is BELOW K, so
         # the top-K branch does not run at all and the whole context is
         # materialised. Correcting K there left linkbench at 24/24 = dense while
-        # cutting the decode cache 2.5x. THIS SIDE IS NOT YET MEASURED -- CUDA
-        # validation is what decides whether it ships here.
-        # K_MIN=2 never binds at any block size <= 2048.
+        # cutting the decode cache 2.5x.
+        #
+        # THE FLOOR STAYS 16 ON CUDA, AND MLX'S IS 2. THAT ASYMMETRY IS MEASURED,
+        # NOT AN OVERSIGHT. K trades synthesis quality against the DECODE CACHE,
+        # and that cache is only allocated where it is enabled. MLX's is on;
+        # CUDA's is gated on DKV_DECODE_CACHE_CUDA (dkv_attention.py), which
+        # defaults to "0" -- the DKV_DECODE_CACHE=1 in decode_config.py is read
+        # only by the MLX wrapper. So on CUDA a smaller K pays the quality cost
+        # and collects nothing. Measured 2026-08-30, RTX 4070 SUPER,
+        # Qwen3.5-2B, micro_block_size=1024, observed_block_span=1024:
+        #
+        #   metric                     K=4 (budget)   K=16 (this floor)
+        #   peak VRAM @16k             4213.0 MB      4213.0 MB   identical
+        #   decode ms/tok @32k         61.06          63.10       CI contains 0
+        #   needle recall 3 ctx x 3 d  9/9            9/9         unchanged
+        #   synthesis (paired, n=8)    27.9           44.2        -16.2, CI
+        #                                                         [-29.1, -3.4]
+        #
+        # i.e. no memory saved, no time saved, 16 synthesis points lost. K=8 was
+        # also measured (38.8; +10.8 over K=4 resolved, -5.4 vs K=16 NOT
+        # resolvable at n=8) and is the knee if the CUDA decode cache is ever
+        # turned on -- until then there is nothing to trade for.
+        #
+        # What DID change here is the DIVISOR: this divided by block_size+1 (the
+        # anchor row), giving 4096//257 = 15 at the 256-token block, and the
+        # floor existed to round that back to 16. Dividing by the token PAYLOAD
+        # gives 16 directly, so the floor no longer hides an off-by-one -- it now
+        # states a minimum block count on purpose.
         _routing_block_size = max(
             self.micro_block_size if self.streaming_ingest else self.block_size,
             1,
         )
-        self.native_pool.routing_topk_default = max(2, 4096 // _routing_block_size)
+        self.native_pool.routing_topk_default = max(16, 4096 // _routing_block_size)
 
         # ── SRL: Initialize random projection matrix W_proj ──────────────
         # Fixed at construction time — never updated.

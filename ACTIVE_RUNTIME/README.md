@@ -53,7 +53,7 @@ table/multi-entity fact extraction.
 | `DKV_COMPRESSED_DECODE` | **`1`** | sparse-always (default, from token 1); `auto` = adaptive opt-in; `0` = dense |
 | `DKV_COMPRESSED_MIN_CTX` | `16384` | auto sparse threshold (tokens) |
 | `DKV_MAX_RESIDUAL` | `64` | exact residual tokens kept per block (memory ↔ accuracy) |
-| `DKV_TOPK_BLOCKS` | `16` | top-K compressed blocks attended per decode step |
+| `DKV_TOPK_BLOCKS` | derived: **CUDA** `max(16, 4096 // block_size)` = `16`; **MLX** `max(2, 4096 // block_size)` = `4` at `block_size=1024` | top-K compressed blocks attended per decode step. `K × block_size` is a routed-TOKEN budget (4096). The floors differ **on purpose**: K trades synthesis quality against the decode cache it sizes, and that cache is on for MLX but gated off on CUDA (`DKV_DECODE_CACHE_CUDA=0`). Measured on CUDA, K=4 vs K=16: peak VRAM identical, decode latency CI contains 0, needles 9/9 both, synthesis −16.2 points. So CUDA keeps 16. `0` = attend every block; set `32` for synthesis-shaped work. |
 | `DKV_ROUTER` | `residual` | block router: `residual` (tight) or `minmax` (cheap) |
 | `DKV_FACTUAL_STORE` | `0` | enable factual store / entity binding (dense-fact retrieval; opt-in) |
 | `DKV_FACTUAL_MAX_OCC` | `4` | max total occurrences for a query token to anchor positional linking |

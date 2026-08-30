@@ -9,6 +9,71 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+* **Routing K: the divisor is fixed on both runtimes; the CUDA floor stays 16
+  and MLX's becomes 2 — deliberately, and measured.** `max(16, 4096 // block_size)`
+  lived in three places and bundled two separate issues.
+
+  *The divisor was wrong.* CUDA divided by `block_size + 1` (payload **plus** the
+  anchor row), giving `4096//257 = 15` at the 256-token block, and the `max(16, …)`
+  existed only to round that back up. It now divides by the token payload, which
+  gives 16 at 256 directly, so the floor no longer conceals an off-by-one.
+
+  *The floor value was right on CUDA and wrong on MLX.* K trades synthesis
+  quality against the **decode cache it sizes**, so a smaller K only pays where
+  that cache is allocated. MLX's is on; CUDA's is gated on
+  `DKV_DECODE_CACHE_CUDA`, which defaults to `0` (the `DKV_DECODE_CACHE=1` in
+  `serving/decode_config.py` is read only by the MLX wrapper). Measured on CUDA
+  (RTX 4070 SUPER, Qwen3.5-2B, `micro_block_size=1024`, `observed_block_span=1024`):
+
+  | metric | K=4 | K=16 | verdict |
+  |---|---|---|---|
+  | peak VRAM @16k, fresh process per arm | 4213.0 MB | 4213.0 MB | identical |
+  | decode ms/tok @32k, paired (A/A calibrated) | 61.06 | 63.10 | CI [−3.4, +9.8] contains 0 |
+  | needle recall, 3 contexts × 3 depths | 9/9 | 9/9 | unchanged |
+  | linkbench 16k, 24 seeds | 10/24 | 10/24 | = dense (10/24) |
+  | synthesis, paired, n=8 | 27.9 | **44.2** | **−16.2, CI [−29.1, −3.4]** |
+
+  So on CUDA a smaller K saves no memory, saves no time, and costs 16 synthesis
+  points: **CUDA keeps 16, MLX takes the budget K=4** (its 377.9 → 151.1 MB
+  saving is real). `K=8` is the knee (38.8 — resolvably above K=4, not resolvably
+  below K=16 at n=8) if the CUDA decode cache is ever enabled.
+
+  Two caveats recorded because they bound what the above proves. At 16k the
+  context is 14–15 blocks, **below** K=16, so `nb > k_eff` was false and the
+  "K=16" arm is *attend-all*, not "routing 16 blocks". And linkbench has **no
+  power** here — dense scores the same as DKV at both 16k and 32k, so it is at
+  the model's ceiling; the needle suite is the discriminating retrieval
+  instrument, and it is unchanged.
+
+  Also in this change:
+
+  * `dkv_native/serving/batch_engine.cpp` defaulted `micro_block_size` to 256
+    while `main.cpp` used 1024, so every **batch-served** native session silently
+    ran at the block size linkbench scores 9/24 on against 24/24 = dense at 1024.
+  * `hf_dkv_wrapper`'s dead `self.block_size = 256` (assigned, never read) removed
+    — it was what made readers conclude CUDA ran 256.
+  * `KVRuntimeManager`'s signature default 256 → 1024, and `micro_block_size` is
+    now seeded into a **copy** of the caller's config dict so `DKVConfig`'s
+    prefill-chunk floor can finally see the real block size (both terms were
+    `None` before, so the floor always came from a stale literal).
+  * `DKV_TOPK_FRAC` used `int()` on both runtimes (frac 0.3, nb 13 → 3, not 4);
+    both now `ceil`, or one env var routes different block counts per runtime.
+    Default stays `0.0` (off): measured at 32k, fracs 0.15 and 0.25 moved K from
+    4 to 5 and 8 and retrieval did not change.
+  * `observed_block_span` measured 1024 at 8k/16k/32k (0 at 2k, where no block is
+    written) — **not** the "~32–64 short-context" its own comment claimed, which
+    is what had predicted this change would be a CUDA no-op. Comment corrected.
+  * `colab/probe_relevance_dist.py`'s CUDA path imported `HFDKVWrapper`, which
+    does not exist, so it had never run. Fixed to `PyTorchDKVHFWrapper` and
+    executed: at 32k with 27 blocks the top block holds a median 0.708 of
+    softmaxed relevance, and a 0.90/0.95 mass threshold needs p90 K = 7/8 —
+    landing on the same ~8 as the synthesis knee, from an independent direction.
+  * Pinned by `ACTIVE_RUNTIME/tests/test_routing_k_budget_parity.py` (11 tests,
+    source-level so they need no GPU), which asserts the shared 4096 budget, the
+    per-runtime floors **and why they differ**, the payload divisor, `ceil`
+    parity, and that `main.cpp`/`batch_engine.cpp` agree. Suite: 307 passed,
+    18 skipped.
+
 * **`DKV_RESIDUAL_RUN_RESERVE=query` (strict) now honours its own contract when
   no query is pinned** — the one known defect shipped with v1.2.0. In
   `_select_residual_rows`

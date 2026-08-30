@@ -1431,10 +1431,21 @@ class NativeBlockPool:
         # already a Python int here, so no device read). The router needs it: K is
         # meaningless on its own, the quantity that has to match MLX is the routed
         # TOKEN budget K * span. MLX has a fixed block_size=256 so K=16 always
-        # means 4096 tokens; this side blocks ADAPTIVELY (~32-64 tokens for short
-        # contexts, ~256 for long — see the avg_block_sz note in
-        # kv_runtime_manager), so a K derived from an assumed 257 routes 4x too
-        # few tokens whenever the real blocks are 64 wide.
+        # means 4096 tokens.
+        #
+        # MEASURED 2026-08-30 -- the "~32-64 tokens for short contexts, ~256 for
+        # long" this comment used to claim is WRONG for the shipped streaming-
+        # ingest path, and reasoning from it produced the prediction that the K
+        # budget change would be a no-op on CUDA. On RTX 4070 SUPER / Qwen3.5-2B
+        # with micro_block_size=1024, observed_block_span reads:
+        #     2k  -> 0     (no block written at all; the router falls back to
+        #                   the pool's static routing_topk_default)
+        #     8k  -> 1024
+        #     16k -> 1024
+        #     32k -> 1024
+        # i.e. once any block is written the span IS micro_block_size. Probe it
+        # before assuming otherwise: a K derived from an assumed span is wrong in
+        # whichever direction the assumption missed.
         _span = write_seq
         if _span > 0:
             self.observed_block_span = max(getattr(self, "observed_block_span", 0), _span)

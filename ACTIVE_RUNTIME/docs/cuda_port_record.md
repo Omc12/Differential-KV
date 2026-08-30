@@ -202,8 +202,49 @@ block was being stored verbatim* and the "compressed" pool came to 0.95x the den
 KV it replaced — at the shipped default, DKV was barely compressing at all. At
 1024 the same budget covers 4x the tokens and real compression appears.
 
-`DKV_TOPK_BLOCKS`'s derived default is unaffected: `max(16, 4096 // block_size)`
-is 16 at both sizes.
+~~`DKV_TOPK_BLOCKS`'s derived default is unaffected: `max(16, 4096 // block_size)`
+is 16 at both sizes.~~
+
+**Corrected 2026-08-30, then partly re-corrected by measurement.** Two separate
+things were bundled in that sentence.
+
+**The divisor was wrong, and that IS fixed.** CUDA divided by `block_size + 1`
+(payload plus anchor row), so `4096//257 = 15` at the 256-token block and the
+`max(16, ...)` existed only to round it back up. It now divides by the payload,
+which gives 16 at 256 directly. The floor no longer hides an off-by-one.
+
+**The floor value was NOT wrong on CUDA, and the first version of this
+correction was.** K trades synthesis quality against the decode cache it sizes,
+and CUDA's decode cache is **off by default** — `DKV_DECODE_CACHE_CUDA` defaults
+to `"0"` in `runtime/dkv_attention.py`; the `DKV_DECODE_CACHE=1` in
+`serving/decode_config.py` is read only by the MLX wrapper. So on CUDA a smaller
+K pays the quality cost and collects nothing. Measured here (RTX 4070 SUPER,
+Qwen3.5-2B, `micro_block_size=1024`, `observed_block_span=1024`):
+
+| metric | K=4 | K=16 | verdict |
+|---|---|---|---|
+| peak VRAM @16k, fresh process/arm | 4213.0 MB | 4213.0 MB | identical |
+| decode ms/tok @32k, paired | 61.06 | 63.10 | CI [−3.4, +9.8] contains 0 |
+| needle recall, 3 ctx × 3 depths | 9/9 | 9/9 | unchanged |
+| linkbench 16k, 24 seeds | 10/24 | 10/24 | = dense (10/24) |
+| synthesis, paired, n=8 | 27.9 | **44.2** | **−16.2, CI [−29.1, −3.4]** |
+
+CUDA therefore keeps the 16 floor; MLX takes the budget K=4, where its decode
+cache is real and the 377.9 → 151.1 MB saving was measured. `K=8` is the knee
+(38.8; resolvably above K=4, not resolvably below K=16 at n=8) if the CUDA cache
+is ever enabled. Pinned by `tests/test_routing_k_budget_parity.py`.
+
+**Two instrument notes, since this record is cited as evidence.** First, at 16k
+the context is ~14–15 blocks, BELOW K=16, so `nb > k_eff` was false and the
+top-K branch never ran — the K=16 arm above is *attend-all*, not "routing 16
+blocks". Second, linkbench cannot support a claim either way here: **dense scores
+the same as DKV** (10/24 at 16k, 6/12 at 32k), so it is at the model's ceiling and
+has no power to detect a routing loss. The needle suite is the discriminating
+retrieval instrument, and it holds.
+
+Finally, `observed_block_span` measured **1024** at 8k/16k/32k (and 0 at 2k, where
+no block is written at all) — not the ~32–64 the router's own comment predicted.
+Any reasoning that assumed short spans on this path is wrong.
 
 Use `BLOCK=512` for synthesis-shaped work, where CUDA measured the finer
 granularity helping; 1024 is chosen for retrieval, which is what this system is

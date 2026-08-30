@@ -967,17 +967,22 @@ def route_blocks_relevance(
     # default stays valid), while 64-token blocks now give 64 for the same token
     # budget. Falls back to the pool's static default before the first write.
     #
-    # DIVIDE BY THE PAYLOAD, NOT payload+anchor, AND DO NOT CLAMP TO 16. K is a
-    # routed-TOKEN budget (K * span = 4096). Dividing by _span+1 gave 15 at the
-    # 256-token block, which is the only reason the `max(16, ...)` was here; by
-    # the payload it is 16 directly. The floor was simultaneously clamping every
-    # span ABOVE 256 -- at the now-default micro_block_size=1024 it forced K=16
-    # where the budget asks for 4, routing 16384 tokens instead of 4096. See
-    # kv_runtime_manager.routing_topk_default for the same fix and the MLX
-    # measurement behind it. K_MIN=2 never binds at any span <= 2048.
+    # DIVIDE BY THE PAYLOAD, NOT payload+anchor. This divided by _span+1, giving
+    # 4096//257 = 15 at the 256-token block, and the `max(16, ...)` existed only
+    # to round that back up. By the payload it is 16 directly, so the floor no
+    # longer papers over an off-by-one -- it states a minimum block count.
+    #
+    # THE 16 STAYS, AND MLX'S EQUIVALENT FLOOR IS 2. That asymmetry is measured:
+    # K trades synthesis against the decode cache, and CUDA's decode cache is
+    # OFF by default (DKV_DECODE_CACHE_CUDA=0 in dkv_attention.py), so a smaller
+    # K here pays the quality cost and collects nothing. Measured 2026-08-30 at
+    # span 1024: peak VRAM identical (4213.0 MB either way), decode ms/tok CI
+    # contains 0, needles 9/9 both, synthesis 44.2 -> 27.9 (paired, n=8, CI
+    # [-29.1, -3.4]). See kv_runtime_manager.routing_topk_default for the table
+    # and for the K=8 knee, which is what to use if that cache is ever enabled.
     _span = int(getattr(pool, "observed_block_span", 0) or 0)
     if _span > 0:
-        _pool_default = max(2, 4096 // _span)
+        _pool_default = max(16, 4096 // _span)
 
     # ── Measured: the default is tuned for retrieval, not for synthesis ──────
     # _pool_default works out to 16 for the usual 256-token block, which is
