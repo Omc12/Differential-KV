@@ -2214,6 +2214,16 @@ def apply_dkv_attention_patch(model, kv_manager):
     hidden_size           = _cfg.hidden_size
     head_dim              = getattr(_cfg, "head_dim", None) or (hidden_size // num_heads)
     num_key_value_groups  = num_heads // num_key_value_heads
+    # ATTENTION OUTPUT WIDTH IS NOT hidden_size. It is num_heads * head_dim --
+    # o_proj's in_features -- and the two are equal only when the model does not
+    # decouple them. Qwen3.5-2B does not (8 * 256 == 2048), Qwen3.5-4B does
+    # (16 * 256 == 4096 while hidden_size is 2560), and reshaping the attention
+    # output to hidden_size raised
+    #     RuntimeError: shape '[1, 1025, 2560]' is invalid for input of size 4198400
+    # on every forward, so DKV could not run that model at all. o_proj maps this
+    # width down to hidden_size immediately afterwards; hidden_size is the width
+    # of what LEAVES the block, not of what the heads produce.
+    attn_out_dim          = num_heads * head_dim
 
     # ── transformers-version convention detection ───────────────────────────
     # dkv_forward below must match whatever calling convention the installed
@@ -2861,7 +2871,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                     attn_out = F.scaled_dot_product_attention(
                         query_states, k_rep, v_rep, is_causal=(q_len > 1)
                     )
-                    attn_out = attn_out.transpose(1, 2).contiguous().reshape(bsz, q_len, hidden_size)
+                    attn_out = attn_out.transpose(1, 2).contiguous().reshape(bsz, q_len, attn_out_dim)
                     if attn_gate is not None:
                         attn_out = attn_out * torch.sigmoid(attn_gate)
                     attn_out = self.o_proj(attn_out)
@@ -5296,7 +5306,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                     attn_output = torch.cat(attn_outputs, dim=0)
 
                     attn_output = attn_output.transpose(1, 2).contiguous()
-                    attn_output = attn_output.reshape(bsz, q_len, hidden_size)
+                    attn_output = attn_output.reshape(bsz, q_len, attn_out_dim)
                     if attn_gate is not None:
                         attn_output = attn_output * torch.sigmoid(attn_gate)
                     attn_output = self.o_proj(attn_output)
@@ -5817,7 +5827,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                     attn_weights = None
 
                 attn_output = attn_output.transpose(1, 2).contiguous()
-                attn_output = attn_output.reshape(bsz, q_len, hidden_size)
+                attn_output = attn_output.reshape(bsz, q_len, attn_out_dim)
                 if attn_gate is not None:
                     attn_output = attn_output * torch.sigmoid(attn_gate)
                 attn_output = self.o_proj(attn_output)
