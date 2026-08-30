@@ -912,6 +912,37 @@ K_FIXED = int(os.environ.get("DKV_SRL_K_FIXED", "64"))
 # Production leaves this None. Signature: hook(relevance: Tensor[N], layer_idx).
 _ROUTE_DIST_HOOK = None
 
+# ── EXPERIMENTAL, BOTH DEFAULT-OFF: mass-like scoring and top-p selection ────
+#
+# DKV_ROUTE_SCORE=lse  aggregate a block's keys with logsumexp instead of max.
+# DKV_ROUTE_TOPP=<f>   select blocks by cumulative softmax mass instead of top-K.
+#
+# These are two HALVES of one idea and are separable on purpose, because
+# measurement says the selection rule alone is not enough. The shipped score is
+# a MAX over each block's anchor + top-R residual keys -- an upper bound on the
+# block's best logit, not the mass it would receive. Softmaxing a max is far too
+# peaked to spread: measured at 32k over 96 routing calls with 27 blocks, even a
+# 0.99 mass threshold never asked for more than 12 blocks, and its median was 9.
+# So on the max score a top-p rule can only ever take FEWER blocks than the
+# fixed K=16 -- it structurally cannot express "this query is hard, give me 20",
+# which is the main reason to want an adaptive rule at all.
+#
+# logsumexp over the block's scored keys approximates the unnormalised attention
+# mass instead, so a block holding many moderately-relevant tokens can outweigh
+# one spiky outlier. That is the half that makes an adaptive rule able to grow.
+_ROUTE_SCORE_MODE = os.environ.get("DKV_ROUTE_SCORE", "max").strip().lower()
+try:
+    _ROUTE_TOPP = float(os.environ.get("DKV_ROUTE_TOPP", "0") or 0)
+except ValueError:
+    _ROUTE_TOPP = 0.0
+# Guard rails for the adaptive rule: never fewer than this, never more than the
+# block count. A rule with no floor drops to 1 block on an easy-looking query and
+# there is no recovering the context it skipped.
+try:
+    _ROUTE_TOPP_KMIN = int(os.environ.get("DKV_ROUTE_TOPP_KMIN", "4"))
+except ValueError:
+    _ROUTE_TOPP_KMIN = 4
+
 # ROUTE TRACE budget: kept=True lines are capped (drops always print).
 _ROUTE_TRACE_KEPT_SHOWN = 0
 _ROUTE_TRACE_TOK = None
@@ -919,6 +950,37 @@ try:
     _ROUTE_TRACE_MAX = int(os.environ.get("DKV_ROUTE_TRACE_MAX", "60"))
 except ValueError:
     _ROUTE_TRACE_MAX = 60
+
+
+def select_by_mass(relevance, topp, k_min, k_floor):
+    """Blocks covering `topp` of the softmaxed relevance mass, clamped both ways.
+
+    The adaptive alternative to a fixed top-K: an easy query costs a few blocks,
+    a diffuse one takes many. Returns indices ordered by descending relevance.
+
+    CLAMPED BOTH WAYS ON PURPOSE. Without `k_min` a confident-looking score drops
+    to a single block and there is no recovering the context it skipped; without
+    the `k_floor` term a DKV_TOPK_FRAC that raised k_eff would be silently
+    ignored. The ceiling is N because there is nothing else to take.
+
+    MEASURED, and the reason this is not the default: at 32k over 96 routing
+    calls with 27 blocks, top-p 0.99 scored 42.1 against fixed K=16's 43.8
+    (paired, n=8, CI [-4.6, +1.3]) -- indistinguishable, at ~10 blocks instead
+    of 16. Attending ALL 27 scored 41.2 (CI [-5.7, +0.7] vs fixed), so routing
+    more than 16 does not help either. There is no quality headroom here for an
+    adaptive rule to capture; its only real effect is fewer blocks at equal
+    quality, which is worth something only where K sizes an allocation (MLX,
+    native) and nothing on CUDA, where the decode cache is off.
+    """
+    N = int(relevance.numel())
+    p = torch.softmax(relevance.float(), dim=-1)
+    ps, pi = torch.sort(p, descending=True)
+    cum = torch.cumsum(ps, dim=0)
+    # First index whose cumulative mass reaches the threshold; +1 for a count.
+    k = int(torch.searchsorted(
+        cum, torch.tensor(topp, device=cum.device, dtype=cum.dtype)).item()) + 1
+    k = max(k, int(k_min), min(int(k_floor), N))
+    return pi[:min(k, N)]
 
 
 def route_blocks_relevance(
@@ -1310,10 +1372,23 @@ def route_blocks_relevance(
 
         # Apply validity mask
         s_res = s_res.masked_fill(~rvalid.view(1, 1, 1, N, R), float("-inf"))
-        res_scores = s_res.max(dim=-1).values           # [H_kv, gpk, L, N]
+        # MAX (default) = upper bound on the block's best logit. LSE = log-sum-exp
+        # over the block's kept keys, which is proportional to the unnormalised
+        # attention mass the block would actually receive, so many moderate keys
+        # can outweigh one spiky one. Only the WITHIN-BLOCK axis changes: the
+        # head axis stays a max below, because a block relevant to any single
+        # head still has to be kept.
+        if _ROUTE_SCORE_MODE == "lse":
+            res_scores = torch.logsumexp(s_res.float(), dim=-1).to(s_res.dtype)
+        else:
+            res_scores = s_res.max(dim=-1).values       # [H_kv, gpk, L, N]
 
     if res_scores is not None:
-        relevance = torch.maximum(s_anc, res_scores)
+        # Combining the anchor with the residual mass has to match the
+        # aggregation: logaddexp is the LSE-consistent form of maximum.
+        relevance = (torch.logaddexp(s_anc.float(), res_scores.float()).to(s_anc.dtype)
+                     if _ROUTE_SCORE_MODE == "lse"
+                     else torch.maximum(s_anc, res_scores))
     else:
         relevance = s_anc
 
@@ -1389,7 +1464,10 @@ def route_blocks_relevance(
     # is confirmed on A100 to drop answer-critical blocks at matched K, which a
     # forced non-relevance slot is a plausible contributor to. Removed to match
     # the documented "direct port" contract.
-    sel = torch.topk(relevance, k=k_eff).indices
+    if _ROUTE_TOPP > 0.0:
+        sel = select_by_mass(relevance, _ROUTE_TOPP, _ROUTE_TOPP_KMIN, k_eff)
+    else:
+        sel = torch.topk(relevance, k=k_eff).indices
 
     # ── DKV_ROUTE_TRACE_TOKEN — does the needle's block survive routing AT THE
     # TOKEN THAT PRODUCES THE ANSWER? ────────────────────────────────────────
