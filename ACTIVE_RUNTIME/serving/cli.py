@@ -1342,7 +1342,7 @@ def main():
                              "to a verified no-op otherwise. NOT free on every "
                              "model: it moves per-layer work into the host loop, "
                              "so on wide models at long context, where it "
-                             "declines, it costs ~9%.")
+                             "declines, it costs ~9%%.")
     
     # Quantization flags
     parser.add_argument('--load-in-4bit', action='store_true',
