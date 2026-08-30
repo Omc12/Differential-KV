@@ -5,6 +5,42 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+* **`DKV_RESIDUAL_RUN_RESERVE=query` (strict) now honours its own contract when
+  no query is pinned** — the one known defect shipped with v1.2.0. In
+  `_select_residual_rows`
+  ([`lowrank.py`](ACTIVE_RUNTIME/native_core/compression/lowrank.py)) the
+  `elif not _has_priority: pass` branch was tested *before*
+  `elif _mode == "query": return [], set()`, and swallowed every unpinned
+  strict-mode call — so strict `query` fell through to reserve-by-error and
+  silently behaved as `all`, the exact opposite of its documented "reserve
+  nothing". The two branches are swapped; strict mode is the only way into that
+  chain without priority information, which is why the shadowed branch was both
+  dead for the default and wrong for the only mode reaching it.
+
+  **No shipped behaviour changes.** Verified by differential test against the
+  v1.2.0 implementation over 4,000 randomised inputs per mode:
+
+  | mode | result |
+  |---|---|
+  | `query_first` (shipped default) | identical, 4000/4000 |
+  | unset (→ `query_first`) | identical, 4000/4000 |
+  | `all` | identical, 4000/4000 |
+  | `query`, query pinned | identical, 1963/1963 |
+  | `query`, no query pinned | **changed — this is the fix** (1916/2037) |
+
+  Unpinned strict `query` now hands the whole budget to the per-token error
+  ranking instead of reserving every run. Any A/B previously run with
+  `DKV_RESIDUAL_RUN_RESERVE=query` against unprioritised runs was comparing
+  `all` with `all` and should be re-measured.
+  `test_residual_capture.py::TestQueryScopedReservation::test_unasked_runs_do_not_claim_slots`
+  passes; suite is 406 passed, 2 skipped, 0 failed.
+
+---
+
 ## [1.2.0] — 2026-08-30
 
 **349 commits · 140 files changed · +45,750 / −2,869 lines since v1.1.0.**
@@ -223,6 +259,7 @@ withdrawn rather than quietly dropped:
   `all` against `all`. Covered by the (currently failing)
   `test_residual_capture.py::TestQueryScopedReservation::test_unasked_runs_do_not_claim_slots`,
   left failing deliberately rather than skipped.
+  **Fixed after release — see [Unreleased].**
 
 ---
 
@@ -250,6 +287,7 @@ withdrawn rather than quietly dropped:
 * Hardware auto-detection via `import dkv; dkv.info()`.
 * Unified `pip install` support across environments.
 
+[Unreleased]: https://github.com/Omc12/Differential-KV/compare/v1.2.0...HEAD
 [1.2.0]: https://github.com/Omc12/Differential-KV/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Omc12/Differential-KV/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Omc12/Differential-KV/releases/tag/v1.0.0

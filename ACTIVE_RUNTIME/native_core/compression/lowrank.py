@@ -411,10 +411,21 @@ def _greedy_whole_runs(s_np, runs, T, budget):
             _marked = [r for r in ranked if r[0]]
             if _marked:
                 ranked = _marked
+            elif _mode == "query":
+                # STRICT. Nothing marked -> reserve nothing, whether that is
+                # because the query pointed elsewhere or because no query was
+                # pinned at all. This branch MUST be tested before the
+                # `not _has_priority` one below: strict mode is the only way
+                # into this chain without priority information (the outer gate
+                # admits `query_first` only when _has_priority), so ordering
+                # them the other way round let `not _has_priority` swallow
+                # every unpinned strict-mode call and fall through to
+                # reserve-by-error -- i.e. strict `query` silently behaved as
+                # `all`, the exact opposite of its contract, and any A/B run
+                # against unprioritised runs compared `all` with `all`.
+                return [], set()
             elif not _has_priority:
                 pass          # NO query at all -> reserve by error, untouched.
-            elif _mode == "query":
-                return [], set()
             else:
                 # NOTHING MARKED IN THIS BLOCK. Two very different situations
                 # produce that and they are NOT separable per block:
