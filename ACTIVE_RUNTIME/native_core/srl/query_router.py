@@ -943,6 +943,32 @@ try:
 except ValueError:
     _ROUTE_TOPP_KMIN = 4
 
+# DKV_ROUTE_TOPP_STATS=1 prints the K this rule actually chose, at exit.
+# An adaptive rule can only be compared against a fixed K at MATCHED COST, and
+# its cost is not a setting -- it is an outcome of the score distribution, so it
+# has to be measured rather than assumed. Without this the natural comparison
+# (top-p 0.99 vs fixed 16) silently compares two different budgets and reads a
+# cost saving as a quality tie.
+_ROUTE_TOPP_STATS = os.environ.get("DKV_ROUTE_TOPP_STATS", "0") == "1"
+_ROUTE_TOPP_K_LOG = []
+
+if _ROUTE_TOPP_STATS:
+    import atexit as _atexit
+
+    def _dump_topp_stats():
+        ks = _ROUTE_TOPP_K_LOG
+        if not ks:
+            print("[DKV TOPP STATS] no adaptive routing calls observed",
+                  file=sys.stderr, flush=True)
+            return
+        srt = sorted(ks)
+        n = len(srt)
+        print(f"[DKV TOPP STATS] calls={n} mean_K={sum(srt) / n:.2f} "
+              f"median={srt[n // 2]} p90={srt[int(0.9 * (n - 1))]} "
+              f"min={srt[0]} max={srt[-1]}",
+              file=sys.stderr, flush=True)
+    _atexit.register(_dump_topp_stats)
+
 # ROUTE TRACE budget: kept=True lines are capped (drops always print).
 _ROUTE_TRACE_KEPT_SHOWN = 0
 _ROUTE_TRACE_TOK = None
@@ -980,7 +1006,10 @@ def select_by_mass(relevance, topp, k_min, k_floor):
     k = int(torch.searchsorted(
         cum, torch.tensor(topp, device=cum.device, dtype=cum.dtype)).item()) + 1
     k = max(k, int(k_min), min(int(k_floor), N))
-    return pi[:min(k, N)]
+    k = min(k, N)
+    if _ROUTE_TOPP_STATS:
+        _ROUTE_TOPP_K_LOG.append(k)
+    return pi[:k]
 
 
 def route_blocks_relevance(
@@ -1396,17 +1425,6 @@ def route_blocks_relevance(
     # Max-reduce over L (dim=1) and H (dim=0 after reshape)
     relevance = relevance.reshape(H_kv * gpk, L, N).max(dim=1).values.max(dim=0).values   # [N]
 
-    # Opt-in observer for the per-block score DISTRIBUTION (colab/probe_relevance_dist.py).
-    # Answers "how many blocks would a mass THRESHOLD take here?", which cannot be
-    # read from this function's return value -- that is the already-selected top-K.
-    # None by default: one identity check per route when nobody is looking. The
-    # hook must not mutate `relevance`; its return value is ignored.
-    if _ROUTE_DIST_HOOK is not None:
-        try:
-            _ROUTE_DIST_HOOK(relevance, layer_idx)
-        except Exception:                                        # noqa: BLE001
-            pass
-
     # ── Edge-aware routing propagation (MLX parity) ──────────────────────────
     # MLX applies this to the SAME relevance vector, between scoring and top-K:
     #
@@ -1464,6 +1482,28 @@ def route_blocks_relevance(
     # is confirmed on A100 to drop answer-critical blocks at matched K, which a
     # forced non-relevance slot is a plausible contributor to. Removed to match
     # the documented "direct port" contract.
+    # Opt-in observer for the per-block score DISTRIBUTION (colab/probe_relevance_dist.py).
+    # Answers "how many blocks would a mass THRESHOLD take here?", which cannot be
+    # read from this function's return value -- that is the already-selected set.
+    #
+    # PLACED AFTER EDGE PROPAGATION ON PURPOSE, and it was wrong before. Sitting
+    # above the propagation block, it observed the RAW max-reduced relevance while
+    # selection actually runs on the propagated vector -- and propagation
+    # (relevance + beta * A_hat @ relevance) deliberately FLATTENS the
+    # distribution by diffusing mass over connected blocks. A threshold needs
+    # more blocks to cover a flatter vector, so the probe systematically
+    # UNDER-predicted K: it reported a 0.99 threshold never exceeding 15 blocks
+    # of 27, while the live rule measured mean K = 19.65 on the same setting.
+    # A probe for a selection rule has to observe the tensor that rule sees.
+    #
+    # None by default: one identity check per route when nobody is looking. The
+    # hook must not mutate `relevance`; its return value is ignored.
+    if _ROUTE_DIST_HOOK is not None:
+        try:
+            _ROUTE_DIST_HOOK(relevance, layer_idx)
+        except Exception:                                        # noqa: BLE001
+            pass
+
     if _ROUTE_TOPP > 0.0:
         sel = select_by_mass(relevance, _ROUTE_TOPP, _ROUTE_TOPP_KMIN, k_eff)
     else:

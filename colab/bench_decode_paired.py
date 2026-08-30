@@ -103,6 +103,14 @@ def set_arm(arm):
             os.environ["DKV_TOPK_BLOCKS"] = os.environ.get("TOPK_ON", "32")
         else:
             os.environ.pop("DKV_TOPK_BLOCKS", None)
+    elif EXPERIMENT == "topk_pair":
+        # BOTH arms explicit, so any two K values can be compared. `topk` above
+        # pins the off-arm to whatever the pool default happens to be, which
+        # makes it useless once that default is the value under test -- and it
+        # silently changes meaning when the default changes.
+        # TOPK_OFF=0 means "attend every block", the widest contrast available.
+        os.environ["DKV_TOPK_BLOCKS"] = os.environ.get(
+            "TOPK_ON" if on else "TOPK_OFF", "4" if on else "0")
     elif EXPERIMENT == "remat_interval":
         os.environ["DKV_REMAT_INTERVAL"] = (os.environ.get("IV_ON", "16") if on
                                             else os.environ.get("IV_OFF", "4"))

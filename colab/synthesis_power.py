@@ -116,7 +116,15 @@ def run_dkv(a, reps):
     for k, v in BEST_DECODE_DEFAULTS.items():
         os.environ.setdefault(k, v)
     from serving.hf_dkv_wrapper import PyTorchDKVHFWrapper
-    cfg = {"mode": "fp16"}
+    # QUANT=nf4 for models that do not fit in fp16 -- a 7B is 14 GiB fp16 and the
+    # card is 12. Both the config mode AND DKV_QUANTIZATION have to be set, the
+    # same pair linkbench_cuda.py sets: the wrapper reads the config, the runtime
+    # re-reads the env, and setting only one loads fp16 silently (the defect
+    # fixed in 4385dd61, where quantization='int4' matched nothing).
+    _q = os.environ.get("QUANT", "").lower()
+    cfg = {"mode": "nf4" if _q == "nf4" else "fp16"}
+    if _q == "nf4":
+        os.environ["DKV_QUANTIZATION"] = "nf4"
     if os.environ.get("DKV_PRESET"):
         cfg["preset"] = os.environ["DKV_PRESET"]
     # BLOCK / RANK, matching the convention in linkbench_cuda.py and
