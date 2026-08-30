@@ -833,7 +833,21 @@ class PyTorchDKVHFWrapper:
 
         self.num_layers = self.model.config.num_hidden_layers
         self.heads = self.model.config.num_attention_heads
-        self.head_dim = self.model.config.hidden_size // self.heads
+        # READ head_dim, DO NOT DERIVE IT. hidden_size // num_heads is only
+        # correct when the model does not decouple the two, and a growing number
+        # do: Qwen3.5-4B is 2560 // 16 = 160 against a real head_dim of 256, and
+        # google/gemma-4-e2b-it is 1536 // 8 = 192 against 256. The wrong value
+        # propagates into the pool's h_dim, where write_blocks_batched slices the
+        # stacked K|V at num_kv * h_dim and reshapes the V half --
+        #     RuntimeError: shape '[7, 53, 4, 160]' is invalid for input of
+        #     size 522368            (native_block_pool.py, vv = ...)
+        # because the slice cuts at 640 while the V half is really 1024 wide.
+        # This same expression already appears in its correct form at
+        # _D = getattr(_hf_cfg, "head_dim", ...) further down this file, and in
+        # runtime/dkv_attention.py -- this site was the one left behind.
+        # It also silently mis-sized the rank cap below (head_dim // 2).
+        self.head_dim = getattr(self.model.config, "head_dim", None) or (
+            self.model.config.hidden_size // self.heads)
         if self.rank >= self.head_dim:
             old_rank = self.rank
             self.rank = self.head_dim // 2
