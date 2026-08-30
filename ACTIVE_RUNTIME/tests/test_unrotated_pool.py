@@ -99,9 +99,18 @@ def _fill(mgr, sid, k_unrot, k_rot, v, n):
         )
 
 
-def test_residual_keys_round_trip_to_their_rotated_originals():
+def test_residual_keys_round_trip_to_their_rotated_originals(monkeypatch):
     """THE test. Re-rotating an unrotated residual must reproduce the rotated key
-    that lived at that absolute position — to fp16 storage precision."""
+    that lived at that absolute position — to fp16 storage precision.
+
+    Pins DKV_RESIDUAL_QUANT=none. The claim under test is about the RoPE math,
+    the slot->position map and the block->absolute-position arithmetic, and it
+    is stated at fp16 storage precision; the shipped int4 default stores no
+    fp16 slab at all (`comp_res_k` is None by design) and its group
+    quantisation error would swamp exactly the ~25% partial-RoPE perturbation
+    this test exists to detect.
+    """
+    monkeypatch.setenv("DKV_RESIDUAL_QUANT", "none")
     mgr = _mgr(rotated=False)
     n = _seq_len(mgr)
     rope = nn.RoPE(ROPE_DIMS, traditional=False, base=ROPE_BASE, scale=1.0)

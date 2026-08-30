@@ -25,17 +25,24 @@ from native_core.compression.residual_capture import (
 
 
 def test_idf_formula():
-    # IDF(t) = ln(1 + N / count(t))
+    # IDF(t) = ln(max(N, 2) / (count(t) + 0.1)).
+    # The +0.1 smoothing and the dropped 1+ landed in 46737636, which aligned
+    # this path with the six MLX call sites in mlx_dkv_wrapper.py; the two
+    # engines must not diverge on the rarity score or they select different
+    # residual rows for the same block.
     counts = {101: 1, 102: 10, 103: 1000}
     N = 16000
     idf_rare = _compute_idf(101, counts, N)
-    assert math.isclose(idf_rare, math.log(1.0 + 16000.0 / 1.0), rel_tol=1e-5)
+    assert math.isclose(idf_rare, math.log(16000.0 / 1.1), rel_tol=1e-5)
 
     idf_mid = _compute_idf(102, counts, N)
-    assert math.isclose(idf_mid, math.log(1.0 + 16000.0 / 10.0), rel_tol=1e-5)
+    assert math.isclose(idf_mid, math.log(16000.0 / 10.1), rel_tol=1e-5)
 
     idf_freq = _compute_idf(103, counts, N)
-    assert math.isclose(idf_freq, math.log(1.0 + 16000.0 / 1000.0), rel_tol=1e-5)
+    assert math.isclose(idf_freq, math.log(16000.0 / 1000.1), rel_tol=1e-5)
+
+    # Monotone in rarity, which is the property the selection actually relies on.
+    assert idf_rare > idf_mid > idf_freq
 
 
 def test_exclusion_guard_delimiters():

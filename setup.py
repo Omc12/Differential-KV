@@ -155,7 +155,7 @@ except Exception as e:
 
 setup(
     name="dkv",
-    version="1.0.0",
+    version="1.2.0",
     description="Differential KV-Cache Management & High-Efficiency Attention Engine",
     ext_modules=ext_modules,
     cmdclass=cmdclass,

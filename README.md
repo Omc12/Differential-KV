@@ -203,7 +203,7 @@ Differential-KV introduces a **multi-tiered semantic selection engine**:
    * Numeric Digits / Passkeys: **20.0x multiplier** (`DKV_BOOST_DIGITS`)
    * TitleCase / Entity Names: **14.6x multiplier** (`DKV_BOOST_OWNER`)
    * Rare Technical / Domain Terms: **7.3x multiplier** (`DKV_BOOST_RARE`)
-2. **IDF-Weighted Rarity Layer**: Computes inverse document frequency `IDF(t) = ln(1 + N / count(t))`. Rare tokens above the threshold receive a multiplicative boost to ensure document facts are preserved verbatim.
+2. **IDF-Weighted Rarity Layer**: Computes inverse document frequency `IDF(t) = ln(max(N, 2) / (count(t) + 0.1))`. Rare tokens above the threshold receive a multiplicative boost to ensure document facts are preserved verbatim. The `+0.1` smoothing keeps a hapax finite, and both engines use this exact form — MLX and the CUDA/C++ path must not diverge here, or they select different residual rows for the same block.
 3. **Punctuation Exclusion Guard**: Delimiters and whitespace are strictly barred from receiving rarity boosts.
 
 #### Tunable Selection Dials

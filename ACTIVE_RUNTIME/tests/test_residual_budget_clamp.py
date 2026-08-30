@@ -65,8 +65,15 @@ def test_budget_is_not_clamped_when_the_block_is_large_enough():
     assert max(sess["comp_res_n"][0][:sess["num_blocks"][0]]) <= 128
 
 
-def test_stored_residual_rows_match_the_recorded_count():
-    """n_res must describe the rows actually written, not the slab width."""
+def test_stored_residual_rows_match_the_recorded_count(monkeypatch):
+    """n_res must describe the rows actually written, not the slab width.
+
+    Reads the fp16 residual slab directly, so it pins DKV_RESIDUAL_QUANT=none.
+    Under the shipped int4 default `comp_res_k` is deliberately None and the
+    rows live in the packed `comp_res_k_q` store instead; the invariant under
+    test (recorded count vs slab width) is about the count, not the format.
+    """
+    monkeypatch.setenv("DKV_RESIDUAL_QUANT", "none")
     m = _mgr(32)
     sess = _ingest(m, 64 + 6 * 32)
     n = sess["comp_res_n"][0][0]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dkv"
-version = "1.0.0"
+version = "1.2.0"
 description = "Differential KV-Cache Management & High-Efficiency Attention Engine"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -10,9 +10,9 @@ authors:
     given-names: Om
     affiliation: Newton School of Technology, Rishihood University
 
-version: "v1"
+version: "v1.2.0"
 
-date-released: 2026-07-21
+date-released: 2026-08-30
 
 license: MIT
 

@@ -1,0 +1,30 @@
+# Metadata and docs shipped with the source distribution.
+include LICENSE
+include README.md
+include CHANGELOG.md
+include CITATION.cff
+include Makefile
+include pyproject.toml
+include setup.py
+include ACTIVE_RUNTIME/requirements.txt
+recursive-include docs *.md
+
+# Native engine sources. setup.py compiles these into the `dkv_core` extension
+# (C++/Metal on macOS, C++/CUDA on Linux); without them an sdist install
+# silently degrades to the Python-only fallback.
+recursive-include ACTIVE_RUNTIME/native_core/dkv_core *.cpp *.cu *.mm *.hpp *.h *.metal
+
+# Generated Metal library header. setup.py regenerates it on macOS when the
+# Metal toolchain is present, but it must ship so non-macOS builds and machines
+# without `xcrun` still compile.
+include ACTIVE_RUNTIME/native_core/dkv_core/src/dkv_metallib.hpp
+
+# Never ship build residue, models, or research artifacts.
+global-exclude *.py[cod]
+global-exclude .DS_Store
+prune ACTIVE_RUNTIME/tests
+prune archive
+prune benchmarks
+prune colab
+prune paper
+prune scratch
