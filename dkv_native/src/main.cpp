@@ -4503,6 +4503,68 @@ int main(int argc, char ** argv) {
             }
         }
 
+        // ── Final clamp: K is bounded by the blocks that can ever exist ─────────
+        // The three gates above are all RAISE-ONLY, and nothing brings srl_k_keep back
+        // down to the block count this prompt actually produced.
+        //
+        // The "n_slots <= 32" gate keys off the context WINDOW (n_ctx / micro_block_size,
+        // set at main.cpp:2245 and only ever grown, never shrunk for a short prompt), not
+        // off the blocks that exist. At the shipped micro_block_size = 1024 that condition
+        // holds for essentially every request, so K was pinned at n_slots regardless of
+        // prompt length -- at L=8192 that is K=32 for 7 blocks. srl_k_keep sizes the routed
+        // half of the decode cache (cache_routed_cap below), native_dup_tri [K,K] and
+        // native_attn_slots [K], so the overshoot is a real allocation, not a stale number.
+        //
+        // ONE CLAMP, NOT A RE-KEYED GATE. Re-keying the n_slots gate off n_comp_blocks is
+        // necessary but not sufficient: under DKV_PRESET that gate never fires (n_slots is
+        // already <= 16) and the binding overshoot is adaptive_k_min = max(20, ...) above,
+        // which can exceed n_slots outright -- i.e. ask to keep more blocks than the pool
+        // has slots for. That is why the min() below has an n_slots term as well.
+        //
+        // GROWTH IS LOAD-BEARING. Blocks keep compressing DURING generation as the dense
+        // window flushes, so clamping to the prefill-time count would under-allocate
+        // mid-answer.
+        //
+        // DERIVE IT FROM max_generate, NOT FROM headroom_slots. headroom_slots looks
+        // like the right quantity -- it is the pool's own reservation for generation --
+        // but it is capped at headroom_tokens_cap = 512 tokens (~line 2807) and it does
+        // NOT bound how many blocks generation can create. Generation runs until
+        // active_slot >= n_slots, so with the default DKV_MAX_TOKENS = 2048 at
+        // micro_block_size = 1024 it forms 2 blocks while headroom_slots is 1, and K
+        // would be one block short mid-answer. The NIAH suite cannot catch that: it
+        // sets DKV_MAX_TOKENS = 40, where both expressions give 1.
+        //
+        // ceil(max_generate / micro_block_size) is the real bound on blocks created
+        // during generation, and the n_slots term below caps it at what the pool can
+        // physically hold.
+        //
+        // srl_k_semantic and srl_k_host are deliberately NOT lowered. The gates raise them
+        // to keep the anchor_screen candidate pool at >= 3x srl_k_keep; a SMALLER K still
+        // satisfies that, so shrinking them would be a separate behavioural change to
+        // candidate screening rather than part of fixing the allocation.
+        //
+        // Arithmetic verified by transcription (tools/native_k_pipeline/, mbs=1024,
+        // n_ctx=32768, recency 512, one block of growth): 295200 -> 135300 rows/layer
+        // across the preset x length grid, 54.2% less. Worst case was L=4096 with no
+        // preset -- K=32 for 3 blocks, a 10.7x over-allocation.
+        {
+            const int n_comp_blocks_final =
+                (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
+            if (n_comp_blocks_final > 0) {
+                const int growth =
+                    (max_generate + micro_block_size - 1) / micro_block_size;
+                const int k_ceiling =
+                    std::min(n_comp_blocks_final + growth, n_slots);
+                if (srl_k_keep > k_ceiling) {
+                    std::cerr << "[DKV] K clamp: srl_k_keep lowered from " << srl_k_keep
+                              << " → " << k_ceiling << " (" << n_comp_blocks_final
+                              << " compressed blocks + " << growth
+                              << " generation headroom; pool has " << n_slots << " slots)\n";
+                    srl_k_keep = k_ceiling;
+                }
+            }
+        }
+
         // Prefill RoPE rotation and GPU upload is deferred until after past-KV GPU allocation.
 
         if (std::getenv("DKV_VERBOSE") && std::string(std::getenv("DKV_VERBOSE")) == "1") {

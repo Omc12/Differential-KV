@@ -1298,8 +1298,6 @@ void DKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req) {
     ggml_set_input(W_proj_decode);
     struct ggml_tensor * slots_mask_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_F32, n_slots);
     ggml_set_input(slots_mask_decode);
-    struct ggml_tensor * host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
-    ggml_set_input(host_slots_decode);
     
 #ifdef __APPLE__
     bool approx = true;
@@ -1400,8 +1398,74 @@ void DKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req) {
                 srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
             }
         }
+        // ── Final clamp: K is bounded by the blocks that can ever exist ─────────
+        // Parity with src/main.cpp -- the identical raise-only trio lives there, and
+        // this file has already diverged from it once (micro_block_size 256 vs 1024,
+        // fixed in 1157f3a2), so the clamp has to land in both or batch-served
+        // sessions quietly keep the old sizing.
+        //
+        // Every gate above only RAISES srl_k_keep. The "n_slots <= 32" one keys off the
+        // context WINDOW (n_ctx / micro_block_size, line ~703) rather than the blocks
+        // this prompt produced, and at the shipped micro_block_size = 1024 it holds for
+        // essentially every request -- pinning K at n_slots whatever the prompt length.
+        // Under DKV_PRESET that gate never fires and the overshoot is instead
+        // adaptive_k_min = max(20, ...), which can exceed n_slots outright, i.e. ask to
+        // keep more blocks than the pool has slots for. Hence both terms in the min().
+        //
+        // WHAT IT COSTS HERE IS NOT MEMORY. Unlike main.cpp, this file allocates no
+        // decode cache (there is no cache_routed_cap), so srl_k_keep feeds
+        // build_decode_graph and anchor_screen's K rather than a buffer. The clamp
+        // therefore buys routing work, not bytes -- state it that way rather than
+        // reusing main.cpp's 54.2% allocation figure, which does not apply to this path.
+        //
+        // GROWTH IS LOAD-BEARING: blocks keep compressing DURING generation as the dense
+        // window flushes, so clamping to the prefill-time count would under-allocate
+        // mid-answer. main.cpp reuses its pool's own headroom_slots for this; that budget
+        // does not exist in this file, so derive the same quantity from the request's own
+        // generation length.
+        {
+            const int growth = (req->max_tokens + micro_block_size - 1) / micro_block_size;
+            const int k_ceiling = std::min(n_comp_blocks + growth, n_slots);
+            if (n_comp_blocks > 0 && srl_k_keep > k_ceiling) {
+                srl_k_keep = k_ceiling;
+            }
+        }
     }
     
+    // host_slots_decode is created HERE, AFTER the gates above -- not up with the
+    // other decode inputs -- because those gates MUTATE srl_k_host, which is its
+    // length.
+    //
+    // It used to be created alongside slots_mask_decode, before the gate block. The
+    // gates raise srl_k_semantic to 3x srl_k_keep and then recompute
+    // srl_k_host = 1 + recency + lexical + semantic + graph, so the value the tensor
+    // was sized with is not the value that later reads it. At the shipped
+    // micro_block_size = 1024 with n_ctx = 32768: n_slots = 32, so srl_k_semantic
+    // starts at 32 and srl_k_host at 1+8+8+32+8 = 57; the "n_slots <= 32" gate then
+    // raises srl_k_keep to 32, sem_floor2 to 96, and srl_k_host to 121. The write
+    // below is `srl_k_host * sizeof(int32_t)` -- 121 int32s into a 57-int32 tensor.
+    //
+    // The re-creation inside the decode loop (on pool growth) already used the
+    // post-gate value, which is why this only bites when the pool does NOT grow --
+    // i.e. on the ordinary path, not the rare one.
+    //
+    // src/main.cpp has always had this ordering right (it creates the tensor after
+    // its own gate block), so this was a divergence between two entry points into
+    // the same engine rather than a shared design. That is the same class of defect
+    // as the micro_block_size 256-vs-1024 split fixed in 1157f3a2.
+    //
+    // Safe to move: nothing between the old site and here reads host_slots_decode --
+    // its only consumers are build_decode_graph below and the ggml_backend_tensor_set
+    // in the decode loop, both after the gates. The graph is not allocated until
+    // ggml_backend_sched_alloc_graph further down, so creation order within
+    // decode_ctx carries no meaning of its own.
+    //
+    // The length is exact, not a bound: route_decode_slots both pads and caps its
+    // result to srl_k_host (kv_runtime_manager.cpp ~290-297), so the write is
+    // always precisely this many elements.
+    struct ggml_tensor * host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
+    ggml_set_input(host_slots_decode);
+
     struct ggml_tensor * decode_logits = nullptr;
     struct ggml_tensor * decode_selected_slots = nullptr;
     struct ggml_tensor * decode_concat_k = nullptr;

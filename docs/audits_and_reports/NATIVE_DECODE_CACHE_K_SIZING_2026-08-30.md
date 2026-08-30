@@ -1,7 +1,8 @@
 # The native decode cache is sized off the context WINDOW, not the blocks that exist
 
-**Status: analysis only, not fixed.** The arithmetic is settled; the behavioural
-change is not, and must not be made from this box — see *Why nothing was changed*.
+**Status: APPLIED and validated on Apple silicon, 2026-08-30.** See *What
+shipped* at the end — including one correction to the fix proposed below, which
+was wrong in a way this document's own grid could not show.
 
 **Date:** 2026-08-30
 **Files:** `dkv_native/src/main.cpp`, `dkv_native/serving/batch_engine.cpp`
@@ -117,3 +118,88 @@ actually need answered before shipping this.
 * On the CUDA Python path this whole class of concern is currently moot: the
   decode cache is gated on `DKV_DECODE_CACHE_CUDA`, which defaults to `0`.
   Measured 2026-08-30, K=4 vs K=16 gave byte-identical peak VRAM there.
+
+
+---
+
+# What shipped (Mac session, 2026-08-30)
+
+Applied to `dkv_native/src/main.cpp` and `dkv_native/serving/batch_engine.cpp`,
+pinned by three tests in `ACTIVE_RUNTIME/tests/test_routing_k_budget_parity.py`
+(each verified to FAIL on the unfixed source).
+
+## Correction to the proposed fix: the growth term
+
+The clamp above is right. The `growth` term was first implemented as the pool's
+own `headroom_slots`, on the reasoning that the pool already reserves exactly that
+for blocks compressed during generation, so reusing it could not drift from the
+pool sizing. **That was wrong, and the grid in this document cannot show it** —
+every row uses one block of growth, so both forms agree everywhere in the table.
+
+`headroom_slots` is capped at `headroom_tokens_cap = 512` tokens and does **not**
+bound how many blocks generation can create; generation runs until
+`active_slot >= n_slots`. At the default `DKV_MAX_TOKENS = 2048` with
+`micro_block_size = 1024` that is 2 blocks against a headroom of 1, so K would sit
+one block short mid-answer — the precise failure the growth term exists to prevent.
+
+The shipped term is this document's original `ceil(max_new / micro_block_size)`,
+with `max_new` = `max_generate` in `main.cpp` and `req->max_tokens` in
+`batch_engine.cpp`. It was caught by reading the clamp's own log line, not by any
+test: `test_niah_native.sh` sets `DKV_MAX_TOKENS = 40`, where both forms give 1.
+
+## Validation
+
+Qwen2.5-1.5B-Instruct-f16, `micro_block_size = 1024`, needle sweep 4k/8k/16k x
+depth 0.5/0.9, baseline binary vs shipped binary, same prompts and env:
+
+| ctx | depth | baseline | clamped | srl_k_keep | output |
+|---|---|---|---|---|---|
+| 4000 | 0.5 / 0.9 | PASS | PASS | 32 -> 5 | byte-identical |
+| 8000 | 0.5 / 0.9 | PASS | PASS | 32 -> 9 | byte-identical |
+| 16000 | 0.5 / 0.9 | PASS | PASS | 32 -> 17 | byte-identical |
+
+Byte-identity is not luck, it is forced. Prefill can occupy at most
+`n_slots - headroom` blocks and generation can add at most `growth` more, so the
+largest block count that can ever exist is exactly `k_ceiling`. The clamp sets K to
+that maximum, so it can never prune a block that exists — it only releases capacity
+that was provably unusable. The measurement confirms an argument rather than
+standing in for one.
+
+Predictions were recorded before the runs and came in one higher (5/9/17 against
+4/8/16) because the real prompts exceed their nominal token targets by the chat
+template and question, giving one more compressed block.
+
+## What is NOT validated
+
+* **`batch_engine.cpp` was not behaviourally exercised.** `main.cpp` never calls
+  `DKVBatchEngine` — it only references it in comments — and there is no test in
+  the repo that drives the batch path. Both of its changes are compile-verified and
+  source-pinned only.
+* **The growth term itself was never exercised behaviourally.** Producing a case
+  where the headroom form actually fails needs generation to cross a block
+  boundary; this model hit EOS at ~800 tokens on every prompt tried, well short of
+  1024. Forcing it with `DKV_MICRO_BLOCK_SIZE=256` was discarded as an instrument
+  failure — the **baseline** loses the needle at that block size (it is the
+  configuration linkbench scores 9/24 on), so there is no working control to read
+  the arms against. The growth correction rests on the arithmetic argument above,
+  not on a measurement.
+* **The 54.2% figure is `main.cpp` only.** `batch_engine.cpp` allocates no decode
+  cache (`cache_routed_cap` does not exist there), so the clamp buys routing work
+  rather than bytes on that path.
+
+## Also fixed here: `srl_k_host` sized before the gates mutate it
+
+Found while tracing the clamp's consumers. `batch_engine.cpp` created
+`host_slots_decode` — whose length is `srl_k_host` — *before* the gate block, while
+the gates raise `srl_k_semantic` to `3 x srl_k_keep` and recompute `srl_k_host`
+from it. At `micro_block_size = 1024`, `n_ctx = 32768`: `srl_k_host` starts at 57
+and the gates take it to 121, and the decode loop then writes
+`srl_k_host * sizeof(int32_t)` — **121 int32s into a 57-int32 tensor**.
+
+Not a merely wasteful size: the length is exact, since `route_decode_slots` both
+pads and caps its result to `srl_k_host`. It survived because the decode loop's
+re-creation of the tensor on pool growth *does* use the post-gate value, so the
+overflow only appears when the pool does **not** grow — the ordinary path.
+`main.cpp` has always created the tensor after its gates, so this was a divergence
+between two entry points, not a shared design. Fixed by moving the creation below
+the gate block, matching `main.cpp`.

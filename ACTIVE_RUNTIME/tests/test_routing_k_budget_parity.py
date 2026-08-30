@@ -240,6 +240,155 @@ def test_native_entry_points_agree_on_micro_block_size():
     assert main_mbs == 1024
 
 
+def test_native_k_is_clamped_to_the_blocks_that_exist():
+    """Both native entry points clamp srl_k_keep AFTER their raise-only gates.
+
+    THE DEFECT. main.cpp and batch_engine.cpp each carry three gates that can raise
+    srl_k_keep, and every one of them is raise-only. The "n_slots <= 32" gate keys
+    off the context WINDOW (n_ctx / micro_block_size) rather than the blocks the
+    prompt produced, and n_slots is only ever grown to fit a long prompt, never
+    shrunk for a short one -- so at the shipped micro_block_size = 1024 that gate
+    fires on essentially every request and pins K at n_slots. At L=8192 that was
+    K=32 for 7 blocks, and in main.cpp srl_k_keep sizes a real allocation
+    (cache_routed_cap = srl_k_keep * (micro_block_size + 1)).
+
+    WHY A CLAMP AND NOT A RE-KEYED GATE. Re-keying the n_slots gate off the block
+    count fixes only the no-preset case. Under DKV_PRESET, n_slots is already <= 16
+    so that gate never fired, and the binding overshoot is instead
+    adaptive_k_min = max(20, ...) -- which can exceed n_slots outright, i.e. keep
+    more blocks than the pool has slots for. One clamp after all three covers both,
+    which is why the assertion below also requires the n_slots term.
+
+    WHY BOTH FILES. These are two entry points into the same engine and they have
+    diverged before: batch_engine.cpp defaulted micro_block_size to 256 while
+    main.cpp used 1024, so every batch-served session silently ran the block size
+    linkbench scores 9/24 on. Nothing at runtime reconciles them, so the pin is here.
+
+    THE GROWTH TERM MUST COME FROM THE GENERATION BUDGET, not from the pool's
+    headroom_slots. headroom_slots looks like the right quantity and is not: it is
+    capped at 512 tokens and does not bound how many blocks generation can create
+    (generation runs until active_slot >= n_slots). At the default DKV_MAX_TOKENS
+    of 2048 with micro_block_size=1024 that is 2 blocks against a headroom of 1, so
+    K would fall one block short mid-answer. It was written that way first and
+    caught by reading the clamp's own log line -- the NIAH suite sets
+    DKV_MAX_TOKENS=40, where both forms give 1 and therefore agree.
+    """
+    for path in (MAIN_CPP, BATCH_ENGINE):
+        name = os.path.basename(path)
+        src = _strip_comments(_read(path))
+
+        m = re.search(r"k_ceiling\s*=\s*std::min\(([^;]+)\);", src)
+        assert m, (f"{name} has no k_ceiling clamp. srl_k_keep must be bounded by "
+                   f"the blocks that can exist; without it the raise-only gates "
+                   f"pin K at the context window.")
+        expr = " ".join(m.group(1).split())
+        assert "n_slots" in expr, (
+            f"{name} clamps K as std::min({expr}) with no n_slots term. "
+            f"adaptive_k_min = max(20, ...) can exceed the pool's slot count, so "
+            f"the block-count term alone still permits K > pool size.")
+        assert "n_comp_blocks" in expr, (
+            f"{name} clamps K as std::min({expr}) without the compressed-block "
+            f"count -- that count is the whole point of the clamp.")
+
+        gm = re.search(r"int\s+growth\s*=\s*\(([^;]+)\)\s*/", src)
+        assert gm, f"{name} has no growth term feeding the clamp"
+        growth = " ".join(gm.group(1).split())
+        assert "headroom_slots" not in growth, (
+            f"{name} derives the clamp's growth from headroom_slots ({growth!r}). "
+            f"That is capped at 512 tokens and does not bound blocks created during "
+            f"generation, so K falls short mid-answer whenever the generation budget "
+            f"exceeds one block. Derive it from the generation budget instead.")
+        assert ("max_generate" in growth or "max_tokens" in growth), (
+            f"{name} derives the clamp's growth from {growth!r}; it must come from "
+            f"the request's generation budget.")
+
+        assert re.search(r"srl_k_keep\s*=\s*k_ceiling\s*;", src), \
+            f"{name} computes k_ceiling but never assigns it to srl_k_keep"
+
+        # ORDER IS THE WHOLE FIX. A clamp placed before the gates is dead code:
+        # they would simply raise K again afterwards, and nothing would fail.
+        last_raise = max(mm.start() for mm in
+                         re.finditer(r"srl_k_keep\s*=\s*(?:target_k|adaptive_k)\s*;", src))
+        clamp_at = re.search(r"srl_k_keep\s*=\s*k_ceiling\s*;", src).start()
+        assert clamp_at > last_raise, (
+            f"{name} clamps srl_k_keep BEFORE its last raise-only gate, so the "
+            f"gate re-raises K afterwards and the clamp does nothing.")
+
+
+def test_native_clamp_lands_before_every_allocation_that_reads_k():
+    """main.cpp only: the clamp must precede the buffers srl_k_keep sizes.
+
+    srl_k_keep sizes cache_routed_cap, native_dup_tri [K,K] and native_attn_slots
+    [K]. A clamp that ran after any of them would leave a buffer sized off the
+    pre-clamp value while the decode loop indexed with the post-clamp one -- a
+    disagreement far worse than the over-allocation it was meant to fix.
+    """
+    src = _strip_comments(_read(MAIN_CPP))
+    clamp_at = re.search(r"srl_k_keep\s*=\s*k_ceiling\s*;", src)
+    assert clamp_at, "main.cpp has no k_ceiling clamp"
+    clamp_at = clamp_at.start()
+    for consumer in (r"cache_routed_cap\s*=", r"native_dup_tri\s*=\s*ggml_new_tensor_2d",
+                     r"native_attn_slots\s*=\s*ggml_new_tensor_1d"):
+        m = re.search(consumer, src)
+        assert m, f"consumer {consumer!r} not found in main.cpp"
+        assert m.start() > clamp_at, (
+            f"main.cpp sizes {consumer!r} at offset {m.start()} but clamps "
+            f"srl_k_keep later, at {clamp_at}. The buffer would be sized from the "
+            f"unclamped K.")
+
+
+def test_host_slots_tensor_is_sized_after_the_gates_mutate_k_host():
+    """Both native entry points must create host_slots_decode AFTER the gates.
+
+    THE DEFECT (batch_engine.cpp, fixed alongside the K clamp). The gates raise
+    srl_k_semantic to 3x srl_k_keep and then recompute
+    srl_k_host = 1 + recency + lexical + semantic + graph. host_slots_decode is a
+    tensor whose LENGTH is srl_k_host, and batch_engine.cpp created it before that
+    block while main.cpp created it after -- so on the batch-served path the tensor
+    was sized with the pre-gate value and written with the post-gate one.
+
+    Concretely at micro_block_size = 1024, n_ctx = 32768: n_slots = 32, so
+    srl_k_semantic starts at 32 and srl_k_host at 57. The "n_slots <= 32" gate then
+    raises srl_k_keep to 32, sem_floor2 to 96 and srl_k_host to 121, and the decode
+    loop's ggml_backend_tensor_set writes `srl_k_host * sizeof(int32_t)` -- 121
+    int32s into a 57-int32 tensor. It is an overflow of the backend buffer, not a
+    merely wasteful size, which is why this is pinned rather than left to review.
+
+    The length is exact and not a bound, so a "write less than capacity" reading
+    does not save it: route_decode_slots both pads and caps its result to
+    srl_k_host (kv_runtime_manager.cpp ~290-297).
+
+    NOT caught by the existing decode-loop path: that loop re-creates the tensor
+    when the pool grows, using the post-gate value, so the bug only appears when
+    the pool does NOT grow -- the ordinary case rather than the rare one.
+    """
+    for path in (MAIN_CPP, BATCH_ENGINE):
+        name = os.path.basename(path)
+        src = _strip_comments(_read(path))
+
+        creates = [m.start() for m in re.finditer(
+            r"host_slots_decode\s*=\s*ggml_new_tensor_1d\([^;]*srl_k_host\s*\)", src)]
+        assert creates, f"{name} never sizes host_slots_decode from srl_k_host"
+
+        mutations = [m.start() for m in re.finditer(
+            r"srl_k_host\s*=\s*1\s*\+\s*srl_k_recency", src)]
+        # The first assignment is the initial definition, not a gate mutation; the
+        # ones inside the gate block are what move the value out from under the
+        # tensor. If a file ever has only the initial one, there is nothing to order.
+        gate_mutations = [o for o in mutations if o != min(mutations)]
+        if not gate_mutations:
+            continue
+
+        first_create = min(creates)
+        last_mutation = max(gate_mutations)
+        assert first_create > last_mutation, (
+            f"{name} creates host_slots_decode at offset {first_create} but "
+            f"srl_k_host is still raised afterwards at {last_mutation}. The tensor "
+            f"is then sized with a stale, SMALLER length than the "
+            f"ggml_backend_tensor_set that fills it, which overflows the backend "
+            f"buffer. Create it after the gate block, as src/main.cpp does.")
+
+
 def test_python_runtime_manager_default_matches_native():
     """KVRuntimeManager's signature default is the same 1024.
 
