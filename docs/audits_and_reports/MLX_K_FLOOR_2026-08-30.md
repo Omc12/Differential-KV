@@ -49,8 +49,37 @@ directly before any score was read, by instrumenting `_route_k`:
     DKV_TOPK_BLOCKS=16  -> nb=15, k_eff=16, top-K branch fired 0/12   (attend-all)
 
 This makes it the strictest available control — K=8 tying it means K=8 loses
-nothing to routing at this context. It also means **nothing here speaks to K=8 vs a
-genuinely-routing K=16**, which needs nb > 16, i.e. ctx beyond ~18k. Not measured.
+nothing to routing at this context.
+
+## The routing-vs-routing comparison, at 32k
+
+Run afterwards to close that gap, since at 16k the K=16 arm is not routing at all.
+At 32k there are **nb=31** blocks, so both arms genuinely route (verified: K=16
+fired the top-K branch 6/6 calls). Same harness, paired, n=32:
+
+| K | mean | sd | vs K=16 (paired, 95% CI) | reps < 30 | worst rep |
+|---|---|---|---|---|---|
+| 8 | 43.0 | 9.8 | **−3.44  [−7.78, +0.91]  not resolvable** | 2 / 32 | 20.0 |
+| 16 | 46.5 | 9.5 | — | 1 / 32 | **16.7** |
+
+Per-replicate, K=8 was worse in 15 of 32, better in 11, tied in 6 — close to even.
+
+So K=8 vs K=16 is unresolved at BOTH contexts, and in the same direction each time
+(−2.29 at 16k, −3.44 at 32k). Two cautions before reading that as a real ~3-point
+deficit:
+
+* they are **not the same comparison** — at 16k the K=16 arm is attend-all, at 32k
+  it routes 16 of 31 — so the two should not simply be pooled;
+* **the tail argument that killed K=4 does not reproduce here.** K=4's case rested
+  on 7 of 32 reps below 30 points against zero for the other arms. At 32k both K=8
+  and K=16 produce the occasional bad rep and K=16 owns the single worst one, so
+  there is no failure-mode difference between them, only a small mean gap.
+
+That is why the floor is 8 rather than 16: the resolved, catastrophic failure is at
+K=4, and K=8 removes it while keeping half of K=16's decode cache. The residual
+K=8-vs-K=16 gap is real in direction but unresolved in size at n=32, and sits under
+this harness's ~3-point noise floor. **If it needs settling, n=64 at 32k is the
+run** — resolution at n=32 was ±4.34, so roughly n≈51 would resolve a −3.44.
 
 ## Cost, and why CUDA still floors at 16
 

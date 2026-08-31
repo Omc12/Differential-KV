@@ -2088,8 +2088,21 @@ class MLXKVBlockManager:
         # sites). k_eff=16 means that guard is FALSE, so the K=16 arm above is
         # ATTEND-ALL -- it is the quality ceiling, not "routing 16 blocks". That makes
         # it the strictest possible control: K=8 tying it means K=8 loses nothing to
-        # routing at all at this context. It also means this measurement says nothing
-        # about K=8 vs a genuinely-routing K=16, which needs nb>16, i.e. ctx > ~18k.
+        # routing at all at this context.
+        #
+        # ROUTING-VS-ROUTING WAS THEN MEASURED AT 32k, where nb=31 so both arms really
+        # route (K=16 fired the top-K branch 6/6 calls). Paired, n=32:
+        #
+        #     K       mean   sd    vs K=16 (95% CI)          reps <30   worst rep
+        #     8       43.0   9.8   -3.44 [-7.78, +0.91]      2 of 32    20.0
+        #     16      46.5   9.5   --                        1 of 32    16.7
+        #
+        # Unresolved, and K=8 was worse in only 15 of 32 replicates (better in 11,
+        # tied in 6). Crucially the TAIL argument that killed K=4 does NOT reproduce
+        # here -- K=16 owns the single worst rep -- so between 8 and 16 there is a
+        # small mean gap and no difference in failure mode. K=4's case was a resolved
+        # deficit AND 7 of 32 catastrophic reps; that is the difference in kind that
+        # sets the floor at 8. To settle 8 vs 16 would take n~=51 at 32k.
         #
         # COST: the decode cache is sized k_eff * block_size and is ON for MLX, so
         # this floor is not free -- it is the deliberate trade of some of the 377.9 ->
