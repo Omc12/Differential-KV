@@ -425,6 +425,48 @@ def test_host_slots_tensor_is_sized_after_the_gates_mutate_k_host():
             f"buffer. Create it after the gate block, as src/main.cpp does.")
 
 
+def test_the_two_native_entry_points_derive_the_same_k():
+    """EXECUTE both native K pipelines and check they agree, not just that they exist.
+
+    The other native tests here are source-level: they assert each file CONTAINS a
+    clamp with the right terms in the right place. That cannot catch the two files
+    computing different K from the same inputs, which is exactly the failure this
+    pair has already had -- micro_block_size defaulted to 256 in batch_engine.cpp
+    and 1024 in main.cpp, so every batch-served session ran at the block size
+    linkbench scores 9/24 on while single-stream ran 1024, and nothing at runtime
+    reconciled them.
+
+    tools/native_k_pipeline/k_pipeline_two_entrypoints.cpp transcribes both gate
+    chains and sweeps preset x block size x length x generation budget, asserting
+    equal K and that neither entry point ever keeps more blocks than can exist.
+    Compiling it needs only a C++17 compiler -- no ggml, model or GPU.
+
+    WHY A TRANSCRIPTION AND NOT AN INTEGRATION TEST: nothing in this repo ever
+    constructs a DKVBatchEngine. It and DKVGateway are compiled and linked into the
+    binary but have no caller, so there is no batch path to drive end-to-end -- an
+    "integration test" would first have to build the wiring that does not exist.
+    Until that is wired up, executing the transcribed logic is the strongest
+    available coverage of the batch entry point.
+    """
+    import shutil, subprocess, tempfile
+    cxx = shutil.which("g++") or shutil.which("clang++")
+    if cxx is None:
+        import pytest
+        pytest.skip("no C++ compiler available")
+    srcfile = os.path.join(REPO, "tools", "native_k_pipeline",
+                           "k_pipeline_two_entrypoints.cpp")
+    assert os.path.exists(srcfile), srcfile
+    with tempfile.TemporaryDirectory() as td:
+        exe = os.path.join(td, "k2")
+        build = subprocess.run([cxx, "-O2", "-std=c++17", "-o", exe, srcfile],
+                               capture_output=True, text=True)
+        assert build.returncode == 0, build.stderr
+        run = subprocess.run([exe], capture_output=True, text=True)
+        assert run.returncode == 0, (
+            f"main.cpp and batch_engine.cpp derive different srl_k_keep:\n{run.stdout}")
+        assert "agree everywhere" in run.stdout, run.stdout
+
+
 def test_python_runtime_manager_default_matches_native():
     """KVRuntimeManager's signature default is the same 1024.
 
