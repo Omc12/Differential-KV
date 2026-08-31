@@ -214,12 +214,18 @@ read that as "no regression", not as an improvement).
 
 ## What shipped
 
-`DKV_RSVD_MAX_RPROJ=32` is now the **default for configured rank ≤ 64**
+`DKV_RSVD_MAX_RPROJ=32` is the **default for configured rank ≤ 96**
 (`low`, `mid`, `ultra` — including the default path), at
 `compression/lowrank.py` and `kv_runtime_manager.py`. The two sites must agree,
 or the pool is sized for a rank the compressor does not produce.
 
-**`high` (rank=128) is deliberately left uncapped.** Capping it to 32 would be a
+> The threshold reads 96, not 64, because of the rank-ceiling change below.
+> It was 64 until the preset ranks were rescaled by 1.5, at which point mid and
+> ultra (64 → 96) fell out of the guard and the cap **silently stopped applying
+> to the default path** — the pool quietly returned to 370 KB/slot with nothing
+> failing. Fixed in `968418b4`, with two tests pinning the coupling.
+
+**`high` (now rank=192) is deliberately left uncapped.** Capping it to 32 would be a
 4× cut, taking the explicit fidelity preset *below* what `low` asks for, and
 nothing here tested rank 128. The manager keys the guard off `self.rank` (the
 configured base rank), **not** off `max_possible_rank` — the per-layer schedule
@@ -240,3 +246,34 @@ Suite after the change: 321 passed, 18 skipped — unchanged.
 `RANK_BOOST=off` already shipped, so there was only ever one; and that one now
 has 80 paired needle trials, 8 linkbench seeds and a multifact A/B behind it
 instead of 3 fixed-needle runs.
+
+
+## Postscript: the rank ceiling this exposed (fixed, `ed9b4313`)
+
+Chasing the cap surfaced something bigger: **no preset delivered the rank it
+declared, and that predated the cap entirely.** The per-layer schedule's middle
+band returned `1.5 * base_rank`, so `mid` declared 64 and stored 32–96, and
+`high` declared 128 and stored 64–192 — it had never once delivered its stated
+rank. Both wrappers even documented the value as "a CEILING, not a target".
+
+Fixed as a reparameterisation, so nothing moved:
+
+```
+schedule multipliers /1.5   0.75 / 1.50 / 0.50  ->  0.50 / 1.00 / 0.333
+preset ranks         *1.5   low 32->48, mid/ultra 64->96, high 128->192
+MLX default rank     *1.5   32 -> 48
+```
+
+`new(1.5*b) == old(b)` at every layer. Pool sizing is unchanged (mid still
+370 KB/slot uncapped, 178 capped), and linkbench over 8 seeds at 29k reproduced
+`4/8` identically, seed for seed. `tests/test_layer_rank_ceiling.py` pins the
+equivalence, the ceiling property, and the guard coupling — 106 cases.
+
+One deliberate change: an **explicit** `config` rank now means what it says.
+`rank=32` delivers at most 32 (16/32/11) where it used to deliver up to 48
+(24/48/16). Presets are unaffected.
+
+**MLX is edited but UNRUN.** `mlx_dkv_wrapper.get_layer_rank` is mirrored with
+an explicit "do not fix one without the other", so it moved in step — but this
+box has no `mlx` module. Mirror `test_layer_rank_ceiling.py` on Apple silicon
+before trusting the MLX side.
