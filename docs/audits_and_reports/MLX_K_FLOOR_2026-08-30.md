@@ -91,13 +91,40 @@ quality that nobody had measured. CUDA's cache is OFF by default
 quality — hence 16 there, 8 here. The asymmetry is measured on both sides and is
 pinned with its reasoning in `ACTIVE_RUNTIME/tests/test_routing_k_budget_parity.py`.
 
+## What the floor actually costs (measured, not extrapolated)
+
+The whole case for K=4 was memory, so raising the floor without measuring the cost
+would have been the same mistake in the other direction. Qwen3.5-2B-4bit, 16k,
+block_size=1024, live `_cache_kv` bytes and MLX peak:
+
+| K | decode cache | peak memory |
+|---|---|---|
+| 4 | 151.1 MB | 2329.9 MB |
+| **8** | **251.9 MB** | **2329.9 MB** |
+| 16 | 428.2 MB | 2329.9 MB |
+
+K=4's 151.1 MB reproduces the figure in `1157f3a2` exactly, which says the probe is
+measuring the same quantity that decision was made on.
+
+**Peak is byte-identical at all three.** The decode cache is not what sets peak —
+prefill activations are, and they happen before it is allocated. So the floor costs
++100.8 MB of *resident decode-cache* footprint and nothing in peak. That is the
+same pattern CUDA reported (peak VRAM identical at K=4 and K=16), now confirmed on
+MLX, and it makes the original memory argument for K=4 considerably weaker than it
+looked: the 377.9 -> 151.1 MB saving was in a buffer that never drove the ceiling.
+
+Two honest qualifications: peak is not the only thing that matters — resident bytes
+still bound how many sessions fit concurrently — and this is one context on one
+model. But on the axis the K=4 decision was actually argued on, the cost of moving
+to 8 is smaller than that decision assumed.
+
 ## Caveats
 
 * **Hybrid model.** DKV patches only 6 of 24 layers on Qwen3.5-2B
   (`[3, 7, 11, 15, 19, 23]`), which bounds how large any routing effect can be and
   likely explains why MLX's −5.42 is smaller than CUDA's −16.2 for the same change.
-* **One context, one model.** 16k only, one model. The decode-cache size at K=8 was
-  not re-measured; the 377.9 / 151.1 MB figures quoted are from `1157f3a2`.
+* **One context, one model.** The quality numbers are 16k (plus the 32k
+  routing-vs-routing run); the memory numbers are 16k only.
 * Reproduce with:
 
       BLOCK=1024 DKV_TOPK_BLOCKS=8 python3 colab/synthesis_power.py \

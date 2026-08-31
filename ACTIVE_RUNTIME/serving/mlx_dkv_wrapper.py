@@ -2104,11 +2104,24 @@ class MLXKVBlockManager:
         # deficit AND 7 of 32 catastrophic reps; that is the difference in kind that
         # sets the floor at 8. To settle 8 vs 16 would take n~=51 at 32k.
         #
-        # COST: the decode cache is sized k_eff * block_size and is ON for MLX, so
-        # this floor is not free -- it is the deliberate trade of some of the 377.9 ->
-        # 151.1 MB saving back for the quality above. CUDA keeps its floor at 16 for
-        # the mirror-image reason: its decode cache is OFF by default, so a smaller K
-        # there pays the quality cost and collects nothing.
+        # COST, MEASURED (16k, this model): the decode cache is sized k_eff *
+        # block_size and is ON for MLX, so the floor is not free --
+        #
+        #     K       decode cache    peak memory
+        #     4       151.1 MB        2329.9 MB
+        #     8       251.9 MB        2329.9 MB
+        #     16      428.2 MB        2329.9 MB
+        #
+        # K=4 reproduces 1157f3a2's 151.1 MB exactly, so this is the same quantity
+        # that decision was argued on. But PEAK IS IDENTICAL at all three: the
+        # decode cache is not what sets peak (prefill activations are, and they run
+        # before it is allocated). So this floor costs +100.8 MB of resident cache
+        # and nothing in peak -- the same result CUDA got -- which makes the
+        # original memory case for K=4 weaker than it looked. Resident bytes still
+        # bound how many sessions fit at once, so it is a real cost, just not the
+        # one it was sold as. CUDA keeps its floor at 16 for the mirror-image
+        # reason: its decode cache is OFF by default, so a smaller K there pays the
+        # quality cost and collects nothing at all.
         #
         # _K_MIN=8 binds only for block_size > 512; at 256 the budget still gives 16,
         # so every pre-1024 measurement remains valid.
