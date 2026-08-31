@@ -659,10 +659,97 @@ class DKVConfig:
         # consistently but mildly worse: 6 lost needles out of 96 and not one
         # gained, which is real (a 6-0 split is p=0.031) and small. So the CUDA
         # case for int8 rests on "identical to fp16 at half the bytes", NOT on
-        # rescuing a catastrophe. Why the two backends diverge this much on the
-        # same nominal design is OPEN and worth a probe before either result is
-        # generalised; the exact-copy semantics that should drive it are on by
-        # default on both (compression/lowrank.py returns True with no env set).
+        # rescuing a catastrophe.
+        #
+        # WHY THE BACKENDS DIVERGE: STILL OPEN, BUT FOUR HYPOTHESES ARE DEAD.
+        # Measured 2026-08-31 with colab/residual_format_niah_cuda.py against the
+        # MLX session running the mirror experiments. Every arm below is 96
+        # needles (12 trials x 16k/32k) unless marked, prompts byte-identical
+        # across runs (sha1-checked), A/A tied exactly in every run, and each
+        # arm's live allocator fingerprint recorded so no arm can be inert.
+        #
+        # 1. ROTATION ORIENTATION -- REAL BUT FAR TOO SMALL. MLX stores residual
+        #    keys already rotated; mid/high/ultra store pre-RoPE and rotate at
+        #    read (`low` already ships MLX's orientation). Forcing rot=1 here:
+        #
+        #                        fp16    int8    int4   int4's paired deficit
+        #        rot=0          78/96   78/96   72/96     6/96, all losses
+        #        rot=1          85/96   86/96   73/96    12/96, all losses
+        #
+        #    Rotation is worth +7 needles to fp16 (p=0.065) and +8 to int8
+        #    (p=0.022) and +1 to int4 (p=1.0) -- int4 captures none of the gain.
+        #    Its deficit doubles in the predicted direction, but Fisher on 6/96
+        #    vs 12/96 is p=0.21. AND IT SETTLES NOTHING: in MLX's own
+        #    orientation CUDA int4 still scores 73/96 = 76% where MLX scores 0/48.
+        #
+        # 2. DILUTION BY THE PROJECT-THEN-ATTEND FRAME SPLIT -- DEAD. The idea
+        #    was that a base rotated at the anchor and a residual rotated at its
+        #    true position leave the residual's contribution attenuated, so
+        #    coarsening it costs little. It requires the split; DKV_REMAT_WHY=1
+        #    prints "REMAT ACTIVE" for this configuration, i.e. materialise-then-
+        #    SDPA keeps both in ONE frame. The residual was pulling full weight
+        #    and int4 still cost only 6/96.
+        #
+        # 3. "CUDA'S LOW-RANK BASE CARRIES RECALL THAT MLX'S DOES NOT" -- DEAD.
+        #    With residuals OFF entirely (DKV_MAX_RESIDUAL_TOKENS=0, verified as a
+        #    genuine zero-size buffer) the base retrieves 2/96 exact and loses the
+        #    needle's NAME in 93/96, identically in both orientations. The bases
+        #    floor together. MLX re-checked its own starved arm and found the same
+        #    failure mode (names back, digits wrong), so both sides agree here.
+        #
+        # 4. MODEL WEIGHT PRECISION -- DEAD ON CUDA. Every MLX number uses
+        #    Qwen2.5-1.5B-*4bit* and every CUDA number fp16 weights, so it was
+        #    confounded with backend throughout. NF4 here, 16k, 48 needles/cell:
+        #        fp16 weights   fp16 36/48   int8 36/48   int4 32/48 (lost 4/won 0)
+        #        NF4  weights   fp16 27/48   int8 27/48   int4 27/48 (lost 2/won 2)
+        #    NF4 costs ~19 points of baseline and EVERY format pays it equally;
+        #    int4's deficit vanishes into noise rather than growing. (Lower
+        #    baseline = less sensitive, so this does not prove int4 improves --
+        #    but a collapse of MLX's size would have been unmissable.)
+        #
+        # 5. NEEDLE CONSTRUCTION -- DEAD (added after MLX ran it). MLX's codes
+        #    (OMEGA-8993-OMEGA, KAPPA-8766-IOTA) fragment 10 of 10 into partial
+        #    words on the Qwen tokenizer -- " O","ME","GA" is the exact split
+        #    multifact_eval_cuda.py:19 warns makes recall a coin flip at a
+        #    measured 0.19-logit top-2 margin -- while this harness's names are
+        #    0 of 8 fragmenting, rejected at startup and re-verified per model.
+        #    It really did contaminate every earlier MLX number, and it is still
+        #    not the explanation: rerun with whole-word needles at 20k, int8 went
+        #    93.8% -> 96.9% and int4 went 0.0% -> 0.0%. Clean needles buy int4
+        #    nothing at all.
+        #
+        # THE DIVERGENCE IS NOT A MATTER OF DEGREE. CUDA's int4 DEGRADES; MLX's
+        # int4 CORRUPTS, and only the second is a bug. Measured over the stored
+        # generations of every CUDA arm, scanning for the three things MLX's rows
+        # show -- longest immediately-repeated token run, fraction of non-language
+        # characters, and a colon-blankline-colon run:
+        #
+        #     every format, both orientations   max repeated-token run = 1,
+        #                                       token-soup rows = 0, colon runs = 0
+        #     int4 specifically                 keeps the correct entity NAME in
+        #                                       72/96 (rot=0) and 77/96 (rot=1);
+        #                                       misses are one-digit near misses
+        #                                       (Cobra-4367-5976 -> Cobra-4363-5976)
+        #     residuals OFF entirely            2/96 exact, name lost in 93/96 --
+        #                                       and STILL fluent, well-formed,
+        #                                       zero degeneracy
+        #
+        # MLX at int4 returns a colon-and-newline loop for eighty tokens with no
+        # entities at all, 8 of 8 trials. THE LAST ROW ABOVE IS WHY THAT CANNOT BE
+        # A RECALL DEFICIT: removing 100% of the residual contribution here leaves
+        # decode completely intact, so losing residual INFORMATION does not perturb
+        # generation on this backend at all. Whatever MLX's int4 path does, it does
+        # something residual ABSENCE does not -- a state-corruption signature, not
+        # a fidelity one. MLX confirmed its packed values round-trip against
+        # synthetic mx.quantize at 1.00x, so the values are right; the suspicion is
+        # WHERE they are written, not WHAT they are.
+        #
+        # SO THIS IS NOT A SHARED DESIGN QUESTION WITH AN UNEXPLAINED RESIDUE.
+        # Five explanations spanning both runtimes are dead by measurement, and
+        # what remains is an MLX-side defect. Do not re-derive any of the five
+        # here, and do not treat CUDA's mild int4 deficit and MLX's collapse as
+        # one phenomenon at two magnitudes -- reading the raw generations is what
+        # showed they are not, and exact-string scoring maps both to the same 0.
         #
         # The mechanism under test: residuals are the EXACT-COPY tokens --
         # DKV_RESIDUAL_EXACT_KEYS / DKV_RESIDUAL_EXCLUDE_SVD drops their lossy SVD

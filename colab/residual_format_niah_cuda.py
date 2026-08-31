@@ -93,11 +93,21 @@ QUESTION = ("What are the four secret passcodes? List them all in order, "
 # Arm -> the residual_quant value passed in the wrapper CONFIG DICT (which beats
 # the environment in DKVConfig._get_str, so an inherited DKV_RESIDUAL_QUANT
 # cannot silently redefine an arm).
+# Each arm is (residual_quant, residual_quant_bits) where None means "derive the
+# width from the format name", which is the shipped behaviour.
 ARMS = {
-    "fp16":    "none",   # unquantised residual buffers -- the reference
-    "fp16_aa": "none",   # A/A noise floor; must tie `fp16` exactly
-    "int8":    "int8",   # the shipped default since 2026-08-31
-    "int4":    "int4",   # the format measured at 0/48 on MLX -- positive control
+    "fp16":    ("none", None),   # unquantised residual buffers -- the reference
+    "fp16_aa": ("none", None),   # A/A noise floor; must tie `fp16` exactly
+    "int8":    ("int8", None),   # the shipped default since 2026-08-31
+    "int4":    ("int4", None),   # the format measured at 0/48 on MLX
+    # WIDTH CROSSED AGAINST FORMAT NAME. Same 4-bit packed_width as `int4`, but
+    # every name-keyed branch takes the int8 path. On MLX this arm is BYTE-
+    # IDENTICAL to int4 -- same corrupted generations, character for character,
+    # at every seed -- which is what localised that backend's defect to the
+    # WIDTH rather than to an int4-specific code path. Run here as the symmetric
+    # control: this side should show the width mattering (int4-like recall) with
+    # no corruption, because CUDA's int4 degrades where MLX's corrupts.
+    "int8_bits4": ("int8", 4),
 }
 
 
@@ -172,23 +182,51 @@ def pool_fingerprint(w):
     except Exception:                                              # noqa: BLE001
         return {"error": "no native_pool"}
     q = getattr(p, "comp_res_k_q", None)
+    # Rotation ORIENTATION belongs in the fingerprint, not just the format.
+    # Whether the pool stores pre-RoPE keys (rotated at read, to each token's
+    # exact position) or post-RoPE keys (rotated at store, as MLX does) decides
+    # WHAT the quantizer sees, and it is a plausible explanation for MLX and CUDA
+    # disagreeing about int4. Reading it from the predicate every site consults
+    # means a run cannot report an orientation it did not use.
+    try:
+        from native_core.sparse_decode.triton_fused_decode import pool_stores_rotated_k
+        rot = bool(pool_stores_rotated_k())
+    except Exception:                                              # noqa: BLE001
+        rot = None
+    # COMPRESSED TOKEN COUNT. Not the context length: the dense window is not
+    # compressed, so "ctx=32768" says nothing about how much data the pool
+    # actually holds. MLX's int4 corruption has a sharp onset above ~8192
+    # COMPRESSED tokens, independent of block size, block count and top-K, so
+    # any cross-backend comparison has to be on this number rather than on ctx.
+    seq = getattr(p, "seq_lens", None)
+    try:
+        used = int((seq > 0).sum().item())
+        comp_tokens = int(seq.clamp(min=0).sum().item())
+    except Exception:                                              # noqa: BLE001
+        used, comp_tokens = None, None
     return {
         "residual_quant": getattr(p, "residual_quant", None),
         "residual_quant_bits": getattr(p, "residual_quant_bits", None),
         "max_residual_tokens": getattr(p, "max_residual_tokens", None),
+        "blocks_used": used,
+        "compressed_tokens": comp_tokens,
+        "pool_stores_rotated_k": rot,
+        "residual_exact_rope": os.environ.get("DKV_RESIDUAL_EXACT_ROPE", "1"),
         "comp_res_k_q_shape": (None if q is None else tuple(q.shape)),
         "comp_res_k_q_dtype": (None if q is None else str(q.dtype)),
         "comp_res_k_q_bytes": (0 if q is None else int(q.nbytes)),
     }
 
 
-def run_arm(arm, fmt, model_id, cases, ctxs, trials, max_new):
+def run_arm(arm, spec, model_id, cases, ctxs, trials, max_new):
     from ACTIVE_RUNTIME.serving.hf_dkv_wrapper import PyTorchDKVHFWrapper
-    print("\n### arm " + arm + " (residual_quant=" + repr(fmt) + ") -- loading "
-          + model_id, flush=True)
-    w = PyTorchDKVHFWrapper(model_id=model_id,
-                            config={"mode": "fp16", "residual_quant": fmt},
-                            device="cuda")
+    fmt, bits = spec
+    print("\n### arm " + arm + " (residual_quant=" + repr(fmt) + ", bits="
+          + repr(bits) + ") -- loading " + model_id, flush=True)
+    cfg = {"mode": "fp16", "residual_quant": fmt}
+    if bits is not None:
+        cfg["residual_quant_bits"] = bits
+    w = PyTorchDKVHFWrapper(model_id=model_id, config=cfg, device="cuda")
     w.ensure_loaded()
     rows, fp = [], None
     for ctx in ctxs:
@@ -284,8 +322,12 @@ def main():
     for arm in arms:
         key = json.dumps(fps[arm], sort_keys=True, default=str)
         distinct.setdefault(key, []).append(arm)
+    # int4 and int8_bits4 SHOULD share an allocator -- that is the point of the
+    # crossing (same packed width, different name-keyed branches), so they are
+    # not an inert pair either. Any other collision is one arm run twice.
+    _ok_pairs = ({"fp16", "fp16_aa"}, {"int4", "int8_bits4"})
     inert = [v for v in distinct.values()
-             if len(v) > 1 and set(v) != {"fp16", "fp16_aa"}]
+             if len(v) > 1 and set(v) not in _ok_pairs]
     if inert:
         print("  !! ARMS WITH AN IDENTICAL ALLOCATOR: " + str(inert) + ". These are "
               "the SAME arm run twice; their scores are not a comparison.", flush=True)
