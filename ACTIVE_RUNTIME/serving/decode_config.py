@@ -50,7 +50,38 @@ BEST_DECODE_DEFAULTS = {
     # unchanged.
     "DKV_DISABLE_CUDA_GRAPH": "0",     # 1 disables capture entirely
     "DKV_GRAPH_SAFE_DECODE": "1",      # sync-free decode step (bypass capture)
-    "DKV_RESIDUAL_QUANT": "int4",       # 4-bit asymmetric group quantized residuals by default
+    # ── RESIDUAL FORMAT: int8. Measured, not inherited. ───────────────────────
+    # THIS LINE, not the wrapper's constructor default, is what reaches serving:
+    # apply_best_decode_defaults() writes it into os.environ (:172) and both the
+    # CLI (cli.py:849, NOT device-gated) and the gateway (:938) call it. It is also
+    # what NativeBlockPool latches on CUDA (native_block_pool.py:206). Changing only
+    # the constructor default ships inert.
+    #
+    # 4-needle NIAH, ctx=20000, 12 randomised trials (48 needles/arm),
+    # Qwen2.5-1.5B-4bit, block 1024, greedy, DKV_DECODE_CACHE=1:
+    #     int4 POST-RoPE   0/48 =  0.0%  95% CI [ 0.0,  7.4]   <- the old default
+    #     int4 PRE-RoPE   27/48 = 56.2%  95% CI [42.3, 69.3]
+    #     int8 PRE-RoPE   39/48 = 81.2%  95% CI [68.1, 89.8]
+    #     int8 POST-RoPE  41/48 = 85.4%  95% CI [72.8, 92.8]   <- THIS
+    #     fp16 POST-RoPE  42/48 = 87.5%  95% CI [75.3, 94.1]
+    # int8 is statistically indistinguishable from fp16 and saves 63.0 -> 33.5 MB
+    # of residual buffers (residuals are the LARGEST session category at 16k:
+    # 37.6%, vs dense window 33.4% and comp_U 14.1%). int4 is not recoverable on
+    # this tensor: pre-RoPE storage and KIVI per-channel keys each lift it from 0%
+    # to only ~56-60%, both well below fp16 with non-overlapping intervals.
+    #
+    # WHY THE ROTATED POOL STAYS ON (DKV_ROTATED_POOL unset = 1): the unrotated
+    # pool is what rescues int4 (0% -> 56%), but at int8 it is not needed and
+    # measures slightly worse (81.2% vs 85.4%), and DKV_ROTATED_POOL=0 additionally
+    # forces DKV_DECODE_CACHE=1 on MLX because read-time rotation needs materialised
+    # keys (mlx_dkv_wrapper.py:1850). Precision removes the need for the workaround.
+    #
+    # DO NOT re-validate this with a SINGLE-NEEDLE sweep. That metric is saturated
+    # and cannot discriminate: on 3 ctx x 3 depths it scored int4 8/9 and fp16 7/9,
+    # i.e. it ranks the catastrophic format ABOVE the good one. CUDA's "needle
+    # sweep 9/9" was measured that way and is not evidence about residual format.
+    # Use the 4-needle verbatim-code test.
+    "DKV_RESIDUAL_QUANT": "int8",
 }
 
 
@@ -73,9 +104,21 @@ BEST_DECODE_DEFAULTS = {
 MLX_CONSTRUCTOR_DEFAULTS = {
     "block_size": 1024,
     "max_residual": 128,
-    "residual_quant": "int4",   # MLX-measured, paired vs a dense control on identical
-                          # prompts: linkbench 9/21 -> 21/21 = dense (p=5.3e-05),
-                          # pool 1.08x -> 0.48x of the KV it replaces.
+    # WAS "int4" on the linkbench result below. That result is NOT retracted, but it
+    # does not survive as a default: 4-needle NIAH at ctx=20000 (12 randomised trials,
+    # 48 needles/arm, Qwen2.5-1.5B-4bit, block 1024, greedy) measures
+    #     int4   0/48 =  0.0%  95% CI [ 0.0,  7.4]
+    #     int8  41/48 = 85.4%  95% CI [72.8, 92.8]
+    #     fp16  42/48 = 87.5%  95% CI [75.3, 94.1]
+    # i.e. int4 residuals cost ALL long-context verbatim recall. The two findings are
+    # compatible: linkbench is multi-hop RELATIONAL on Qwen3.5-2B, NIAH is verbatim
+    # code recall, and verbatim is far more precision-sensitive. Residuals are the
+    # exact-copy tokens (see the note at mlx_dkv_wrapper.MLXKVBlockManager.__init__).
+    # CUDA runs int4 residuals too -- that is NOT why it scores well, and e38f3cd1
+    # has since made its int8 real and propagated the config that selects it. If
+    # int4 is wanted back, re-run linkbench AND a MULTI-needle NIAH under both.
+    "residual_quant": "int8",   # measured equal to fp16 at 1.88x smaller; see
+                                # DKV_RESIDUAL_QUANT above for the full ladder.
     "rank": 48,           # a CEILING, not a target; the rank sweep that suggested
                           # otherwise was randomised-SVD projection noise.
                           # 32 -> 48 on 2026-08-31: it was NOT actually a ceiling

@@ -2191,9 +2191,58 @@ class MLXKVBlockManager:
         # When enabled ("int4", "q4", "4bit"), residuals are compressed via 4-bit
         # asymmetric group quantization (group_size=64, bits=4). Memory footprint
         # drops by ~3.6x, enabling 4x higher residual capacity in the same budget.
-        self.residual_quant = os.environ.get("DKV_RESIDUAL_QUANT", "int4").strip().lower()
+        #
+        # int8 USED TO BE A SILENT ALIAS FOR FP16. Only the int4 spellings were
+        # ever allocated a packed buffer below, so "int8" fell through to the
+        # fp16 branch: no packing, no saving, and `_apply_residual_quantization`
+        # (the one function that would have 8-bit the VALUES) has no caller at
+        # all. Measured before the fix: int8 and fp16 reported byte-identical
+        # residual buffers (66,060,288 B) and identical peak/active memory.
+        # `_res_packed` is now the single predicate every allocation site reads,
+        # and the bit width is derived from the FORMAT NAME rather than from a
+        # separate env that defaulted to 4 regardless of the name.
+        # DEFAULT WAS "int4" AND IT COST ALL LONG-CONTEXT RECALL. Measured on this
+        # Mac, Qwen2.5-1.5B-4bit, 4-needle NIAH at ctx=20000, 12 randomised trials
+        # (48 needles/arm), block 1024, greedy:
+        #     int4   0/48 =  0.0%   95% CI [ 0.0,  7.4]
+        #     int8  41/48 = 85.4%   95% CI [72.8, 92.8]
+        #     fp16  42/48 = 87.5%   95% CI [75.3, 94.1]
+        # It is not a bit-width problem, it is a WRONG-TENSOR problem. Residuals
+        # are this design's exact-copy tokens: DKV_RESIDUAL_EXCLUDE_SVD=1 drops a
+        # captured token's lossy SVD twin precisely because the residual is meant
+        # to be exact, so quantising it leaves the token with no faithful
+        # representation anywhere. CUDA keeps residuals fp16 and puts its int4/int8
+        # on U_sem (bulk semantic rows) while U_fact stays fp16 — the same split
+        # KIVI/KVQuant use (4-bit bulk, full-precision window). Quantise the BULK,
+        # never the exact copy. `comp_U` above is where MLX's equivalent saving
+        # lives, and it is far larger than the ~45 MB this default was chasing.
+        # int8 measures equal to fp16 here and is a supported opt-in for memory
+        # pressure (33.5 MB vs 63.0 MB of residual buffers at 16k); fp16 is the
+        # default because the residual's whole job is exactness and the memory at
+        # stake is ~1.4% of peak.
+        self.residual_quant = os.environ.get("DKV_RESIDUAL_QUANT", "int8").strip().lower()
         self.residual_quant_group_size = int(os.environ.get("DKV_RESIDUAL_QUANT_GROUP_SIZE", "64"))
-        self.residual_quant_bits = int(os.environ.get("DKV_RESIDUAL_QUANT_BITS", "4"))
+        _q8 = self.residual_quant in ("int8", "q8", "8bit")
+        _q4 = self.residual_quant in ("int4", "q4", "4bit")
+        self._res_packed = _q4 or _q8
+        # Explicit DKV_RESIDUAL_QUANT_BITS still wins; otherwise the name decides.
+        _bits_env = os.environ.get("DKV_RESIDUAL_QUANT_BITS")
+        self.residual_quant_bits = (int(_bits_env) if _bits_env is not None
+                                    else (8 if _q8 else 4))
+        # ── DKV_RESIDUAL_QUANT_PERCHANNEL_K — KIVI's actual recipe ────────────
+        # KIVI/KVQuant both report near-lossless 4-bit KV, and the reason this
+        # file does not reproduce that is the AXIS: mx.quantize groups along the
+        # LAST axis, and residuals are stored [R, H_kv, D], so a group spans 64
+        # CHANNELS of one token -> per-token. Key channels carry large, stable
+        # outliers (measured on real 16k residuals: layer 0 max/median channel
+        # magnitude = 76x), so one shared scale per token lets the outlier own
+        # the range and the remaining channels collapse. KIVI quantizes the KEY
+        # cache PER-CHANNEL and the VALUE cache per-token; values here show a
+        # 1.8-4.5x outlier ratio, so they are left alone.
+        # Transposing keys to [H_kv, D, R] makes the group span 64 TOKENS of one
+        # channel instead. Measured relative error on real residual keys:
+        # 4b per-token 0.126 -> 4b per-channel 0.048.
+        self._res_pc_k = os.environ.get("DKV_RESIDUAL_QUANT_PERCHANNEL_K", "0") == "1"
         self.max_dense_len = self.recency_window + self.block_size
         self._comp_res_n_const = mx.full((self.max_blocks,), self.max_residual, dtype=mx.int32)
 
@@ -2537,7 +2586,27 @@ class MLXKVBlockManager:
             gs = self.residual_quant_group_size
             bits = self.residual_quant_bits
             if res_k.size > 0:
-                qk, sk, bk = mx.quantize(res_k, group_size=gs, bits=bits)
+                # RANK-AGNOSTIC: the live path passes [B, R, H, D] (leading block
+                # axis) while unit tests pass [R, H, D]. Index the R axis from the
+                # END (-3) — hardcoding axis 0 silently quantised per-TOKEN into a
+                # per-CHANNEL buffer and only surfaced as a broadcast error.
+                _nd = res_k.ndim
+                if self._res_pc_k and _nd >= 3 and res_k.shape[-3] % gs == 0:
+                    # [..., R, H, D] -> [..., H, D, R]: the group now spans 64
+                    # TOKENS of a single channel (per-channel, KIVI) rather than
+                    # 64 channels of a single token. Values keep per-token.
+                    _perm = tuple(range(_nd - 3)) + (_nd - 2, _nd - 1, _nd - 3)
+                    qk, sk, bk = mx.quantize(mx.transpose(res_k, _perm),
+                                             group_size=gs, bits=bits)
+                elif self._res_pc_k:
+                    raise ValueError(
+                        "DKV_RESIDUAL_QUANT_PERCHANNEL_K=1 needs the residual count "
+                        f"({res_k.shape[-3] if _nd >= 3 else res_k.shape}) to be a "
+                        f"multiple of group_size={gs}. Falling back here would write a "
+                        "per-TOKEN layout into a per-CHANNEL buffer — a silent "
+                        "corruption rather than an error.")
+                else:
+                    qk, sk, bk = mx.quantize(res_k, group_size=gs, bits=bits)
                 qv, sv, bv = mx.quantize(res_v, group_size=gs, bits=bits)
                 session["comp_res_k_q"][layer_idx][slice_idx] = qk
                 session["comp_res_k_s"][layer_idx][slice_idx] = sk
@@ -2571,6 +2640,14 @@ class MLXKVBlockManager:
                 q, s, b = q[sb:nb], s[sb:nb], b[sb:nb]
             elif sb > 0:
                 q, s, b = q[sb:], s[sb:], b[sb:]
+            if self._res_pc_k:
+                # Stored [.., H, D, R]. The token axis is LAST here, so r_max
+                # cannot be sliced before dequantising (that would cut channels);
+                # dequantise, transpose back to [.., R, H, D], then slice.
+                out = mx.dequantize(q, s, b, group_size=gs, bits=bits)
+                nd = out.ndim
+                out = mx.transpose(out, tuple(range(nd - 3)) + (nd - 1, nd - 3, nd - 2))
+                return out[:, :r_max] if r_max is not None else out
             if r_max is not None:
                 q = q[:, :r_max]
                 s = s[:, :r_max]
@@ -2911,22 +2988,31 @@ class MLXKVBlockManager:
             "comp_scale":    self._per_layer((max_blocks,), mx.float32),
             "comp_seq_len": self._per_layer((max_blocks,), mx.int32),
             
-            "comp_res_k": (None if self.residual_quant in ("int4", "q4", "4bit")
+            "comp_res_k": (None if self._res_packed
                            else self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype)),
-            "comp_res_v": (None if self.residual_quant in ("int4", "q4", "4bit")
+            "comp_res_v": (None if self._res_packed
                            else self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype)),
-            "comp_res_k_q": (self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim * self.residual_quant_bits // 32), mx.uint32)
-                             if self.residual_quant in ("int4", "q4", "4bit") else None),
-            "comp_res_k_s": (self._per_layer((max_blocks, self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), dtype)
-                             if self.residual_quant in ("int4", "q4", "4bit") else None),
-            "comp_res_k_b": (self._per_layer((max_blocks, self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), dtype)
-                             if self.residual_quant in ("int4", "q4", "4bit") else None),
+            # KEY residuals. Under _res_pc_k the tensor is stored TRANSPOSED to
+            # [H_kv, D, R] so mx.quantize's last-axis grouping spans 64 TOKENS of
+            # one channel (per-channel, KIVI) instead of 64 channels of one token.
+            "comp_res_k_q": ((self._per_layer((max_blocks, self.kv_heads, self.head_dim, self.max_residual * self.residual_quant_bits // 32), mx.uint32)
+                              if self._res_pc_k else
+                              self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim * self.residual_quant_bits // 32), mx.uint32))
+                             if self._res_packed else None),
+            "comp_res_k_s": ((self._per_layer((max_blocks, self.kv_heads, self.head_dim, max(1, self.max_residual // self.residual_quant_group_size)), dtype)
+                              if self._res_pc_k else
+                              self._per_layer((max_blocks, self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), dtype))
+                             if self._res_packed else None),
+            "comp_res_k_b": ((self._per_layer((max_blocks, self.kv_heads, self.head_dim, max(1, self.max_residual // self.residual_quant_group_size)), dtype)
+                              if self._res_pc_k else
+                              self._per_layer((max_blocks, self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), dtype))
+                             if self._res_packed else None),
             "comp_res_v_q": (self._per_layer((max_blocks, self.max_residual, self.kv_heads, self.head_dim * self.residual_quant_bits // 32), mx.uint32)
-                             if self.residual_quant in ("int4", "q4", "4bit") else None),
+                             if self._res_packed else None),
             "comp_res_v_s": (self._per_layer((max_blocks, self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), dtype)
-                             if self.residual_quant in ("int4", "q4", "4bit") else None),
+                             if self._res_packed else None),
             "comp_res_v_b": (self._per_layer((max_blocks, self.max_residual, self.kv_heads, max(1, self.head_dim // self.residual_quant_group_size)), dtype)
-                             if self.residual_quant in ("int4", "q4", "4bit") else None),
+                             if self._res_packed else None),
             "comp_res_n": [[0] * (max_blocks if self._layer_attended(l) else 0) for l in range(self.num_layers)],
             # Per-block boolean mask of which delta positions (0..block_size-2) are kept
             # as EXACT residuals — used to exclude them from the SVD pool at decode.
