@@ -347,19 +347,26 @@ def _apply_fast_mode() -> None:
     cannot be resolved, which drops FAST into the +915 MB arm with no warning.
     See docs/audits_and_reports/PREFILL_ARMS_REMEASURED_2026-08-31.md
 
-    NOT "the last two are unvalidated" any more -- there was only ever ONE.
-    DKV_RANK_BOOST=off is ALREADY THE SHIPPED DEFAULT (lowrank.py, and
-    kv_runtime_manager.py), so FAST setting it changes nothing.  That leaves
-    DKV_RSVD_MAX_RPROJ=32, and with the boost off it does NOT truncate stored
-    rank (block ranks are already 32); it only narrows the randomized-SVD
-    projection 37 -> 32.
+    ⚠ THIS TOGGLE NOW BUYS ESSENTIALLY NOTHING.  Every knob it once carried is
+    either a default already or measured worthless:
 
-    That knob was decided on 2026-08-31 with colab/rproj_cap_decision.py:
-    80 PAIRED prompts, a fresh 6-digit needle each, Qwen2.5-1.5B at 16k/32k and
-    Qwen2.5-7B-NF4 at 16k -- ZERO discordant pairs, bounding its effect at
-    <=3.7% of prompts (95%).  The 7B arm sits at 0.688 recall, not at ceiling,
-    and both arms failed on exactly the same prompts.  It buys -13.4% forward
-    and -73 MB peak at 32k.  See RPROJ_CAP_DECISION_2026-08-31.md.
+      GRAM_SVD=1          already the default
+      RANK_BOOST=off      already the default
+      RSVD_MAX_RPROJ=32   PROMOTED to default (rank <= 64) on 2026-08-31, and
+                            no longer bundled -- see the loop below
+      CONTIGUOUS_PREFILL  a +915 MB REGRESSION on its own (see above)
+      CONTIG_UNROTATE     cancels that; the pair nets ~zero
+
+    So what remains is the contiguous pair, whose best case is a wash and whose
+    failure mode is +915 MB.  Prefer setting individual flags; there is no
+    reason left to reach for DKV_FAST, and a good reason not to.
+
+    The rank cap was decided on 2026-08-31 with colab/rproj_cap_decision.py:
+    80 PAIRED prompts, a fresh 6-digit needle each (Qwen2.5-1.5B 16k/32k,
+    Qwen2.5-7B-NF4 16k) -- ZERO discordant pairs, effect bounded at <=3.7%
+    (95%); linkbench 8 seeds @29k identical seed-for-seed on the default preset
+    where the cap is a 3x truncation; multifact 9/9 both arms with synthesis
+    33.3 -> 40.0.  See RPROJ_CAP_DECISION_2026-08-31.md.
 
     The old advice here was to validate with test_niah.py.  DO NOT rely on that
     for this question: it is n=3 against ONE fixed needle (847291), which
@@ -372,12 +379,18 @@ def _apply_fast_mode() -> None:
         ("DKV_CONTIGUOUS_PREFILL", "1"),
         ("DKV_CONTIG_UNROTATE", "1"),
         ("DKV_RANK_BOOST", "off"),
-        ("DKV_RSVD_MAX_RPROJ", "32"),
+        # DKV_RSVD_MAX_RPROJ is deliberately NO LONGER BUNDLED.  As of
+        # 2026-08-31 it is the DEFAULT for configured rank <= 64, so bundling it
+        # buys nothing there -- and setting it EXPLICITLY would override the
+        # guard that keeps `high` (rank=128) uncapped, forcing an untested 4x
+        # rank cut on the one preset whose whole purpose is fidelity.
     ):
         os.environ.setdefault(_k, _v)
-    print("[DKV] DKV_FAST=1 — batched-compress cliff + contiguous 1x prefill "
-          "(recon-equivalent SVD; rank cap 32 is fidelity-affecting — validate "
-          "test_niah.py). DECODE_PRUNE deliberately NOT bundled (dead end).")
+    print("[DKV] DKV_FAST=1 — NOTE: this now buys ~nothing. GRAM_SVD, "
+          "RANK_BOOST=off and the r_proj cap are all defaults already; what is "
+          "left is the contiguous prefill pair, measured 2026-08-31 as a wash "
+          "at best (+915 MB if CONTIG_UNROTATE falls back). Prefer individual "
+          "flags. See PREFILL_ARMS_REMEASURED_2026-08-31.md.")
 
 
 def _sample_logits(logits, temperature: float, top_p: float) -> torch.Tensor:

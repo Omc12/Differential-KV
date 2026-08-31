@@ -735,10 +735,22 @@ class KVRuntimeManager:
         # A hard r_proj cap (DKV_RSVD_MAX_RPROJ) caps every block's stored rank
         # in the compress path, so the pool never needs to be wider than the cap.
         # Safe: compress clamps dynamic_rank to r_proj <= this cap.
-        try:
-            _pool_rproj_cap = int(os.environ.get("DKV_RSVD_MAX_RPROJ", "0"))
-        except ValueError:
-            _pool_rproj_cap = 0
+        # DEFAULT ON since 2026-08-31 for configured rank <= 64, matching the
+        # compress-path default in compression/lowrank.py -- the two MUST agree,
+        # or the pool is sized for a rank the compressor does not produce.
+        # Keyed off self.rank (the configured/preset base rank), NOT off
+        # max_possible_rank: the per-layer schedule lifts mid's 64 to 96, so
+        # keying off the schedule would skip the cap on the very preset the
+        # evidence covers.  `high` (rank=128) is deliberately left uncapped.
+        # An explicit DKV_RSVD_MAX_RPROJ always wins ("0" disables).
+        _cap_env = os.environ.get("DKV_RSVD_MAX_RPROJ")
+        if _cap_env is None:
+            _pool_rproj_cap = 32 if (isinstance(self.rank, int) and self.rank <= 64) else 0
+        else:
+            try:
+                _pool_rproj_cap = int(_cap_env)
+            except ValueError:
+                _pool_rproj_cap = 0
         if _pool_rproj_cap > 0:
             pool_rank = max(1, min(pool_rank, _pool_rproj_cap))
         # Pool max_seq_len = micro_block_size (default varies by context length).

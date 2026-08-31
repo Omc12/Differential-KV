@@ -1428,10 +1428,32 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         n_oversamples = 5
     n_oversamples = max(0, n_oversamples)
     r_proj = min(max_rank_for_batch + n_oversamples, T_active, feat_dim)
-    try:
-        _max_rproj = int(_local_os.environ.get("DKV_RSVD_MAX_RPROJ", "0"))
-    except ValueError:
-        _max_rproj = 0
+    # DEFAULT ON since 2026-08-31 for configured rank <= 64 (low/mid/ultra).
+    # Decided by colab/rproj_cap_decision.py + linkbench + multifact, all A/B'd
+    # against the uncapped arm on this box:
+    #   80 paired NIAH prompts (Qwen2.5-1.5B 16k/32k, 7B-NF4 16k), fresh 6-digit
+    #     needle each -> ZERO discordant pairs, effect bounded at <=3.7% (95%).
+    #   linkbench 8 seeds @29k on the DEFAULT mid preset, where this cap is a 3x
+    #     truncation (pool_rank 96 -> 32) -> 4/8 both arms, IDENTICAL seed-for-
+    #     seed, same wrong answers on the misses.
+    #   multifact @16k -> 9/9 both arms; synthesis 33.3 -> 40.0 (not a
+    #     regression on the metric that justified mid's rank=64).
+    #   Cost side: -13.4% forward, -73 MB peak @32k; 370 -> 178 KB per pool slot.
+    #
+    # NOT applied when the configured rank exceeds 64 -- i.e. the `high` preset
+    # (rank=128).  Capping that to 32 would be a 4x cut, taking the explicit
+    # fidelity preset BELOW what `low` asks for, and nothing here tested it.
+    # An explicit DKV_RSVD_MAX_RPROJ always wins, in both directions ("0" off).
+    # See docs/audits_and_reports/RPROJ_CAP_DECISION_2026-08-31.md
+    _cap_env = _local_os.environ.get("DKV_RSVD_MAX_RPROJ")
+    if _cap_env is None:
+        _base_rank = getattr(manager, "rank", None)
+        _max_rproj = 32 if (isinstance(_base_rank, int) and _base_rank <= 64) else 0
+    else:
+        try:
+            _max_rproj = int(_cap_env)
+        except ValueError:
+            _max_rproj = 0
     if _max_rproj > 0:
         r_proj = min(r_proj, _max_rproj)
     if r_proj < 1:

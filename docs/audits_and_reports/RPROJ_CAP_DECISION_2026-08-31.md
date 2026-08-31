@@ -1,9 +1,10 @@
 # `DKV_RSVD_MAX_RPROJ=32` — powered recall decision, 2026-08-31
 
-**Verdict: the cap buys a reproducible −13.4% prefill and −73 MB peak, and did
-not flip a single needle in 80 paired trials across two model scales — bounding
-its effect at ≤3.7% of prompts (95%). It is the one part of the `DKV_FAST`
-bundle still worth having, and the evidence now supports promoting it.**
+**Verdict: PROMOTED to default for configured rank ≤ 64. The cap buys −13.4%
+prefill, −73 MB peak, and halves the pool slot (370 → 178 KB); it did not flip a
+single needle in 80 paired trials, is identical seed-for-seed on linkbench at
+29k, and does not regress multifact synthesis. `high` (rank=128) is left
+uncapped — untested at that rank, and capping it would be a 4× cut.**
 
 ## The question
 
@@ -110,6 +111,23 @@ The paired **disagreement rate** is well defined either way:
 So the honest claim is: **the cap changes a needle outcome on at most ~3.7% of
 prompts (95%)**, not "the cap is identical".
 
+## Synthesis: linkbench at 29k, default preset (where the cap bites hardest)
+
+The needle runs above pin `rank=32`, where the cap only trims oversamples
+(37→32). `colab/linkbench_cuda.py` does **not** pin rank, so it runs the default
+`mid` preset — `rank=64`, layer schedule to 96 — where the cap is a **3×**
+truncation. Multi-hop, distractors, graded on attribution (a confident wrong
+answer scores 0, not a substring pass):
+
+```
+cap_off  seeds 11..18:  hit hit MISS hit hit MISS MISS MISS   HITS=4/8
+cap_32   seeds 11..18:  hit hit MISS hit hit MISS MISS MISS   HITS=4/8
+```
+
+ctx=29,339, Qwen3.5-2B. **Identical seed-for-seed** — same hits, same misses,
+same wrong answers on the misses. At 50% accuracy this is far off-ceiling, and
+the cap tracked the baseline through every failure, under a 3× rank cut.
+
 ## On the null-instrument guard (a failed instrument, reported as failed)
 
 The harness carries a pool-signature column intended as a positive control:
@@ -124,9 +142,32 @@ arm in **31/31** pairs regardless of the knob. Clearing between arms and
 clearing after the pair both fail, in opposite directions; absolute sums fare no
 better, since the second arm's pool still holds the first arm's blocks.
 
-**The real positive control is the timing table above.** A knob that never
-reached compression could not produce a reproducible −13.4% forward and −73 MB
-peak at two contexts. The cap is live, so the recall comparison is not vacuous.
+**The real positive control turned out to be the runtime's own log line.**
+`kv_runtime_manager.py:743` applies the cap to `pool_rank`, and the pool banner
+prints it. One seed of linkbench per arm, default `mid` preset:
+
+```
+cap off : rank=64 (pool_rank=96), 370 KB/slot, budget 4.0 GB, 11330 blocks
+cap 32  : rank=64 (pool_rank=32), 178 KB/slot, budget 2.6 GB, 15209 blocks
+```
+
+That is a **3× rank truncation and 52% less memory per slot**, stated by the
+runtime itself — unambiguous, and far better evidence than any checksum. The
+timing table (−13.4% forward, −73 MB peak) is the second, independent control.
+The cap is live; the comparisons are not vacuous.
+
+### The coherence eval cannot test this at all
+
+`colab/eval_natural_coherence.py` prints generations for a human to read and
+produces no verdict, and its prompts are **67–159 tokens** — shorter than a
+single 256-token block. Even after forcing `DKV_ENGAGE_THRESHOLD=128`,
+`colab/coherence_cap_ab.py` logged *"DKV routing is not engaged for this
+context"* on every prompt and both arms were byte-identical 3/3.
+
+**That 3/3 is worth nothing.** Nothing was compressed, so the cap was a no-op
+and the eval would have "passed" identically for a knob that broke everything.
+It is recorded here so the pass is not mistaken for evidence. The synthesis
+gates that *can* see the cap are linkbench and multifact, below.
 
 ## Limits — read before promoting
 
@@ -140,16 +181,46 @@ peak at two contexts. The cap is live, so the recall comparison is not vacuous.
    measured here, and `colab/run_nat_eval.py` already defaults `DKV_FAST=1`, so
    the natural-coherence numbers on record were produced **with the cap on**.
 
-## Recommendation
+## Synthesis: multifact at 16k (the metric mid's rank=64 was chosen on)
+
+`mid`'s rank was justified by a synthesis score — its own comment reads
+"0.9999/64 recovers most of the synthesis that 0.999 gives up (30.0 -> 43.3)".
+Capping to 32 could have undone exactly that, so it was measured:
+
+```
+cap_off  9/9 checks   synthesis score=33.3  (facts 4/15, links 2/5)
+cap_32   9/9 checks   synthesis score=40.0  (facts 6/15, links 2/5)
+```
+
+Multi-needle 3/3 and all four relational-binding checks pass identically in both
+arms. Synthesis did not regress; it scored higher with the cap (n=1 per arm, so
+read that as "no regression", not as an improvement).
+
+## What shipped
+
+`DKV_RSVD_MAX_RPROJ=32` is now the **default for configured rank ≤ 64**
+(`low`, `mid`, `ultra` — including the default path), at
+`compression/lowrank.py` and `kv_runtime_manager.py`. The two sites must agree,
+or the pool is sized for a rank the compressor does not produce.
+
+**`high` (rank=128) is deliberately left uncapped.** Capping it to 32 would be a
+4× cut, taking the explicit fidelity preset *below* what `low` asks for, and
+nothing here tested rank 128. The manager keys the guard off `self.rank` (the
+configured base rank), **not** off `max_possible_rank` — the per-layer schedule
+lifts mid's 64 to 96, so keying off the schedule would have skipped the cap on
+the very preset the evidence covers.
+
+An explicit `DKV_RSVD_MAX_RPROJ` always wins, in both directions. Verified:
+
+```
+mid,  no env var          -> rank=64  (pool_rank=32)   178 KB/slot   capped
+high, no env var          -> rank=128 (pool_rank=192)  835 KB/slot   guard holds
+mid,  DKV_RSVD_MAX_RPROJ=0-> rank=64  (pool_rank=96)   370 KB/slot   override wins
+```
+
+Suite after the change: 321 passed, 18 skipped — unchanged.
 
 **Stop describing `DKV_FAST` as carrying two unvalidated fidelity knobs.**
-`RANK_BOOST=off` already ships as the default, so there was only ever one; and
-that one now has 80 paired trials behind it instead of 3, at two model scales,
-one of them off-ceiling.
-
-Promoting `DKV_RSVD_MAX_RPROJ=32` to a default is supported by this evidence: it
-is a one-line change at `lowrank.py:1432` (`"0"` → `"32"`) plus the matching
-default at `kv_runtime_manager.py:739`. It is **not** applied here, because
-changing a global compression default is the maintainer's call and limit (3)
-means the synthesis side is untested. If it is promoted, re-run
-`colab/eval_natural_coherence.py` on both arms first.
+`RANK_BOOST=off` already shipped, so there was only ever one; and that one now
+has 80 paired needle trials, 8 linkbench seeds and a multifact A/B behind it
+instead of 3 fixed-needle runs.
