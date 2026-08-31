@@ -171,18 +171,35 @@ template and question, giving one more compressed block.
 
 ## What is NOT validated
 
-* **`batch_engine.cpp` was not behaviourally exercised.** `main.cpp` never calls
-  `DKVBatchEngine` — it only references it in comments — and there is no test in
-  the repo that drives the batch path. Both of its changes are compile-verified and
-  source-pinned only.
-* **The growth term itself was never exercised behaviourally.** Producing a case
-  where the headroom form actually fails needs generation to cross a block
-  boundary; this model hit EOS at ~800 tokens on every prompt tried, well short of
-  1024. Forcing it with `DKV_MICRO_BLOCK_SIZE=256` was discarded as an instrument
-  failure — the **baseline** loses the needle at that block size (it is the
-  configuration linkbench scores 9/24 on), so there is no working control to read
-  the arms against. The growth correction rests on the arithmetic argument above,
-  not on a measurement.
+* **The growth term is now exercised** — `dkv_native/tests/test_k_growth_native.sh`
+  (added later in the session). Sweeping `DKV_MAX_TOKENS` makes the two candidate
+  forms produce visibly different K, which is exactly what `test_niah_native.sh`
+  cannot do at its fixed `DKV_MAX_TOKENS=40`:
+
+  | `DKV_MAX_TOKENS` | correct `ceil(max_generate/mbs)` | the `headroom_slots` form |
+  |---|---|---|
+  | 40 | n_comp + 1 | n_comp + 1 — agree, so useless as a test |
+  | 2048 | n_comp + 2 | n_comp + 1 |
+  | 8192 | n_comp + 8 | n_comp + 1 |
+
+  Measured on Qwen2.5-1.5B-Instruct-f16, 4k prompt (n_comp=4): K = **5 / 6 / 12**,
+  matching prediction exactly, needle recalled in all three. The headroom form would
+  have read 5 / 5 / 5, so this discriminates the fix rather than merely agreeing
+  with it. What is still NOT shown is the *failure* the term prevents — that needs
+  generation to actually cross a block boundary, and this model hits EOS around 800
+  tokens, short of a 1024 block.
+
+* **`batch_engine.cpp` is unreachable, not merely untested.** Nothing in the repo
+  constructs a `DKVBatchEngine`; it and `DKVGateway` are compiled and linked but
+  have no caller (confirmed by symbol inspection and by grepping every construction
+  site). Its clamp and `srl_k_host` fix are therefore parity repairs for when that
+  path is wired up, not live-path fixes. The strongest coverage available is
+  executing the transcribed logic, which
+  `tools/native_k_pipeline/k_pipeline_two_entrypoints.cpp` now does: 384 cases
+  across preset x block size x length x generation budget, asserting `main.cpp` and
+  `batch_engine.cpp` derive identical K and that neither can keep more blocks than
+  can exist. Wired into `test_routing_k_budget_parity.py`.
+
 * **The 54.2% figure is `main.cpp` only.** `batch_engine.cpp` allocates no decode
   cache (`cache_routed_cap` does not exist there), so the clamp buys routing work
   rather than bytes on that path.
