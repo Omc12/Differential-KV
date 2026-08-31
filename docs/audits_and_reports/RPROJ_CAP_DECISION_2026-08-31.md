@@ -169,17 +169,23 @@ and the eval would have "passed" identically for a knob that broke everything.
 It is recorded here so the pass is not mistaken for evidence. The synthesis
 gates that *can* see the cap are linkbench and multifact, below.
 
-## Limits — read before promoting
+## Limits — what this evidence does NOT cover
 
 1. **Bound, not equivalence.** ≤3.7% of prompts is a bound. A rare effect —
    one prompt in fifty — would not have been seen.
 2. **Model scale.** 1.5B and 7B. `test_niah.py:77` notes rank=16 is too low for
    14B models with `RANK_BOOST=off`; nothing here speaks to 14B, though that
    comment is about `rank`, not about this cap.
-3. **One box, one task.** NIAH digit recall only, on an eager-path 4070. The cap
-   is a global compression change; synthesis / multi-fact behaviour was not
-   measured here, and `colab/run_nat_eval.py` already defaults `DKV_FAST=1`, so
-   the natural-coherence numbers on record were produced **with the cap on**.
+3. **`ultra` is capped by inference, not by direct test.** It shares mid's
+   `rank=64` and is described in config as "MID PLUS AN UNROTATED POOL, AND
+   NOTHING ELSE", so the mid evidence is taken to carry. It was not run.
+4. **One box, and synthesis at n=1 per arm.** Everything is an eager-path 4070
+   (no MSVC), so timings are a pessimistic bound. Synthesis *was* measured
+   (linkbench 8 seeds, multifact 9/9) — but multifact is a single run per arm
+   and its score is noisy, so 33.3 → 40.0 supports "no regression" and nothing
+   stronger. Note also that `colab/run_nat_eval.py` defaulted `DKV_FAST=1`, so
+   the natural-coherence numbers already on record were produced with the cap
+   on — they are not an uncapped baseline.
 
 ## Synthesis: multifact at 16k (the metric mid's rank=64 was chosen on)
 
