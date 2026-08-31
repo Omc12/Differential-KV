@@ -93,42 +93,60 @@ stays invisible either way, because the score only ever sees the **top-R** keys.
 top-R keys.** Changing the selection rule is not enough, and neither is changing
 the aggregation.
 
-## UNFINISHED — the bigger-model control, now unblocked
+## THE BIGGER-MODEL CONTROL — RUN 2026-08-31 (Qwen3.5-4B fp16)
 
-**Qwen3.5-4B fp16 could not run at all until `940e6e57` + `fb62f362`.** Two
-head-geometry bugs stood in the way (attention output reshaped to `hidden_size`
-instead of `num_heads * head_dim`; `head_dim` derived by division instead of
-read from config). Both are fixed and the 4B now runs clean — synthesis **53.3**
-at 8k, no CPU fallbacks — but the sweep itself was started and **stopped early,
-so there is no result yet.**
+The sweep that was started and stopped early on 2026-08-30 has now been run in
+full: five arms, **n=12**, ctx 32768, `BLOCK=1024`, Qwen3.5-4B fp16 on the 4070
+SUPER. `DKV_RSVD_MAX_RPROJ=0` was pinned on every arm so the r_proj cap (which
+became a default later the same day) could not confound a routing question.
 
-This is the single most valuable outstanding measurement, because every
-"more blocks do not help" conclusion above rests on the 2B, and the 4B is the
-clean control: same generation, fp16, no NF4 confound.
+| arm | mean | sd | 95% CI |
+|---|---|---|---|
+| K=4 | 29.4 | 13.6 | [21.7, 37.2] |
+| K=8 | 23.6 | 8.8 | [18.6, 28.6] |
+| K=16 | 25.3 | 9.0 | [20.2, 30.4] |
+| attend-all (K=0) | 29.4 | 7.1 | [25.4, 33.5] |
+| grow-only 0.99 | 23.3 | 8.8 | [18.4, 28.3] |
 
-To resume (≈1–2 h on a 4070 SUPER, 8.8 GB at 32k so it fits):
+Paired comparisons:
+
+| pair | mean diff | 95% CI | verdict |
+|---|---|---|---|
+| **attend-all vs K=16** | **+4.17** | **[−0.26, +8.60]** | **not resolved — but only just** |
+| K=16 vs K=4 | −4.17 | [−10.20, +1.87] | not resolved |
+| K=16 vs K=8 | +1.67 | [−4.87, +8.21] | not resolved |
+| K=16 vs grow-only | +1.94 | [−3.83, +7.72] | not resolved |
+| attend-all vs K=4 | +0.00 | [−7.91, +7.91] | not resolved |
+
+**The decisive pair moved, but did not resolve.** On the 2B, attend-all vs K=16
+was −0.21, CI [−4.98, +4.56] — dead centred on zero. On the 4B it is **+4.17,
+CI [−0.26, +8.60]**: the whole interval is above zero except the last quarter
+point. That is the first hint in this benchmark that attending more blocks helps
+a bigger model, and it is *not* strong enough to act on. The harness's own power
+note says ~10 replicates resolve a 5-point effect and we ran 12, so if this
+effect is real it is ~4 points — just under what n=12 can separate.
+
+**Read this next caveat before treating the 4B as a clean control.** The 4B
+scores **25–29 at 32k**, against the 2B's **40.8/40.6** at the same context and
+block size, and against its own **53.3 at 8k**. The bigger model is doing
+substantially *worse* at long context. So the premise "the 4B is the clean
+control for the 2B's ceiling" is weakened: the 4B has a long-context problem of
+its own, and a K-gradient measured inside that degradation may be reporting the
+degradation rather than routing headroom. A fixed-K ladder for the 4B at 8k and
+16k — where it scores 53.3 — would separate the two.
+
+**Nothing here changes the shipped default.** No pair resolves, K=16 remains the
+knee on cost (the latency ladder above is unchanged), and grow-only again buys
+nothing (+1.94, CI spanning zero) for its extra blocks.
+
+**To settle the decisive pair:** rerun only attend-all and K=16 at n=24.
+Roughly 65 min on this box — the attend-all arm alone took ~55 min for 12 reps
+against ~11 min for each routed arm, and it sits at 11.9 GB of 12.3 GB, so it is
+both the slow arm and the one closest to OOM.
 
 ```
-BLOCK=1024 DKV_TOPK_BLOCKS=<K> python colab/synthesis_power.py \
-    --arm dkv --reps 12 --ctx 32768 --model Qwen/Qwen3.5-4B --out c8_k<K>.json
+DKV_RSVD_MAX_RPROJ=0 BLOCK=1024 DKV_TOPK_BLOCKS=<0|16> python colab/synthesis_power.py     --arm dkv --reps 24 --ctx 32768 --model Qwen/Qwen3.5-4B --out c8_k<K>_n24.json
 ```
-
-for `K` in `4, 8, 16, 0` (0 = attend-all), plus the grow-only arm:
-
-```
-DKV_ROUTE_SCORE=lse DKV_ROUTE_TOPP=0.99 DKV_ROUTE_TOPP_KMIN=16 \
-DKV_ROUTE_TOPP_STATS=1 DKV_TOPK_BLOCKS=16 BLOCK=1024 \
-python colab/synthesis_power.py --arm dkv --reps 12 --ctx 32768 \
-    --model Qwen/Qwen3.5-4B --out c8_grow.json
-```
-
-then `--compare c8_k0.json c8_k16.json` and friends.
-
-**The decisive pair is attend-all vs K=16.** On the 2B it was −0.21, CI
-[−4.98, +4.56] — nothing above 16 helped. If the 4B shows a gradient there,
-"more blocks do not help" was a fact about the 2B's ceiling and adaptive-upward
-routing deserves another look. If it does not, the conclusion generalises and
-fixed K=16 is right for both.
 
 ## Limits of this evidence — read before overriding any of it
 
@@ -137,7 +155,10 @@ fixed K=16 is right for both.
   routing's. The bigger-model arm could not be run fairly on a 12 GB card: NF4 is
   forced above ~4B, and both Qwen2.5-7B and Qwen3.5-9B scored 25.0 in NF4 against
   the 2B's 41–44 in fp16 — size and precision are confounded. **Qwen3.5-4B fp16
-  is the untested clean comparison.**
+  was run on 2026-08-31 — see the section above.** It did not settle the
+  question: the decisive pair moved off zero (+4.17, CI [−0.26, +8.60]) but did
+  not resolve, and the 4B turned out to score *below* the 2B at 32k, so it is
+  not the clean control it was expected to be.
 * **The noise floor is ~3 points.** Fixed K=16 at 32k read 43.8 (n=8) and 40.8
   (n=16). Every effect measured above 16 blocks is smaller than that, and an n=8
   result in this exact comparison *reversed* at n=16.
