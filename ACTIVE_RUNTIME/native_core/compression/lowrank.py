@@ -1428,7 +1428,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         n_oversamples = 5
     n_oversamples = max(0, n_oversamples)
     r_proj = min(max_rank_for_batch + n_oversamples, T_active, feat_dim)
-    # DEFAULT ON since 2026-08-31 for configured rank <= 64 (low/mid/ultra).
+    # DEFAULT ON since 2026-08-31 for configured rank <= 96 (low/mid/ultra).
     # Decided by colab/rproj_cap_decision.py + linkbench + multifact, all A/B'd
     # against the uncapped arm on this box:
     #   80 paired NIAH prompts (Qwen2.5-1.5B 16k/32k, 7B-NF4 16k), fresh 6-digit
@@ -1448,7 +1448,11 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     _cap_env = _local_os.environ.get("DKV_RSVD_MAX_RPROJ")
     if _cap_env is None:
         _base_rank = getattr(manager, "rank", None)
-        _max_rproj = 32 if (isinstance(_base_rank, int) and _base_rank <= 64) else 0
+        # Threshold is 96, not 64: the 2026-08-31 rank rescale multiplied
+        # every preset rank by 1.5 (mid/ultra 64 -> 96, high 128 -> 192), so
+        # a 64 here would have silently stopped capping mid and ultra -- the
+        # default path, and the one the evidence actually covers.
+        _max_rproj = 32 if (isinstance(_base_rank, int) and _base_rank <= 96) else 0
     else:
         try:
             _max_rproj = int(_cap_env)

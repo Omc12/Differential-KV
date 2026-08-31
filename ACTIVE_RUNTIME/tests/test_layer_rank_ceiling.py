@@ -102,3 +102,53 @@ def test_presets_declare_the_rescaled_ceiling():
             f"Preset ranks and schedule multipliers must move together: "
             f"multipliers were divided by 1.5, so presets were scaled by 1.5."
         )
+
+
+# ── The coupling that actually broke ─────────────────────────────────────────
+# The r_proj cap defaults on only for presets at or below a base-rank threshold
+# (`high` is excluded: capping rank 192 to 32 is a 6x cut nobody measured).
+# That threshold is compared against the PRESET RANK -- so the 2026-08-31
+# rescale, which multiplied every preset rank by 1.5, silently pushed mid and
+# ultra past a threshold still written as 64 and uncapped the default path.
+# Caught in review, but only by chance. These pin the relationship.
+CAP_MAX_BASE_RANK = 96          # must equal the literal in BOTH files below
+
+
+def _cap_thresholds_in_source():
+    """Read the guard literal out of both files that implement it."""
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).resolve().parents[1]
+    found = {}
+    for rel in ("native_core/compression/lowrank.py",
+                "native_core/kv_runtime_manager.py"):
+        src = (root / rel).read_text(encoding="utf-8")
+        m = re.findall(r"_(?:max_rproj|pool_rproj_cap) = 32 if \("
+                       r"isinstance\([^)]*\) and [\w.]+ <= (\d+)\)", src)
+        assert m, f"could not find the cap guard in {rel}"
+        found[rel] = {int(x) for x in m}
+    return found
+
+
+def test_cap_guard_threshold_matches_in_both_files():
+    """Compress and pool sites must agree, or the pool is sized for a rank the
+    compressor never produces."""
+    found = _cap_thresholds_in_source()
+    values = set().union(*found.values())
+    assert values == {CAP_MAX_BASE_RANK}, (
+        f"cap guard thresholds disagree or drifted: {found}; "
+        f"expected all == {CAP_MAX_BASE_RANK}"
+    )
+
+
+def test_default_cap_covers_low_mid_ultra_but_not_high():
+    """The threshold must track the preset ranks. If presets are rescaled again
+    without moving it, this fails instead of silently uncapping production."""
+    from native_core.config import DKVConfig
+    expected = {"low": True, "mid": True, "ultra": True, "high": False}
+    for preset, should_cap in expected.items():
+        rank = DKVConfig({"preset": preset}).rank
+        assert (rank <= CAP_MAX_BASE_RANK) is should_cap, (
+            f"preset {preset} has rank {rank}; expected cap-by-default="
+            f"{should_cap} against threshold {CAP_MAX_BASE_RANK}"
+        )
