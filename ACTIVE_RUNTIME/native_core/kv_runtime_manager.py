@@ -108,7 +108,11 @@ def get_layer_rank(
     ----------
     layer_idx     : index of the current transformer layer (0-indexed)
     num_layers    : total number of layers in the model
-    base_rank     : user-configured SVD rank (acts as standard ceiling)
+    base_rank     : user-configured SVD rank. NOT a ceiling -- see the NOTE
+                    above: the middle band returns 1.5 * base_rank, so a
+                    configured 64 delivers 96 in middle layers. (This line
+                    previously said "acts as standard ceiling", contradicting
+                    the NOTE in the same docstring.)
     early_boost   : if True, boost rank for layers 0-15% (default False)
     max_rank_early: hard cap for boosted early-layer rank; 0 = auto (2 * base_rank)
     """
