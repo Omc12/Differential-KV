@@ -4,8 +4,17 @@ set -e
 # Run NIAH test for C++ native runtime with Q4_K_M model.
 # Sweep 4k/8k/16k × depth 0.5/0.9.
 
-BINARY="../build/dkv_native"
-MODEL="../qwen2.5-1.5b-instruct-q4_k_m.gguf"
+BINARY="${DKV_TEST_BINARY:-../build/dkv_native}"
+# Overridable so this runs on a box that does not carry this exact file.
+# It hardcoded one .gguf path, so the suite was simply unrunnable anywhere
+# that file was missing -- which is how a Mac session ended up driving the
+# binary by hand instead of running the certified script.
+MODEL="${DKV_TEST_MODEL:-../qwen2.5-1.5b-instruct-q4_k_m.gguf}"
+if [ ! -f "$MODEL" ]; then
+    echo "model not found: $MODEL" >&2
+    echo "set DKV_TEST_MODEL=/path/to/model.gguf" >&2
+    exit 2
+fi
 CONTEXTS=(4000 8000 16000)
 DEPTHS=(0.5 0.9)
 NEEDLE="The secret passcode is OMEGA-7741-DELTA."
