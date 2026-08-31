@@ -8,20 +8,30 @@ uncapped — untested at that rank, and capping it would be a 4× cut.**
 
 ## The question
 
-`DKV_RSVD_MAX_RPROJ=32` is the last fidelity-affecting knob in `DKV_FAST`. It
+`DKV_RSVD_MAX_RPROJ=32` was the last fidelity-affecting knob in `DKV_FAST` (it
+is no longer bundled there — see What shipped). It
 caps the randomized-SVD projection width so every cuSOLVER call stays inside the
 batched Jacobi 32×32 cliff. The rank boost it replaces existed specifically to
 give **digit** blocks extra rank, and `test_niah.py` asserts a 6-digit needle —
 so the risk lands exactly where the shipped test looks.
 
-### What the cap actually does (narrower than the docs imply)
+### What the cap actually does — and it DEPENDS ON THE CONFIGURED RANK
 
-With `DKV_RANK_BOOST=off` — which has been the **default** for some time, so the
-"two fidelity knobs to validate" is really **one** — the per-block ranks are
-already 32. `block_ranks_t.clamp(max=r_proj)` is then a no-op. The cap does
-**not** truncate stored rank; it only narrows the projection from
-`rank + oversamples` (37) to 32. A subtler numerical change than "caps every
-block's rank" suggests.
+`DKV_RANK_BOOST=off` has been the **default** for some time, so the "two
+fidelity knobs to validate" was really **one**. What the remaining one does then
+splits by configured rank, and this distinction matters for reading everything
+below:
+
+- **rank = 32** (`low`, and every harness here that pins `rank=32`): block ranks
+  are already 32, so `block_ranks_t.clamp(max=r_proj)` is a no-op. The cap only
+  trims oversamples, `32+5 = 37` → 32. A mild numerical change.
+- **rank = 64** (`mid` — the **default preset** — and `ultra`): the per-layer
+  schedule lifts this to 96, and the cap truncates it to 32. A **3× cut**, and
+  the pool banner says so: `pool_rank=96` → `pool_rank=32`.
+- **rank = 128** (`high`): would be a 4× cut. Left uncapped — see What shipped.
+
+So the needle runs below, which pin `rank=32`, exercise the *mild* form. The
+linkbench and multifact runs, which use the default preset, exercise the 3× one.
 
 ### Why the existing evidence could not decide
 
