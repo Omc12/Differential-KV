@@ -138,6 +138,9 @@ class NativeBlockPool:
         max_residual_tokens: Optional[int] = None,
         shared_basis: bool = False,
         shared_basis_frac: float = 0.50,
+        residual_quant: Optional[str] = None,
+        residual_quant_group_size: Optional[int] = None,
+        residual_quant_bits: Optional[int] = None,
     ):
         # ── Phase 1: Record config — NO GPU tensors allocated yet if lazy ────────────
         # Allocation is deferred to ensure_allocated(n_tokens), called by
@@ -201,17 +204,50 @@ class NativeBlockPool:
             _force_legacy == "1" if _force_legacy is not None
             else not (_is_cuda_dev and _gpu_compress))
 
-        # Residual quantization configuration (Production-Grade INT4/INT8 Residual Buffers)
-        # Default is "none" per specification; opt-in via DKV_RESIDUAL_QUANT
-        self.residual_quant = _os.environ.get("DKV_RESIDUAL_QUANT", "none").lower()
+        # ── Residual quantization (Production-Grade INT4/INT8 Residual Buffers) ──
+        # These arrive from DKVConfig via KVRuntimeManager.  Passing None keeps
+        # the env-only behaviour for direct-construction paths (tests, the
+        # archive/ harnesses) that have no config object to hand.
+        #
+        # This block used to read the ENVIRONMENT AND NOTHING ELSE, defaulting to
+        # "none", while DKVConfig carried its own `residual_quant` defaulting to
+        # "int4" that no code path ever read.  The two therefore disagreed by
+        # default: in one process, DKVConfig().residual_quant == "int4" while the
+        # pool built from that same config resolved "none" and allocated fp16
+        # residuals.  int4 was reached only when something had already called
+        # serving.decode_config.apply_best_decode_defaults(), which setdefaults
+        # DKV_RESIDUAL_QUANT — true for cli.py and the OpenAI gateway, false for
+        # anything that constructs KVRuntimeManager itself.  colab/run_nat_eval.py
+        # declines to call it ON PURPOSE, so that benchmark measured fp16
+        # residuals while every config readout it could print said "int4".
+        if residual_quant is None:
+            residual_quant = _os.environ.get("DKV_RESIDUAL_QUANT", "none")
+        self.residual_quant = str(residual_quant).strip().lower()
+
+        if residual_quant_group_size is None:
+            residual_quant_group_size = _os.environ.get("DKV_RESIDUAL_QUANT_GROUP_SIZE", 64)
         try:
-            self.residual_quant_group_size = int(_os.environ.get("DKV_RESIDUAL_QUANT_GROUP_SIZE", "64"))
-        except ValueError:
+            self.residual_quant_group_size = int(residual_quant_group_size)
+        except (TypeError, ValueError):
             self.residual_quant_group_size = 64
+
+        # Bit width follows the FORMAT NAME.  It used to come from
+        # DKV_RESIDUAL_QUANT_BITS alone (default 4) no matter what the format was
+        # called, so "int8" allocated a 4-bit packed_width and quantized at 4
+        # bits: int4 and int8 produced BYTE-IDENTICAL buffers and int8 was a
+        # silent alias with no way to notice from the outside.  An explicit
+        # bits setting still wins, for sweeps that vary width without renaming.
+        _named_bits = 8 if "8" in self.residual_quant else 4
+        if residual_quant_bits is None:
+            residual_quant_bits = _os.environ.get("DKV_RESIDUAL_QUANT_BITS", _named_bits)
         try:
-            self.residual_quant_bits = int(_os.environ.get("DKV_RESIDUAL_QUANT_BITS", "4"))
-        except ValueError:
-            self.residual_quant_bits = 4
+            self.residual_quant_bits = int(residual_quant_bits)
+        except (TypeError, ValueError):
+            self.residual_quant_bits = _named_bits
+        if self.residual_quant_bits not in (4, 8):
+            # residual_quant.py only has shift tables for 4 and 8; anything else
+            # would raise at the first write, long after allocation.
+            self.residual_quant_bits = _named_bits
 
         if self.residual_quant in ("int4", "int8"):
             _bits = self.residual_quant_bits

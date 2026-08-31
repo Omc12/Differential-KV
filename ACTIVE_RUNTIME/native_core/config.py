@@ -103,7 +103,14 @@ class DKVConfig:
             # The ladder's ordering holds in BOTH modes. Run a dense control
             # alongside every time -- it is what distinguished "DKV regressed"
             # from "these are different tasks".
-            self.max_residual_tokens = 40
+            #
+            # 40 -> 64 (2026-08-31), the `low` rung of the ladder f5f96e13
+            # announced and only ever applied to MLX. Byte-justified, not
+            # quality-justified: see the `mid` branch for the arithmetic and for
+            # the four A/Bs that still say this dial is inert. 64 int4 slots cost
+            # 4,608 B per (block, kv-head) against the 10,240 B this preset paid
+            # at 40 fp16 slots, so `low` stays the memory-priority rung.
+            self.max_residual_tokens = 64
             # Spectral energy a block's low-rank form must retain, and the rank
             # ceiling that serves it. This -- not `rank` -- is what actually sets
             # a block's rank: the compressor keeps the smallest k carrying this
@@ -141,7 +148,15 @@ class DKVConfig:
             # `high` = max fidelity: full 128-residual ceiling (paper config of
             # record, MLX default) for table/factual-dense docs, accepting the
             # larger pool.  See the "mid" branch for the ladder rationale.
-            self.max_residual_tokens = 128
+            #
+            # 128 -> 256 (2026-08-31), the `high` rung of f5f96e13's ladder. This
+            # is the one rung that costs more than its pre-int4 self: 256 int4
+            # slots = 18,432 B per (block, kv-head) against 128 fp16 slots'
+            # 32,768 B, so it is still a saving there, but it is 6.4x the
+            # 40-at-int4 floor. `high` is the rung defined as "accept the pool
+            # size for fidelity", which is why the extra headroom goes here and
+            # not on `mid`. Still no measurement showing it recovers anything.
+            self.max_residual_tokens = 256
             # UNROTATED too, from 2026-08-17. `high` is the MAX-FIDELITY rung, and
             # it made no sense for it to be the one preset that still lost 42% of
             # exact digit recall -- the "table/factual-dense docs" this branch is
@@ -219,7 +234,16 @@ class DKVConfig:
             # measurements that showed the residual budget inert. Keeping ultra
             # above mid here would reintroduce exactly the kind of unmeasured
             # extra that 69393023 removed from this preset.
-            self.max_residual_tokens = 40
+            #
+            # 40 -> 128 (2026-08-31), still TRACKING MID rather than taking the
+            # 256 that f5f96e13's message assigned `ultra`. That number would
+            # break the one-line definition of this preset -- `ultra` is `mid`
+            # plus the unrotated pool, nothing else -- and put it above `mid` on
+            # a dial measured inert four times, which is the unmeasured extra the
+            # paragraph above exists to prevent. If `ultra` should own residual
+            # headroom of its own, that needs a measurement first, not a commit
+            # message. Deliberate divergence from the announced ladder.
+            self.max_residual_tokens = 128
             # ENERGY IS THE DIAL. RANK IS A CEILING THAT USUALLY DOES NOT BIND.
             #
             # This block previously claimed the opposite ("rank is the driver,
@@ -421,7 +445,31 @@ class DKVConfig:
             # 2.8 GB -> 1.5 GB) for no measured quality cost.
             #
             # Diverges from MLX's flat 128 deliberately; `high` keeps 128.
-            self.max_residual_tokens = 40
+            #
+            # RAISED 40 -> 128 (2026-08-31), completing the ladder f5f96e13's
+            # message announced (low 64 / mid 128 / high 256 / ultra 256) but
+            # never actually applied on this side: that commit's config.py hunk
+            # only added the residual_quant getters, so the ladder landed in
+            # mlx_dkv_wrapper.py alone and CUDA kept 40/40/128/40 while claiming
+            # otherwise.
+            #
+            # BE CLEAR ABOUT WHAT THIS BUYS: nothing measured. The four A/Bs
+            # above still stand -- 40 and 128 score identically on all of them,
+            # including the digit-table bench built to make residuals matter.
+            # This is a CAPACITY RESTORATION justified on bytes, not a quality
+            # change. int4 residuals cost 72 B per (slot, kv-head) at head_dim
+            # 128 against fp16's 256 B, so:
+            #
+            #   40 slots @ fp16  = 10,240 B   <- what this preset cost pre-int4
+            #   128 slots @ int4 =  9,216 B   <- what it costs now
+            #   40 slots @ int4  =  2,880 B   <- what it cost between the two
+            #
+            # i.e. 128 int4 slots fit inside the budget 40 fp16 slots already
+            # had. Against the 40-at-int4 state this is still 3.2x the residual
+            # bytes, so if a VRAM regression shows up at 32k+, this is the first
+            # dial to put back -- DKV_MAX_RESIDUAL_TOKENS=40 restores it with no
+            # expected accuracy cost.
+            self.max_residual_tokens = 128
             # `mid` KEEPS ROTATED KEYS. Decided 2026-08-17 with both halves of
             # the trade finally measured, after trying the other way and
             # reverting it.
@@ -569,14 +617,23 @@ class DKVConfig:
             "max_residual_tokens", "DKV_MAX_RESIDUAL_TOKENS", self.max_residual_tokens, config_dict,
             alias_env="DKV_MAX_RESIDUAL",   # MLX's name for the same knob
         )
+        # Residual storage format (Production-Grade INT4 / INT8 Residual Buffers).
+        # Resolved HERE and nowhere else: KVRuntimeManager forwards all three to
+        # NativeBlockPool, which used to read the environment itself with a
+        # "none" default and ignore this object entirely.
         self.residual_quant = self._get_str(
             "residual_quant", "DKV_RESIDUAL_QUANT", "int4", config_dict
-        )
+        ).strip().lower()
         self.residual_quant_group_size = self._get_int(
             "residual_quant_group_size", "DKV_RESIDUAL_QUANT_GROUP_SIZE", 64, config_dict
         )
+        # Bit width follows the FORMAT NAME. It used to default to a flat 4 no
+        # matter what the format was called, so "int8" packed at 4 bits and was a
+        # silent alias for int4 — identical shapes, identical bytes, identical
+        # error. DKV_RESIDUAL_QUANT_BITS still overrides.
         self.residual_quant_bits = self._get_int(
-            "residual_quant_bits", "DKV_RESIDUAL_QUANT_BITS", 4, config_dict
+            "residual_quant_bits", "DKV_RESIDUAL_QUANT_BITS",
+            8 if "8" in self.residual_quant else 4, config_dict
         )
         self.rarity_capture = self._get_bool(
             "rarity_capture", "DKV_RARITY_CAPTURE", True, config_dict
@@ -650,19 +707,11 @@ class DKVConfig:
             "shared_basis_frac", "DKV_SHARED_BASIS_FRAC", 0.50, config_dict
         )
 
-        # Residual quantization dials (Production-Grade INT4 / INT8 Residual Buffers)
-        # Default is "none" (safe production default per spec). Opt-in to "int4" or "int8".
-        self.residual_quant = self._get_str(
-            "residual_quant", "DKV_RESIDUAL_QUANT", self.residual_quant, config_dict
-        ).lower()
-        self.residual_quant_group_size = self._get_int(
-            "residual_quant_group_size", "DKV_RESIDUAL_QUANT_GROUP_SIZE",
-            self.residual_quant_group_size, config_dict
-        )
-        self.residual_quant_bits = self._get_int(
-            "residual_quant_bits", "DKV_RESIDUAL_QUANT_BITS",
-            self.residual_quant_bits, config_dict
-        )
+        # The residual quantization dials used to be re-resolved a second time
+        # here, from the same keys and the same env vars with the already-resolved
+        # value as the default — a no-op that only served to carry a comment
+        # claiming the default was "none" when it had been "int4" since f5f96e13.
+        # Resolved once above; a second copy is how the first one drifted.
 
         # Content-Aware / Rarity-Aware Residual Selection dials
         self.rarity_capture = self._get_bool(

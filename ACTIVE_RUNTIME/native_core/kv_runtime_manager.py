@@ -991,6 +991,14 @@ class KVRuntimeManager:
             # Preset-driven; DKV_SHARED_BASIS still overrides. On for `low`.
             shared_basis=bool(getattr(self.config, "shared_basis", False)),
             shared_basis_frac=float(getattr(self.config, "shared_basis_frac", 0.50)),
+            # Residual storage format. MUST be passed: the pool latches this in
+            # __init__, so assigning `native_pool.config` below is far too late
+            # to affect it. Without these three the pool fell back to reading the
+            # environment with a "none" default, and DKVConfig.residual_quant was
+            # dead config that disagreed with what was actually allocated.
+            residual_quant=getattr(self.config, "residual_quant", None),
+            residual_quant_group_size=getattr(self.config, "residual_quant_group_size", None),
+            residual_quant_bits=getattr(self.config, "residual_quant_bits", None),
         )
         self.native_pool.config = self.config
         # Back-reference so decode-path hooks can reach k-transformers subsystems
