@@ -737,6 +737,15 @@ is about reaching MLX's design, not adding to MLX.
 
 ## `DKV_CONTIG_UNROTATE=1` (1× memory) CONFIRMED on A100
 
+> **SUPERSEDED 2026-08-31 — DO NOT ACT ON THIS RECOMMENDATION.**
+> This table never measured the DKV *default* path (every row is an opt-in
+> contiguous arm or dense), and `DKV_SDPA_HISTORY` became default-on in
+> `1c293277` on 2026-08-13, three weeks after this was written. Re-measured
+> against today's default: `contig1x` saves **13 MB** at 32k (a wash) and
+> `contig2x` **costs +915 MB**. See
+> `PREFILL_ARMS_REMEASURED_2026-08-31.md`.
+
+
 The un-rotate variant worked exactly as designed:
 
 ```
@@ -1070,6 +1079,15 @@ pruning experiment (run on low/mid) had masked.
 # SEVENTH PASS — 1× confirmed, CUDA-graph reality, factual-store cause (2026-07-18)
 
 ## 1× contiguous prefill (`DKV_CONTIG_UNROTATE=1`) — CONFIRMED on A100
+
+> **SUPERSEDED 2026-08-31 — DO NOT ACT ON THIS RECOMMENDATION.**
+> This table never measured the DKV *default* path (every row is an opt-in
+> contiguous arm or dense), and `DKV_SDPA_HISTORY` became default-on in
+> `1c293277` on 2026-08-13, three weeks after this was written. Re-measured
+> against today's default: `contig1x` saves **13 MB** at 32k (a wash) and
+> `contig2x` **costs +915 MB**. See
+> `PREFILL_ARMS_REMEASURED_2026-08-31.md`.
+
 
 ```
                 fwd     after_fwd   peak_prefill

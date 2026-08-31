@@ -5555,7 +5555,17 @@ def apply_dkv_attention_patch(model, kv_manager):
                             # so during prefill this holds the rotated buffer AND the unrotated
                             # blocks: ~2x raw prefill KV for a dense-speed forward.  The buffer
                             # is freed when decode begins (is_decode branch) and on clear_session.
-                            # UNVALIDATED on GPU — A/B output_text vs the default path before use.
+                            # VALIDATED on GPU 2026-08-31 (RTX 4070 SUPER, Qwen2.5-1.5B,
+                            # colab/bench_prefill_arms_peak.py): output text is IDENTICAL to
+                            # the default path at 8k and 32k, so this is recon-equivalent.
+                            # It is NOT, however, a memory win any more.  Measured vs the
+                            # CURRENT default (DKV_SDPA_HISTORY=1) at 32k:
+                            #   this flag alone      +915 MB peak, -3.9% fwd   <- a REGRESSION
+                            #   with CONTIG_UNROTATE  -13 MB peak, +0.4% fwd   <- a wash
+                            # The 2026-07-17 doc's "-2.6 GB" was 1x measured against 2x,
+                            # both opt-in arms; SDPA_HISTORY (default since 2026-08-13) had
+                            # already taken -1243 MB and -31%.  Both flags stay default-off.
+                            # See docs/audits_and_reports/PREFILL_ARMS_REMEASURED_2026-08-31.md
                             if not hasattr(kv_manager, "_contig_prefill"):
                                 kv_manager._contig_prefill = {}
                             # 1x-memory variant: keep ONLY the rotated buffer, defer

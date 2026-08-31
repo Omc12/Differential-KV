@@ -326,13 +326,26 @@ def _apply_fast_mode() -> None:
 
     Bundles (via setdefault, so an explicit flag still wins):
       DKV_COMPRESS_GRAM_SVD=1   recon-equivalent SVD (safe)
-      DKV_CONTIGUOUS_PREFILL=1  forward faster than dense (recon-equivalent)
-      DKV_CONTIG_UNROTATE=1     1x-memory prefill, peak ~dense (fp16-equivalent)
+      DKV_CONTIGUOUS_PREFILL=1  recon-equivalent, but NOT a memory win any more
+      DKV_CONTIG_UNROTATE=1     cancels the above flag's cost; net ~zero
       DKV_RANK_BOOST=off        the boost fired on ~100% of blocks (a fake flat
                                    1.5x); off = the configured rank + pool_rank
                                    48->32 (VRAM ratio up to ~3x)
       DKV_RSVD_MAX_RPROJ=32     enables the batched-compress cuSOLVER cliff
                                    (compress 6s->2.6s)
+
+    ⚠ THE TWO CONTIGUOUS FLAGS NO LONGER BUY MEMORY, and one of them is a trap.
+    Re-measured 2026-08-31 vs the CURRENT default (DKV_SDPA_HISTORY=1, on by
+    default since 2026-08-13) at 32k on Qwen2.5-1.5B:
+
+        CONTIGUOUS_PREFILL alone          +915 MB peak, -3.9% fwd  (REGRESSION)
+        + CONTIG_UNROTATE (what FAST does) -13 MB peak, +0.4% fwd  (a wash)
+
+    The 2026-07-17 doc's "-2.6 GB" was 1x measured against 2x -- both opt-in
+    arms -- and SDPA_HISTORY had already taken -1243 MB / -31% on its own.
+    THE TRAP: CONTIG_UNROTATE silently sets itself False when the rotary module
+    cannot be resolved, which drops FAST into the +915 MB arm with no warning.
+    See docs/audits_and_reports/PREFILL_ARMS_REMEASURED_2026-08-31.md
 
     ⚠ The last two are FIDELITY-AFFECTING (rank cap + 0 oversamples).  The
     content-aware rank boost existed to give DIGIT/number blocks extra rank, so
