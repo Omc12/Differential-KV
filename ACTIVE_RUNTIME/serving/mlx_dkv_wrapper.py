@@ -231,12 +231,23 @@ def _normalize_references(text: str) -> str:
 def get_layer_rank(layer_idx: int, num_layers: int, base_rank: int) -> int:
     if os.environ.get("DKV_LAYER_ADAPTIVE_RANK", "1") == "1":
         ratio = layer_idx / max(num_layers, 1)
-        if ratio < 0.25:       # Early layers (25%) -> lower rank (e.g. 12 if base is 16)
-            return max(8, round(0.75 * base_rank))
-        elif ratio < 0.75:     # Middle layers (50%) -> higher rank (e.g. 24 if base is 16)
-            return round(1.5 * base_rank)
-        else:                  # Late layers (25%) -> lower rank (e.g. 8 if base is 16)
-            return max(8, round(0.50 * base_rank))
+        # base_rank IS the ceiling: the middle band takes all of it, never more.
+        # MUST STAY IDENTICAL to native_core/kv_runtime_manager.get_layer_rank.
+        # Rescaled 2026-08-31 from 0.75 / 1.50 / 0.50 by dividing every
+        # multiplier by 1.5 and scaling the default rank UP by 1.5 (32 -> 48 in
+        # decode_config.MLX_CONSTRUCTOR_DEFAULTS), so DELIVERED ranks are
+        # unchanged.  The pool no longer needs its own 1.5x headroom either --
+        # see `self.rank = self.base_rank` below.
+        # NOTE: changed on the CUDA box, which has no `mlx` module, so this
+        # branch is UNRUN. The CUDA twin is pinned by
+        # tests/test_layer_rank_ceiling.py; mirror that test here once on Apple
+        # silicon before trusting it.
+        if ratio < 0.25:       # Early layers (25%)  -> half the ceiling
+            return max(8, round(0.5 * base_rank))
+        elif ratio < 0.75:     # Middle layers (50%) -> the full ceiling
+            return round(1.0 * base_rank)
+        else:                  # Late layers (25%)   -> a third of the ceiling
+            return max(8, round(base_rank / 3.0))
     
     return base_rank
 
@@ -1958,10 +1969,13 @@ class MLXKVBlockManager:
         self.head_dim = head_dim
         self.base_rank = rank
         self.layer_adaptive_rank = (os.environ.get("DKV_LAYER_ADAPTIVE_RANK", "1") == "1")
-        if self.layer_adaptive_rank:
-            self.rank = int(round(self.base_rank * 1.5))
-        else:
-            self.rank = rank
+        # Pool width == base_rank, because base_rank is now the schedule's
+        # CEILING (2026-08-31). This used to be round(base_rank * 1.5) purely as
+        # headroom for a middle band that returned 1.5x base; that band now
+        # returns 1.0x, so the extra 50% would allocate slots nothing can fill.
+        # With the default rank rescaled 32 -> 48 to match, the pool comes out
+        # the same width it always was.
+        self.rank = self.base_rank if self.layer_adaptive_rank else rank
         self.block_size = block_size
         
         # ── Dense recency window ───────────────────────────────────────────────

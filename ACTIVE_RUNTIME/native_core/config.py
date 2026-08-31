@@ -125,7 +125,7 @@ class DKVConfig:
             # three (10.45-10.77 s), so the cost is VRAM, not latency, and
             # distractor retrieval stays 24/24 at every setting.
             self.svd_energy = 0.999
-            self.rank = 32
+            self.rank = 48  # ceiling; was 32 before the 2026-08-31 rescale (schedule multipliers /1.5, preset ranks *1.5 -> delivered ranks unchanged)
         elif self.preset == "high":
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 16384
@@ -170,7 +170,7 @@ class DKVConfig:
             # carries the retraction of the rank-sweep numbers this ladder was
             # originally justified with.
             self.svd_energy = 0.99999
-            self.rank = 128
+            self.rank = 192  # ceiling; was 128 before the 2026-08-31 rescale (schedule multipliers /1.5, preset ranks *1.5 -> delivered ranks unchanged)
         elif self.preset == "ultra":
             # `ultra` is MID's settings with a higher energy target.
             #
@@ -332,7 +332,7 @@ class DKVConfig:
             # against 47/48 unrotated -- exactly dense's 47/48. That single
             # change is the whole preset.
             self.svd_energy = 0.9999
-            self.rank = 64
+            self.rank = 96  # ceiling; was 64 before the 2026-08-31 rescale (schedule multipliers /1.5, preset ranks *1.5 -> delivered ranks unchanged)
             # Store keys UNROTATED. This is the one change in the project that
             # measurably closes a gap to dense on a metric that can actually
             # resolve it -- see the rotated_pool resolution below.
@@ -358,7 +358,7 @@ class DKVConfig:
             # gives up (30.0 -> 43.3 of the 46.7 that `high` reaches) for a third
             # of its VRAM cost (+0.09 GB against +0.34).
             self.svd_energy = 0.9999
-            self.rank = 64
+            self.rank = 96  # ceiling; was 64 before the 2026-08-31 rescale (schedule multipliers /1.5, preset ranks *1.5 -> delivered ranks unchanged)
             self.max_active_dense_tokens = 2048
             # Residual budget per block: how many exact (uncompressed) tokens
             # correct the lossy SVD.  This is the main quality dial.

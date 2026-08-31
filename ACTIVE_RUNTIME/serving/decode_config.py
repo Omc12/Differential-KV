@@ -76,8 +76,14 @@ MLX_CONSTRUCTOR_DEFAULTS = {
     "residual_quant": "int4",   # MLX-measured, paired vs a dense control on identical
                           # prompts: linkbench 9/21 -> 21/21 = dense (p=5.3e-05),
                           # pool 1.08x -> 0.48x of the KV it replaces.
-    "rank": 32,           # a CEILING, not a target; the rank sweep that suggested
-                          # otherwise was randomised-SVD projection noise
+    "rank": 48,           # a CEILING, not a target; the rank sweep that suggested
+                          # otherwise was randomised-SVD projection noise.
+                          # 32 -> 48 on 2026-08-31: it was NOT actually a ceiling
+                          # before (the per-layer middle band returned 1.5x, so
+                          # 32 delivered 48). The schedule multipliers were
+                          # divided by 1.5 and this scaled up by 1.5, so the
+                          # delivered ranks are unchanged -- 24/48/16 either way
+                          # -- and the word "CEILING" above is now true.
 }
 
 

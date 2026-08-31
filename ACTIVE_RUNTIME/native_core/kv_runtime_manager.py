@@ -77,16 +77,27 @@ def get_layer_rank(
     base_rank=32). Do not "fix" one without the other.
 
     Normal schedule (early_boost=False, default):
-      ratio < 0.25:   max(8, round(0.75 * base_rank))   (24 at base 32)
-      ratio < 0.75:   round(1.50 * base_rank)           (48 at base 32)
-      ratio >= 0.75:  max(8, round(0.50 * base_rank))   (16 at base 32)
+      ratio < 0.25:   max(8, round(0.50 * base_rank))   (24 at base 48)
+      ratio < 0.75:   round(1.00 * base_rank)           (48 at base 48)
+      ratio >= 0.75:  max(8, round(base_rank / 3.0))    (16 at base 48)
 
-    NOTE: the middle band returns 1.5x base_rank, i.e. ABOVE the configured
-    rank. That is deliberate and matches MLX, whose pool is allocated at
-    `base_rank * 1.5` precisely so the middle band fits; the earlier text here
-    claiming base_rank is "the standard ceiling (no silent VRAM inflation beyond
-    --rank)" described a schedule this function has not implemented for a long
-    time. The pool's `pool_rank` (48) is the real ceiling.
+    base_rank IS THE CEILING. It did not used to be: until 2026-08-31 the bands
+    were 0.75 / 1.50 / 0.50, so the middle band returned 1.5x base_rank and a
+    configured 64 silently delivered 96. Three different numbers hid behind the
+    word "rank" (configured value, schedule output, r_proj cap) and none of them
+    agreed -- `high` declared 128 and stored 64-192, having never once delivered
+    its stated rank.
+
+    THE RESCALING WAS BEHAVIOUR-PRESERVING. Every multiplier was divided by 1.5
+    and every preset rank multiplied by 1.5 (low 32->48, mid/ultra 64->96,
+    high 128->192), so the DELIVERED per-layer ranks are bit-identical to
+    before. tests/test_layer_rank_ceiling.py pins that, and pins the ceiling
+    property itself.
+
+    The one deliberate behaviour change is for callers passing an EXPLICIT
+    config rank: `rank=32` now means "at most 32" (16/32/11) where it used to
+    mean "up to 48" (24/48/16). That is the point of the change -- but it does
+    lower fidelity for such callers, so pass the ceiling you actually want.
 
     MLX stores U/V ZERO-PADDED to pool_rank and always reads pool_rank
     components; this side passes the layer's own rank to the kernel and reads
@@ -108,11 +119,8 @@ def get_layer_rank(
     ----------
     layer_idx     : index of the current transformer layer (0-indexed)
     num_layers    : total number of layers in the model
-    base_rank     : user-configured SVD rank. NOT a ceiling -- see the NOTE
-                    above: the middle band returns 1.5 * base_rank, so a
-                    configured 64 delivers 96 in middle layers. (This line
-                    previously said "acts as standard ceiling", contradicting
-                    the NOTE in the same docstring.)
+    base_rank     : user-configured SVD rank, and a TRUE CEILING as of
+                    2026-08-31 -- no band returns more than this.
     early_boost   : if True, boost rank for layers 0-15% (default False)
     max_rank_early: hard cap for boosted early-layer rank; 0 = auto (2 * base_rank)
     """
@@ -121,12 +129,17 @@ def get_layer_rank(
     # Enable via DKV_LAYER_ADAPTIVE_RANK=1 or config.layer_adaptive_rank=True.
     if os.environ.get("DKV_LAYER_ADAPTIVE_RANK", "1") == "1":
         ratio = layer_idx / max(num_layers, 1)
-        if ratio < 0.25:       # Early layers (25%) -> lower rank (e.g. 12 if base is 16)
-            return max(8, round(0.75 * base_rank))
-        elif ratio < 0.75:     # Middle layers (50%) -> higher rank (e.g. 24 if base is 16)
-            return round(1.5 * base_rank)
-        else:                  # Late layers (25%) -> lower rank (e.g. 8 if base is 16)
-            return max(8, round(0.50 * base_rank))
+        # base_rank IS the ceiling: the middle band takes all of it, never more.
+        # Rescaled 2026-08-31 from 0.75 / 1.50 / 0.50 (max 1.5x base) by dividing
+        # every multiplier by 1.5 and scaling the preset ranks UP by 1.5.  The
+        # delivered ranks are therefore UNCHANGED -- see
+        # tests/test_layer_rank_ceiling.py, which pins them.
+        if ratio < 0.25:       # Early layers (25%)  -> half the ceiling
+            return max(8, round(0.5 * base_rank))
+        elif ratio < 0.75:     # Middle layers (50%) -> the full ceiling
+            return round(1.0 * base_rank)
+        else:                  # Late layers (25%)   -> a third of the ceiling
+            return max(8, round(base_rank / 3.0))
 
     ratio = layer_idx / max(num_layers, 1)
     if ratio < 0.15:       # layers 0-4 for 28-layer model
@@ -943,13 +956,19 @@ class KVRuntimeManager:
                     for _r in _sched]
             _lo, _hi = min(_eff), max(_eff)
             _band = str(_lo) if _lo == _hi else f"{_lo}-{_hi}"
-            _why = ""
-            if _lo != self.rank or _hi != self.rank:
-                _why = (f"  <- NOT the configured rank={self.rank}"
-                        f" (schedule gives {min(_sched)}-{max(_sched)}"
-                        + (f", then the r_proj cap clamps to {_pool_rproj_cap}"
-                           if _pool_rproj_cap > 0 else "")
-                        + ")")
+            # Bands BELOW the ceiling are by design (early/late layers get less).
+            # Only two things are worth flagging: a band ABOVE the configured
+            # rank -- which would mean the ceiling has been broken again -- and
+            # the r_proj cap holding delivery below what the preset asked for.
+            if _hi > self.rank:
+                _why = (f"  <- ABOVE the configured ceiling rank={self.rank}."
+                        f" The per-layer schedule should never exceed it.")
+            elif _pool_rproj_cap > 0 and _hi < max(_sched):
+                _why = (f"  (ceiling rank={self.rank}; schedule wanted"
+                        f" {min(_sched)}-{max(_sched)}, r_proj cap clamps to"
+                        f" {_pool_rproj_cap})")
+            else:
+                _why = f"  (ceiling rank={self.rank}, respected)"
             print(f"[DKV Memory] Effective per-layer rank actually stored: "
                   f"{_band}{_why}")
         except Exception:                                          # noqa: BLE001
