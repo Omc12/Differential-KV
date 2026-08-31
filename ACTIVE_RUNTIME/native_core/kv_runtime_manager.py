@@ -923,6 +923,38 @@ class KVRuntimeManager:
             f"(lazy: only used slots are allocated)"
         )
 
+        # ── What rank you actually GET, not what you asked for ───────────────
+        # THREE different numbers hide behind the word "rank" and they rarely
+        # agree:
+        #   1. the configured/preset value (self.rank)
+        #   2. the per-layer schedule -- get_layer_rank returns 1.5x base in the
+        #      middle band, so base 64 delivers 96 there.  Its NOTE is explicit
+        #      that base_rank is NOT a ceiling.
+        #   3. the r_proj cap, which clamps every block on top of that.
+        # Delivered rank is min(schedule, cap).  Reading it off requires three
+        # call sites in two files, so a config that says 64 while every block
+        # stores 32 reads as a bug.  Print it instead.
+        try:
+            _sched = [get_layer_rank(_l, self.num_layers, self.rank,
+                                     early_boost=_early_boost,
+                                     max_rank_early=_max_rank_early)
+                      for _l in range(self.num_layers)]
+            _eff = [min(_r, _pool_rproj_cap) if _pool_rproj_cap > 0 else _r
+                    for _r in _sched]
+            _lo, _hi = min(_eff), max(_eff)
+            _band = str(_lo) if _lo == _hi else f"{_lo}-{_hi}"
+            _why = ""
+            if _lo != self.rank or _hi != self.rank:
+                _why = (f"  <- NOT the configured rank={self.rank}"
+                        f" (schedule gives {min(_sched)}-{max(_sched)}"
+                        + (f", then the r_proj cap clamps to {_pool_rproj_cap}"
+                           if _pool_rproj_cap > 0 else "")
+                        + ")")
+            print(f"[DKV Memory] Effective per-layer rank actually stored: "
+                  f"{_band}{_why}")
+        except Exception:                                          # noqa: BLE001
+            pass                       # a reporting line must never break init
+
         self.native_pool = NativeBlockPool(
             max_blocks=dynamic_max_blocks,
             num_kv_heads=self.kv_heads,
