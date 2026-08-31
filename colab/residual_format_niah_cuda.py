@@ -172,10 +172,23 @@ def pool_fingerprint(w):
     except Exception:                                              # noqa: BLE001
         return {"error": "no native_pool"}
     q = getattr(p, "comp_res_k_q", None)
+    # Rotation ORIENTATION belongs in the fingerprint, not just the format.
+    # Whether the pool stores pre-RoPE keys (rotated at read, to each token's
+    # exact position) or post-RoPE keys (rotated at store, as MLX does) decides
+    # WHAT the quantizer sees, and it is a plausible explanation for MLX and CUDA
+    # disagreeing about int4. Reading it from the predicate every site consults
+    # means a run cannot report an orientation it did not use.
+    try:
+        from native_core.sparse_decode.triton_fused_decode import pool_stores_rotated_k
+        rot = bool(pool_stores_rotated_k())
+    except Exception:                                              # noqa: BLE001
+        rot = None
     return {
         "residual_quant": getattr(p, "residual_quant", None),
         "residual_quant_bits": getattr(p, "residual_quant_bits", None),
         "max_residual_tokens": getattr(p, "max_residual_tokens", None),
+        "pool_stores_rotated_k": rot,
+        "residual_exact_rope": os.environ.get("DKV_RESIDUAL_EXACT_ROPE", "1"),
         "comp_res_k_q_shape": (None if q is None else tuple(q.shape)),
         "comp_res_k_q_dtype": (None if q is None else str(q.dtype)),
         "comp_res_k_q_bytes": (0 if q is None else int(q.nbytes)),
