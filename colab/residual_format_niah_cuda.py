@@ -196,8 +196,24 @@ def pool_fingerprint(w):
     # COMPRESSED TOKEN COUNT. Not the context length: the dense window is not
     # compressed, so "ctx=32768" says nothing about how much data the pool
     # actually holds. MLX's int4 corruption has a sharp onset above ~8192
-    # COMPRESSED tokens, independent of block size, block count and top-K, so
-    # any cross-backend comparison has to be on this number rather than on ctx.
+    # COMPRESSED TOKENS PER LAYER (verified per-layer on that side: num_blocks is
+    # one entry per layer and the bisect read layer 0), independent of block size,
+    # block count and top-K -- so any cross-backend comparison has to be on this
+    # number rather than on ctx.
+    #
+    # MEASURED HERE, Qwen2.5-1.5B-Instruct, read off the live pool:
+    #     ctx=16384 (16,211 prompt tokens)  blocks_used 392  = 14 blocks/layer
+    #                                       over 28 layers   = 14,336 per layer
+    #     ctx=32768 (32,296 prompt tokens)  blocks_used 840  = 30 blocks/layer
+    #                                       over 28 layers   = 30,720 per layer
+    # i.e. 1.75x and 3.75x MLX's onset, both fluent with zero degeneracy.
+    #
+    # CORRECTS 5852924a, whose subject line says "3.6x". That figure was DERIVED
+    # by scaling the 16k measurement before this field existed, and scaling is
+    # wrong here because the POOL grows too (476 slots at 16k, 924 at 32k), so
+    # blocks-per-layer is not a clean doubling. The measured value is 3.75x. The
+    # commit is not amended because it is already a parent of a pushed merge;
+    # this is the authoritative number and the commit title is not.
     seq = getattr(p, "seq_lens", None)
     try:
         used = int((seq > 0).sum().item())

@@ -109,6 +109,18 @@ BEST_DECODE_DEFAULTS = {
     #   Width-keyed, values correct, sharp onset at a power-of-two token count =
     #   ADDRESSING BUG. Look for an offset/extent computed with the 8-bit stride.
     #
+    #   CAVEAT ON EVERY CUDA ROW CITED ABOVE, and it belongs next to them rather
+    #   than in a commit message: they were all measured on a box with no MSVC,
+    #   where Inductor fails at call time and _compile_guard drops
+    #   _reconstruct_and_score -- the residual-consuming reconstruction -- to
+    #   EAGER for the rest of the process. So CUDA's cleanliness is a clean
+    #   negative for EAGER EXECUTION and does NOT test a compiled specialisation
+    #   keyed on the packed width. That matters because a stale width
+    #   specialisation was a live hypothesis; it is retired by MLX's forced-eval
+    #   result, not by CUDA's silence. Neither negative settles it alone. Anyone
+    #   re-running the CUDA arms on a box WITH a working compiler is testing
+    #   something these numbers did not.
+    #
     # DEAD HYPOTHESES, killed by measurement — do not re-derive: residual
     # dilution via the RoPE frame split (CUDA remat confirmed ACTIVE), low-rank
     # base quality (CUDA bases floor at 2/96 with residuals off), rotation order
