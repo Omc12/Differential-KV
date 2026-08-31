@@ -92,13 +92,31 @@ os.environ.setdefault("DKV_DECODE_CACHE", "1")
 import serving.mlx_dkv_wrapper as W  # noqa: E402
 from serving.mlx_dkv_wrapper import MLXDKVWrapper, MLXKVBlockManager  # noqa: E402
 
-# The multi-needle probe set. Reproduced from benchmarks/run_multi_needle_mlx.py
-# so this probe stands alone; NEEDLES[0] is the one that flipped case.
+# The multi-needle probe set.
+#
+# 🔴 THE GREEK NAMES THIS FILE USED ARE CONTAMINATED — DO NOT REINTRODUCE THEM.
+# Measured on the Qwen2.5 tokenizer, 10/10 of OMEGA/SIGMA/THETA/KAPPA/LAMBDA/
+# DELTA/GAMMA/ZETA/EPSILON/IOTA split into PARTIAL WORDS:
+#     OMEGA -> [' O', 'ME', 'GA']      KAPPA -> [' K', 'AP', 'PA']
+#     THETA -> [' TH', 'ETA']          EPSILON -> [' EPS', 'ILON']
+# colab/multifact_eval_cuda.py:19-25 warns about exactly this shape: it is
+# "proven to make recall a coin flip on small models (measured greedy top-2
+# margin 0.1875 logits)", and it names OMEGA-7741-DELTA specifically. A code
+# needing three correct partial-word tokens compounds that margin; a whole-word
+# name does not. Every name below is a SINGLE token under Qwen2.5 (verified), so
+# the score measures retrieval rather than the tokenizer.
+#
+# Measured cost of the contamination when it was found (2026-09-01, 4-needle
+# NIAH at ctx=20000, MLX): swapping GREEK -> whole-word moved int8 93.8% -> 96.9%
+# and moved int4 not at all (0.0% both ways) — so it did not change any
+# conclusion here, but it inflates variance and it is free to avoid.
+#
+# Format is name-DDDD-DDDD; a trailing GREEK word would reintroduce the problem.
 NEEDLES = [
-    ("OMEGA-7741-DELTA", "The first secret passcode is OMEGA-7741-DELTA."),
-    ("SIGMA-9923-BETA", "The second secret passcode is SIGMA-9923-BETA."),
-    ("THETA-1105-ALPHA", "The third secret passcode is THETA-1105-ALPHA."),
-    ("KAPPA-4419-GAMMA", "The fourth secret passcode is KAPPA-4419-GAMMA."),
+    ("Falcon-7741-4185", "The first secret passcode is Falcon-7741-4185."),
+    ("Harbor-9923-2607", "The second secret passcode is Harbor-9923-2607."),
+    ("Cobra-1105-8342", "The third secret passcode is Cobra-1105-8342."),
+    ("Meteor-4419-5178", "The fourth secret passcode is Meteor-4419-5178."),
 ]
 
 QUESTION = "What are the four secret passcodes? List all of them clearly."

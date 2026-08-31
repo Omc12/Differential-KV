@@ -64,30 +64,62 @@ BEST_DECODE_DEFAULTS = {
     # everything else gets native_core/config.py's default, which is kept equal to
     # this one on purpose. Change the two together.
     #
-    # 4-needle NIAH, ctx=20000, 12 randomised trials (48 needles/arm),
+    # WHY int8 AND NOT int4 — AND THE TWO BACKENDS DISAGREE ABOUT WHY.
+    #
+    # MLX, 4-needle verbatim NIAH, ctx=20000, 12 randomised trials (48 needles/arm),
     # Qwen2.5-1.5B-4bit, block 1024, greedy, DKV_DECODE_CACHE=1:
-    #     int4 POST-RoPE   0/48 =  0.0%  95% CI [ 0.0,  7.4]   <- the old default
-    #     int4 PRE-RoPE   27/48 = 56.2%  95% CI [42.3, 69.3]
-    #     int8 PRE-RoPE   39/48 = 81.2%  95% CI [68.1, 89.8]
-    #     int8 POST-RoPE  41/48 = 85.4%  95% CI [72.8, 92.8]   <- THIS
-    #     fp16 POST-RoPE  42/48 = 87.5%  95% CI [75.3, 94.1]
-    # int8 is statistically indistinguishable from fp16 and saves 63.0 -> 33.5 MB
-    # of residual buffers (residuals are the LARGEST session category at 16k:
-    # 37.6%, vs dense window 33.4% and comp_U 14.1%). int4 is not recoverable on
-    # this tensor: pre-RoPE storage and KIVI per-channel keys each lift it from 0%
-    # to only ~56-60%, both well below fp16 with non-overlapping intervals.
+    #     int4   0/48 =  0.0%  95% CI [ 0.0,  7.4]   <- the old default
+    #     int8  41/48 = 85.4%  95% CI [72.8, 92.8]   <- THIS
+    #     fp16  42/48 = 87.5%  95% CI [75.3, 94.1]
+    # int8 is statistically indistinguishable from fp16 and halves the residual
+    # buffers (63.0 -> 33.5 MB at 16k; residuals are the LARGEST session category
+    # there at 37.6%, vs dense window 33.4% and comp_U 14.1%).
     #
-    # WHY THE ROTATED POOL STAYS ON (DKV_ROTATED_POOL unset = 1): the unrotated
-    # pool is what rescues int4 (0% -> 56%), but at int8 it is not needed and
-    # measures slightly worse (81.2% vs 85.4%), and DKV_ROTATED_POOL=0 additionally
-    # forces DKV_DECODE_CACHE=1 on MLX because read-time rotation needs materialised
-    # keys (mlx_dkv_wrapper.py:1850). Precision removes the need for the workaround.
+    # CUDA, measured independently on its own harness (12 trials x 16k/32k, 96
+    # paired needles, Qwen2.5-1.5B-Instruct fp16 weights): int8 returns the
+    # IDENTICAL per-needle result to fp16 on all 96, and int4 loses only 6/96
+    # (sign test p=0.031) while keeping the correct entity name in 72-77 of 96
+    # and never producing degenerate output. So int8 is right on both backends,
+    # but for different reasons: on CUDA int4 is a fidelity trade with a small
+    # measurable price; ON MLX int4 IS A BUG.
     #
-    # DO NOT re-validate this with a SINGLE-NEEDLE sweep. That metric is saturated
-    # and cannot discriminate: on 3 ctx x 3 depths it scored int4 8/9 and fp16 7/9,
-    # i.e. it ranks the catastrophic format ABOVE the good one. CUDA's "needle
-    # sweep 9/9" was measured that way and is not evidence about residual format.
-    # Use the 4-needle verbatim-code test.
+    # THE MLX FAILURE IS CORRUPTION, NOT LOST RECALL. Its int4 output collapses
+    # into ':\n\n:\n\n:' and token soup with zero entity names in 8/8 trials,
+    # where CUDA's int4 returns near misses (Cobra-4367-5976 -> Cobra-4363-5976).
+    # CUDA's residuals-OFF control settles the interpretation: 2/96 exact, name
+    # gone 93/96, and still FLUENT — losing 100% of the residual signal does not
+    # perturb generation, so a merely degraded signal cannot be what stops MLX
+    # emitting language. Localisation (all measured, whole-word needles):
+    #   * trigger is the PACKED WIDTH 4, not the int4 branch — format name "int8"
+    #     with DKV_RESIDUAL_QUANT_BITS=4 reproduces the soup BYTE-IDENTICALLY.
+    #     The same crossing on CUDA is also byte-identical to its int4 and stays
+    #     fluent, so behaviour follows the width on BOTH backends; only MLX's
+    #     width-4 corrupts.
+    #   * onset > ~8192 compressed tokens PER LAYER, independent of block_size,
+    #     block count and K (block 512 nb=15 ok/19 fail; block 1024 nb=7 ok/8
+    #     fail; block 2048 nb=3 ok/5 degraded; DKV_TOPK_BLOCKS 8->16 does not
+    #     move it). CUDA is clean at 14,336 and 30,720 compressed tokens PER
+    #     LAYER (1.75x and 3.75x this onset, both read off a live pool), with a
+    #     deficit FLAT in context, so this is not a shared design consequence.
+    #   * NOT residual volume (res=8 corrupts too), NOT the compile boundary
+    #     (forcing mx.eval on fetched residuals changes nothing), NOT weight
+    #     precision (CUDA NF4 does not collapse int4), NOT needle construction.
+    #   * values are provably fine in isolation: live _store_residuals ->
+    #     _fetch_res_k matches synthetic mx.quantize at 1.00x.
+    #   Width-keyed, values correct, sharp onset at a power-of-two token count =
+    #   ADDRESSING BUG. Look for an offset/extent computed with the 8-bit stride.
+    #
+    # DEAD HYPOTHESES, killed by measurement — do not re-derive: residual
+    # dilution via the RoPE frame split (CUDA remat confirmed ACTIVE), low-rank
+    # base quality (CUDA bases floor at 2/96 with residuals off), rotation order
+    # (real but small: +7/+8 needles to fp16/int8, +1 to int4), weight precision,
+    # needle construction, lazy-dequantise at the compile boundary.
+    #
+    # DO NOT re-validate any of this with a SINGLE-NEEDLE sweep: that metric is
+    # saturated and scored int4 8/9 against fp16 7/9 here, ranking the broken
+    # format ABOVE the good one. And do not use partial-word needle names —
+    # OMEGA splits ' O','ME','GA' and makes recall a coin flip (see
+    # colab/multifact_eval_cuda.py:19-25). Use whole-word names.
     "DKV_RESIDUAL_QUANT": "int8",
 }
 
