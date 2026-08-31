@@ -347,11 +347,23 @@ def _apply_fast_mode() -> None:
     cannot be resolved, which drops FAST into the +915 MB arm with no warning.
     See docs/audits_and_reports/PREFILL_ARMS_REMEASURED_2026-08-31.md
 
-    ⚠ The last two are FIDELITY-AFFECTING (rank cap + 0 oversamples).  The
-    content-aware rank boost existed to give DIGIT/number blocks extra rank, so
-    validate needle recall before trusting FAST on number-heavy retrieval:
-        DKV_MODEL=<model> python -m pytest ACTIVE_RUNTIME/tests/test_niah.py -v
-    run WITH and WITHOUT DKV_FAST and confirm the 6-digit needle still returns.
+    NOT "the last two are unvalidated" any more -- there was only ever ONE.
+    DKV_RANK_BOOST=off is ALREADY THE SHIPPED DEFAULT (lowrank.py, and
+    kv_runtime_manager.py), so FAST setting it changes nothing.  That leaves
+    DKV_RSVD_MAX_RPROJ=32, and with the boost off it does NOT truncate stored
+    rank (block ranks are already 32); it only narrows the randomized-SVD
+    projection 37 -> 32.
+
+    That knob was decided on 2026-08-31 with colab/rproj_cap_decision.py:
+    80 PAIRED prompts, a fresh 6-digit needle each, Qwen2.5-1.5B at 16k/32k and
+    Qwen2.5-7B-NF4 at 16k -- ZERO discordant pairs, bounding its effect at
+    <=3.7% of prompts (95%).  The 7B arm sits at 0.688 recall, not at ceiling,
+    and both arms failed on exactly the same prompts.  It buys -13.4% forward
+    and -73 MB peak at 32k.  See RPROJ_CAP_DECISION_2026-08-31.md.
+
+    The old advice here was to validate with test_niah.py.  DO NOT rely on that
+    for this question: it is n=3 against ONE fixed needle (847291), which
+    reports p=1.00 even for a 33% observed drop.  Use the harness above.
     """
     if os.environ.get("DKV_FAST", "0") != "1":
         return
