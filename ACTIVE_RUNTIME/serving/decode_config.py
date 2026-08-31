@@ -53,9 +53,16 @@ BEST_DECODE_DEFAULTS = {
     # ── RESIDUAL FORMAT: int8. Measured, not inherited. ───────────────────────
     # THIS LINE, not the wrapper's constructor default, is what reaches serving:
     # apply_best_decode_defaults() writes it into os.environ (:172) and both the
-    # CLI (cli.py:849, NOT device-gated) and the gateway (:938) call it. It is also
-    # what NativeBlockPool latches on CUDA (native_block_pool.py:206). Changing only
-    # the constructor default ships inert.
+    # CLI (cli.py:849, NOT device-gated) and the gateway (:938) call it. Changing
+    # only the constructor default ships inert.
+    #
+    # ON CUDA it arrives one hop further along than it used to: since e38f3cd1 the
+    # pool no longer reads the environment itself (that read had a "none" default
+    # and ignored the config object). DKVConfig resolves DKV_RESIDUAL_QUANT and
+    # KVRuntimeManager forwards it into NativeBlockPool.__init__. So this line
+    # still reaches CUDA, but only for callers that run apply_best_decode_defaults;
+    # everything else gets native_core/config.py's default, which is kept equal to
+    # this one on purpose. Change the two together.
     #
     # 4-needle NIAH, ctx=20000, 12 randomised trials (48 needles/arm),
     # Qwen2.5-1.5B-4bit, block 1024, greedy, DKV_DECODE_CACHE=1:

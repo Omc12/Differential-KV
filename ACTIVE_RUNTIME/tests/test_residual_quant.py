@@ -246,3 +246,84 @@ class TestNativeBlockPoolQuantization:
         g_k_after = pool.get_residual_k(gather_indices)
         assert (g_k - g_k_after).abs().max().item() == 0.0
 
+
+class TestResidualFormatIsNotAnAlias:
+    """int8 must not be a silent alias for int4, and the format must not be
+    decided by the environment alone.
+
+    Both defects were real and neither was visible from outside the allocator.
+    Until e38f3cd1 the bit width came from DKV_RESIDUAL_QUANT_BITS (default 4)
+    regardless of the format NAME, so "int8" allocated a 4-bit packed_width and
+    produced byte-identical buffers with identical error -- and DKVConfig's
+    residual_quant was dead config the pool never saw, so a caller that passed a
+    config object got whatever the environment said instead.
+    """
+
+    def _pool(self, **kw):
+        from runtime.native_block_pool import NativeBlockPool
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        base = dict(max_blocks=64, num_kv_heads=4, head_dim=128, rank=16,
+                    max_seq_len=64, device=dev, dtype=torch.float16,
+                    initial_blocks=32, max_residual_tokens=32)
+        base.update(kw)
+        return NativeBlockPool(**base)
+
+    def test_int8_allocates_twice_int4(self, monkeypatch):
+        monkeypatch.setenv("DKV_RESIDUAL_QUANT", "int4")
+        monkeypatch.delenv("DKV_RESIDUAL_QUANT_BITS", raising=False)
+        p4 = self._pool()
+        monkeypatch.setenv("DKV_RESIDUAL_QUANT", "int8")
+        p8 = self._pool()
+
+        assert (p4.residual_quant_bits, p8.residual_quant_bits) == (4, 8)
+        # packed_width, not just a flag: this is the number that was wrong.
+        assert p4.comp_res_k_q.shape[-1] == 16
+        assert p8.comp_res_k_q.shape[-1] == 32
+        assert p8.comp_res_k_q.nbytes == 2 * p4.comp_res_k_q.nbytes
+        assert p8.comp_res_v_q.nbytes == 2 * p4.comp_res_v_q.nbytes
+
+    def test_explicit_bits_still_override_the_name(self, monkeypatch):
+        # Sweeps that vary width without renaming the format must keep working.
+        monkeypatch.setenv("DKV_RESIDUAL_QUANT", "int8")
+        monkeypatch.setenv("DKV_RESIDUAL_QUANT_BITS", "4")
+        p = self._pool()
+        assert p.residual_quant == "int8" and p.residual_quant_bits == 4
+        assert p.comp_res_k_q.shape[-1] == 16
+
+    def test_constructor_beats_environment(self, monkeypatch):
+        # KVRuntimeManager forwards DKVConfig's value here; if the env won, the
+        # config object would be dead again.
+        monkeypatch.setenv("DKV_RESIDUAL_QUANT", "int4")
+        monkeypatch.delenv("DKV_RESIDUAL_QUANT_BITS", raising=False)
+        p = self._pool(residual_quant="int8")
+        assert p.residual_quant == "int8" and p.residual_quant_bits == 8
+        assert p.comp_res_k_q.shape[-1] == 32
+
+    def test_unsupported_bit_width_falls_back_to_the_name(self, monkeypatch):
+        # residual_quant.py only has shift tables for 4 and 8; a bogus width has
+        # to be caught at ALLOCATION, not at the first write.
+        monkeypatch.setenv("DKV_RESIDUAL_QUANT", "int8")
+        monkeypatch.setenv("DKV_RESIDUAL_QUANT_BITS", "5")
+        p = self._pool()
+        assert p.residual_quant_bits == 8
+
+    def test_config_default_matches_the_serving_default(self, monkeypatch):
+        """One dial, two live defaults -- they must agree.
+
+        DKVConfig's default is what every direct-construction path allocates
+        (serving/hf_dkv_wrapper.py, and so colab/run_nat_eval.py, which declines
+        apply_best_decode_defaults on purpose). BEST_DECODE_DEFAULTS is what the
+        CLI and gateway get. They drifted apart once already, which is how int4
+        shipped to one set of callers and not the other.
+        """
+        # monkeypatch, not os.environ.pop: this asserts on the DEFAULT, so it
+        # has to clear the env, and clearing it for real would leak into every
+        # test that runs after this one.
+        for k in ("DKV_RESIDUAL_QUANT", "DKV_RESIDUAL_QUANT_BITS"):
+            monkeypatch.delenv(k, raising=False)
+        from native_core.config import DKVConfig
+        from serving.decode_config import BEST_DECODE_DEFAULTS
+        cfg = DKVConfig({})
+        assert cfg.residual_quant == BEST_DECODE_DEFAULTS["DKV_RESIDUAL_QUANT"]
+        # And the width follows the name without anyone setting BITS.
+        assert cfg.residual_quant_bits == (8 if "8" in cfg.residual_quant else 4)

@@ -621,8 +621,67 @@ class DKVConfig:
         # Resolved HERE and nowhere else: KVRuntimeManager forwards all three to
         # NativeBlockPool, which used to read the environment itself with a
         # "none" default and ignore this object entirely.
+        #
+        # int4 -> int8 (2026-08-31). THIS DEFAULT IS LOAD-BEARING AND ONLY BECAME
+        # SO IN e38f3cd1. Before that commit the pool ignored this object and fell
+        # back to DKV_RESIDUAL_QUANT with a "none" default, so a caller that did
+        # not go through serving.decode_config.apply_best_decode_defaults() got
+        # fp16 residuals no matter what this line said. Now the value is forwarded
+        # into the constructor, so this line -- not the env -- is what every
+        # direct-construction path allocates: serving/hf_dkv_wrapper.py, and
+        # therefore colab/run_nat_eval.py, which declines apply_best_decode_defaults
+        # on purpose (:243, for reasons about SPARSE_BIAS and the fused Triton
+        # gate, nothing to do with residual format). Leaving "int4" here would have
+        # silently moved every one of those paths off fp16 and onto the format
+        # that measures WORSE than fp16 on both backends (see below), without a
+        # line of the diff mentioning them.
+        #
+        # WHY int8. MEASURED HERE, on CUDA, not inherited from the MLX result.
+        # colab/residual_format_niah_cuda.py, Qwen2.5-1.5B-Instruct, 4 verbatim
+        # codes at randomised codes AND depths, 12 trials x 16k and 32k = 48
+        # needles per cell, greedy, exact-string scored. Arms share prompts, so
+        # the informative statistic is the DISCORDANT needles, not the rates:
+        #
+        #     arm      16k         32k         discordant vs fp16 (96 needles)
+        #     fp16    36/48 75.0%  42/48 87.5%   --
+        #     fp16_aa 36/48 75.0%  42/48 87.5%    0   (A/A floor, ties exactly)
+        #     int8    36/48 75.0%  42/48 87.5%    0   sign test p = 1.0
+        #     int4    32/48 66.7%  40/48 83.3%    6, all 6 losses  p = 0.031
+        #
+        # int8 did not merely match fp16's RATE -- it returned the identical
+        # per-needle result on all 96 paired needles. That is the strongest form
+        # this instrument can express, and it is why int8 is the default: it is
+        # free on quality and halves the residual buffer against fp16.
+        #
+        # BE HONEST ABOUT WHAT CUDA DID *NOT* REPRODUCE. On MLX the same shape of
+        # test at ctx=20000 read int4 0/48, int8 41/48, fp16 42/48 -- int4 lost
+        # ALL long-context recall. CUDA does not show that. Here int4 is
+        # consistently but mildly worse: 6 lost needles out of 96 and not one
+        # gained, which is real (a 6-0 split is p=0.031) and small. So the CUDA
+        # case for int8 rests on "identical to fp16 at half the bytes", NOT on
+        # rescuing a catastrophe. Why the two backends diverge this much on the
+        # same nominal design is OPEN and worth a probe before either result is
+        # generalised; the exact-copy semantics that should drive it are on by
+        # default on both (compression/lowrank.py returns True with no env set).
+        #
+        # The mechanism under test: residuals are the EXACT-COPY tokens --
+        # DKV_RESIDUAL_EXACT_KEYS / DKV_RESIDUAL_EXCLUDE_SVD drops their lossy SVD
+        # twin precisely because the residual is meant to be faithful -- so
+        # quantizing them coarsely leaves those tokens with no accurate
+        # representation anywhere in the store. On MLX int4 was not recoverable on
+        # this tensor: pre-RoPE storage and KIVI per-channel keys each lift it only
+        # to ~56-60%, still disjoint from fp16.
+        #
+        # This now agrees with serving/decode_config.py's BEST_DECODE_DEFAULTS
+        # ["DKV_RESIDUAL_QUANT"], which is the same value reached the other way
+        # (env setdefault) for cli.py and the gateway. Two live defaults for one
+        # dial is how this drifted the first time; they are meant to be equal.
+        #
+        # DO NOT re-validate a change here with the single-needle sweep. That
+        # metric is saturated and ranked int4 (8/9) ABOVE fp16 (7/9) on 3 ctx x 3
+        # depths. Use multi-needle verbatim codes with randomised codes and depths.
         self.residual_quant = self._get_str(
-            "residual_quant", "DKV_RESIDUAL_QUANT", "int4", config_dict
+            "residual_quant", "DKV_RESIDUAL_QUANT", "int8", config_dict
         ).strip().lower()
         self.residual_quant_group_size = self._get_int(
             "residual_quant_group_size", "DKV_RESIDUAL_QUANT_GROUP_SIZE", 64, config_dict

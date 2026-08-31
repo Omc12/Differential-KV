@@ -230,9 +230,25 @@ To eliminate the memory cost of exact residual storage, Differential-KV implemen
 #### Tunable Quantization Dials
 | Environment Variable | Default | Description |
 |---|:---:|---|
-| `DKV_RESIDUAL_QUANT` | `int4` | Quantization format: `int4` (default, $3.56x$ compression), `int8` ($1.9x$), or `none` (FP16 fallback). |
+| `DKV_RESIDUAL_QUANT` | `int8` | Quantization format: `int8` (default, $1.9x$ compression), `int4` ($3.56x$), or `none` (FP16 fallback). |
 | `DKV_RESIDUAL_QUANT_GROUP_SIZE` | `64` | Sub-vector quantization group size. |
-| `DKV_RESIDUAL_QUANT_BITS` | `4` | Bit-width per quantized element (4 or 8). |
+| `DKV_RESIDUAL_QUANT_BITS` | follows the format | 4 for `int4`, 8 for `int8`. Set it only to vary width without renaming the format. |
+
+**The default was `int4` until 2026-08-31 and the change is measured, not stylistic.**
+Residuals are the *exact-copy* tokens — the design drops a residual token's lossy
+SVD twin precisely because the residual is meant to be faithful — so quantizing
+them coarsely can leave those tokens with no accurate representation anywhere in
+the store. On MLX that was catastrophic (4-needle verbatim NIAH at 20k, 48
+needles/arm: int4 **0/48**, int8 41/48, fp16 42/48). On CUDA
+(`colab/residual_format_niah_cuda.py`, 12 trials x 16k/32k, paired prompts) int4
+is only mildly worse — 6 lost needles out of 96 with none gained, sign test
+p=0.031 — while **int8 returned the identical per-needle result to fp16 on all 96
+paired needles** at half fp16's residual bytes. `DKV_RESIDUAL_QUANT=int4` remains
+available and is the right dial to reach for first if VRAM regresses at 32k+.
+
+> Do **not** re-validate a change to this dial with a single-needle sweep. That
+> metric is saturated and scored int4 8/9 against fp16 7/9 — it ranks the worse
+> format above the better one. Use multi-needle verbatim codes.
 
 ---
 
