@@ -104,3 +104,9 @@ benchmarks/results_*/
 benchmarks/*.sh
 benchmarks/bench_rope_tradeoff.py
 docs/turboquant_dkv_hybrid_roadmap.md
+
+# Paper results are evidence, not scratch: a table nobody can trace back to the
+# rows that produced it is not reproducible. The blanket *.jsonl above would
+# otherwise silently drop every benchmark result under paper/results/.
+!paper/results/**/*.jsonl
+!paper/results/**/*.meta.json
