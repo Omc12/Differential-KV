@@ -528,6 +528,7 @@ from native_core.sparse_decode.remat_cache import (  # noqa: E402
 )
 
 
+
 class PyTorchDKVHFWrapper:
     """
     Wraps a HuggingFace model to use Differential KV cache.
@@ -779,6 +780,15 @@ class PyTorchDKVHFWrapper:
 
         # Clean Code Integration: AttentionInterface path (Mode A default)
         attn_impl_kwarg = {}
+        # DKV_ATTN_IMPL: force the NATIVE (unpatched) layers' attention backend,
+        # e.g. "eager" to take transformers' SDPA path out of the picture when
+        # diagnosing a backend-specific failure. Not needed by any model here --
+        # note "eager" materialises the full attention matrix and OOMs
+        # gemma-4-12B-it at ctx 4096 on a 12 GB card, so it is a debugging tool
+        # rather than a workaround.
+        _forced_impl = os.environ.get("DKV_ATTN_IMPL")
+        if _forced_impl:
+            attn_impl_kwarg["attn_implementation"] = _forced_impl
         # DEFAULT "0" -- the MONKEYPATCH path (Path A).
         #
         # Path A runs the FUSED decode kernel (Triton on CUDA, the Metal shader
@@ -1791,6 +1801,45 @@ class PyTorchDKVHFWrapper:
           #   2. Preserves exact causal prefill semantics like the MLX path.
           #   3. Avoids repeated partial-block SVD launches.
         PREFILL_CHUNK = getattr(self.manager, "config", None) and self.manager.config.prefill_chunk_size or 512
+        # A SLIDING-WINDOW MODEL MUST BE PREFILLED IN ONE SHOT.
+        #
+        # DKV patches only a hybrid's GLOBAL layers; its sliding layers keep
+        # their native forward. Chunking them through the explicit cache below
+        # does not reproduce a single forward, they attend the wrong span, and
+        # every later layer inherits it. Measured on google/gemma-4-e2b-it at
+        # ctx 8192 against a plain-HF control, with DKV NOT ENGAGING AT ALL
+        # (0 compressed blocks on both sides, so none of this is compression):
+        #
+        #     chunked (1028 x 8)   KL 4.99   top5 overlap 2.0/5
+        #     one 8007-tok shot    KL 0.47   top5 overlap 5.0/5
+        #
+        # Threading an explicit `cache_position` (done below) does NOT fix the
+        # chunked case -- measured, still KL 4.99 -- and neither does the cache
+        # type, which transformers already builds correctly
+        # (DynamicSlidingWindowLayer for the sliding layers, from either the
+        # composite or the text config). One shot is what makes them correct.
+        #
+        # COST, and it is real: this gives up the O(N^2) attention VRAM saving
+        # chunking exists for. gemma-4-12B-it then OOMs at ctx 8192 on a 12 GB
+        # card (and at 4096 under attn_implementation=eager). That is a hardware
+        # limit, not a correctness bug -- but the alternative is a silently wrong
+        # prefill, so this must not fall back on its own. Set
+        # DKV_PREFILL_CHUNK_SIZE to opt back into chunking, knowing the above.
+        if os.environ.get("DKV_PREFILL_CHUNK_SIZE") is None:
+            try:
+                from runtime.dkv_attention import is_sliding_attention_layer
+                if any(is_sliding_attention_layer(_l)
+                       for _l in resolve_decoder_layers(self.model)):
+                    if not getattr(self, "_dkv_warned_contiguous", False):
+                        print("[DKV] Sliding-window layers detected — prefilling "
+                              "contiguously; chunked prefill would truncate their "
+                              "context (measured KL 4.99 vs 0.47 on gemma-4-e2b-it). "
+                              "Costs the chunked VRAM saving. Set "
+                              "DKV_PREFILL_CHUNK_SIZE to override.", flush=True)
+                        self._dkv_warned_contiguous = True
+                    PREFILL_CHUNK = 1 << 30
+            except Exception:
+                pass
         # Keep CUDA chunk boundaries aligned with the streaming block layout.
         # Otherwise, e.g. 1024 tokens with 256 active tokens per block creates
         # a 252-token partial block on every chunk.  MLX keeps a single dense
@@ -1884,10 +1933,25 @@ class PyTorchDKVHFWrapper:
                 self.manager.finalize_compressed_blocks()
 
             with torch.no_grad():
+                # Pass cache_position explicitly rather than letting
+                # transformers infer it from the cache length. It is what mask
+                # construction keys on, and being explicit is the documented
+                # contract once you drive the model chunk by chunk.
+                #
+                # HONESTY NOTE, since it would be easy to assume otherwise: this
+                # is hygiene, NOT the fix for the sliding-layer problem described
+                # at PREFILL_CHUNK above. It was tried as that fix and measured
+                # not to be one -- google/gemma-4-e2b-it at ctx 8192 stayed at
+                # KL 4.99 with cache_position threaded here. Prefilling
+                # contiguously is what actually corrects those layers.
+                _cache_pos = torch.arange(
+                    abs_start, abs_start + clen,
+                    device=chunk_tensor.device, dtype=torch.long)
                 outputs = self.model(
                     input_ids=chunk_tensor,
                     position_ids=pos_tensor,
                     past_key_values=prefill_cache,
+                    cache_position=_cache_pos,
                     use_cache=True,
                 )
 

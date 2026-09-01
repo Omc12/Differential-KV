@@ -2008,6 +2008,41 @@ def _get_prefill_chunk_size(kv_manager, session_id: str, device) -> int:
     MLX has one contiguous dense tail, so its internal and external chunk
     boundaries never disagree.  Keep the same invariant here.
     """
+    # SLIDING-WINDOW MODELS CANNOT BE PREFILLED IN CHUNKS BY THIS PATH.
+    #
+    # DKV only patches the global layers of a hybrid; the sliding layers keep
+    # their native forward and their own bounded cache. Chunking the prefill
+    # hands those layers one chunk at a time without the cross-chunk history
+    # their window needs, and they silently attend to a truncated context --
+    # measured on google/gemma-4-e2b-it at ctx 8192 with DKV NOT ENGAGING AT ALL
+    # (0 compressed blocks), against a plain-HF control:
+    #
+    #     chunked (512)      KL 4.99   top5 overlap 2.0/5
+    #     contiguous         KL 0.47   top5 overlap 5.0/5
+    #
+    # Same weights, same prompt, no compression in either -- the entire gap is
+    # the chunk boundary. It is also why the layer-output probe died inside
+    # `self.keys.index_copy_(2, cache_position, key_states)` with a device-side
+    # assert: a bounded sliding cache indexed at a position past its window.
+    #
+    # An explicit DKV_PREFILL_CHUNK_SIZE still wins, so the old behaviour is one
+    # env var away, but it must be opted into rather than silently defaulted to.
+    if os.environ.get("DKV_PREFILL_CHUNK_SIZE") is None:
+        _mdl = getattr(kv_manager, "model", None)
+        if _mdl is not None:
+            _flag = getattr(kv_manager, "_dkv_has_sliding_layers", None)
+            if _flag is None:
+                try:
+                    _flag = any(is_sliding_attention_layer(_l)
+                                for _l in resolve_decoder_layers(_mdl))
+                except Exception:
+                    _flag = False
+                kv_manager._dkv_has_sliding_layers = _flag
+                # The wrapper prints the user-facing notice for this; this is the
+                # attention hook's own inner chunk loop and must agree with it.
+            if _flag:
+                return 1 << 30
+
     configured = os.environ.get("DKV_PREFILL_CHUNK_SIZE")
     if configured is not None:
         try:
@@ -2769,6 +2804,32 @@ def apply_dkv_attention_patch(model, kv_manager):
                     use_cache = True
 
                 bsz, q_len, _ = hidden_states.size()
+                # THE MODEL'S OWN ATTENTION SCALE, not 1/sqrt(head_dim).
+                #
+                # That expression is a Llama-ism, and this file asserted it in
+                # 13 places while reading `self.scaling` in none. Measured
+                # 2026-09-01 on the actual text-attention modules:
+                #
+                #     Qwen3.5 (all)     scaling 0.0625     == 1/sqrt(256)  ok
+                #     gemma-4-e2b/12B   scaling 1.0        vs 0.044194     22.6x
+                #     granite-4.2-8b    scaling 0.0078125  vs 0.088388     11.3x
+                #                       (its config's `attention_multiplier`)
+                #
+                # Gemma 4 does not scale at attention time at all; Granite uses
+                # its own multiplier. Both therefore ran with a badly wrong
+                # softmax temperature, and NEITHER FAILED A NEEDLE TEST --
+                # gemma-4-e2b recalls the needle at 6.6k with the scale off by
+                # 22.6x. colab/logit_fidelity.py against a true dense control is
+                # what exposed it: KL(dense||DKV) 8.04 on gemma-4-e2b and 10.36
+                # on granite-4.2-8b, the latter agreeing with dense on ZERO
+                # top-1 tokens, against ~0.0 for Qwen3.5-2B whose scale matches.
+                #
+                # dkv_backend.py's AttentionInterface path was never affected --
+                # transformers hands it `module.scaling` and it threads it
+                # through. Only this legacy monkey-patch path hardcoded it.
+                attn_scale = getattr(self, "scaling", None)
+                if attn_scale is None:
+                    attn_scale = 1.0 / math.sqrt(head_dim)
 
                 # Zero-overhead bypass check
                 is_decode = (use_cache and q_len == 1)
@@ -2971,9 +3032,23 @@ def apply_dkv_attention_patch(model, kv_manager):
                     # "(*bias): last dimension must be contiguous" during graph
                     # capture otherwise. A DynamicCache mask happens to be
                     # contiguous already, so this only bites on the static path.
-                    if (_GRAPH_SAFE_DECODE and attention_mask is not None
+                    if (attention_mask is not None
                             and not attention_mask.is_contiguous()):
                         attention_mask = attention_mask.contiguous()
+                    # A DEGENERATE 1-WIDE MASK IS NOT USABLE, and .is_contiguous()
+                    # says nothing about it -- a [1,1,1,1] bool mask reports
+                    # contiguous, then broadcasts to the key length with last-dim
+                    # stride 0, which is what SDPA actually rejects:
+                    #     RuntimeError: (*bias): last dimension must be contiguous
+                    # Measured on gemma-4-12B-it: at decode this site was handed
+                    # mask [1,1,1,1] for q [1,16,1,512], i.e. one mask element for
+                    # a whole cached history. Every layer reaching here is a
+                    # GLOBAL layer (DKV never patches sliding ones), and a global
+                    # layer's single decode query attends the entire cache, so the
+                    # correct mask is simply "no mask" rather than a 1-wide one.
+                    if (attention_mask is not None and q_len == 1
+                            and attention_mask.shape[-1] == 1):
+                        attention_mask = None
                     return self._original_forward(
                         hidden_states=hidden_states,
                         attention_mask=attention_mask,
@@ -3000,7 +3075,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                     k_rep = repeat_kv(k, num_key_value_groups)
                     v_rep = repeat_kv(v, num_key_value_groups)
 
-                    scale = 1.0 / math.sqrt(head_dim)
+                    scale = attn_scale
                     scores = torch.matmul(q * scale, k_rep.transpose(-2, -1))
 
                     # Causal mask — use q.dtype to stay in fp16 on MPS
@@ -3122,7 +3197,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                         prefill_cos_cache.pop(k, None)
                         prefill_sin_cache.pop(k, None)
 
-                    inv_scale_val = 1.0 / math.sqrt(head_dim)
+                    inv_scale_val = attn_scale
 
                     # ── O5b: Single JIT dispatch covering all inner math ─────────────
                     # result[0] = out_hist  [1, H, q_len, D]
@@ -3343,7 +3418,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                     k_rep = repeat_kv(key_states, num_key_value_groups)
                     v_rep = repeat_kv(value_states, num_key_value_groups)
                     attn_out = F.scaled_dot_product_attention(
-                        query_states, k_rep, v_rep, is_causal=(q_len > 1)
+                        query_states, k_rep, v_rep, is_causal=(q_len > 1),
+                        scale=attn_scale,
                     )
                     attn_out = attn_out.transpose(1, 2).contiguous().reshape(bsz, q_len, attn_out_dim)
                     if attn_gate is not None:
@@ -3736,7 +3812,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         #     13.4K (degraded outputs, lower tps); kept for
                                         #     multi-turn experiments.
                                         q_for_routing = query_states[b_idx, :, 0, :]  # [H, D] ROTATED query (matches MLX _block_relevance_residual)
-                                        _scale = 1.0 / math.sqrt(head_dim)
+                                        _scale = attn_scale
                                         _router_mode = os.environ.get("DKV_ROUTER", "residual").lower()
                                         if _router_mode == "srl":
                                             selected_slots = route_query_fixed_k(
@@ -3949,7 +4025,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 try:
                                     from native_core.srl.query_router import route_blocks_relevance
                                     _q_prune = unrot_query_states[b_idx, :, 0, :]   # [H, D]
-                                    _sc = 1.0 / math.sqrt(head_dim)
+                                    _sc = attn_scale
                                     _sel_slots = route_blocks_relevance(
                                         _q_prune, pool, block_indices, anchor_indices, _sc
                                     )
@@ -4572,12 +4648,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 out_dense = F.scaled_dot_product_attention(
                                     query_states[b_idx:b_idx+1], k_rep, v_rep,
                                     is_causal=False,
+                                    scale=attn_scale,
                                 )  # [1, H_q, 1, D]
                                 out_dense_hd = out_dense[0, :, 0, :].float()
                                 
                                 _q = query_states[b_idx, :, 0, :]
                                 _kd = k_rep[0]
-                                _scale = (D ** -0.5)
+                                _scale = attn_scale
                                 scores_dense = torch.matmul(_kd, _q.unsqueeze(-1)).squeeze(-1) * _scale  # [H_q, T]
                                 lse_dense = torch.logsumexp(scores_dense.float(), dim=-1)  # [H_q]
                             else:
@@ -4641,7 +4718,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                             k_rep_fact = repeat_kv(fact_k_rot, num_key_value_groups)
                             v_rep_fact = repeat_kv(fact_v, num_key_value_groups)
                             
-                            _scale = D ** -0.5
+                            _scale = attn_scale
                             out_facts = F.scaled_dot_product_attention(
                                 query_states[b_idx:b_idx+1], k_rep_fact, v_rep_fact,
                                 is_causal=False,
@@ -4704,7 +4781,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                         _is_mps_decode = (query_states.device.type == "mps" and pool is not None and os.environ.get("DKV_MPS_APPROXIMATE_ATTN", "0") == "1")
                         if _is_mps_decode:
                             if _DKV_CORE_AVAILABLE and hasattr(_dkv_core, "fused_decode_attention_combined") and _compiled_kernel_ok(pool):
-                                _scale = 1.0 / math.sqrt(head_dim)
+                                _scale = attn_scale
                                 _q_val = query_states[b_idx, :, 0, :]
                                 _dk = dense_k_assembled if dense_k_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                 _dv = dense_v_assembled if dense_v_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
@@ -4948,6 +5025,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     attn_out_b = F.scaled_dot_product_attention(
                                         query_states[b_idx:b_idx+1], k_rep, v_rep,
                                         is_causal=False,
+                                        scale=attn_scale,
                                     )
                                 elif has_comp and not has_dense:
                                     # Compressed history only.
@@ -4977,7 +5055,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _fact_val_V = pool.fact_anchors_V if pool.fact_anchors_V is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
 
                                     if _DKV_HAS_METAL_ATTN and pool is not None and _compiled_kernel_ok(pool):
-                                        _scale = 1.0 / math.sqrt(head_dim)
+                                        _scale = attn_scale
                                         # Binding grew 4 trailing dense-window args (dense_K/V +
                                         # cos/sin_dense); this caller merges dense separately, so
                                         # pass empties (numel==0 → impl skips the dense loop).
@@ -5017,7 +5095,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             _anchor_rotary_dim,
                                         )
                                     elif _DKV_HAS_DECODE_ATTN and pool is not None and not has_residual and _compiled_kernel_ok(pool):
-                                        _scale = 1.0 / math.sqrt(head_dim)
+                                        _scale = attn_scale
                                         out_sparse = _decode_attention_aten(
                                             _Q_sq.contiguous(),
                                             pool.U.contiguous(),
@@ -5065,13 +5143,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     out_dense = F.scaled_dot_product_attention(
                                         query_states[b_idx:b_idx+1], k_rep, v_rep,
                                         is_causal=False,
+                                        scale=attn_scale,
                                     )  # [1, H_q, 1, D]
                                     out_dense_hd = out_dense[0, :, 0, :].float()
 
                                     # 2. LSE for dense scores (in fp16 to avoid large fp32 promotions)
                                     _q = query_states[b_idx, :, 0, :]
                                     _kd = k_rep[0]
-                                    _scale = (D ** -0.5)
+                                    _scale = attn_scale
                                     scores_dense = torch.matmul(_kd, _q.unsqueeze(-1)).squeeze(-1) * _scale  # [H_q, T]
                                     lse_dense = torch.logsumexp(scores_dense.float(), dim=-1)  # [H_q]
 
@@ -5101,7 +5180,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _fact_val_V = pool.fact_anchors_V if pool.fact_anchors_V is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
 
                                     if _DKV_HAS_METAL_ATTN and pool is not None and _compiled_kernel_ok(pool):
-                                        _scale = 1.0 / math.sqrt(head_dim)
+                                        _scale = attn_scale
                                         # Same 4 trailing dense-window args as above: dense is
                                         # merged separately here, pass empties to skip it.
                                         _ed = torch.empty(0, device=_Q_sq.device, dtype=_Q_sq.dtype)
@@ -5140,7 +5219,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             _anchor_rotary_dim,
                                         )
                                     elif _DKV_HAS_DECODE_ATTN and pool is not None and not has_residual and _compiled_kernel_ok(pool):
-                                        _scale = 1.0 / math.sqrt(head_dim)
+                                        _scale = attn_scale
                                         out_sparse, lse_sparse = _decode_attention_aten_lse(
                                             _Q_sq.contiguous(),
                                             pool.U.contiguous(),
@@ -5688,6 +5767,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             attn_out_full_approx = F.scaled_dot_product_attention(
                                                 query_states[b_idx:b_idx+1], k_rep, v_rep,
                                                 is_causal=False,
+                                                scale=attn_scale,
                                             )
                                         elif has_comp and not has_dense:
                                             attn_out_full_approx = out_sparse_full.unsqueeze(0).unsqueeze(2)
@@ -5697,6 +5777,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             out_dense_val = F.scaled_dot_product_attention(
                                                 query_states[b_idx:b_idx+1], k_rep, v_rep,
                                                 is_causal=False,
+                                                scale=attn_scale,
                                             )
                                             
                                             _kd = k_rep[0]
@@ -5938,7 +6019,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         k_dense_rep = repeat_kv(k_dense_rot, num_key_value_groups).to(chunk_q.dtype)
                                         v_dense_rep = repeat_kv(v_dense, num_key_value_groups).to(chunk_q.dtype)
 
-                                        _scale = 1.0 / math.sqrt(head_dim)
+                                        _scale = attn_scale
                                         scores_dense = torch.matmul(chunk_q * _scale, k_dense_rep.transpose(-2, -1))
                                         lse_hist_dense = torch.logsumexp(scores_dense, dim=-1)
                                         weights_dense = torch.softmax(scores_dense, dim=-1)
@@ -6093,6 +6174,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     out_b = F.scaled_dot_product_attention(
                                         cq.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
                                         attn_mask=_mask, dropout_p=0.0,
+                                        scale=attn_scale,
                                     )
                                 attn_outputs.append(out_b)
                                 if _unrotate:
@@ -6127,7 +6209,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 with torch.backends.cuda.sdp_kernel(enable_flash=(curr_q.device.type == "cuda"), enable_math=True, enable_mem_efficient=True):
                                     out_b = F.scaled_dot_product_attention(
                                         curr_q.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
-                                        attn_mask=attn_mask_flag, dropout_p=0.0, is_causal=is_causal_flag
+                                        attn_mask=attn_mask_flag, dropout_p=0.0, is_causal=is_causal_flag,
+                                        scale=attn_scale,
                                     )
                                 attn_outputs.append(out_b)
 
@@ -6233,7 +6316,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             k_dense_rep = repeat_kv(k_dense_rot, num_key_value_groups)
                                             v_dense_rep = repeat_kv(v_dense, num_key_value_groups)
 
-                                            _scale = 1.0 / math.sqrt(head_dim)
+                                            _scale = attn_scale
                                             # Fused attention instead of eager
                                             # matmul+softmax.
                                             #

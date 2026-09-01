@@ -126,8 +126,20 @@ def _run_dense_true(args):
     from niah_recall import build_prompt
 
     tok = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, dtype=torch.float16, device_map="cuda")
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model, dtype=torch.float16, device_map="cuda")
+    except ValueError as e:
+        # Text models that ship only inside a multimodal wrapper are absent from
+        # the AutoModelForCausalLM mapping -- mistralai/Ministral-3-8B-* is
+        # `mistral3` outside and an ordinary `ministral3` decoder inside. Without
+        # this the control cannot load and the run ends in "no dense control --
+        # nothing to compare against", which looks like a DKV failure and is not.
+        if "Unrecognized configuration class" not in str(e):
+            raise
+        from transformers import AutoModelForImageTextToText
+        model = AutoModelForImageTextToText.from_pretrained(
+            args.model, dtype=torch.float16, device_map="cuda")
     model.eval()
     print(f"[dense control] plain transformers, DKV NOT loaded ({args.model})",
           flush=True)

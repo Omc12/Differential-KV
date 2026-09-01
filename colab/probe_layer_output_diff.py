@@ -128,7 +128,10 @@ class Capture:
         self._cur = set()
 
     def attach(self, model):
-        layers = model.model.layers if hasattr(model, "model") else model.layers
+        # Composite/multimodal models (Gemma 4) keep the decoder at
+        # model.model.language_model, so model.model has no .layers at all.
+        from runtime.dkv_attention import resolve_decoder_layers
+        layers = resolve_decoder_layers(model)
         for i, layer in enumerate(layers):
             attn = getattr(layer, "self_attn", None)
             if attn is None:                     # linear-attention layer
