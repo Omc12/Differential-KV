@@ -126,9 +126,35 @@ def _run_dense_true(args):
     from niah_recall import build_prompt
 
     tok = AutoTokenizer.from_pretrained(args.model)
+
+    # THE CONTROL MUST CARRY THE SAME WEIGHT QUANTIZATION AS THE ARM. This used
+    # to hardcode fp16 while the DKV arm could be loaded in NF4, so every
+    # "fidelity" number was really weight-quantization + KV-compression summed
+    # together and reported as if it were KV-compression alone. The bnb config
+    # below is copied field-for-field from hf_dkv_wrapper.py's own 4-bit branch
+    # (nf4 / bfloat16 compute / double quant) -- if that branch changes, this
+    # one has to change with it or the two arms stop being comparable.
+    _kw = {"device_map": "cuda"}
+    _q = (args.quant or "").strip().lower()
+    if _q in ("nf4", "int4", "4bit", "4-bit", "fp4"):
+        from transformers import BitsAndBytesConfig
+        _kw["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=("fp4" if _q == "fp4" else "nf4"),
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        _kw["dtype"] = torch.bfloat16
+        print(f"[dense control] 4-bit weights ({_q}), bfloat16 compute", flush=True)
+    elif _q in ("int8", "8bit", "8-bit"):
+        from transformers import BitsAndBytesConfig
+        _kw["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+        print("[dense control] 8-bit weights", flush=True)
+    else:
+        _kw["dtype"] = torch.float16
+
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model, dtype=torch.float16, device_map="cuda")
+        model = AutoModelForCausalLM.from_pretrained(args.model, **_kw)
     except ValueError as e:
         # Text models that ship only inside a multimodal wrapper are absent from
         # the AutoModelForCausalLM mapping -- mistralai/Ministral-3-8B-* is
@@ -138,8 +164,7 @@ def _run_dense_true(args):
         if "Unrecognized configuration class" not in str(e):
             raise
         from transformers import AutoModelForImageTextToText
-        model = AutoModelForImageTextToText.from_pretrained(
-            args.model, dtype=torch.float16, device_map="cuda")
+        model = AutoModelForImageTextToText.from_pretrained(args.model, **_kw)
     model.eval()
     print(f"[dense control] plain transformers, DKV NOT loaded ({args.model})",
           flush=True)
@@ -204,8 +229,17 @@ def run_one_arm(args):
     from serving.hf_dkv_wrapper import DKVHFWrapper
     from niah_recall import build_prompt
 
-    _cfg = {"quantization": None, "rank": 32, "block_size": 256,
-            "micro_block_size": 256, "preset": "mid"}
+    # PRESET-CLEAN. This used to read
+    #     {"preset": "mid", "rank": 32, "block_size": 256, "micro_block_size": 256}
+    # -- a preset name with three of that preset's own knobs overridden on top.
+    # Whatever that measured, it was not "preset mid", and no number produced
+    # that way is reproducible from a shipped preset. The rank* arms in
+    # ARM_CONFIG still override deliberately; that is what those arms are for.
+    #
+    # `quantization` is passed explicitly because NF4 is NOT the CUDA default:
+    # hf_dkv_wrapper.py:711 auto-enables it for preset `low` ONLY, so at mid and
+    # high an unset value silently loads full-size fp16 weights.
+    _cfg = {"quantization": args.quant or None, "preset": args.preset}
     _cfg.update(ARM_CONFIG.get(args.arm, {}))
     print(f"[arm {args.arm}] config={_cfg} env="
           f"{ {k: os.environ[k] for k in _ARM_KEYS if k in os.environ} }", flush=True)
@@ -310,6 +344,12 @@ def main():
     ap.add_argument("--arms", nargs="+", default=list(ARMS))
     ap.add_argument("--arm", default="")
     ap.add_argument("--json", default="")
+    ap.add_argument("--preset", default="mid",
+                    choices=["low", "mid", "high", "ultra"],
+                    help="shipped preset, used verbatim with no knob overrides")
+    ap.add_argument("--quant", default="",
+                    help="weight quantization for BOTH the dense control and the "
+                         "DKV arms (e.g. nf4). Empty = fp16 on both sides.")
     args = ap.parse_args()
 
     if args.arm:
@@ -329,6 +369,7 @@ def main():
         out = os.path.join(tmp, f"{arm}.json")
         cmd = [sys.executable, os.path.abspath(__file__), "--arm", arm,
                "--model", args.model, "--ctx", str(args.ctx), "--json", out,
+               "--preset", args.preset, "--quant", args.quant,
                "--depths"] + [str(d) for d in args.depths]
         p = subprocess.run(cmd, cwd=REPO)
         if p.returncode != 0 or not os.path.exists(out):
@@ -353,7 +394,8 @@ def main():
         raise SystemExit("no dense control -- nothing to compare against")
 
     print(f"\n== first-step logit fidelity vs DENSE "
-          f"(n={len(args.depths)} prompts, ctx={args.ctx}) ==")
+          f"(n={len(args.depths)} prompts, ctx={args.ctx}, "
+          f"preset={args.preset}, quant={args.quant or 'fp16'}) ==")
     print(f"{'arm':>16} {'top1 agree':>11} {'KL(dense||arm)':>15} "
           f"{'dense-top1 rank':>16} {'top5 overlap':>13} {'blocks':>8}")
     for arm in report_arms:

@@ -176,9 +176,7 @@ def run_arm(args):
     else:
         from serving.hf_dkv_wrapper import DKVHFWrapper
         w = DKVHFWrapper(model_id=args.model,
-                         config={"quantization": None, "rank": 32,
-                                 "block_size": 256, "micro_block_size": 256,
-                                 "preset": "mid"})
+                         config={"preset": os.environ.get("PRESET", "mid")})
         w.ensure_loaded()
         tok = w.tokenizer
         bad, parts = _unambiguous(tok, NEEDLE)

@@ -84,8 +84,7 @@ def run_arm(arm, ctx):
     from niah_recall import build_prompt
 
     w = DKVHFWrapper(model_id=os.environ.get("MODEL", "Qwen/Qwen2.5-1.5B-Instruct"),
-                     config={"quantization": None, "rank": 32, "block_size": 256,
-                             "micro_block_size": 256, "preset": "mid"})
+                     config={"preset": os.environ.get("PRESET", "mid")})
     w.ensure_loaded()
     torch.cuda.synchronize()
     weights_b = torch.cuda.memory_allocated()

@@ -116,8 +116,7 @@ def main():
     from niah_recall import build_prompt
 
     w = DKVHFWrapper(model_id=MODEL,
-                     config={"quantization": None, "rank": 32, "block_size": 256,
-                             "micro_block_size": 256, "preset": "mid"})
+                     config={"preset": os.environ.get("PRESET", "mid")})
     w.ensure_loaded()
     prompt = build_prompt(w.tokenizer, CTX, 0.5)
     n_tok = len(w.tokenizer.encode(prompt))
