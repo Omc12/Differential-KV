@@ -31,6 +31,7 @@ python prepare.py \
     --num_samples 10 \
 """
 import os
+import sys
 import argparse
 import importlib
 import subprocess
@@ -120,31 +121,41 @@ def main():
     if not file_exists:
         try:
             script = os.path.join(curr_folder, args.benchmark, f"{config['task']}.py")
-            additional_args = " ".join([f"--{k} {v}" for k, v in config['args'].items()])
-            command = f"""python {script} \
-            --save_dir  {args.save_dir} \
-            --save_name {args.task} \
-            --subset {args.subset} \
-            --tokenizer_path {args.tokenizer_path} \
-            --tokenizer_type {args.tokenizer_type} \
-            --max_seq_length {args.max_seq_length} \
-            --tokens_to_generate {config['tokens_to_generate']} \
-            --num_samples {num_samples} \
-            --random_seed {random_seed} \
-            {additional_args} \
-            {f"--remove_newline_tab" if args.remove_newline_tab else ""} \
-            {f"--pre_samples {pre_samples}" if config['task'] == 'qa' else ""} \
-            --template "{config['template']}" \
-            """
+            # LOCAL PORT FIX (argument list instead of a shell string). Upstream
+            # builds this as one shell command, which on Windows breaks three
+            # ways: bare `python` hits the Store alias stub; unquoted paths split
+            # on the space in the repo directory ("Differential KV"); and
+            # --template holds literal newlines, so cmd.exe tears it apart and
+            # the generator runs with a collapsed template that never
+            # substitutes {context} -- producing 26-token samples for a
+            # 4096-token request, silently. Same script, same arguments, same
+            # values; only the launch mechanism changes.
+            command = [sys.executable, script,
+                       "--save_dir", str(args.save_dir),
+                       "--save_name", str(args.task),
+                       "--subset", str(args.subset),
+                       "--tokenizer_path", str(args.tokenizer_path),
+                       "--tokenizer_type", str(args.tokenizer_type),
+                       "--max_seq_length", str(args.max_seq_length),
+                       "--tokens_to_generate", str(config['tokens_to_generate']),
+                       "--num_samples", str(num_samples),
+                       "--random_seed", str(random_seed)]
+            for _k, _v in config['args'].items():
+                command += [f"--{_k}", str(_v)]
+            if args.remove_newline_tab:
+                command += ["--remove_newline_tab"]
+            if config['task'] == 'qa':
+                command += ["--pre_samples", str(pre_samples)]
+            command += ["--template", config['template']]
             if args.prepare_for_ns:
-                command += f""" --model_template_token {model_template_token}"""
-            
-            print(command)
-            result = subprocess.run(command, 
-                                    shell=True, 
-                                    check=True, 
-                                    stdout=subprocess.PIPE, 
-                                    stderr=subprocess.PIPE, 
+                command += ["--model_template_token", str(model_template_token)]
+
+            print(" ".join(command[:6]), "...")
+            result = subprocess.run(command,
+                                    shell=False,
+                                    check=True,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
                                     text=True)
             
             if result.returncode == 0:
@@ -156,7 +167,19 @@ def main():
         except subprocess.CalledProcessError as e:
             print("Error output:", e.stderr)
 
-        print(f"Prepare {args.task} with lines: {args.num_samples} to {save_file}")
+        # A generation that produced nothing must not report success. Upstream
+        # prints this unconditionally after the except block, so a dead child
+        # reads exactly like a live one, and the empty directory it leaves is
+        # taken downstream as "zero samples".
+        _n = 0
+        if os.path.exists(save_file):
+            with open(save_file, encoding="utf-8") as _f:
+                _n = sum(1 for _l in _f if _l.strip())
+        if _n < 1:
+            raise SystemExit(
+                f"RULER generation FAILED for {args.task} @ {args.max_seq_length}: "
+                f"{save_file} is missing or empty.")
+        print(f"Prepare {args.task} with lines: {_n} to {save_file}")
         print(f"Used time: {round((time.time() - start_time) / 60, 1)} minutes")
     else:
         print(f"Skip preparing {args.task} with lines: {args.num_samples} to {save_file} (file exists)")

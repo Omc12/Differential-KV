@@ -143,7 +143,36 @@ def load_task(name: str, n: int) -> List[Dict[str, Any]]:
 # Prompt construction — the published recipe
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_prompt(tokenizer, row, dataset, prompt_fmt, max_length):
+def apply_template(tokenizer, prompt: str, thinking: bool):
+    """Chat template, with reasoning-mode models pinned to direct answers.
+
+    granite-4.2 and Qwen3.5 both open a `<think>` block by default, so a
+    LongBench run against them scores whatever fits in the task's generation
+    budget of chain-of-thought -- qasper allows 128 tokens, and the model is
+    still reasoning when it runs out. Measured on granite before this was
+    fixed: every prediction began "Okay, let's tackle this question:" and no
+    answer was ever reached.
+
+    That is not a fair reading of the model and it is not what LongBench's
+    per-task generation lengths were calibrated against, so thinking is turned
+    OFF by default and the flag is recorded in the run config. It is applied
+    identically to every arm, so it cannot advantage one of them.
+    """
+    msgs = [{"role": "user", "content": prompt}]
+    if not thinking:
+        try:
+            return tokenizer.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=True,
+                enable_thinking=False)
+        except (TypeError, ValueError):
+            # Template does not take the kwarg; fall through to the default.
+            pass
+    return tokenizer.apply_chat_template(
+        msgs, tokenize=False, add_generation_prompt=True)
+
+
+def build_prompt(tokenizer, row, dataset, prompt_fmt, max_length,
+                 thinking: bool = False):
     prompt = prompt_fmt.format(**row)
     ids = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
     if len(ids) > max_length:
@@ -155,9 +184,7 @@ def build_prompt(tokenizer, row, dataset, prompt_fmt, max_length):
                   + tokenizer.decode(ids[-half:], skip_special_tokens=True))
     if dataset not in NO_CHAT_TEMPLATE:
         try:
-            prompt = tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}],
-                tokenize=False, add_generation_prompt=True)
+            prompt = apply_template(tokenizer, prompt, thinking)
         except Exception:                                        # noqa: BLE001
             pass
     return prompt
@@ -404,6 +431,10 @@ def main():
     ap.add_argument("--chunk", type=int, default=1024)
     ap.add_argument("--baseline-params", default="{}",
                     help="JSON of method params, e.g. '{\"budget\": 2048}'")
+    ap.add_argument("--thinking", action="store_true",
+                    help="let reasoning models emit their <think> block. OFF by "
+                         "default: the per-task generation budgets are far too "
+                         "small to hold chain-of-thought AND an answer.")
     ap.add_argument("--score", nargs="*", default=None,
                     help="score existing JSONL result files and exit")
     args = ap.parse_args()
@@ -424,6 +455,7 @@ def main():
            "max_length": args.max_length, "num_samples": args.num_samples,
            "preset": args.preset if args.arm == "dkv" else None,
            "baseline_params": json.loads(args.baseline_params),
+           "thinking": bool(args.thinking),
            "protocol": "longbench-official-v1"}
     store = ResumableJSONL(out, config=cfg)
     done = store.load_done()
@@ -471,7 +503,8 @@ def main():
     t_start = time.time()
     for n, (key, ds, i, row) in enumerate(work, 1):
         gen_len = maxlens[ds]
-        prompt = build_prompt(tok, row, ds, prompts[ds], args.max_length)
+        prompt = build_prompt(tok, row, ds, prompts[ds], args.max_length,
+                              thinking=args.thinking)
         ntok = len(tok(prompt).input_ids)
         try:
             if args.arm == "dkv":

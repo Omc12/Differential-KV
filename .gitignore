@@ -110,3 +110,9 @@ docs/turboquant_dkv_hybrid_roadmap.md
 # otherwise silently drop every benchmark result under paper/results/.
 !paper/results/**/*.jsonl
 !paper/results/**/*.meta.json
+
+# RULER haystack/QA source data: large, and reproducible from the vendored
+# download scripts. The generators and configs ARE tracked; these are not.
+benchmarks/ruler_official/data/synthetic/json/PaulGrahamEssays.json
+benchmarks/ruler_official/data/synthetic/json/squad.json
+benchmarks/ruler_official/data/synthetic/json/hotpotqa.json
