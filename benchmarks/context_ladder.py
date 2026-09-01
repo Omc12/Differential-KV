@@ -21,6 +21,23 @@ process and reports back through a JSON file. The parent survives every OOM and
 the ladder keeps climbing, which is the only way to find a ceiling rather than
 guess at one.
 
+ON WINDOWS, EXCEEDING VRAM DOES NOT RAISE
+-----------------------------------------
+Under the WDDM driver model CUDA oversubscribes into host RAM instead of
+failing, so a point past the card's capacity comes back `ok` with a peak
+LARGER than the physical card and a wall time several times what the trend
+predicts. Measured here on granite-4.2-8b, dense, Q4 (12.28 GB card):
+
+    16,384 tok    9.42 GB     10.6 s
+    24,576 tok   11.23 GB     65.7 s      <- already thrashing
+    32,768 tok   13.04 GB    380.5 s      <- 13.04 GB on a 12.28 GB card
+
+A ladder that trusts the absence of an exception would have recorded 128k as
+a success and every latency number above ~24k as real. So each point is
+compared against the physical card and flagged `spilled`; a spilled point is
+a CEILING, not a pass, and the arm stops there. Any timing from a spilled
+point is PCIe bandwidth, not compute, and must not be quoted.
+
 Checkpointed, so a power cut costs the point in flight and nothing else.
 
 USAGE
@@ -50,6 +67,18 @@ sys.path.insert(0, HERE)
 from checkpoint import ResumableJSONL                            # noqa: E402
 
 DEFAULT_CONTEXTS = [4096, 8192, 16384, 32768, 49152, 65536, 98304, 131072]
+
+# A point whose allocation passes this fraction of the physical card is treated
+# as having spilled to host memory. Not 1.0: the display/driver context holds
+# several hundred MB that the process can never have, so the practical wall is
+# below the nameplate figure.
+SPILL_FRACTION = 0.94
+
+# Seconds-per-1k-tokens growth against the previous rung that counts as the
+# memory system taking over. Prefill cost per token drifts up gently with
+# context (attention is quadratic in total work but chunked here); a factor
+# this large in one step is paging, not arithmetic.
+CLIFF_RATIO = 2.5
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -155,7 +184,15 @@ def run_point(args) -> None:
                 res[k] = r.get(k)
         res["peak_gb"] = torch.cuda.max_memory_allocated() / 1e9
         res["peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 1e9
-        res["status"] = "ok"
+        # The card, not the allocator's opinion of it.
+        total = torch.cuda.get_device_properties(0).total_memory / 1e9
+        res["vram_total_gb"] = total
+        # Headroom for the driver/display context, which is not ours to use.
+        # Reserved is the honest figure to compare: it is what the allocator
+        # actually took from the device.
+        usable = total * SPILL_FRACTION
+        res["spilled"] = bool(max(res["peak_gb"], res["peak_reserved_gb"]) > usable)
+        res["status"] = "spilled" if res["spilled"] else "ok"
     except torch.cuda.OutOfMemoryError as e:                     # noqa: BLE001
         res["status"] = "oom"
         res["error"] = str(e)[:300]
@@ -191,7 +228,7 @@ def report(paths: List[str]) -> None:
         print(f"{meta.get('model','?')}  quant={meta.get('quant','-')}  "
               f"preset={meta.get('preset','-')}")
         print(f"{'arm':>6} {'ctx':>8} {'actual':>8} {'peak GB':>9} {'wall s':>8} "
-              f"{'KV GB':>8} {'status':>7}")
+              f"{'KV GB':>8} {'status':>8}")
         rows = sorted(recs, key=lambda r: (r.get("arm", ""), r.get("ctx", 0)))
         for r in rows:
             kv = r.get("kv_physical_gb")
@@ -200,10 +237,13 @@ def report(paths: List[str]) -> None:
                   f"{(f'{r['peak_gb']:.2f}' if r.get('peak_gb') else '-'):>9} "
                   f"{(f'{r['wall_s']:.1f}' if r.get('wall_s') else '-'):>8} "
                   f"{(f'{kv:.3f}' if kv else '-'):>8} "
-                  f"{r.get('status','?'):>7}")
+                  f"{r.get('status','?'):>8}")
         # Slope: the marginal GB per 1k tokens, from the largest two OK points
         # of each arm. This is the number that predicts the next rung.
         for arm in sorted({r.get("arm") for r in rows}):
+            # Spilled points are excluded: their peak is partly host memory
+            # and their wall time is bandwidth, so fitting through them would
+            # put both the slope and the predicted ceiling in the wrong place.
             ok = [r for r in rows if r.get("arm") == arm and r.get("status") == "ok"
                   and r.get("peak_gb") and r.get("ctx_actual")]
             if len(ok) >= 2:
@@ -215,6 +255,18 @@ def report(paths: List[str]) -> None:
                     print(f"  {arm}: {slope:.4f} GB per 1k tokens, "
                           f"floor {icept:.2f} GB  "
                           f"(max OK {b['ctx_actual']} tok @ {b['peak_gb']:.2f} GB)")
+                    total = b.get("vram_total_gb")
+                    if total and slope > 0:
+                        pred = (total * SPILL_FRACTION - icept) / slope * 1000.0
+                        print(f"         predicted ceiling ~{pred:,.0f} tok on a "
+                              f"{total:.1f} GB card")
+            spilled = [r for r in rows if r.get("arm") == arm
+                       and r.get("status") == "spilled"]
+            if spilled:
+                f = min(spilled, key=lambda r: r.get("ctx", 0))
+                print(f"         first spill at {f.get('ctx')} tok "
+                      f"({f.get('peak_gb', 0):.2f} GB) -- timings at and above "
+                      f"this length are host-memory bound, not compute")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -263,6 +315,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix="dkv-ladder-")
     for arm in args.arms:
         ooms = 0
+        last_rate = None          # seconds per 1k tokens at the previous rung
         for ctx in sorted(args.contexts):
             key = f"{arm}@{ctx}"
             if key in done:
@@ -300,11 +353,34 @@ def main():
                 res = {"arm": arm, "ctx": ctx,
                        "status": "timeout" if rc == -9 else "died",
                        "returncode": rc, "stderr_tail": tail}
+            # ── second spill signal: the latency cliff ──────────────────────
+            # Allocation alone does not catch the onset. Measured on granite
+            # dense Q4, the point at 24,576 tokens reported 11.23 GB against a
+            # 12.28 GB card -- under any sane fraction of the card, and so not
+            # flagged -- while taking 65.7 s where the trend predicted ~16 s.
+            # It was already paging. Cost per token is near-linear in context
+            # for a compute-bound prefill, so a sudden jump in seconds-per-1k
+            # against the previous rung is the earliest honest evidence that
+            # the memory system, not the GPU, is setting the pace.
+            sec_per_1k = None
+            if res.get("status") == "ok" and res.get("wall_s") and res.get("ctx_actual"):
+                sec_per_1k = res["wall_s"] / (res["ctx_actual"] / 1000.0)
+                if last_rate is not None and sec_per_1k > last_rate * CLIFF_RATIO:
+                    res["status"] = "degraded"
+                    res["degraded_vs_prev"] = round(sec_per_1k / last_rate, 2)
+                    res["sec_per_1k"] = round(sec_per_1k, 3)
+                else:
+                    res["sec_per_1k"] = round(sec_per_1k, 3)
+                    last_rate = sec_per_1k
+
             store.append(key, **res)
             st = res.get("status")
             print(f"    {key}: {st} peak={res.get('peak_gb','-')} "
                   f"({time.time()-t0:.0f}s)", flush=True)
-            if st in ("oom", "died", "timeout"):
+            if st in ("oom", "died", "timeout", "spilled", "degraded"):
+                # `spilled` counts as a ceiling: the point technically returned,
+                # but it returned by borrowing host memory, and every larger
+                # context borrows more. Climbing further measures PCIe.
                 ooms += 1
             else:
                 ooms = 0
