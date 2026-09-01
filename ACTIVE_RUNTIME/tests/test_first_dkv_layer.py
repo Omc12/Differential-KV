@@ -123,10 +123,13 @@ def test_sliding_layers_are_never_compressed():
     # "shape '[1, 1025, 1, 256]' is invalid for input of size 524800".
     layers = [_GLayer(layer_type="sliding_attention") for _ in range(4)]
     layers.insert(2, _GLayer(layer_type="full_attention"))
-    assert dkv_layer_indices(layers) == [2]
-    assert first_dkv_layer_index(layers) == 2
     assert not is_dkv_attention_layer(layers[0])
     assert is_sliding_attention_layer(layers[0])
+    # Layer 2 is the ONLY global layer, so it is also the mask donor (see
+    # test_mask_donor_layer_stays_native) and DKV compresses nothing at all.
+    # That is the correct outcome, not a bug: compressing it would leave the
+    # shared full_attention mask sized from an empty cache entry.
+    assert dkv_layer_indices(layers) == []
 
 
 def test_kv_sharing_producer_is_excluded_when_consumers_exist():
@@ -139,7 +142,8 @@ def test_kv_sharing_producer_is_excluded_when_consumers_exist():
     layers[14] = _GLayer(layer_type="full_attention", store_full_length_kv=True)
     layers[19] = _GLayer(layer_type="full_attention", k_proj=None,
                          is_kv_shared_layer=True)
-    assert dkv_layer_indices(layers) == [4, 9]
+    # 14 is dropped as the KV-sharing publisher, 4 as the mask donor.
+    assert dkv_layer_indices(layers) == [9]
 
 
 def test_producer_with_no_consumers_is_still_compressed():
@@ -149,7 +153,8 @@ def test_producer_with_no_consumers_is_still_compressed():
     layers = [_GLayer(layer_type="sliding_attention") for _ in range(6)]
     layers[2] = _GLayer(layer_type="full_attention")
     layers[5] = _GLayer(layer_type="full_attention", store_full_length_kv=True)
-    assert dkv_layer_indices(layers) == [2, 5]
+    # 5 is kept (nothing consumes it); 2 is dropped as the mask donor.
+    assert dkv_layer_indices(layers) == [5]
 
 
 def test_fused_qkv_layers_are_not_mistaken_for_kv_sharing():
@@ -167,3 +172,42 @@ def test_fused_qkv_layers_are_not_mistaken_for_kv_sharing():
 def test_plain_dense_model_is_unaffected_by_the_hybrid_rules():
     # Granite/Llama/Qwen: no layer_type, no sliding, no sharing -- every layer.
     assert dkv_layer_indices(_layers("A" * 12)) == list(range(12))
+
+
+def test_mask_donor_layer_stays_native():
+    """The first global layer must never be compressed on a hybrid.
+
+    transformers builds ONE `full_attention` mask for every global layer and
+    sizes it from the first non-sliding layer:
+
+        layer_idx = past_key_values.is_sliding.index(False)   # masking_utils
+        kv_length = layer.get_seq_length() + q_len            # get_mask_sizes
+
+    A DKV-patched layer holds its K/V in the pool and never writes
+    past_key_values, so it reports length 0. Measured on gemma-4-e2b-it after
+    one 1028-token chunk: patched layers held 0 where native held 1028. The
+    shared mask was then sized for no history and the global layers still
+    running natively silently attended only the current chunk -- KL 4.99 against
+    a dense control, versus 0.51 once the donor is left native.
+
+    Chunked prefill is the default and saves the O(N^2) attention VRAM, so this
+    rule is what keeps it usable on Gemma 4 rather than forcing one-shot prefill
+    (which OOMs gemma-4-12B-it at ctx 8192 on a 12 GB card).
+    """
+    layers = [_GLayer(layer_type="sliding_attention") for _ in range(12)]
+    for i in (2, 5, 8, 11):
+        layers[i] = _GLayer(layer_type="full_attention")
+    assert dkv_layer_indices(layers) == [5, 8, 11]      # 2 donates the mask
+    assert first_dkv_layer_index(layers) == 5
+
+
+def test_uniform_model_keeps_its_first_layer():
+    """The donor rule is scoped to hybrids and must not touch dense models.
+
+    With no sliding layers there is no second mask to size and every layer
+    writes the cache, so layer 0 stays compressible exactly as before. Granite,
+    Ministral and the Qwen3.5 family all land here.
+    """
+    assert dkv_layer_indices(_layers("A" * 12)) == list(range(12))
+    assert dkv_layer_indices([_GLayer(layer_type="full_attention")
+                              for _ in range(4)]) == [0, 1, 2, 3]

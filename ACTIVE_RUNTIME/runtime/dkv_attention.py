@@ -2008,41 +2008,6 @@ def _get_prefill_chunk_size(kv_manager, session_id: str, device) -> int:
     MLX has one contiguous dense tail, so its internal and external chunk
     boundaries never disagree.  Keep the same invariant here.
     """
-    # SLIDING-WINDOW MODELS CANNOT BE PREFILLED IN CHUNKS BY THIS PATH.
-    #
-    # DKV only patches the global layers of a hybrid; the sliding layers keep
-    # their native forward and their own bounded cache. Chunking the prefill
-    # hands those layers one chunk at a time without the cross-chunk history
-    # their window needs, and they silently attend to a truncated context --
-    # measured on google/gemma-4-e2b-it at ctx 8192 with DKV NOT ENGAGING AT ALL
-    # (0 compressed blocks), against a plain-HF control:
-    #
-    #     chunked (512)      KL 4.99   top5 overlap 2.0/5
-    #     contiguous         KL 0.47   top5 overlap 5.0/5
-    #
-    # Same weights, same prompt, no compression in either -- the entire gap is
-    # the chunk boundary. It is also why the layer-output probe died inside
-    # `self.keys.index_copy_(2, cache_position, key_states)` with a device-side
-    # assert: a bounded sliding cache indexed at a position past its window.
-    #
-    # An explicit DKV_PREFILL_CHUNK_SIZE still wins, so the old behaviour is one
-    # env var away, but it must be opted into rather than silently defaulted to.
-    if os.environ.get("DKV_PREFILL_CHUNK_SIZE") is None:
-        _mdl = getattr(kv_manager, "model", None)
-        if _mdl is not None:
-            _flag = getattr(kv_manager, "_dkv_has_sliding_layers", None)
-            if _flag is None:
-                try:
-                    _flag = any(is_sliding_attention_layer(_l)
-                                for _l in resolve_decoder_layers(_mdl))
-                except Exception:
-                    _flag = False
-                kv_manager._dkv_has_sliding_layers = _flag
-                # The wrapper prints the user-facing notice for this; this is the
-                # attention hook's own inner chunk loop and must agree with it.
-            if _flag:
-                return 1 << 30
-
     configured = os.environ.get("DKV_PREFILL_CHUNK_SIZE")
     if configured is not None:
         try:
@@ -2594,6 +2559,36 @@ def dkv_layer_indices(layers):
             if lt in consumed_types:
                 continue
         out.append(i)
+
+    # THE MASK-DONOR LAYER MUST STAY NATIVE ON A SLIDING-WINDOW MODEL.
+    #
+    # transformers builds ONE `full_attention` mask for every global layer and
+    # sizes it from the FIRST non-sliding layer (masking_utils.py:
+    #     layer_idx = past_key_values.is_sliding.index(False)
+    # then get_mask_sizes -> kv_length = layer.get_seq_length() + q_len).
+    #
+    # A DKV-patched layer keeps its K/V in the pool and never writes
+    # past_key_values, so that layer reports length 0. Measured on
+    # gemma-4-e2b-it after one 1028-token chunk: layers 4 and 9 (patched) hold
+    # 0 where native holds 1028, while layer 14 (not patched) holds 1028. The
+    # shared mask is therefore sized for NO history, and the global layers that
+    # ARE native -- layer 14 here -- silently attend only the current chunk.
+    # Layer 14 was the first diverging layer in a per-layer diff, and DKV's own
+    # patched layers were bit-identical, which is what pointed here.
+    #
+    # Leaving the donor native costs one compressed layer and makes chunked
+    # prefill correct again, which is worth far more: prefilling contiguously
+    # instead OOMs gemma-4-12B-it at ctx 8192 on a 12 GB card.
+    #
+    # Only relevant when sliding layers exist. On a uniform model every layer is
+    # patched and populated consistently, and layer 0 donates as it always did.
+    if out and any(is_sliding_attention_layer(l) for l in layers):
+        _first_global = next(
+            (i for i, l in enumerate(layers)
+             if hasattr(l, "self_attn") and not is_sliding_attention_layer(l)),
+            None)
+        if _first_global is not None and _first_global in out:
+            out = [i for i in out if i != _first_global]
     return out
 
 
