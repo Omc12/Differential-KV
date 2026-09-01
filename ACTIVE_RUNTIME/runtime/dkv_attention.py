@@ -2209,8 +2209,73 @@ def _resolve_rotary_emb(model):
     cached = getattr(model, "_dkv_resolved_rotary_emb", None)
     if cached is not None:
         return cached
+
+    def _bind(mod):
+        """Bind the per-layer-type RoPE argument if this module needs one.
+
+        Gemma 4 keeps a SEPARATE rope base per layer type and registers the
+        frequencies as `{layer_type}_inv_freq`, so its rotary forward is
+        `forward(x, position_ids, layer_type=None)` and calling it positionally
+        gives
+
+            AttributeError: 'Gemma4UnifiedTextRotaryEmbedding' object has no
+            attribute 'None_inv_freq'
+
+        DKV only ever compresses global layers, so the correct layer_type is the
+        one on the first layer it patches -- resolved once here rather than
+        threaded through the five call sites. Models whose rotary forward takes
+        no layer_type are returned untouched.
+        """
+        if mod is None:
+            return None
+        try:
+            import inspect
+            fwd = getattr(mod, "forward", mod)
+            if "layer_type" not in inspect.signature(fwd).parameters:
+                return mod
+        except (TypeError, ValueError):
+            return mod
+        lt = None
+        try:
+            for _l in resolve_decoder_layers(model):
+                if is_dkv_attention_layer(_l):
+                    lt = (getattr(_l.self_attn, "layer_type", None)
+                          or getattr(_l, "layer_type", None))
+                    break
+        except Exception:
+            pass
+        if lt is None:
+            lt = "full_attention"
+
+        def _rope(x, position_ids, *a, **kw):
+            kw.setdefault("layer_type", lt)
+            return mod(x, position_ids, *a, **kw)
+        _rope.layer_type = lt
+        return _rope
+    # THE TEXT DECODER'S rotary_emb, ahead of every other path.
+    #
+    # The scan below matches on the class name containing "rotary", and
+    # `named_modules()` yields the vision tower first: on gemma-4-e2b-it it
+    # returns `model.vision_tower.encoder.rotary_emb`, a
+    # Gemma4VisionRotaryEmbedding, whose forward indexes
+    # `position_ids[:, :, i]` over SPATIAL x/y patch dimensions and raised
+    #     IndexError: too many indices for tensor of dimension 2
+    # on DKV's ordinary 2D text position_ids. gemma-4-12B-it has no vision
+    # tower, so the scan happened to find the text module and that model
+    # worked -- the same coincidence that hid the decoder-layer lookup.
+    try:
+        _dec = model.get_decoder() if callable(getattr(model, "get_decoder", None)) else None
+        _rot = getattr(_dec, "rotary_emb", None)
+        if _rot is not None and callable(_rot):
+            _rot = _bind(_rot)
+            model._dkv_resolved_rotary_emb = _rot
+            return _rot
+    except Exception:
+        pass
+
     # Walk common attribute paths first (fast)
     for attr_path in (
+        "model.language_model.rotary_emb",
         "model.rotary_emb",
         "rotary_emb",
         "transformer.rotary_emb",
@@ -2221,13 +2286,20 @@ def _resolve_rotary_emb(model):
             for part in attr_path.split("."):
                 obj = getattr(obj, part)
             if callable(obj):
+                obj = _bind(obj)
                 model._dkv_resolved_rotary_emb = obj
                 return obj
         except AttributeError:
             continue
-    # Slow path: scan all named modules
-    for _, mod in model.named_modules():
+    # Slow path: scan named modules, but SKIP non-text towers -- a vision or
+    # audio encoder's rotary embedding is not interchangeable with the text
+    # decoder's (different arity, different position semantics).
+    for _name, mod in model.named_modules():
+        if any(_t in _name for _t in ("vision_tower", "audio_tower", "vision_model",
+                                      "audio_model", "image_encoder")):
+            continue
         if "rotary" in type(mod).__name__.lower() and callable(mod):
+            mod = _bind(mod)
             model._dkv_resolved_rotary_emb = mod
             return mod
     return None
@@ -2261,6 +2333,235 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 #   - micro_block_size cached — eliminates O(N·L) block scan per token
 # ---------------------------------------------------------------------------
 
+def is_sliding_attention_layer(layer) -> bool:
+    """True for a bounded sliding-window layer, which DKV must NOT compress.
+
+    Gemma 4 interleaves sliding and global layers, and THEY DO NOT SHARE
+    GEOMETRY -- measured from the live modules 2026-09-01:
+
+        gemma-4-e2b-it  sliding head_dim 256, q(2048,1536), k(256,1536)
+                        global  head_dim 512, q(4096,1536), k(512,1536)
+        gemma-4-12B-it  sliding head_dim 256, q(4096,3840), k(2048,3840)
+                        global  head_dim 512, q(8192,3840), k(512,3840)
+
+    `config.text_config` reports only the SLIDING numbers, so a config-derived
+    geometry is wrong for exactly the layers DKV compresses -- on 12B the config
+    says 8 KV heads while the global layers have 1. That mismatch is what raised
+
+        RuntimeError: shape '[1, 1025, 1, 256]' is invalid for input of size 524800
+
+    (exactly 2x, 256 against a true 512). A sliding layer's KV is bounded by its
+    own window anyway, so there is nothing for DKV to save there: leave it on its
+    native forward.
+    """
+    attn = getattr(layer, "self_attn", None)
+    return bool(
+        getattr(layer, "is_sliding", False)
+        or getattr(attn, "is_sliding", False)
+        or getattr(layer, "layer_type", "") == "sliding_attention"
+        or getattr(attn, "layer_type", "") == "sliding_attention"
+    )
+
+
+def attn_owns_kv(layer) -> bool:
+    """False for a cross-layer KV-SHARING layer, which has no k_proj of its own.
+
+    gemma-4-e2b-it shares KV across its second half: layers 15+ have
+    `k_proj = None` and read another layer's K/V. DKV has no cross-layer pool
+    mapping on the CUDA path (the MLX wrapper does, via `_is_kv_shared` and a
+    target-layer slot map), so such a layer cannot produce the K/V that
+    dkv_forward would need to capture. Leave it native.
+    """
+    attn = getattr(layer, "self_attn", None)
+    if attn is None:
+        return False
+    if getattr(attn, "is_kv_shared_layer", False) or getattr(layer, "is_kv_shared_layer", False):
+        return False
+    # ONLY an explicit `k_proj = None` means "no K/V of its own". A MISSING
+    # k_proj must not be treated as sharing: models with a fused qkv_proj have
+    # no k_proj attribute at all (dkv_forward has a packed-QKV branch for
+    # exactly those), and excluding them here would silently disable DKV on
+    # every one of their layers -- no error, just no compression.
+    if hasattr(attn, "k_proj") and attn.k_proj is None:
+        return False
+    return True
+
+
+def is_dkv_attention_layer(layer) -> bool:
+    """THE predicate for "DKV compresses this layer".
+
+    first_dkv_layer_index(), the patch loop and resolve_attn_geometry() all call
+    this one function, so the layer DKV measures, the layer it patches and the
+    layer its once-per-token gates key on cannot drift apart. The previous
+    version of this invariant was spelled out in a comment and enforced by
+    duplicating `hasattr(l, "self_attn")` at each site; that held only while the
+    predicate stayed a one-liner.
+    """
+    return (
+        hasattr(layer, "self_attn")
+        and not is_sliding_attention_layer(layer)
+        and attn_owns_kv(layer)
+    )
+
+
+def _linear_out_features(proj):
+    """Output width of a projection, correct for QUANTIZED layers too.
+
+    Read `out_features`, never `weight.shape[0]`. bitsandbytes stores a 4-bit
+    weight as a PACKED uint8 `Params4bit` of shape (numel // 2, 1), so the
+    shape-based read returns numel//2 and silently produces nonsense head
+    counts: on gemma-4-e2b-it NF4 it gave q_out 3,145,728 and therefore
+    6144 heads, raising
+
+        RuntimeError: shape '[1, 1025, 6144, 512]' is invalid for input of
+        size 4198400
+
+    only at the first forward. An unquantized probe of the same model reports
+    the right widths, so this cannot be caught without loading the model the
+    way it is actually served. `out_features` is preserved by bnb's Linear4bit
+    and Linear8bitLt, and by plain nn.Linear.
+    """
+    if proj is None:
+        return None
+    n = getattr(proj, "out_features", None)
+    if n:
+        return int(n)
+    w = getattr(proj, "weight", None)
+    if w is None or getattr(w, "dim", lambda: 0)() != 2:
+        return None
+    if type(w).__name__ in ("Params4bit", "Int8Params"):
+        return None        # packed: shape is not the logical width
+    return int(w.shape[0])
+
+
+def _linear_in_features(proj):
+    """Input width of a projection; same quantization caveat as the out twin."""
+    if proj is None:
+        return None
+    n = getattr(proj, "in_features", None)
+    if n:
+        return int(n)
+    return None
+
+
+def resolve_attn_geometry(model, config=None) -> HeadGeometry:
+    """Head geometry of the layers DKV actually compresses, from LIVE modules.
+
+    resolve_head_geometry() reads the config, which is right for a uniform model
+    and wrong for a hybrid one (see is_sliding_attention_layer). This reads the
+    first layer DKV will really patch, which is what the MLX wrapper has always
+    done (`_resolve_attn_dims` over the first non-sliding layer) and is why the
+    MLX path was never affected by any of this.
+
+    Head COUNTS are derived from projection widths rather than read, because
+    Gemma 4's attention modules expose `head_dim` but no `num_heads` /
+    `num_key_value_heads` at all. head_dim itself is still read, never derived.
+    Falls back to the config geometry for any model where this cannot be
+    determined, so non-hybrid architectures behave exactly as before.
+    """
+    cfg_geom = None
+    try:
+        cfg_geom = resolve_head_geometry(config if config is not None else model.config)
+    except Exception:
+        pass
+
+    try:
+        layers = resolve_decoder_layers(model)
+    except Exception:
+        if cfg_geom is None:
+            raise
+        return cfg_geom
+
+    _idx = dkv_layer_indices(layers)
+    ref = layers[_idx[0]] if _idx else None
+    if ref is None:
+        return cfg_geom if cfg_geom is not None else resolve_head_geometry(model.config)
+
+    attn = ref.self_attn
+    head_dim = getattr(attn, "head_dim", None)
+    # HEAD COUNT COMES FROM o_proj, NOT q_proj.
+    #
+    # o_proj's in_features IS num_heads * head_dim by construction, and it is
+    # the one width no architecture inflates. q_proj is unsafe: gated-attention
+    # variants (Qwen3-Next / Qwen3.5) pack [query | gate] per head, so q_proj is
+    # 2x and deriving from it doubles the head count -- Qwen3.5-9B reports 32
+    # heads instead of 16, which survives a `num_heads % num_kv_heads` sanity
+    # check (32 % 4 == 0) and then fails much later as
+    #     RuntimeError: mat1 and mat2 shapes cannot be multiplied
+    # dkv_forward already detects the 2x packing at runtime against the TRUE
+    # num_heads, so handing it the doubled value breaks that detection too.
+    o_in = _linear_in_features(getattr(attn, "o_proj", None))
+    k_out = _linear_out_features(getattr(attn, "k_proj", None))
+
+    if head_dim is None and cfg_geom is not None:
+        head_dim = cfg_geom.head_dim
+    if head_dim is None or not o_in or not k_out:
+        return cfg_geom if cfg_geom is not None else resolve_head_geometry(model.config)
+
+    head_dim = int(head_dim)
+    num_heads = int(o_in) // head_dim
+    num_kv_heads = int(k_out) // head_dim
+    if num_heads < 1 or num_kv_heads < 1 or num_heads % num_kv_heads:
+        return cfg_geom if cfg_geom is not None else resolve_head_geometry(model.config)
+
+    n_layers = len(layers)
+    hidden = cfg_geom.hidden_size if cfg_geom is not None else None
+    return HeadGeometry(
+        num_layers=n_layers,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        hidden_size=hidden,
+        attn_out_dim=num_heads * head_dim,
+        num_kv_groups=num_heads // num_kv_heads,
+    )
+
+
+def dkv_layer_indices(layers):
+    """Indices of the layers DKV compresses, as a list.
+
+    Per-layer eligibility is is_dkv_attention_layer(); this adds the one rule
+    that cannot be decided from a single layer:
+
+      A LAYER WHOSE UNABRIDGED K/V ANOTHER LAYER CONSUMES MUST STAY NATIVE.
+
+    Gemma 4 shares KV across layers -- gemma-4-e2b-it's layers 15..34 read
+    `shared_kv_states[layer_type]`, which the last non-sharing layer of that
+    type publishes under `store_full_length_kv`. Compressing the publisher
+    breaks the consumers outright:
+
+        KeyError: 'full_attention'          (modeling_gemma4.py, line 1258)
+
+    because a patched layer never writes the dict. Reconstructing full-length
+    K/V there would also defeat the point -- the consumers need the whole
+    history, which is exactly what DKV throws away. So the publisher runs
+    native and DKV compresses the other global layers: on e2b that is layers
+    4 and 9 rather than 4, 9 and 14.
+
+    The exclusion is deliberately conditional on a consumer EXISTING.
+    gemma-4-12B-it sets store_full_length_kv on layer 47 but has no KV-sharing
+    layers at all, so all eight of its global layers stay compressible.
+    """
+    consumed_types = set()
+    for l in layers:
+        attn = getattr(l, "self_attn", None)
+        if getattr(attn, "is_kv_shared_layer", False) or getattr(l, "is_kv_shared_layer", False):
+            lt = getattr(attn, "layer_type", None) or getattr(l, "layer_type", None)
+            consumed_types.add(lt)
+
+    out = []
+    for i, l in enumerate(layers):
+        if not is_dkv_attention_layer(l):
+            continue
+        attn = getattr(l, "self_attn", None)
+        if getattr(attn, "store_full_length_kv", False) or getattr(l, "store_full_length_kv", False):
+            lt = getattr(attn, "layer_type", None) or getattr(l, "layer_type", None)
+            if lt in consumed_types:
+                continue
+        out.append(i)
+    return out
+
+
 def first_dkv_layer_index(layers) -> int:
     """Index of the first layer DKV actually attends — NOT model layer 0.
 
@@ -2277,10 +2578,8 @@ def first_dkv_layer_index(layers) -> int:
     to compare against 0, which is dead on any model whose layer 0 is not an
     attention layer -- see the note at the call site.
     """
-    for i, l in enumerate(layers):
-        if hasattr(l, "self_attn"):
-            return i
-    return 0        # no attention layers at all; the patch loop wraps nothing
+    _idx = dkv_layer_indices(layers)
+    return _idx[0] if _idx else 0    # nothing to compress; the loop wraps nothing
 
 
 def apply_dkv_attention_patch(model, kv_manager):
@@ -2343,7 +2642,13 @@ def apply_dkv_attention_patch(model, kv_manager):
     # Some newer HF configs (e.g. Qwen3.5, other composite/multimodal models)
     # nest the text-decoder fields under `text_config` instead of exposing
     # them flat on `model.config` -- fall back to that before giving up.
-    _geom                 = resolve_head_geometry(model.config)
+    # From the LIVE layers, not the config: on a hybrid these differ, and it is
+    # this geometry that dkv_forward closes over to reshape K/V. Gemma 4's config
+    # describes its sliding layers (head_dim 256) while the layers patched below
+    # are the global ones (512), which is what raised
+    #     RuntimeError: shape '[1, 1025, 1, 256]' is invalid for input of size 524800
+    # -- exactly 2x -- once the config and layer-tree fixes let it get this far.
+    _geom                 = resolve_attn_geometry(model)
     num_heads             = _geom.num_heads
     num_key_value_heads   = _geom.num_kv_heads
     hidden_size           = _geom.hidden_size
@@ -2428,11 +2733,15 @@ def apply_dkv_attention_patch(model, kv_manager):
     _decoder_layers = resolve_decoder_layers(model)
     _first_dkv_layer = first_dkv_layer_index(_decoder_layers)
 
+    _dkv_targets = set(dkv_layer_indices(_decoder_layers))
     for i, layer in enumerate(_decoder_layers):
-        if not hasattr(layer, "self_attn"):
-            # Non-attention layer (linear/gated-delta-net) in a hybrid
-            # architecture -- no KV cache here for DKV to intercept, leave
-            # its native forward untouched.
+        if i not in _dkv_targets:
+            # Not a layer DKV compresses. Three cases, all left on their native
+            # forward: a non-attention layer (linear/gated-delta-net) with no KV
+            # cache to intercept; a bounded sliding-window layer, whose KV is
+            # already capped by its window and whose head_dim differs from the
+            # global layers'; and a cross-layer KV-sharing layer with no k_proj
+            # of its own. See is_dkv_attention_layer.
             continue
 
         def make_dkv_forward(captured_layer_idx):
@@ -2889,7 +3198,17 @@ def apply_dkv_attention_patch(model, kv_manager):
                 else:
                     query_states = self.q_proj(hidden_states)
                     key_states   = self.k_proj(hidden_states)
-                    value_states = self.v_proj(hidden_states)
+                    # v_proj MAY NOT EXIST. Gemma 4's global layers set
+                    # `use_alternative_attention`, which leaves `v_proj = None`
+                    # and aliases V onto the RAW k_proj output -- all eight
+                    # global layers of gemma-4-12B-it do this, and calling it
+                    # raised `TypeError: 'NoneType' object is not callable`.
+                    # Alias the PRE-norm, PRE-RoPE key exactly as the model's own
+                    # attention does; key_states is rebound by k_norm below, so
+                    # value_states keeps referencing the unmodified tensor.
+                    value_states = (self.v_proj(hidden_states)
+                                    if getattr(self, "v_proj", None) is not None
+                                    else key_states)
 
                 # Gated-attention variants (Qwen3-Next/Qwen3.5-style) pack [query | gate]
                 # per head into q_proj's output (2x width): reshape to (..., n_heads,
@@ -2918,10 +3237,29 @@ def apply_dkv_attention_patch(model, kv_manager):
                     query_states = self.q_norm(query_states)
                 if hasattr(self, "k_norm"):
                     key_states = self.k_norm(key_states)
+                # v_norm is real on Gemma 4 and absent on Qwen/Llama. Skipping it
+                # does not change any SHAPE, so it would have produced quietly
+                # wrong values rather than an error.
+                if getattr(self, "v_norm", None) is not None:
+                    value_states = self.v_norm(value_states)
 
                 # --- RoPE ---
                 if position_embeddings is None:
-                    cos, sin = self.rotary_emb(value_states, position_ids)
+                    # Same per-layer-type RoPE argument as _resolve_rotary_emb
+                    # binds; here `self` IS the attention layer, so its own
+                    # layer_type is authoritative.
+                    _lt = getattr(self, "layer_type", None)
+                    if _lt is not None:
+                        try:
+                            import inspect as _insp
+                            if "layer_type" in _insp.signature(self.rotary_emb.forward).parameters:
+                                cos, sin = self.rotary_emb(value_states, position_ids, layer_type=_lt)
+                            else:
+                                cos, sin = self.rotary_emb(value_states, position_ids)
+                        except (TypeError, ValueError):
+                            cos, sin = self.rotary_emb(value_states, position_ids)
+                    else:
+                        cos, sin = self.rotary_emb(value_states, position_ids)
                 else:
                     cos, sin = position_embeddings
                 unrot_key_states = key_states.clone()

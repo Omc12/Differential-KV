@@ -64,7 +64,7 @@ def _auto_from_pretrained(model_id, **kwargs):
     (the vision-language wrapper) while its `text_config.model_type` is
     `ministral3`, a perfectly ordinary dense GQA decoder that DKV supports.
     AutoModelForImageTextToText loads the composite, and every geometry and
-    layer lookup downstream goes through resolve_head_geometry() /
+    layer lookup downstream goes through resolve_attn_geometry() /
     resolve_decoder_layers(), which unwrap to the text decoder -- so nothing
     after this point needs to know which auto class produced the model.
 
@@ -86,8 +86,8 @@ def _auto_from_pretrained(model_id, **kwargs):
 from native_core.kv_runtime_manager import KVRuntimeManager
 
 from native_core.sparse_decode.triton_fused_decode import TritonDKV
-from runtime.dkv_attention import (apply_dkv_attention_patch, resolve_head_geometry,
-                                   resolve_decoder_layers)
+from runtime.dkv_attention import (apply_dkv_attention_patch, resolve_decoder_layers,
+                                   resolve_attn_geometry)
 from runtime.dkv_backend import register_dkv_backend, bind_kv_manager
 from serving.query_span import extract_query_token_ids as _extract_query_token_ids
 from serving.query_span import pinned_blocks_from_prompt as _pinned_blocks_from_prompt
@@ -904,7 +904,7 @@ class PyTorchDKVHFWrapper:
                     except Exception as e:
                         print(f"[DKV] WARNING: Failed to apply torchao weight quantization: {e}")
 
-        # Geometry comes from resolve_head_geometry() and nowhere else. It
+        # Geometry comes from resolve_attn_geometry() and nowhere else. It
         # applies the two rules this block used to get wrong, one at a time:
         #
         #   READ head_dim, DO NOT DERIVE IT -- Qwen3.5-4B is 2560 // 16 = 160
@@ -924,7 +924,13 @@ class PyTorchDKVHFWrapper:
         #   AutoModelForCausalLM hands back a ForConditionalGeneration whose
         #   .config is the composite. Qwen3.5 masked this: it maps to
         #   Qwen3_5ForCausalLM, whose config_class is the flat text config.
-        _geom = resolve_head_geometry(self.model.config)
+        #   USE THE LAYERS DKV ACTUALLY COMPRESSES -- on a hybrid, the config
+        #   describes the wrong ones. Gemma 4's global layers carry head_dim 512
+        #   and (on 12B) 1 KV head, while text_config reports the sliding layers'
+        #   256 and 8. resolve_attn_geometry reads the first layer the patch loop
+        #   will really wrap; it falls back to the config geometry on any
+        #   uniform model, so nothing else changes.
+        _geom = resolve_attn_geometry(self.model)
         self.num_layers = _geom.num_layers
         self.heads = _geom.num_heads
         self.head_dim = _geom.head_dim
@@ -1100,7 +1106,7 @@ class PyTorchDKVHFWrapper:
                 # so the JIT was silently warmed for a 32-head 4096-hidden model
                 # regardless of what was actually loaded -- no error, just the
                 # wrong kernels cached. Prefer self.head_dim et al, which
-                # resolve_head_geometry() has already resolved correctly above.
+                # resolve_attn_geometry() has already resolved correctly above.
                 _H      = self.heads
                 _kv_H   = self.kv_heads
                 _D      = self.head_dim
