@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import math
 import os
 import threading
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, NamedTuple
 from native_core.sparse_decode.triton_fused_decode import (
     TritonDKV,
     native_triton_sparse_attn_decode,
@@ -49,6 +49,143 @@ def _ingest_k(rot_k, unrot_k):
     Routing through one helper means the two sides cannot silently disagree again.
     """
     return rot_k if _pool_rotated_k() else unrot_k
+
+
+class HeadGeometry(NamedTuple):
+    """Decoder attention geometry, read from config -- never guessed."""
+    num_layers: Optional[int]
+    num_heads: int
+    num_kv_heads: int
+    head_dim: int
+    hidden_size: Optional[int]
+    attn_out_dim: int     # num_heads * head_dim == o_proj.in_features
+    num_kv_groups: int
+
+
+def resolve_text_config(config):
+    """Return the sub-config that actually carries the text-decoder fields.
+
+    Composite/multimodal configs nest the decoder geometry under `text_config`
+    and expose NOTHING flat on the top-level object. Measured against
+    transformers 5.14.1: `Gemma4Config`, `Gemma4UnifiedConfig`, `Qwen3_5Config`
+    and `Mistral3Config` all raise AttributeError for num_hidden_layers,
+    num_attention_heads, head_dim, hidden_size AND num_key_value_heads.
+
+    Why this bites unevenly, and why Qwen3.5 hid it: the breakage is decided by
+    which class `AutoModelForCausalLM` maps the config to, not by the family.
+    `Qwen3_5Config` maps to `Qwen3_5ForCausalLM`, whose `config_class` is the
+    FLAT `Qwen3_5TextConfig`, so `model.config` is already unwrapped and every
+    Qwen3.5 run in this repo worked. `Gemma4Config` maps to
+    `Gemma4ForConditionalGeneration`, which keeps the composite -- so Gemma 4
+    fails while the repo's default model does not, and no amount of testing on
+    the default would ever surface it.
+    """
+    cfg = config
+    if cfg is not None and not hasattr(cfg, "num_attention_heads"):
+        for _attr in ("text_config", "llm_config", "language_config", "decoder_config"):
+            _sub = getattr(cfg, _attr, None)
+            if _sub is not None and hasattr(_sub, "num_attention_heads"):
+                return _sub
+    return cfg
+
+
+def resolve_head_geometry(config) -> HeadGeometry:
+    """Single source of truth for head geometry. Do not inline these reads.
+
+    Two rules are baked in here because both were violated in separate places
+    and each cost a silently-wrong run:
+
+      1. UNWRAP the composite config first (see resolve_text_config).
+      2. READ head_dim; derive it only as a last resort. `hidden_size //
+         num_heads` is correct only when the model does not decouple the two,
+         and a growing number do -- google/gemma-4-12B-it is 3840 // 16 = 240
+         against a real head_dim of 256, and Qwen3.5-4B is 2560 // 16 = 160
+         against 256.
+
+    The wrong value propagates into the pool's h_dim, where write_blocks_batched
+    slices the stacked K|V at the wrong offset; that exception was caught and
+    downgraded to a CPU fallback, so the model "ran" with GPU compression
+    silently disabled. Route every site through this function so the copies
+    cannot drift apart again.
+    """
+    cfg = resolve_text_config(config)
+    if cfg is None or not hasattr(cfg, "num_attention_heads"):
+        raise AttributeError(
+            "DKV could not find the text-decoder fields on this model's config "
+            f"({type(config).__name__}). Tried the top level and text_config/"
+            "llm_config/language_config/decoder_config."
+        )
+    num_heads = int(cfg.num_attention_heads)
+    num_kv_heads = int(getattr(cfg, "num_key_value_heads", None) or num_heads)
+    hidden_size = getattr(cfg, "hidden_size", None)
+    head_dim = getattr(cfg, "head_dim", None)
+    if head_dim is None:
+        if hidden_size is None:
+            raise AttributeError(
+                "DKV found neither head_dim nor hidden_size on "
+                f"{type(cfg).__name__}; cannot determine head geometry."
+            )
+        head_dim = int(hidden_size) // num_heads
+    head_dim = int(head_dim)
+    num_layers = getattr(cfg, "num_hidden_layers", None)
+    return HeadGeometry(
+        num_layers=int(num_layers) if num_layers is not None else None,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        hidden_size=int(hidden_size) if hidden_size is not None else None,
+        attn_out_dim=num_heads * head_dim,
+        num_kv_groups=num_heads // num_kv_heads,
+    )
+
+
+def resolve_decoder_layers(model):
+    """Return the TEXT decoder's layer ModuleList.
+
+    `model.model.layers` is correct only for plain causal LMs. Multimodal
+    composites put the decoder at `model.model.language_model` and leave
+    `model.model` with no `.layers` at all -- Gemma 4 raised
+        AttributeError: 'Gemma4Model' object has no attribute 'layers'
+    on every patch site.
+
+    Do NOT "search the module tree for a .layers ModuleList" instead: on
+    google/gemma-4-e2b-it that finds THREE of them -- model.vision_tower.encoder
+    (16 layers) and model.audio_tower (12) alongside the real
+    model.language_model (35) -- and the first hit is the wrong stack. Patching
+    the vision tower would compress image-encoder KV and silently leave the text
+    decoder unpatched, which is exactly the kind of quiet wrongness this repo
+    keeps paying for.
+
+    transformers' own `get_decoder()` resolves it unambiguously and is
+    implemented for both plain and composite models; the attribute walks below
+    are only for architectures that predate it.
+    """
+    _get = getattr(model, "get_decoder", None)
+    if callable(_get):
+        try:
+            _dec = _get()
+        except Exception:
+            _dec = None
+        _layers = getattr(_dec, "layers", None)
+        if _layers is not None:
+            return _layers
+    for _path in (("model", "layers"),
+                  ("layers",),
+                  ("model", "language_model", "layers"),
+                  ("transformer", "h")):
+        _obj = model
+        for _attr in _path:
+            _obj = getattr(_obj, _attr, None)
+            if _obj is None:
+                break
+        if _obj is not None:
+            return _obj
+    raise AttributeError(
+        f"DKV could not locate the decoder layers on {type(model).__name__}. "
+        "Tried get_decoder() and model.model.layers / model.layers / "
+        "model.model.language_model.layers / model.transformer.h."
+    )
+
 
 # ── Phase 1: C++ extension fast path ─────────────────────────────────────────
 # Import dkv_core C++ extension if built. When available, the hot path uses:
@@ -2206,14 +2343,12 @@ def apply_dkv_attention_patch(model, kv_manager):
     # Some newer HF configs (e.g. Qwen3.5, other composite/multimodal models)
     # nest the text-decoder fields under `text_config` instead of exposing
     # them flat on `model.config` -- fall back to that before giving up.
-    _cfg = model.config
-    if not hasattr(_cfg, "num_attention_heads") and hasattr(_cfg, "text_config"):
-        _cfg = _cfg.text_config
-    num_heads             = _cfg.num_attention_heads
-    num_key_value_heads   = getattr(_cfg, "num_key_value_heads", num_heads)
-    hidden_size           = _cfg.hidden_size
-    head_dim              = getattr(_cfg, "head_dim", None) or (hidden_size // num_heads)
-    num_key_value_groups  = num_heads // num_key_value_heads
+    _geom                 = resolve_head_geometry(model.config)
+    num_heads             = _geom.num_heads
+    num_key_value_heads   = _geom.num_kv_heads
+    hidden_size           = _geom.hidden_size
+    head_dim              = _geom.head_dim
+    num_key_value_groups  = _geom.num_kv_groups
     # ATTENTION OUTPUT WIDTH IS NOT hidden_size. It is num_heads * head_dim --
     # o_proj's in_features -- and the two are equal only when the model does not
     # decouple them. Qwen3.5-2B does not (8 * 256 == 2048), Qwen3.5-4B does
@@ -2223,7 +2358,7 @@ def apply_dkv_attention_patch(model, kv_manager):
     # on every forward, so DKV could not run that model at all. o_proj maps this
     # width down to hidden_size immediately afterwards; hidden_size is the width
     # of what LEAVES the block, not of what the heads produce.
-    attn_out_dim          = num_heads * head_dim
+    attn_out_dim          = _geom.attn_out_dim
 
     # ── transformers-version convention detection ───────────────────────────
     # dkv_forward below must match whatever calling convention the installed
@@ -2244,7 +2379,7 @@ def apply_dkv_attention_patch(model, kv_manager):
         # linear/gated-delta-net layers with no `self_attn` at all -- layer 0 may be
         # one of those, so find the first layer that actually has self_attn instead
         # of assuming index 0.
-        _attn_layer = next(l for l in model.model.layers if hasattr(l, "self_attn"))
+        _attn_layer = next(l for l in resolve_decoder_layers(model) if hasattr(l, "self_attn"))
         _sig = _inspect.signature(type(_attn_layer.self_attn).forward)
         _params = set(_sig.parameters)
         _new_cache_convention = "past_key_values" in _params and "past_key_value" not in _params
@@ -2290,9 +2425,10 @@ def apply_dkv_attention_patch(model, kv_manager):
     # index 0"). It just was not applied to the gates. Defining it once here
     # fixes all of them together and stays correct for any architecture, rather
     # than special-casing hybrids at thirteen call sites.
-    _first_dkv_layer = first_dkv_layer_index(model.model.layers)
+    _decoder_layers = resolve_decoder_layers(model)
+    _first_dkv_layer = first_dkv_layer_index(_decoder_layers)
 
-    for i, layer in enumerate(model.model.layers):
+    for i, layer in enumerate(_decoder_layers):
         if not hasattr(layer, "self_attn"):
             # Non-attention layer (linear/gated-delta-net) in a hybrid
             # architecture -- no KV cache here for DKV to intercept, leave

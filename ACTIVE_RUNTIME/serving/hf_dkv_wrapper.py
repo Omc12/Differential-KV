@@ -49,10 +49,45 @@ import sys
 from collections import Counter
 from typing import Optional, List, Tuple, Any, Dict
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
+def _auto_from_pretrained(model_id, **kwargs):
+    """`AutoModelForCausalLM.from_pretrained`, with a composite-model fallback.
+
+    Some text models ship only under a multimodal wrapper and are simply absent
+    from the AutoModelForCausalLM mapping, so loading them raises
+
+        ValueError: Unrecognized configuration class Mistral3Config for this
+        kind of AutoModel: AutoModelForCausalLM.
+
+    mistralai/Ministral-3-8B-* is the case in hand: `model_type` is `mistral3`
+    (the vision-language wrapper) while its `text_config.model_type` is
+    `ministral3`, a perfectly ordinary dense GQA decoder that DKV supports.
+    AutoModelForImageTextToText loads the composite, and every geometry and
+    layer lookup downstream goes through resolve_head_geometry() /
+    resolve_decoder_layers(), which unwrap to the text decoder -- so nothing
+    after this point needs to know which auto class produced the model.
+
+    The fallback is deliberately narrow: only the "unrecognized configuration
+    class" ValueError is retried, so genuine load failures still surface.
+    """
+    try:
+        return AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
+    except ValueError as e:
+        if "Unrecognized configuration class" not in str(e):
+            raise
+        try:
+            from transformers import AutoModelForImageTextToText as _AutoComposite
+        except ImportError:
+            raise e
+        print(f"[DKV] {model_id}: not in the AutoModelForCausalLM mapping; "
+              f"loading via AutoModelForImageTextToText and using its text decoder.")
+        return _AutoComposite.from_pretrained(model_id, **kwargs)
 from native_core.kv_runtime_manager import KVRuntimeManager
 
 from native_core.sparse_decode.triton_fused_decode import TritonDKV
-from runtime.dkv_attention import apply_dkv_attention_patch
+from runtime.dkv_attention import (apply_dkv_attention_patch, resolve_head_geometry,
+                                   resolve_decoder_layers)
 from runtime.dkv_backend import register_dkv_backend, bind_kv_manager
 from serving.query_span import extract_query_token_ids as _extract_query_token_ids
 from serving.query_span import pinned_blocks_from_prompt as _pinned_blocks_from_prompt
@@ -766,7 +801,7 @@ class PyTorchDKVHFWrapper:
             attn_impl_kwarg["attn_implementation"] = "dkv"
 
         if device == "mps" and quantization_config is None:
-            self.model = AutoModelForCausalLM.from_pretrained(
+            self.model = _auto_from_pretrained(
                 model_id,
                 torch_dtype=torch_dtype,
                 trust_remote_code=True,
@@ -776,7 +811,7 @@ class PyTorchDKVHFWrapper:
                 **attn_impl_kwarg,
             ).to(device)
         elif device == "mps":
-            self.model = AutoModelForCausalLM.from_pretrained(
+            self.model = _auto_from_pretrained(
                 model_id,
                 torch_dtype=torch_dtype,
                 device_map="mps",
@@ -800,7 +835,7 @@ class PyTorchDKVHFWrapper:
             #
             # device_map streams each shard straight to the GPU instead. The MPS
             # and quantized branches around this one already do it this way.
-            self.model = AutoModelForCausalLM.from_pretrained(
+            self.model = _auto_from_pretrained(
                 model_id,
                 torch_dtype=torch_dtype,
                 device_map=device,
@@ -811,7 +846,7 @@ class PyTorchDKVHFWrapper:
                 **attn_impl_kwarg,
             )
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(
+            self.model = _auto_from_pretrained(
                 model_id,
                 torch_dtype=torch_dtype,
                 device_map=device,
@@ -869,29 +904,36 @@ class PyTorchDKVHFWrapper:
                     except Exception as e:
                         print(f"[DKV] WARNING: Failed to apply torchao weight quantization: {e}")
 
-        self.num_layers = self.model.config.num_hidden_layers
-        self.heads = self.model.config.num_attention_heads
-        # READ head_dim, DO NOT DERIVE IT. hidden_size // num_heads is only
-        # correct when the model does not decouple the two, and a growing number
-        # do: Qwen3.5-4B is 2560 // 16 = 160 against a real head_dim of 256, and
-        # google/gemma-4-e2b-it is 1536 // 8 = 192 against 256. The wrong value
-        # propagates into the pool's h_dim, where write_blocks_batched slices the
-        # stacked K|V at num_kv * h_dim and reshapes the V half --
-        #     RuntimeError: shape '[7, 53, 4, 160]' is invalid for input of
-        #     size 522368            (native_block_pool.py, vv = ...)
-        # because the slice cuts at 640 while the V half is really 1024 wide.
-        # This same expression already appears in its correct form at
-        # _D = getattr(_hf_cfg, "head_dim", ...) further down this file, and in
-        # runtime/dkv_attention.py -- this site was the one left behind.
-        # It also silently mis-sized the rank cap below (head_dim // 2).
-        self.head_dim = getattr(self.model.config, "head_dim", None) or (
-            self.model.config.hidden_size // self.heads)
+        # Geometry comes from resolve_head_geometry() and nowhere else. It
+        # applies the two rules this block used to get wrong, one at a time:
+        #
+        #   READ head_dim, DO NOT DERIVE IT -- Qwen3.5-4B is 2560 // 16 = 160
+        #   against a real head_dim of 256, google/gemma-4-e2b-it is 1536 // 8 =
+        #   192 against 256, and google/gemma-4-12B-it is 3840 // 16 = 240
+        #   against 256. The wrong value propagates into the pool's h_dim, where
+        #   write_blocks_batched slices the stacked K|V at num_kv * h_dim and
+        #   reshapes the V half --
+        #       RuntimeError: shape '[7, 53, 4, 160]' is invalid for input of
+        #       size 522368            (native_block_pool.py, vv = ...)
+        #   because the slice cuts at 640 while the V half is really 1024 wide.
+        #   It also silently mis-sizes the rank cap below (head_dim // 2).
+        #
+        #   UNWRAP THE COMPOSITE CONFIG -- reading these five fields straight off
+        #   `self.model.config` raised AttributeError on every Gemma 4 checkpoint
+        #   (Gemma4Config/Gemma4UnifiedConfig expose nothing flat), because
+        #   AutoModelForCausalLM hands back a ForConditionalGeneration whose
+        #   .config is the composite. Qwen3.5 masked this: it maps to
+        #   Qwen3_5ForCausalLM, whose config_class is the flat text config.
+        _geom = resolve_head_geometry(self.model.config)
+        self.num_layers = _geom.num_layers
+        self.heads = _geom.num_heads
+        self.head_dim = _geom.head_dim
         if self.rank >= self.head_dim:
             old_rank = self.rank
             self.rank = self.head_dim // 2
             print(f"[DKV] WARNING: Capping SVD rank to {self.rank}")
         
-        self.kv_heads = getattr(self.model.config, "num_key_value_heads", self.heads)
+        self.kv_heads = _geom.num_kv_heads
         self.serving_mode = config.get("serving_mode", "balanced")
         
         try:
@@ -955,7 +997,7 @@ class PyTorchDKVHFWrapper:
         # otherwise reserve slots for layers that never allocate one.
         try:
             _n_attended = sum(
-                1 for _l in self.model.model.layers
+                1 for _l in resolve_decoder_layers(self.model)
                 if hasattr(getattr(_l, "self_attn", None), "_original_forward"))
             _pool = getattr(self.manager, "native_pool", None)
             if _pool is not None and _n_attended > 0:
@@ -1052,12 +1094,16 @@ class PyTorchDKVHFWrapper:
                 from native_core.sparse_decode.triton_fused_decode import warm_up_jit
                 _cfg  = self.manager.config if hasattr(self, "manager") and self.manager else {}
                 _dtype = torch_dtype if torch_dtype in (torch.float16, torch.bfloat16) else torch.float16
-                # Read model's actual head counts from config for accurate dummy shapes
-                _hf_cfg = getattr(self.model, "config", None)
-                _H      = getattr(_hf_cfg, "num_attention_heads", 32)
-                _kv_H   = getattr(_hf_cfg, "num_key_value_heads", _H)
-                _D      = getattr(_hf_cfg, "head_dim",
-                                  getattr(_hf_cfg, "hidden_size", 4096) // max(_H, 1))
+                # Read the model's actual head counts for accurate dummy shapes.
+                # These getattr defaults used to be 32 / 4096 / 28, and on a
+                # composite config (Gemma 4, Mistral 3) every one of them missed,
+                # so the JIT was silently warmed for a 32-head 4096-hidden model
+                # regardless of what was actually loaded -- no error, just the
+                # wrong kernels cached. Prefer self.head_dim et al, which
+                # resolve_head_geometry() has already resolved correctly above.
+                _H      = self.heads
+                _kv_H   = self.kv_heads
+                _D      = self.head_dim
                 _R      = _cfg.get("rank", 16) if isinstance(_cfg, dict) else getattr(_cfg, "rank", 16)
                 # Use the manager's actual block_size, not the config value.
                 # The manager derives block_size independently (currently 64 by default);
@@ -1066,7 +1112,7 @@ class PyTorchDKVHFWrapper:
 
                 # Determine all unique ranks that can be used across layers
                 ranks_to_warm = {_R}
-                num_layers = getattr(_hf_cfg, "num_hidden_layers", 28)
+                num_layers = self.num_layers
                 try:
                     from native_core.kv_runtime_manager import get_layer_rank
                     _early_boost = getattr(_cfg, "early_layer_rank_boost", False)

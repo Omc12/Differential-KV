@@ -151,6 +151,7 @@ s_pre_load = mem_snapshot("pre-load")
 
 from native_core.kv_runtime_manager import KVRuntimeManager
 from runtime.dkv_attention import apply_dkv_attention_patch
+from runtime.dkv_attention import resolve_head_geometry
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
@@ -162,10 +163,14 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 model.eval()
 
-num_layers = model.config.num_hidden_layers
-num_heads  = model.config.num_attention_heads
-head_dim   = model.config.hidden_size // num_heads
-kv_heads   = getattr(model.config, "num_key_value_heads", num_heads)
+# Geometry via the shared resolver: this block used to derive head_dim by
+# division (wrong for Qwen3.5 and Gemma 4, which decouple it from hidden_size)
+# and read flat off model.config (AttributeError on composite configs).
+_geom      = resolve_head_geometry(model.config)
+num_layers = _geom.num_layers
+num_heads  = _geom.num_heads
+head_dim   = _geom.head_dim
+kv_heads   = _geom.num_kv_heads
 
 print(f"  Layers: {num_layers}, Heads: {num_heads}, KV-Heads: {kv_heads}, HeadDim: {head_dim}")
 
