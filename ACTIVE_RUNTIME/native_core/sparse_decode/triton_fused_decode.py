@@ -1053,14 +1053,24 @@ if HAS_TRITON:
             O_c = tl.load(out_c_ptrs).to(tl.float32)
             
             m_new = tl.maximum(m_i, m_c)
-            alpha = tl.exp(m_i - m_new)
-            beta = tl.exp(m_c - m_new)
+            # A chunk whose keys are all masked carries m_c = -inf. If the
+            # accumulator is -inf too (its initial value, or a previous empty
+            # chunk) then m_new is -inf and BOTH subtractions below are
+            # (-inf) - (-inf) = NaN, which poisons l_i and O_i for every head.
+            # An empty chunk contributes nothing, so its weight is zero. The
+            # guard is exact: when m_new is finite, exp(-inf - finite) is
+            # already 0 and needs no special case.
+            _live = m_new > -float("inf")
+            alpha = tl.where(_live, tl.exp(m_i - m_new), 0.0)
+            beta = tl.where(_live, tl.exp(m_c - m_new), 0.0)
             
             l_i = l_i * alpha + l_c * beta
             O_i = O_i * alpha + O_c * beta
             m_i = m_new
             
-        O_i = O_i / l_i
+        # Every chunk empty leaves l_i == 0, and 0/0 is NaN rather than the
+        # zero attention output that case actually means.
+        O_i = tl.where(l_i > 0.0, O_i / l_i, 0.0)
         out_ptrs = out_ptr + h_q * D + offs_d
         tl.store(out_ptrs, O_i)
         if m_final_ptr is not None:
@@ -1101,8 +1111,11 @@ if HAS_TRITON:
         O_r = tl.load(workspace_ptr + h_q * NUM_CHUNKS * D + right * D + offs_d).to(tl.float32)
 
         m_new = tl.maximum(m_l, m_r)
-        alpha = tl.exp(m_l - m_new)
-        beta  = tl.exp(m_r - m_new)
+        # Same (-inf) - (-inf) = NaN hazard as the sequential kernel: two empty
+        # chunks merged together give m_new = -inf and NaN weights.
+        _live = m_new > -float("inf")
+        alpha = tl.where(_live, tl.exp(m_l - m_new), 0.0)
+        beta  = tl.where(_live, tl.exp(m_r - m_new), 0.0)
         l_new = l_l * alpha + l_r * beta
         O_new = O_l * alpha + O_r * beta
 
@@ -3169,9 +3182,15 @@ def native_triton_sparse_attn_decode(
                 
                 workspaces = native_triton_sparse_attn_decode._workspaces_cache.get(cache_key)
                 if workspaces is None:
-                    out_workspace = torch.empty((H_q, num_chunks, D_pad), device=q.device, dtype=torch.float32)
-                    m_workspace = torch.empty((H_q, num_chunks), device=q.device, dtype=torch.float32)
-                    l_workspace = torch.empty((H_q, num_chunks), device=q.device, dtype=torch.float32)
+                    # NOT torch.empty: these are CACHED across decode steps, so
+                    # any slot a kernel does not write is read as whatever was
+                    # last in that memory. Initialised to the neutral element of
+                    # the reduction -- m = -inf, l = 0, O = 0 -- so a missed
+                    # write degrades to "this chunk was empty", which the
+                    # reduction now handles, rather than to garbage.
+                    out_workspace = torch.zeros((H_q, num_chunks, D_pad), device=q.device, dtype=torch.float32)
+                    m_workspace = torch.full((H_q, num_chunks), float("-inf"), device=q.device, dtype=torch.float32)
+                    l_workspace = torch.zeros((H_q, num_chunks), device=q.device, dtype=torch.float32)
                     workspaces = (out_workspace, m_workspace, l_workspace)
                     native_triton_sparse_attn_decode._workspaces_cache[cache_key] = workspaces
                 else:
@@ -3962,6 +3981,18 @@ def native_triton_sparse_attn_decode_combined(
                 out_workspace, m_workspace, l_workspace, out, m_out, l_out,
                 num_chunks, D_pad, H_q,
             )
+
+        if _DKV_DEBUG_NUMERICS:
+            # Where does the NaN first appear: the kernel itself, or the
+            # cross-chunk reduction? The gather inputs were already shown finite,
+            # so it is one of these two and they need separating.
+            _ws_bad = int(torch.isnan(out_workspace).sum().item())
+            _o_bad = int(torch.isnan(out).sum().item())
+            _m_bad = int(torch.isnan(m_workspace).sum().item())
+            print(f"[DKV NUMERICS] kernel out: num_chunks={num_chunks} "
+                  f"N={N} L_dense={L_dense} inv_scale={inv_scale:.6g} "
+                  f"workspace_nan={_ws_bad} m_nan={_m_bad} out_nan={_o_bad}",
+                  flush=True)
 
         if not getattr(native_triton_sparse_attn_decode_combined, "_logged", False):
             print("[DKV] Triton fused-decode COMBINED path ACTIVE (CUDA). "
