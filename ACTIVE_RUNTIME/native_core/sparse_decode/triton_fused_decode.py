@@ -166,6 +166,49 @@ def _heat_update_due() -> bool:
 # per-token sync recorded as F8 in CUDA_TRITON_AUDIT.md. Read once at import.
 _DKV_DEBUG_NUMERICS = os.environ.get("DKV_DEBUG_NUMERICS", "0") == "1"
 
+
+_ATTN_SCALE_WARNED = False
+
+
+def resolve_attn_scale(pool, D: int) -> float:
+    """The model's attention scale, or 1/sqrt(D) when it is genuinely that.
+
+    NOT a Llama-ism by default. `pool.dkv_attn_scale` is published by
+    dkv_attention.py from the attention module's own `self.scaling`, which is
+    what transformers hands every attention implementation. Falling back to
+    1/sqrt(D) is correct only for models whose scaling IS 1/sqrt(head_dim)
+    (Qwen3.5) and badly wrong for those whose is not (granite 11.3x,
+    gemma-4 22.6x).
+    """
+    s = getattr(pool, "dkv_attn_scale", None)
+    if s is None:
+        base = getattr(pool, "base_pool", None)
+        if base is not None:
+            s = getattr(base, "dkv_attn_scale", None)
+    try:
+        s = float(s) if s is not None else None
+    except (TypeError, ValueError):
+        s = None
+    if s is None or not (s > 0.0):
+        # SILENCE IS WHAT LET THIS SHIP. The scale being absent means the
+        # publish in dkv_attention.py did not run for this path or this model,
+        # and the fallback below is right for Qwen-style models and wrong by
+        # 11.3x (granite) or 22.6x (gemma-4) for others. It produced a decode
+        # that was exact on token 1 and word-salad by token 20, with every
+        # config knob inert, and no error anywhere. Say so, once.
+        global _ATTN_SCALE_WARNED
+        if not _ATTN_SCALE_WARNED:
+            _ATTN_SCALE_WARNED = True
+            print("[DKV] WARNING: no model attention scale published to the "
+                  "pool; decode is falling back to 1/sqrt(head_dim). That is "
+                  "correct ONLY if this model's attention scaling is "
+                  "1/sqrt(head_dim). It is not for granite (attention_"
+                  "multiplier) or gemma-4 (scaling=1.0), and the symptom is a "
+                  "decode that looks fine for one token and degenerates after.",
+                  flush=True)
+        return 1.0 / math.sqrt(D)
+    return s
+
 def rotate_half(x):
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
@@ -2386,7 +2429,7 @@ def _pytorch_vectorized_sparse_attn_decode(
 ) -> torch.Tensor:
     bsz, H_q, q_len, D = q.shape
     assert bsz == 1 and q_len == 1
-    inv_scale = 1.0 / math.sqrt(D)
+    inv_scale = resolve_attn_scale(pool, D)
     q_sq = q.view(H_q, D)
     
     def repeat_kv_at_dim(t, n_rep, dim):
@@ -3057,7 +3100,7 @@ def native_triton_sparse_attn_decode(
             active_len=active_len,
         )
         
-    inv_scale = 1.0 / math.sqrt(D)
+    inv_scale = resolve_attn_scale(pool, D)
     N = block_indices.shape[0] if block_indices is not None else 0
 
     # ── Features 1 & 2: Heat update + step-ahead prefetch ─────────────────
@@ -3774,7 +3817,7 @@ def native_triton_sparse_attn_decode_combined(
         return out.unsqueeze(0).unsqueeze(2).to(q.dtype)
 
     try:
-        inv_scale = 1.0 / math.sqrt(D)
+        inv_scale = resolve_attn_scale(pool, D)
         q_sq = q[0, :, 0, :]  # [H_q, D]
 
         D_pad   = triton.next_power_of_2(D)
@@ -3839,6 +3882,38 @@ def native_triton_sparse_attn_decode_combined(
                 pool_for_kernel, block_indices, anchor_indices, cos, sin)
             if gather_cache is not None and gather_key is not None:
                 gather_cache[gather_key] = (pool_for_kernel, g)
+
+        # ── Non-finite audit of the SHARED reconstruction inputs ────────────
+        # The decode bisect localized the defect here rather than in either
+        # attention implementation: noremat (project-then-attend) returns NaN
+        # while remat (materialise-then-SDPA) returns KL 3.63, and neither
+        # DKV_SPARSE_BIAS, DKV_DECODE_CACHE nor DKV_ROTATED_POOL moves either.
+        # What both read is `g`. The pre-existing reporter is in
+        # fused_decode_mps, which never executes on CUDA, so this path had no
+        # visibility at all.
+        if _DKV_DEBUG_NUMERICS:
+            _bad = []
+            for _k, _v in g.items():
+                if not isinstance(_v, torch.Tensor) or not _v.is_floating_point():
+                    continue
+                if _v.numel() == 0:
+                    continue
+                _nan = int(torch.isnan(_v).sum().item())
+                _inf = int(torch.isinf(_v).sum().item())
+                if _nan or _inf:
+                    _bad.append(f"{_k}[{tuple(_v.shape)}] nan={_nan} inf={_inf}")
+            if _bad:
+                print("[DKV NUMERICS] non-finite in gathered pool inputs: "
+                      + "; ".join(_bad), flush=True)
+            else:
+                _rep = []
+                for _k in ("anchors_K", "anchors_V", "V_K", "V_V", "U",
+                           "res_k", "res_v"):
+                    _v = g.get(_k)
+                    if isinstance(_v, torch.Tensor) and _v.numel():
+                        _f = _v.float()
+                        _rep.append(f"{_k} |max|={_f.abs().max().item():.3e}")
+                print("[DKV NUMERICS] gather finite; " + " ".join(_rep), flush=True)
 
         # ── Dense window tensors ──
         # Caller provides pre-RoPE-rotated dense_k/dense_v as [1, H_kv, L_dense, D].

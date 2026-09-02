@@ -349,6 +349,7 @@ def attend_with_remat(
     extra: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
     curr_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     dense_mask: Optional[torch.Tensor] = None,
+    attn_scale: Optional[float] = None,
 ) -> torch.Tensor:
     """One plain attention over [materialised routed blocks | dense window].
 
@@ -536,9 +537,13 @@ def attend_with_remat(
                    os.environ.get("DKV_DET_BACKEND", "math"), SDPBackend.MATH)
         with sdpa_kernel(_bk):
             return torch.nn.functional.scaled_dot_product_attention(
-                q, K_all, V_all, attn_mask=attn_mask)
+                q, K_all, V_all, attn_mask=attn_mask, scale=attn_scale)
+    # `scale=None` is torch's own default (1/sqrt(E)), so passing it through is
+    # a no-op for models where that is right and a correction where it is not.
+    # Leaving it unset asserted 1/sqrt(head_dim) for every model, which is
+    # 11.3x too hot on granite and 22.6x on gemma-4.
     return torch.nn.functional.scaled_dot_product_attention(
-        q, K_all, V_all, attn_mask=attn_mask)                    # [1, H_q, 1, D]
+        q, K_all, V_all, attn_mask=attn_mask, scale=attn_scale)  # [1, H_q, 1, D]
 
 
 if __name__ == "__main__":

@@ -1380,9 +1380,18 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             "bi": None if block_indices is None else block_indices.data_ptr(),
             "mask": None if dense_mask is None else dense_mask.data_ptr(),
         }
+    # THE MODEL'S SCALE, not SDPA's default. attend_with_remat ends in a plain
+    # scaled_dot_product_attention, and torch defaults that to 1/sqrt(E) -- which
+    # is 11.3x too hot on granite (attention_multiplier 0.0078125) and 22.6x on
+    # gemma-4. Published onto the pool by the forward above; None here means
+    # "torch's default", which is correct for models whose scaling IS 1/sqrt(d).
+    _scale = getattr(pool, "dkv_attn_scale", None)
+    if _scale is None:
+        _scale = getattr(kv_manager, "dkv_attn_scale", None)
     out = _awr(q, _Km, _Vm, _seq_cached, dense_k, dense_v, dense_len,
                num_key_value_groups, trace_row=_trace_row, trace_tok=_trace_tok,
-               extra=_extra, curr_kv=curr_kv, dense_mask=dense_mask)
+               extra=_extra, curr_kv=curr_kv, dense_mask=dense_mask,
+               attn_scale=_scale)
     # Advance once per token, on the LAST DKV layer. _LAST_DKV_LAYER learns the
     # max layer index by watching layers go by, so on the FIRST token it equals
     # the current layer at every layer; only advance once it has stopped growing.
@@ -2825,6 +2834,22 @@ def apply_dkv_attention_patch(model, kv_manager):
                 attn_scale = getattr(self, "scaling", None)
                 if attn_scale is None:
                     attn_scale = 1.0 / math.sqrt(head_dim)
+
+                # PUBLISH IT TO THE DECODE KERNELS. They receive `pool` and
+                # never this module, and every one of them asserted
+                # 1/sqrt(head_dim) on its own -- so fixing the scale here left
+                # decode running 11.3x too hot on granite while prefill was
+                # exact. That is the whole shape of the token-1-perfect /
+                # token-2-broken signature.
+                try:
+                    _mgr = kv_manager
+                    if _mgr is not None:
+                        _mgr.dkv_attn_scale = attn_scale
+                        _np = getattr(_mgr, "native_pool", None)
+                        if _np is not None:
+                            _np.dkv_attn_scale = attn_scale
+                except Exception:                                # noqa: BLE001
+                    pass
 
                 # Zero-overhead bypass check
                 is_decode = (use_cache and q_len == 1)
