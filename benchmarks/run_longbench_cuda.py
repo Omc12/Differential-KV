@@ -79,6 +79,13 @@ DEFAULT_DATASETS = ["qasper", "narrativeqa", "hotpotqa", "multifieldqa_en",
 # The authors' own exclusion list: chat models score better WITHOUT a chat
 # template on these, so pred.py skips it.
 NO_CHAT_TEMPLATE = {"trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"}
+
+# Whether cl.exe was available, i.e. whether Inductor could actually compile the
+# decode path. Recorded PER RECORD rather than in the run config on purpose:
+# quality is identical either way ("correct but unfused"), so quality rows from
+# fused and unfused runs may be pooled, but LATENCY rows may not. Putting it in
+# the config would instead invalidate perfectly good quality data on resume.
+MSVC_OK = False
 # eval.py keeps only the first line for these.
 FIRST_LINE_ONLY = {"trec", "triviaqa", "samsum", "lsht"}
 
@@ -573,6 +580,12 @@ def compare_files(paths: List[str]) -> None:
 
 
 def main():
+    # Before ANY torch.compile: without cl.exe on PATH the Inductor
+    # decode path falls back to eager and every latency number here
+    # understates DKV. Quality is unaffected; timings are not.
+    from msvc_env import ensure_msvc
+    global MSVC_OK
+    MSVC_OK = ensure_msvc()
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="ibm-granite/granite-4.2-8b")
     ap.add_argument("--arm", default="dkv",
@@ -763,6 +776,7 @@ def main():
         # from the ids it actually fed the model, which is the authoritative
         # count if the two ever disagree.
         fields = {"dataset": ds, "idx": i, "prompt_tokens": ntok,
+                  "inductor_fused": MSVC_OK,
                   "answers": row.get("answers", []),
                   "all_classes": row.get("all_classes"),
                   "length": row.get("length")}

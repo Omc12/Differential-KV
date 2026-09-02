@@ -272,6 +272,11 @@ def report(paths: List[str]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
+    # Before ANY torch.compile: without cl.exe on PATH the Inductor
+    # decode path falls back to eager and every latency number here
+    # understates DKV. Quality is unaffected; timings are not.
+    from msvc_env import ensure_msvc
+    ensure_msvc()
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="ibm-granite/granite-4.2-8b")
     ap.add_argument("--arms", nargs="+", default=["dense", "dkv"])

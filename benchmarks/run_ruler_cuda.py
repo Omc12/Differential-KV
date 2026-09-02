@@ -62,6 +62,10 @@ TASK_FAMILY = {
 
 RULER_13 = list(TASK_FAMILY)
 
+# See run_longbench_cuda.MSVC_OK: per-record, not per-config, because quality is
+# unaffected by the fused/unfused split but latency is.
+MSVC_OK = False
+
 
 def official_metric_fns():
     sys.path.insert(0, os.path.join(OFFICIAL, "eval", "synthetic"))
@@ -254,6 +258,12 @@ def compare_files(paths):
 
 
 def main():
+    # Before ANY torch.compile: without cl.exe on PATH the Inductor
+    # decode path falls back to eager and every latency number here
+    # understates DKV. Quality is unaffected; timings are not.
+    from msvc_env import ensure_msvc
+    global MSVC_OK
+    MSVC_OK = ensure_msvc()
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="ibm-granite/granite-4.2-8b")
     ap.add_argument("--data", default="")
@@ -406,7 +416,7 @@ def main():
             continue
 
         fields = {"task": it["task"], "length": it["length"], "idx": it["idx"],
-                  "outputs": it["outputs"]}
+                  "outputs": it["outputs"], "inductor_fused": MSVC_OK}
         fields.update(rec)
         store.append(key, **fields)
         el = time.time() - t_start
