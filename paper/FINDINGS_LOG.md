@@ -590,6 +590,58 @@ dense and means nothing.
 
 ---
 
+## 4b. Scope decisions — what was NOT run, and why
+
+Recorded so a reviewer (or a later session) can see these were budget decisions
+with stated reasons, not gaps that were quietly left.
+
+### 4b.1 RULER runs 4 arms, not the 9 LongBench uses
+
+RULER is 1,040 items per arm at 4k/8k/16k/32k. The dense arm alone took **~2
+hours**; seven arms is 10–12 h at 32k and considerably worse at 64k, where
+items run several times slower. The full matrix as originally scoped was **20+
+GPU-hours** on a single desktop card.
+
+**Kept**, because each answers something still open:
+
+| arm | why |
+|---|---|
+| dense | the reference every delta is measured against |
+| dkv_mid, dkv_high | the core quality-at-length question, and the preset ladder |
+| snapkv | the one competitor that beat DKV at 12k (+0.34, n.s.) |
+
+**Dropped at RULER lengths**, with the reason each is already answered:
+
+| arm | why it was cut |
+|---|---|
+| h2o | tracks snapkv closely at 12k (−0.78 vs +0.34) and shares its observation-window mechanism, so snapkv already represents attention-observation eviction |
+| streamingllm | characterised at 12k (−8.96) and consistently the weakest eviction arm; nothing about length changes that reading |
+| kivi2 | catastrophic everywhere (−27.83 at 12k); a second confirmation is not worth 2 h |
+
+**At 64k, only dense and DKV run.** §1.2 already measured that snapkv and
+streamingllm spill at 65,536 *exactly where dense does*, because eviction is
+post-hoc and must materialise the full KV before pruning. Running them at 64k
+would measure paging, not the method — their latency would be PCIe bandwidth
+and their peak partly host memory. Dense is still run there (spilled) because
+**spilling costs speed, not correctness**, so its quality remains a valid
+reference.
+
+Net effect: ~20 h → ~5 h, and nothing the paper claims depends on the cut arms.
+
+`RULER_ARMS` selects the set, so any dropped arm can be added later without
+touching the script.
+
+### 4b.2 What this costs
+
+Honest statement of the limitation: the RULER tables carry **one** competitor
+(SnapKV) rather than four. If a reviewer asks how H2O or KIVI behaves at 32k,
+the answer is that it was not measured and the 12k reading was extrapolated.
+That is a defensible trade at 20 GPU-hours, but it is a trade, and the paper
+should say so rather than presenting a 4-arm table as if it were the whole
+comparison.
+
+---
+
 ## 5. Open
 
 - **`noremat` returns NaN.** The project-then-attend Triton path
