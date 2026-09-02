@@ -140,6 +140,63 @@ That makes **residual budget** (the tokens DKV stores exactly) the lever, not
 rank. See §4.1 for the evidence that it is already the lever separating `mid`
 from `high`.
 
+### 1.4 SnapKV and H2O see the question; DKV does not
+
+**Status: CORRELATIONAL. The causal test is queued, not yet run.** Written down
+now because it qualifies every number in §1.1.
+
+SnapKV and H2O rank prefix tokens by attention from an **observation window** —
+the last 32 prompt tokens. In LongBench's format that window contains the
+question verbatim. Measured, granite, qasper:
+
+    "...Do not provide any explanation.  Question: How is the ground truth
+     for fake news established?  Answer:"
+
+So they choose which context to keep **while looking at the question**. DKV
+compresses during prefill and never sees it — `query_text` is deliberately
+withheld from it so the arms have equal information. The asymmetry runs the
+opposite way from the one that was being guarded against.
+
+Grouping §1.1 by whether the query falls inside that window:
+
+| task | query in window? | dense | snapkv | dkv/high | **snapkv − dense** |
+|---|---|---|---|---|---|
+| multifieldqa_en | yes | 43.84 | 45.23 | 36.10 | **+1.39** |
+| hotpotqa | yes | 30.01 | 31.34 | 30.03 | **+1.33** |
+| qasper | yes | 42.60 | 43.49 | 36.00 | **+0.89** |
+| narrativeqa | yes | 23.56 | 24.15 | 24.40 | **+0.59** |
+| passage_retrieval_en | **no** (query is the abstract, mid-prompt) | 85.00 | 85.00 | 85.00 | **0.00** |
+| gov_report | **no** (summarise — no query at all) | 31.60 | 29.48 | 28.76 | **−2.12** |
+
+**SnapKV beats dense on every task whose window holds the query, ties exactly
+where it does not, and loses where there is no query at all.** It also explains
+DKV's two worst tasks: `qasper` and `multifieldqa` are precisely where a
+query-aware method can pre-select the relevant spans and a query-agnostic one
+cannot. Note `narrativeqa` is the one query-in-window task where DKV still
+edges SnapKV (24.40 vs 24.15), so the pattern is strong but not absolute.
+
+**The causal test** (`--query-first`, queued) moves the question block ahead of
+the context so the window sees only the document tail. LongBench templates are
+`\n\n`-separated blocks, so this is a reordering, not a rewrite: same words,
+same instructions, same trailing answer cue, and verified **identical token
+count** (qasper 4,104 either way). It changes identically for every arm. If
+SnapKV's edge over dense collapses, the advantage was placement rather than the
+eviction policy.
+
+**What this does NOT license.** Even if the effect is confirmed, SnapKV's
+numbers in §1.1 are not invalid — LongBench puts the question last, that is the
+benchmark's own format, and SnapKV is being run exactly as its paper specifies.
+The correct conclusion would be narrower: *query-aware eviction beats
+query-agnostic compression when the query is known at compression time.*
+
+**Why that narrowing matters for a systems paper.** SnapKV's advantage
+*requires* the query at compression time. Under prefix caching or multi-turn
+serving, a context is compressed ONCE and reused across many queries — an
+eviction method would have to re-run selection per query, re-materialising the
+full KV each time, which is the same cost that caps its context ceiling
+(§1.2). DKV compresses once and serves any query. That is a real deployment
+distinction and it should be stated whichever way the experiment lands.
+
 ---
 
 ## 2. Correctness bugs found and fixed
