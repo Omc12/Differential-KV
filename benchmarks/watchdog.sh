@@ -57,10 +57,22 @@ while true; do
   #    string appears and it launches an arm alongside the live campaign. Two
   #    were found this way. Counts DISTINCT chain scripts; a parent/child bash
   #    pair of the same script is normal and is not double-counted.
-  chains=$(tasklist //FI "IMAGENAME eq bash.exe" //FO CSV //NH 2>/dev/null | wc -l)
-  distinct=$(ps -W 2>/dev/null | grep -o 'chain_[a-z]*\.sh' | sort -u | wc -l)
-  if [ "${distinct:-0}" -gt 2 ]; then
-    echo "WATCHDOG: $distinct distinct chain scripts alive — expected at most 2 (main + tail); an orphan may fire unexpectedly"
+  # EXPECTED_CHAINS is the number of chains deliberately queued and waiting.
+  # Staged chains are normal here: each waits on the previous one's completion
+  # marker, so several are alive at once by design and only ONE ever holds the
+  # GPU. A threshold that ignores that fires on a healthy campaign, which is
+  # worse than not checking -- an alarm nobody believes is an alarm nobody
+  # reads. Set EXPECTED_CHAINS when the queue changes.
+  distinct=$(ps -W 2>/dev/null | grep -o 'chain_[a-z0-9_]*\.sh' | sort -u | wc -l)
+  if [ "${distinct:-0}" -gt "${EXPECTED_CHAINS:-3}" ]; then
+    echo "WATCHDOG: $distinct distinct chain scripts alive, expected ${EXPECTED_CHAINS:-3} — an orphan from a killed chain may fire unexpectedly"
+  fi
+
+  # 4b. THE CHECK THAT ACTUALLY MATTERS: more than one GPU worker. Chains are
+  #     harmless while they wait; two python processes on one card are not.
+  workers=$(tasklist //FI "IMAGENAME eq python.exe" //FO CSV //NH 2>/dev/null | grep -c python || echo 0)
+  if [ "${workers:-0}" -gt 1 ]; then
+    echo "WATCHDOG: $workers python workers running at once — they share one GPU and every memory/latency number either records is contended"
   fi
 
   # 5. A finished campaign is worth one line.
