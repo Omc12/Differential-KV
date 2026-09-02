@@ -130,3 +130,13 @@ paper/results/ruler_data/
 # so the *.jsonl negations above silently did nothing for that folder and every
 # LongBench result was untracked. Un-exclude the directory itself.
 !paper/results/longbench/
+
+# Same trap as LongBench/ above: `RULER/` at line 62 was meant for a vendored
+# checkout of the benchmark repo, and core.ignorecase makes it swallow
+# paper/results/ruler. Git will not re-include a file whose parent DIRECTORY is
+# excluded, so the *.jsonl negations did nothing here either.
+!paper/results/ruler/
+
+# Fidelity logs are the KL-vs-dense evidence behind the correctness claims.
+!paper/results/fidelity_q4/
+!paper/results/**/*.log

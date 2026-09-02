@@ -255,6 +255,65 @@ It also means the honest Pareto statement is: DKV's compression/quality curve on
 extractive QA runs from 1.7× at −7.2 to 0.8× at parity — i.e. it does not
 contain a point that is both compressed and dense-quality on these two tasks.
 
+### 1.6 RULER: parity on 10 of 13 tasks, and a nameable failure mode
+
+**Partial — Qwen3.5-4B, dense complete (1040/1040), dkv/mid at 4k/8k/16k
+complete, 32k still running. Five arms not yet started.**
+
+RULER generates the same task at exact context lengths, so a method can be
+watched as context grows. 13 task types, scored 0-100 by the authors' own
+`string_match_all` / `string_match_part`.
+
+| task | what it tests | 8k dense | 8k DKV | 16k dense | 16k DKV |
+|---|---|---|---|---|---|
+| niah_single_1 | 1 needle in random noise | 100 | 100 | 100 | 100 |
+| niah_single_2 | 1 needle in real essays | 100 | 100 | 100 | 100 |
+| niah_single_3 | 1 needle, value is a UUID | 100 | 95 | 100 | 100 |
+| niah_multikey_1 | needle + 3 distractor keys, in essays | 100 | 100 | 100 | 100 |
+| **niah_multikey_2** | **haystack IS other needles (lookalikes)** | 100 | **30** | 100 | **20** |
+| **niah_multikey_3** | **lookalike haystack, keys+values UUIDs** | 100 | **50** | 100 | **25** |
+| niah_multivalue | 1 key, 4 values to recall | 100 | 95 | 99 | 100 |
+| niah_multiquery | 1 key asked 4 times | 100 | 100 | 100 | 99 |
+| vt | chain of variable assignments | 0 | 0 | 0 | 0 |
+| cwe | 10 most frequent words | 42 | 43 | 58 | 54 |
+| fwe | 3 most frequent words | 95 | 95 | 98 | 95 |
+| **qa_1** | **QA quoting an exact span (SQuAD)** | 90 | **65** | 90 | **65** |
+| qa_2 | multi-hop QA (HotpotQA) | 60 | 50 | 50 | 50 |
+
+Aggregate at these lengths is −8.34 [−10.21, −6.51], but that number is
+misleading on its own: **DKV is at dense parity on 10 of 13 tasks**, including
+every basic needle-retrieval task at a perfect 100 even at 16k. The deficit is
+three tasks.
+
+**The three that fail share a property.** `niah_multikey_2` and `_3` are the
+only tasks whose `type_haystack` is `needle` — the haystack is built out of
+*other needles*, hundreds of near-identical sentences, so the job is
+discriminating one key among lookalikes. `_3` additionally uses **UUIDs** for
+both key and value: maximum-entropy strings with no pattern to reconstruct.
+`qa_1` requires quoting an exact span.
+
+The control is `niah_multikey_1`, which also has distractor keys but places them
+in ordinary essay text: **100 → 100**. The moment the distractors become
+lookalikes, DKV drops to 20.
+
+**So the failure mode is nameable: DKV preserves semantic LOCATION but loses
+fine discrimination among near-identical items, and exact reproduction of
+high-entropy tokens.** Low-rank compression keeps the gist of a block; it does
+not keep the digits.
+
+This is the same conclusion §1.3 reached from LongBench by a different route —
+parity on `passage_retrieval` (30 *distinct* paragraphs, 85.00 = dense) and a
+deficit on single-document extractive QA. Two independent benchmarks, one
+mechanism. It is also what §1.5 predicts, since the residual budget is exactly
+the store of bit-exact tokens.
+
+**Two reading notes.** `vt` is 0 for BOTH arms — the model cannot do variable
+tracking at all, so that row says nothing about compression and must not be
+counted as a DKV failure. And the 4k column (not shown) is identical for both
+arms on all 13 tasks, because DKV does not engage below ~4,970 tokens (§4.4) —
+a useful built-in control that the harness and scoring are not themselves
+introducing a gap.
+
 ---
 
 ## 2. Correctness bugs found and fixed
