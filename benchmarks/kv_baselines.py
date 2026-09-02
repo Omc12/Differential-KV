@@ -56,6 +56,26 @@ WHAT IS FAITHFUL AND WHAT IS NOT — read before quoting any number
 
 `kv_footprint_realized` on every returned record says which of the two a given
 method's memory number is, so a plotting script cannot mix them by accident.
+
+DO NOT PUT snapkv/h2o LATENCY IN A LATENCY TABLE
+------------------------------------------------
+Both need real attention weights, so the model must be loaded with
+attn_implementation="eager". Eager attention is far slower than SDPA at long
+context for reasons that have nothing to do with either method: measured here
+on granite-4.2-8b at ~12k, dense/SDPA ran 11 s per item and SnapKV 55 s, a 5x
+gap that is almost entirely the attention implementation.
+
+A real deployment would not pay this -- it would fuse the observation-window
+scores into the prefill kernel, or read them from a backend that returns them.
+So the honest reading is:
+
+    quality        comparable across every arm
+    KV footprint   comparable across every arm
+    TTFT / prefill NOT comparable between the eager arms (snapkv, h2o) and the
+                   SDPA arms (dense, streamingllm, kivi*, int8_kv, DKV)
+
+`attn_eager` is set on every returned record so a plotting script can separate
+them without having to remember which methods those are.
 """
 
 from __future__ import annotations
@@ -376,6 +396,10 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
         "kv_dense_equiv_gb": dense_kv_gb,
         "kv_compression_x": (dense_kv_gb / phys_gb) if phys_gb > 0 else 0.0,
         "kv_footprint_realized": method in _REALIZED,
+        # True when this arm had to run eager attention to see attention
+        # weights. Its prefill/TTFT is then NOT comparable to an SDPA arm's --
+        # see the note at the top of this file.
+        "attn_eager": needs_eager(method),
         "gen_tokens": len(gen_ids),
         "text": tokenizer.decode(gen_ids, skip_special_tokens=True),
     }
