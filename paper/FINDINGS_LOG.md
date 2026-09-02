@@ -260,6 +260,42 @@ can only help. Truncation is also not a legitimate protocol: it drops dense's
 gov_report from 31.60 to 9.70. (All pre-scale-fix; retained as the record of how
 the question was settled.)
 
+### 3.8 LongBench cannot test long context — measure its lengths before believing it can
+
+Prompt lengths over LongBench's own data, Qwen3.5-4B tokenizer, before any
+truncation:
+
+| task | median | p90 | max | > 32k |
+|---|---|---|---|---|
+| narrativeqa | **31,740** | 62,035 | 67,724 | 85/200 |
+| hotpotqa | 15,108 | 17,085 | 17,800 | 0 |
+| passage_retrieval_en | 12,770 | 14,414 | 15,549 | 0 |
+| gov_report | 8,928 | 18,492 | 52,421 | 3 |
+| multifieldqa_en | 7,367 | 12,223 | 16,801 | 0 |
+| qasper | 4,806 | 7,616 | 21,831 | 0 |
+| **overall** | **11,555** | 31,713 | 67,724 | **7.7%** |
+
+**LongBench is a MODERATE-context benchmark**: median 11.5k, and only 7.7% of
+prompts exceed 32k. Raising `--max-length` does not change that — the documents
+are simply not longer. `narrativeqa` is the only genuinely long task.
+
+Consequence for this campaign, and it was a planning error worth recording: the
+granite @12k table is a **quality control at moderate context**, not a
+long-context result. The 12k budget was set by granite's measured ceiling
+(16,384 clean, spills at 24,576), and letting that constraint define the whole
+campaign put the headline comparison at a length where DKV has no structural
+advantage — which is also where the eviction baselines are strongest.
+
+The long-context claim has to come from **RULER**, which generates at any
+length, and from the **context ladder**. Both are run on Qwen3.5-4B, the model
+that actually reaches 98k on this card.
+
+Note for the 64k RULER run: dense spills at 65,536 and the eviction arms must
+materialise the full KV before pruning, so they spill too. Their QUALITY is
+still valid there — spilling costs speed, not correctness — so that run is
+simultaneously a fair quality comparison and a systems result, because only DKV
+runs the length natively (8.54 GB, clean).
+
 ---
 
 ## 4. System / architecture findings
