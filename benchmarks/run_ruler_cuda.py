@@ -209,6 +209,7 @@ def main():
            "baseline_params": json.loads(args.baseline_params),
            "data_dir": os.path.abspath(data_dir),
            "decode_defaults": "serving" if args.arm == "dkv" else None,
+           "prefill_attn": "sdpa",
            "protocol": "ruler-official-generators"}
     store = ResumableJSONL(out, config=cfg)
     done = store.load_done()

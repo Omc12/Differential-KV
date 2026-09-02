@@ -413,6 +413,28 @@ def score_files(paths: List[str]) -> None:
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _paired_bootstrap(deltas: List[float], iters: int = 10000,
+                      seed: int = 1234) -> tuple:
+    """95% CI for the mean of paired per-item differences.
+
+    Paired, because every arm answers the SAME LongBench items: bootstrapping
+    the difference removes item difficulty from the variance entirely. Two
+    independent per-arm intervals at n=120 would overlap for gaps that are in
+    fact consistent across almost every item, and the reader would call a real
+    effect inconclusive.
+    """
+    import random
+    if not deltas:
+        return float("nan"), float("nan")
+    rng = random.Random(seed)
+    n = len(deltas)
+    means = []
+    for _ in range(iters):
+        means.append(sum(deltas[rng.randrange(n)] for _ in range(n)) / n)
+    means.sort()
+    return means[int(0.025 * iters)], means[int(0.975 * iters)]
+
+
 def compare_files(paths: List[str]) -> None:
     """One table, arms as rows — the layout the paper needs.
 
@@ -424,6 +446,7 @@ def compare_files(paths: List[str]) -> None:
     """
     metrics = official_metrics()
     rows: Dict[str, Dict[str, List[float]]] = {}
+    by_item: Dict[str, Dict[str, float]] = {}
     meta_by_arm: Dict[str, Dict[str, Any]] = {}
     sysm: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
 
@@ -442,6 +465,7 @@ def compare_files(paths: List[str]) -> None:
         if meta.get("preset") and arm == "dkv":
             arm = f"dkv/{meta['preset']}"
         meta_by_arm[arm] = meta
+        by_item.setdefault(arm, {})
         per: Dict[str, List[float]] = defaultdict(list)
         for r in recs:
             ds = r.get("dataset")
@@ -452,6 +476,8 @@ def compare_files(paths: List[str]) -> None:
             for gt in r.get("answers", []):
                 best = max(best, metrics[ds](pred, gt, all_classes=r.get("all_classes")))
             per[ds].append(best)
+            # Keyed per item, so arms can be compared on the items they share.
+            by_item.setdefault(arm, {})[r.get("key", f"{ds}#{r.get('idx')}")] = best
             for k in ("ttft_s", "decode_tps", "e2e_tps", "peak_decode_gb",
                       "kv_physical_gb", "kv_compression_x"):
                 if isinstance(r.get(k), (int, float)):
@@ -495,6 +521,30 @@ def compare_files(paths: List[str]) -> None:
         print(f"\nMACRO withheld for {', '.join(sorted(missing))}: not every task "
               f"is present, and averaging over a different denominator per row "
               f"would not be a ranking. Finish those arms, or compare per task.")
+
+    # ── paired comparison against dense ─────────────────────────────────────
+    if "dense" in by_item and len(by_item) > 1:
+        print(f"\nPaired against dense, on the items both arms answered "
+              f"(95% CI, 10k bootstrap resamples over items):")
+        print(f"{'arm':>14} {'n':>5} {'mean delta':>11} {'95% CI':>20}  verdict")
+        for arm in sorted(a for a in by_item if a != "dense"):
+            shared = sorted(set(by_item[arm]) & set(by_item["dense"]))
+            if not shared:
+                continue
+            deltas = [100 * (by_item[arm][k] - by_item["dense"][k]) for k in shared]
+            mean = sum(deltas) / len(deltas)
+            lo, hi = _paired_bootstrap(deltas)
+            # "resolved" only when the interval excludes zero. At n=120 with
+            # this much per-item variance, plenty of gaps will not be.
+            verdict = ("worse than dense" if hi < 0 else
+                       "better than dense" if lo > 0 else
+                       "NOT RESOLVED at this n")
+            print(f"{arm:>14} {len(shared):>5} {mean:>11.2f} "
+                  f"{f'[{lo:+.2f}, {hi:+.2f}]':>20}  {verdict}")
+        print("\nPaired because every arm answers the SAME items: bootstrapping\n"
+              "the per-item difference takes item difficulty out of the variance.\n"
+              "Two independent per-arm intervals would overlap for gaps that are\n"
+              "in fact consistent across nearly every item.")
 
 
 def main():
@@ -551,6 +601,11 @@ def main():
            "baseline_params": json.loads(args.baseline_params),
            "thinking": bool(args.thinking),
            "decode_defaults": "serving" if args.arm == "dkv" else None,
+           # The attention path the PREFILL ran under. Recorded because
+           # snapkv/h2o used to force a whole-model eager load, which made
+           # their prefill ~5x slower than every arm they are compared with.
+           # Rows from before that fix must not merge with rows after it.
+           "prefill_attn": "sdpa",
            "protocol": "longbench-official-v1"}
     store = ResumableJSONL(out, config=cfg)
     done = store.load_done()
