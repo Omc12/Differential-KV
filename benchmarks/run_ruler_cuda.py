@@ -103,7 +103,8 @@ def load_generated(data_dir: str) -> List[Dict[str, Any]]:
                         continue
                     r = json.loads(line)
                     items.append({"length": int(lend), "task": task, "idx": i,
-                                  "input": r["input"], "outputs": r["outputs"]})
+                                  "input": r["input"], "outputs": r["outputs"],
+                                  "answer_prefix": r.get("answer_prefix", "")})
     return items
 
 
@@ -173,6 +174,36 @@ def score_files(paths: List[str]) -> None:
             print(f"  ttft {avg('ttft_s'):.2f}s | decode {avg('decode_tps'):.1f} tok/s "
                   f"| peak {avg('peak_decode_gb'):.2f} GB "
                   f"| KV {avg('kv_physical_gb'):.3f} GB ({avg('kv_compression_x'):.1f}x)")
+
+
+def build_ruler_prompt(tok, item, thinking: bool = False) -> str:
+    """Wrap the bare task text in the model's chat template.
+
+    RULER builds prompts as `model_template.format(task) + answer_prefix`. The
+    data here was generated with template type `base` (no wrapper), so the
+    wrapper is applied now, and the ANSWER PREFIX is re-attached AFTER the
+    generation prompt -- it is the opening of the assistant's own turn, not
+    part of the user's message.
+
+    Without this, a reasoning model spends the task's whole generation budget
+    inside a <think> block: measured 96% of dense outputs containing "<think>"
+    and every NIAH task scoring 0.0.
+    """
+    sys.path.insert(0, HERE)
+    from run_longbench_cuda import apply_template
+
+    text = item["input"]
+    prefix = item.get("answer_prefix") or ""
+    if prefix and text.endswith(prefix):
+        body = text[: -len(prefix)]
+    else:
+        body, prefix = text, ""
+
+    try:
+        wrapped = apply_template(tok, body, thinking)
+    except Exception:                                            # noqa: BLE001
+        return text                      # no chat template: use it raw
+    return wrapped + prefix
 
 
 def compare_files(paths):
@@ -278,6 +309,10 @@ def main():
                          "non-spilling ceiling). 0 = run everything generated.")
     ap.add_argument("--tasks", nargs="+", default=RULER_13)
     ap.add_argument("--baseline-params", default="{}")
+    ap.add_argument("--thinking", action="store_true",
+                    help="let a reasoning model emit its <think> block. OFF by "
+                         "default: RULER's per-task budgets (128 tokens for "
+                         "NIAH, 30 for vt) cannot hold reasoning AND an answer.")
     ap.add_argument("--score", nargs="*", default=None)
     ap.add_argument("--compare", nargs="*", default=None,
                     help="one RULER table with every arm as a row, and exit")
@@ -314,6 +349,8 @@ def main():
            "data_dir": os.path.abspath(data_dir),
            "decode_defaults": "serving" if args.arm == "dkv" else None,
            "prefill_attn": "sdpa",
+           "thinking": bool(args.thinking),
+           "prompt_template": "model-chat-template",
            # See run_longbench_cuda: a kernel change must invalidate DKV rows,
            # and the config alone cannot see one.
            "dkv_decode_rev": (decode_fingerprint() if args.arm == "dkv" else None),
@@ -375,11 +412,7 @@ def main():
     t_start = time.time()
     for n, it in enumerate(work, 1):
         key = f"{it['length']}/{it['task']}#{it['idx']}"
-        # RULER prompts are complete: the template and the answer prefix are
-        # already baked in by the generator. No chat template is applied -- the
-        # generated data was built with model_template_type=base, and wrapping
-        # it again would change the prompt the benchmark defines.
-        prompt = it["input"]
+        prompt = build_ruler_prompt(tok, it, thinking=args.thinking)
         gl = gen_tokens[TASK_FAMILY[it["task"]]]
         try:
             if args.arm == "dkv":
