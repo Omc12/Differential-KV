@@ -413,6 +413,90 @@ def score_files(paths: List[str]) -> None:
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+def compare_files(paths: List[str]) -> None:
+    """One table, arms as rows — the layout the paper needs.
+
+    `--score` prints a table per file, which answers "how did this arm do" but
+    not "which arm won", and comparing nine of them by eye across a scrollback
+    is how a wrong row ends up in a paper. This puts every arm on one grid at
+    the same tasks, and refuses to average over a task an arm is missing:
+    a macro computed over a different denominator per row is not a ranking.
+    """
+    metrics = official_metrics()
+    rows: Dict[str, Dict[str, List[float]]] = {}
+    meta_by_arm: Dict[str, Dict[str, Any]] = {}
+    sysm: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+
+    for p in sorted(paths):
+        store = ResumableJSONL(p, config=None, strict_config=False)
+        latest = store.load_latest()
+        store.close()
+        recs = [r for r in latest.values() if not r.get("error")]
+        if not recs:
+            continue
+        meta = {}
+        if os.path.exists(p + ".meta.json"):
+            with open(p + ".meta.json", encoding="utf-8") as f:
+                meta = json.load(f)
+        arm = meta.get("arm", "?")
+        if meta.get("preset") and arm == "dkv":
+            arm = f"dkv/{meta['preset']}"
+        meta_by_arm[arm] = meta
+        per: Dict[str, List[float]] = defaultdict(list)
+        for r in recs:
+            ds = r.get("dataset")
+            if ds not in metrics:
+                continue
+            pred = post_process(r.get("text", ""), ds)
+            best = 0.0
+            for gt in r.get("answers", []):
+                best = max(best, metrics[ds](pred, gt, all_classes=r.get("all_classes")))
+            per[ds].append(best)
+            for k in ("ttft_s", "decode_tps", "e2e_tps", "peak_decode_gb",
+                      "kv_physical_gb", "kv_compression_x"):
+                if isinstance(r.get(k), (int, float)):
+                    sysm[arm][k].append(float(r[k]))
+        rows[arm] = per
+
+    if not rows:
+        print("no scoreable results")
+        return
+
+    tasks = sorted({t for per in rows.values() for t in per})
+    m0 = next(iter(meta_by_arm.values()), {})
+    print(f"\n=== LongBench — {m0.get('model','?')} "
+          f"@ max_length {m0.get('max_length','?')}, quant {m0.get('quant','?')}, "
+          f"thinking {m0.get('thinking', '?')} ===")
+    hdr = f"{'arm':>14} " + " ".join(f"{t[:12]:>13}" for t in tasks) + f" {'MACRO':>7} {'KV GB':>7} {'cmp x':>6}"
+    print(hdr)
+    print("-" * len(hdr))
+
+    def _order(a):
+        return {"dense": 0}.get(a, 1), a
+    for arm in sorted(rows, key=_order):
+        per = rows[arm]
+        cells, allv, complete = [], [], True
+        for t in tasks:
+            v = per.get(t)
+            if v:
+                cells.append(f"{100*sum(v)/len(v):>13.2f}")
+                allv += v
+            else:
+                cells.append(f"{'-':>13}")
+                complete = False
+        macro = f"{100*sum(allv)/len(allv):>7.2f}" if (allv and complete) else f"{'n/a':>7}"
+        s = sysm.get(arm, {})
+        kv = (sum(s["kv_physical_gb"]) / len(s["kv_physical_gb"])) if s.get("kv_physical_gb") else float("nan")
+        cx = (sum(s["kv_compression_x"]) / len(s["kv_compression_x"])) if s.get("kv_compression_x") else float("nan")
+        print(f"{arm:>14} " + " ".join(cells) + f" {macro} {kv:>7.3f} {cx:>6.1f}")
+
+    missing = [a for a, per in rows.items() if len(per) < len(tasks)]
+    if missing:
+        print(f"\nMACRO withheld for {', '.join(sorted(missing))}: not every task "
+              f"is present, and averaging over a different denominator per row "
+              f"would not be a ranking. Finish those arms, or compare per task.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="ibm-granite/granite-4.2-8b")
@@ -437,7 +521,17 @@ def main():
                          "small to hold chain-of-thought AND an answer.")
     ap.add_argument("--score", nargs="*", default=None,
                     help="score existing JSONL result files and exit")
+    ap.add_argument("--compare", nargs="*", default=None,
+                    help="one table with every arm as a row, and exit")
     args = ap.parse_args()
+
+    if args.compare is not None:
+        paths: List[str] = []
+        for pat in (args.compare or ["paper/results/longbench/*.jsonl"]):
+            paths.extend(sorted(glob.glob(pat)))
+        if not paths:
+            raise SystemExit("no result files matched")
+        return compare_files(paths)
 
     if args.score is not None:
         paths: List[str] = []
