@@ -383,7 +383,8 @@ def main():
                     text = text.get("text", "")
                 torch.cuda.synchronize()
                 wall = time.perf_counter() - t0
-                text, clean = strip_prompt_echo(text, prompt, tok)
+                text, clean = strip_prompt_echo(text, prompt, tok,
+                                                budget_tokens=gl)
                 rec = {"text": text, "wall_s": wall, "prompt_echo_clean": clean,
                        "peak_decode_gb": torch.cuda.max_memory_allocated() / 1e9}
                 try:

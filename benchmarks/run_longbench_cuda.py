@@ -196,7 +196,7 @@ def post_process(pred: str, dataset: str) -> str:
     return pred
 
 
-def strip_prompt_echo(text: str, prompt: str, tok):
+def strip_prompt_echo(text: str, prompt: str, tok, budget_tokens: int = 0):
     """DKVHFWrapper.generate() returns PROMPT + COMPLETION, not the completion.
 
     hf_dkv_wrapper.py builds its output as `generated = prompt_ids.copy()` and
@@ -231,8 +231,33 @@ def strip_prompt_echo(text: str, prompt: str, tok):
         else:
             hi = mid - 1
     if lo > 200:                     # a real, substantial prompt echo
-        return text[lo:].lstrip(), False
-    return text, True
+        text, ok = text[lo:].lstrip(), False
+    else:
+        ok = True
+
+    # HARD BOUND: the model was asked for at most `max_new_tokens`. Anything
+    # longer than that is echoed context by definition, whatever the prefix
+    # search concluded -- this is arithmetic, not a heuristic.
+    #
+    # Measured on granite dkv/high: 2 of 120 items came back as 45,000
+    # characters of the story itself, because _normalize_references() had
+    # rewritten the head enough to break the prefix match. Those two dragged
+    # narrativeqa's mean generation length from ~124 tokens to 1,118 against a
+    # cap of 128. They scored ~0 either way, so they did not change the
+    # headline -- but an unbounded field called "text" is how a harness bug
+    # becomes a quality finding, and the next one might not be so harmless.
+    #
+    # What the model generated is at the END, after the echo, so the tail is
+    # what survives.
+    if budget_tokens:
+        try:
+            ids = tok(text, add_special_tokens=False).input_ids
+            if len(ids) > budget_tokens:
+                text = tok.decode(ids[-budget_tokens:], skip_special_tokens=True)
+                ok = False
+        except Exception:                                        # noqa: BLE001
+            pass
+    return text, ok
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -695,7 +720,8 @@ def main():
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 wall = time.perf_counter() - t0
-                text, clean_strip = strip_prompt_echo(text, prompt, tok)
+                text, clean_strip = strip_prompt_echo(text, prompt, tok,
+                                                      budget_tokens=gen_len)
                 try:
                     sess = w.manager.sessions.get(sid) or {}
                     blocks = int(sum(sess.get("num_blocks") or []))
