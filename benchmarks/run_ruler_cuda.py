@@ -48,6 +48,7 @@ OFFICIAL = os.path.join(HERE, "ruler_official")
 
 sys.path.insert(0, HERE)
 from checkpoint import ResumableJSONL                            # noqa: E402
+from code_fingerprint import decode_fingerprint          # noqa: E402
 
 # task name -> generator family, which is what selects the official metric.
 TASK_FAMILY = {
@@ -313,6 +314,9 @@ def main():
            "data_dir": os.path.abspath(data_dir),
            "decode_defaults": "serving" if args.arm == "dkv" else None,
            "prefill_attn": "sdpa",
+           # See run_longbench_cuda: a kernel change must invalidate DKV rows,
+           # and the config alone cannot see one.
+           "dkv_decode_rev": (decode_fingerprint() if args.arm == "dkv" else None),
            "protocol": "ruler-official-generators"}
     store = ResumableJSONL(out, config=cfg)
     done = store.load_done()

@@ -68,6 +68,7 @@ OFFICIAL = os.path.join(HERE, "longbench_official")
 
 sys.path.insert(0, HERE)
 from checkpoint import ResumableJSONL                            # noqa: E402
+from code_fingerprint import decode_fingerprint          # noqa: E402
 
 # The English subset. The Chinese tasks (dureader/vcsum/lsht/multifieldqa_zh/
 # passage_retrieval_zh) are excluded deliberately: none of the models in this
@@ -644,6 +645,14 @@ def main():
            # their prefill ~5x slower than every arm they are compared with.
            # Rows from before that fix must not merge with rows after it.
            "prefill_attn": "sdpa",
+           # Invalidates DKV rows when the decode ARITHMETIC changes. The
+           # config guard alone cannot see a kernel fix: the attention-scale
+           # correction left this dict byte-identical, so a resume appended
+           # post-fix rows to 81 pre-fix ones and produced a table where
+           # gov_report had moved 10.63 -> 28.55 while hotpotqa sat at exactly
+           # its old 15.12. Baseline arms do not run this code, so they are
+           # not fingerprinted and are not needlessly discarded.
+           "dkv_decode_rev": (decode_fingerprint() if args.arm == "dkv" else None),
            "protocol": "longbench-official-v1"}
     store = ResumableJSONL(out, config=cfg)
     done = store.load_done()
