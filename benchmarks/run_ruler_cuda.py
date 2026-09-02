@@ -112,7 +112,7 @@ def load_generated(data_dir: str) -> List[Dict[str, Any]]:
 def score_files(paths: List[str]) -> None:
     metrics = official_metric_fns()
     for p in paths:
-        store = ResumableJSONL(p, config=None, strict_config=False)
+        store = ResumableJSONL(p, config=None, strict_config=False, read_only=True)
         latest = store.load_latest()
         store.close()
         recs = [r for r in latest.values() if not r.get("error")]
@@ -193,7 +193,7 @@ def compare_files(paths):
     meta_by_arm = {}
 
     for p in sorted(paths):
-        store = ResumableJSONL(p, config=None, strict_config=False)
+        store = ResumableJSONL(p, config=None, strict_config=False, read_only=True)
         latest = store.load_latest()
         store.close()
         recs = [r for r in latest.values() if not r.get("error")]

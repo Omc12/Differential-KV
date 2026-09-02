@@ -59,11 +59,24 @@ class ResumableJSONL:
     """Append-only, fsync'd, resumable record store."""
 
     def __init__(self, path: str, config: Optional[Dict[str, Any]] = None,
-                 strict_config: bool = True):
+                 strict_config: bool = True, read_only: bool = False):
+        """read_only=True: read the store without claiming it.
+
+        Scoring and reporting only ever READ. Making them take the writer's
+        lock would mean --compare could not be run against a file a live
+        campaign owns, and worse, a reader could RECLAIM a lock it has no
+        intention of honouring -- re-opening the door this lock exists to shut.
+        A reader also must not create the file or its meta sidecar.
+        """
         self.path = os.path.abspath(path)
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        self.read_only = read_only
         self.meta_path = self.path + ".meta.json"
         self.config = dict(config or {})
+        self._fh = None
+        self.lock_path = None
+        if read_only:
+            return
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         self._check_config(strict_config)
         self._acquire_lock()
         self._fh = open(self.path, "a", encoding="utf-8", newline="\n")
@@ -215,6 +228,8 @@ class ResumableJSONL:
 
     # ── write ───────────────────────────────────────────────────────────────
     def append(self, key: str, **fields: Any) -> None:
+        if self._fh is None:
+            raise RuntimeError("this store was opened read_only; cannot append")
         rec = {"key": key, **fields}
         self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self._fh.flush()
@@ -222,7 +237,8 @@ class ResumableJSONL:
 
     def close(self) -> None:
         try:
-            self._fh.close()
+            if self._fh is not None:
+                self._fh.close()
         except Exception:                                        # noqa: BLE001
             pass
         self._release_lock()

@@ -401,7 +401,7 @@ def score_files(paths: List[str]) -> None:
     sysm: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
 
     for p in paths:
-        store = ResumableJSONL(p, config=None, strict_config=False)
+        store = ResumableJSONL(p, config=None, strict_config=False, read_only=True)
         # One record per key, last write wins, so a successful retry supersedes
         # the failed attempt before it and neither is double-counted.
         latest = store.load_latest()
@@ -498,7 +498,7 @@ def compare_files(paths: List[str]) -> None:
     sysm: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
 
     for p in sorted(paths):
-        store = ResumableJSONL(p, config=None, strict_config=False)
+        store = ResumableJSONL(p, config=None, strict_config=False, read_only=True)
         latest = store.load_latest()
         store.close()
         recs = [r for r in latest.values() if not r.get("error")]

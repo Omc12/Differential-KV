@@ -226,7 +226,7 @@ def run_point(args) -> None:
 
 def report(paths: List[str]) -> None:
     for p in paths:
-        store = ResumableJSONL(p, config=None, strict_config=False)
+        store = ResumableJSONL(p, config=None, strict_config=False, read_only=True)
         recs = list(store.load_latest().values())
         store.close()
         if not recs:
