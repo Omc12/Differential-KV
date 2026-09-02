@@ -144,7 +144,9 @@ def run_point(args) -> None:
         else:
             sys.path.insert(0, HERE)
             from run_longbench_cuda import load_plain
-            tok, model = load_plain(args.model, args.quant, eager=False)
+            import kv_baselines as _KB
+            tok, model = load_plain(args.model, args.quant,
+                                    _KB.needs_eager(args.arm))
         res["load_s"] = time.time() - t_load
         res["weights_gb"] = torch.cuda.memory_allocated() / 1e9
 
@@ -176,8 +178,17 @@ def run_point(args) -> None:
             import kv_baselines as KB
             ids = tok(prompt, add_special_tokens=False).input_ids
             t0 = time.perf_counter()
-            r = KB.run_baseline(model, tok, ids, "dense", "cuda", args.gen,
-                                set(), args.chunk, {})
+            # ANY kv_baselines method, not just dense. The point of putting
+            # snapkv/streamingllm on the ladder is that they EVICT AFTER
+            # PREFILL: to rank prefix tokens SnapKV needs attention from its
+            # observation window to every prefix position, so the whole prefix
+            # KV must be resident at that moment. If that is right, their PEAK
+            # is dense's peak and they cannot reach a context dense cannot,
+            # however small the cache they end up keeping. That is a claim about
+            # DKV's contribution, so it gets measured rather than asserted.
+            r = KB.run_baseline(model, tok, ids, args.arm, "cuda", args.gen,
+                                set(), args.chunk,
+                                json.loads(args.baseline_params))
             res["wall_s"] = time.perf_counter() - t0
             for k in ("prefill_s", "decode_s", "decode_tps", "ttft_s",
                       "kv_physical_gb", "kv_dense_equiv_gb"):
@@ -287,6 +298,9 @@ def main():
     ap.add_argument("--chunk", type=int, default=1024)
     ap.add_argument("--out", default="")
     ap.add_argument("--timeout", type=float, default=3600)
+    ap.add_argument("--baseline-params", default="{}",
+                    help="JSON params for a kv_baselines arm, e.g. "
+                         "'{\"budget\": 2016}'")
     ap.add_argument("--stop-after-oom", type=int, default=1,
                     help="consecutive OOMs at increasing context before this "
                          "arm is considered finished")
@@ -335,6 +349,7 @@ def main():
                    "--model", args.model, "--arm", arm, "--ctx", str(ctx),
                    "--preset", args.preset, "--quant", args.quant,
                    "--gen", str(args.gen), "--chunk", str(args.chunk),
+                   "--baseline-params", args.baseline_params,
                    "--point-json", pj]
             t0 = time.time()
             print(f"  running {key} ...", flush=True)
