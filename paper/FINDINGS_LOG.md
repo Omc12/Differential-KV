@@ -70,13 +70,50 @@ The mechanism for the split is **not established**. The obvious candidate — CU
 defers compression until after prefill, so the dense KV is resident at peak —
 predicts no benefit on *both* models, and the 4B refutes it. Recorded as open.
 
-**Why eviction cannot follow DKV here** (prediction under test): SnapKV ranks
-prefix tokens by attention from an observation window to *every* prefix
-position, so the whole prefix KV must be resident when it ranks. Its peak is
-dense's peak, however small the cache it keeps afterwards. If SnapKV and
-StreamingLLM spill where dense does while DKV reaches 98k, the max-context axis
-belongs to DKV alone. **Measured, not asserted** — the ladder now accepts
-baseline arms for exactly this.
+**Eviction cannot follow DKV here — MEASURED, 2026-09-02.** The prediction was
+that eviction is a *post-hoc* operation: SnapKV ranks prefix tokens by attention
+from an observation window to every prefix position, so the whole prefix KV must
+be resident when it ranks, and its ceiling should therefore be dense's ceiling
+however small the cache it keeps. Run on the same rungs, Qwen3.5-4B, Q4:
+
+| arm @ 65,536 | final peak | **reserved** | status | wall |
+|---|---|---|---|---|
+| dense | 9.10 GB | **18.26 GB** | spilled | 122.7 s |
+| snapkv | 8.58 GB | **18.27 GB** | spilled | 104.3 s |
+| streamingllm | **3.65 GB** | **15.04 GB** | spilled | 78.7 s |
+| **DKV** | 8.54 GB | **9.42 GB** | **ok** | **42.7 s** |
+
+| arm | max clean context |
+|---|---|
+| dense | 49,152 |
+| snapkv | 49,152 |
+| streamingllm | 49,152 |
+| **DKV** | **98,304** — 9.89 GB peak, 11.13 GB reserved, 76.7 s |
+
+`peak_reserved` is the discriminator, and it makes the mechanism visible:
+**StreamingLLM ends with the smallest cache of any arm — 3.65 GB — and still
+cannot reach 65k**, because *building* the cache it intends to prune transiently
+reserves 15 GB. Both eviction methods spill at exactly the rung dense does.
+
+DKV compresses DURING prefill, so it never materialises the full KV. At 65,536
+that also makes it **2.9x faster than dense** (42.7 s vs 122.7 s) — not from a
+faster kernel, but from not paging.
+
+This is the paper's central systems result, and it is the strongest available
+form of the argument: the baseline with the *smallest steady-state footprint*
+is still unable to reach the context DKV reaches.
+
+CAVEAT, and it must travel with the claim: this is the hybrid model. On
+dense-GQA granite DKV's slope matches dense's and its ceiling does not exceed
+dense's (§1.2 table above). The claim is architecture-conditional.
+
+**One near-miss worth recording.** The first run of this experiment returned
+`snapkv@32768 error, @49152 error, @65536 error`, which reads exactly like
+"SnapKV cannot reach those lengths". It was
+`AttributeError: 'LinearAttentionLayer' object has no attribute 'keys'` — the
+harness could not read a hybrid cache (Qwen3.5-4B is 8 full-attention layers of
+32). A defect in our code, on the model the whole claim rests on, in the
+direction that flatters DKV. See §3.9.
 
 ### 1.3 Where DKV's remaining quality gap actually lives
 
@@ -295,6 +332,26 @@ materialise the full KV before pruning, so they spill too. Their QUALITY is
 still valid there — spilling costs speed, not correctness — so that run is
 simultaneously a fair quality comparison and a systems result, because only DKV
 runs the length natively (8.54 GB, clean).
+
+### 3.9 The baselines could not run on the hybrid model at all
+
+Every KV baseline died on Qwen3.5-4B with
+`AttributeError: 'LinearAttentionLayer' object has no attribute 'keys'`. The
+model is 8 full-attention layers out of 32 (`layer_types`: 24 linear_attention,
+8 full_attention); the rest carry a recurrent state and no KV cache, and the
+cache plumbing assumed every layer has `.keys`/`.values`.
+
+It broke the ladder run that tests whether eviction can reach DKV's contexts —
+on the exact model that claim rests on — and produced three `error` rows that
+read like a ceiling. Same shape as the eager-attention handicap (§3.3): our
+defect, flattering our method.
+
+A second bug surfaced with it: dense-equivalent KV bytes multiplied by
+`num_hidden_layers` (32) when only 8 layers hold KV, **inflating the dense
+baseline 4x and every compression ratio measured against it on hybrids**.
+
+Both fixed; a pass that compresses zero layers now raises rather than reporting
+a footprint.
 
 ---
 
