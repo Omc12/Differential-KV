@@ -550,6 +550,7 @@ def main():
            "preset": args.preset if args.arm == "dkv" else None,
            "baseline_params": json.loads(args.baseline_params),
            "thinking": bool(args.thinking),
+           "decode_defaults": "serving" if args.arm == "dkv" else None,
            "protocol": "longbench-official-v1"}
     store = ResumableJSONL(out, config=cfg)
     done = store.load_done()
@@ -580,6 +581,23 @@ def main():
         os.environ.setdefault("DKV_SVD_SEED", "1234")
         cwd = os.getcwd()
         os.chdir(ACTIVE)
+        # BENCHMARK THE CONFIGURATION THAT SHIPS, NOT THE LIBRARY DEFAULTS.
+        # serving/cli.py and the OpenAI gateway both call this before building
+        # the wrapper; a harness that constructs DKVHFWrapper directly does not,
+        # and the difference is not cosmetic. With DKV_SPARSE_BIAS unset it
+        # takes the value "0.0", which selects the COMBINED decode branch --
+        # a code path production never runs. dkv_attention.py's own comment on
+        # that branch records what has lived there: "It only ever fired on the
+        # combined branch -- DKV_SPARSE_BIAS unset or 0.0, the LIBRARY DEFAULT.
+        # BEST_DECODE_DEFAULTS sets it to auto, which takes the production
+        # branch, so everything going through the serving defaults was
+        # unaffected and never saw it", measured at KL 11.76 with top-1 0/5
+        # against KL 0.00125 and 5/5 once fixed.
+        #
+        # Every explicit env still wins (this is setdefault), so the arm knobs
+        # set above are untouched.
+        from serving.decode_config import apply_best_decode_defaults
+        apply_best_decode_defaults()
         from serving.hf_dkv_wrapper import DKVHFWrapper
         w = DKVHFWrapper(model_id=args.model,
                          config={"preset": args.preset,
