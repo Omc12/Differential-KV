@@ -302,8 +302,22 @@ def dkv_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
     dl = min(raw_dl, max_dense) if raw_dl > 0 else min(seq_len, max_dense)
     res_n0 = (s0.get("comp_res_n") or [[]])[0][:nb]
     preset = str(getattr(cfg, "preset", None) or os.environ.get("DKV_PRESET", "mid")).lower()
-    res_cap = int(getattr(cfg, "max_residual_tokens", None)
-                  or {"low": 40, "mid": 64, "high": 128}.get(preset, 64))
+    # READ IT FROM THE CONFIG, and say so loudly if it is not there. The
+    # fallback this replaced was {"low": 40, "mid": 64, "high": 128}, copied
+    # from run_a100_paper_experiments.py -- and ALL THREE VALUES ARE WRONG. The
+    # shipped presets are low 64, mid 128, high 256 (ultra 128). Had the config
+    # ever been unreachable, every compression ratio in the results would have
+    # been computed against half the real residual budget and nothing would
+    # have said so.
+    res_cap = getattr(cfg, "max_residual_tokens", None)
+    if not res_cap:
+        _PRESET_RESIDUAL = {"low": 64, "mid": 128, "high": 256, "ultra": 128}
+        res_cap = _PRESET_RESIDUAL.get(preset, 128)
+        print(f"[dkv_kv_bytes] WARNING: no max_residual_tokens on the manager "
+              f"config; falling back to the preset table ({preset} -> {res_cap}). "
+              f"If that table drifts from native_core/config.py, every KV "
+              f"footprint here is wrong.", flush=True)
+    res_cap = int(res_cap)
     res_used = sum(min(int(x), res_cap) for x in res_n0) if res_n0 else nb * res_cap
 
     store_used = L * (nb * lowrank_block + res_used * kv_tok + dl * kv_tok)
