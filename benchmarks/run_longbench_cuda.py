@@ -179,8 +179,34 @@ def apply_template(tokenizer, prompt: str, thinking: bool):
         msgs, tokenize=False, add_generation_prompt=True)
 
 
+def to_query_first(prompt_fmt: str) -> str:
+    """Move the block containing {input} to sit just before {context}.
+
+    LongBench templates are "\n\n"-separated blocks, e.g. for qasper:
+
+        <preamble>  |  Article: {context}  |  <instruction>  |
+        Question: {input}  |  Answer:
+
+    Moving the question block ahead of the article leaves every word, every
+    instruction and the trailing answer cue intact -- only the order changes,
+    and it changes identically for every arm. Returns the template unchanged if
+    it does not have the expected shape, so an unusual task silently keeps the
+    official ordering rather than being mangled.
+    """
+    blocks = prompt_fmt.split("\n\n")
+    qi = next((i for i, b in enumerate(blocks) if "{input}" in b), None)
+    ci = next((i for i, b in enumerate(blocks) if "{context}" in b), None)
+    if qi is None or ci is None or qi <= ci:
+        return prompt_fmt
+    q = blocks.pop(qi)
+    blocks.insert(ci, q)
+    return "\n\n".join(blocks)
+
+
 def build_prompt(tokenizer, row, dataset, prompt_fmt, max_length,
-                 thinking: bool = False):
+                 thinking: bool = False, query_first: bool = False):
+    if query_first:
+        prompt_fmt = to_query_first(prompt_fmt)
     prompt = prompt_fmt.format(**row)
     ids = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
     if len(ids) > max_length:
@@ -618,6 +644,11 @@ def main():
     ap.add_argument("--chunk", type=int, default=1024)
     ap.add_argument("--baseline-params", default="{}",
                     help="JSON of method params, e.g. '{\"budget\": 2048}'")
+    ap.add_argument("--query-first", action="store_true",
+                    help="move the question ahead of the context, so an "
+                         "eviction method's observation window does NOT contain "
+                         "it. Tests whether SnapKV/H2O's edge is query "
+                         "placement rather than the eviction policy.")
     ap.add_argument("--thinking", action="store_true",
                     help="let reasoning models emit their <think> block. OFF by "
                          "default: the per-task generation budgets are far too "
@@ -653,6 +684,7 @@ def main():
            "preset": args.preset if args.arm == "dkv" else None,
            "baseline_params": json.loads(args.baseline_params),
            "thinking": bool(args.thinking),
+           "query_first": bool(args.query_first),
            "decode_defaults": "serving" if args.arm == "dkv" else None,
            # The attention path the PREFILL ran under. Recorded because
            # snapkv/h2o used to force a whole-model eager load, which made
@@ -732,7 +764,8 @@ def main():
     for n, (key, ds, i, row) in enumerate(work, 1):
         gen_len = maxlens[ds]
         prompt = build_prompt(tok, row, ds, prompts[ds], args.max_length,
-                              thinking=args.thinking)
+                              thinking=args.thinking,
+                              query_first=args.query_first)
         ntok = len(tok(prompt).input_ids)
         try:
             if args.arm == "dkv":
