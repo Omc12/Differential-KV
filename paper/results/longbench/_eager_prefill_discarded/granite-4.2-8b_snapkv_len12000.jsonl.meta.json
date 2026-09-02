@@ -1,0 +1,14 @@
+{
+  "arm": "snapkv",
+  "baseline_params": {
+    "budget": 2016,
+    "window": 32
+  },
+  "max_length": 12000,
+  "model": "ibm-granite/granite-4.2-8b",
+  "num_samples": 20,
+  "preset": null,
+  "protocol": "longbench-official-v1",
+  "quant": "nf4",
+  "thinking": false
+}

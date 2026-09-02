@@ -142,8 +142,8 @@ from `high`.
 
 ### 1.4 SnapKV and H2O see the question; DKV does not
 
-**Status: CORRELATIONAL. The causal test is queued, not yet run.** Written down
-now because it qualifies every number in §1.1.
+**Status: CONFIRMED CAUSALLY, 2026-09-02.** See the `--query-first` result at
+the end of this section.
 
 SnapKV and H2O rank prefix tokens by attention from an **observation window** —
 the last 32 prompt tokens. In LongBench's format that window contains the
@@ -189,13 +189,71 @@ benchmark's own format, and SnapKV is being run exactly as its paper specifies.
 The correct conclusion would be narrower: *query-aware eviction beats
 query-agnostic compression when the query is known at compression time.*
 
-**Why that narrowing matters for a systems paper.** SnapKV's advantage
+**THE CAUSAL RESULT.** Question moved ahead of the context — same words, same
+instructions, identical token count, applied identically to every arm. Deltas
+are against the matching dense baseline for each ordering, so the prompt change
+itself is controlled:
+
+| arm | Δ vs dense, question LAST | Δ vs dense, question FIRST | shift |
+|---|---|---|---|
+| snapkv | **+1.14** | **−2.81** | **−3.94** |
+| h2o | −2.36 | −4.45 | −2.09 |
+| dkv/high | −7.17 | −8.49 | −1.32 |
+
+**SnapKV flips from beating dense to losing to it.** DKV is query-agnostic and
+shifts least (−1.32 is the baseline effect of the reordering on any compressor),
+so SnapKV's query-awareness is worth roughly **2.6–3.9 points**.
+
+**This does NOT rescue DKV.** With the confound removed the ordering on these
+two tasks is dense 44.85 > snapkv 42.05 > h2o 40.40 > dkv 36.36. SnapKV's *lead
+over dense* is explained; DKV's own deficit is not.
+
+**Why the narrowing still matters for a systems paper.** SnapKV's advantage
 *requires* the query at compression time. Under prefix caching or multi-turn
 serving, a context is compressed ONCE and reused across many queries — an
 eviction method would have to re-run selection per query, re-materialising the
 full KV each time, which is the same cost that caps its context ceiling
 (§1.2). DKV compresses once and serves any query. That is a real deployment
 distinction and it should be stated whichever way the experiment lands.
+
+### 1.5 What actually buys DKV's quality: residuals, not rank
+
+Sweep on the two tasks DKV loses (qasper, multifieldqa_en), all against the same
+dense baseline, n=40 paired:
+
+| arm | score | Δ vs dense | compression | verdict |
+|---|---|---|---|---|
+| dense | 43.22 | — | 1.0× | |
+| `high` — resid 256, rank 32 (**shipped**) | 36.05 | −7.17 [−12.81, −2.45] | 1.7× | worse |
+| rank 64 (r_proj cap off), resid 256 | 35.84 | −7.38 [−13.08, −2.71] | 1.6× | worse |
+| resid 512 | 38.69 | −4.53 [−8.89, −0.82] | 1.2× | worse |
+| resid 512 + rank 64 | 38.42 | −4.80 [−9.00, −1.36] | 1.1× | worse |
+| **resid 1024** | **43.30** | **+0.08 [−0.65, +0.76]** | **0.8×** | **not resolved** |
+
+**1. Residual budget is the entire lever.** 256 → 512 → 1024 moves the gap
+−7.17 → −4.53 → +0.08, monotonically.
+
+**2. Rank contributes nothing measurable.** Lifting the r_proj cap changes
+quality by ~0.2 points at both residual settings — inside the interval — while
+costing +13.4% forward time and ~2× pool-slot bytes. Verified the arms really
+stored it: the logs read `ceiling rank=64, respected` with `pool_rank=64`,
+against `r_proj cap clamps to 32` for the capped arms. **The low-rank
+approximation is not what buys DKV's quality on these tasks.**
+
+**3. Dense parity is reachable, and it costs all of the compression.** At
+resid 1024 the store is **0.8×** — 25% LARGER than the dense KV it replaces.
+At the point where DKV matches dense it has stopped being a compression method.
+
+Taken with §1.3 (DKV's deficit is concentrated in single-document extractive QA,
+where eviction keeps its chosen tokens bit-exact), the picture is consistent:
+**DKV's quality on these tasks tracks how many tokens it stores EXACTLY, and the
+low-rank tail adds little.** That is a finding about the architecture, not a
+tuning result, and it belongs in the design section rather than being fixed by a
+preset change.
+
+It also means the honest Pareto statement is: DKV's compression/quality curve on
+extractive QA runs from 1.7× at −7.2 to 0.8× at parity — i.e. it does not
+contain a point that is both compressed and dense-quality on these two tasks.
 
 ---
 

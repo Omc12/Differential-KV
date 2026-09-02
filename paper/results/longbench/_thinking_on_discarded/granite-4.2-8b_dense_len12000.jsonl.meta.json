@@ -1,0 +1,10 @@
+{
+  "arm": "dense",
+  "baseline_params": {},
+  "max_length": 12000,
+  "model": "ibm-granite/granite-4.2-8b",
+  "num_samples": 20,
+  "preset": null,
+  "protocol": "longbench-official-v1",
+  "quant": "nf4"
+}

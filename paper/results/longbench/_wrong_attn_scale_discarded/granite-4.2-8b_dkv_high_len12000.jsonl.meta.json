@@ -1,0 +1,13 @@
+{
+  "arm": "dkv",
+  "baseline_params": {},
+  "decode_defaults": "serving",
+  "max_length": 12000,
+  "model": "ibm-granite/granite-4.2-8b",
+  "num_samples": 20,
+  "prefill_attn": "sdpa",
+  "preset": "high",
+  "protocol": "longbench-official-v1",
+  "quant": "nf4",
+  "thinking": false
+}

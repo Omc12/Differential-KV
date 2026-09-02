@@ -537,6 +537,19 @@ def compare_files(paths: List[str]) -> None:
         arm = meta.get("arm", "?")
         if meta.get("preset") and arm == "dkv":
             arm = f"dkv/{meta['preset']}"
+        if meta.get("query_first"):
+            arm += "|qfirst"
+        # Env overrides are part of the arm's identity: without them four
+        # capacity diagnostics all read as "dkv/high" and overwrote each other.
+        env = meta.get("dkv_env") or {}
+        _short = {"DKV_MAX_RESIDUAL_TOKENS": "res", "DKV_RSVD_MAX_RPROJ": "rproj"}
+        if env:
+            arm += "|" + ",".join(f"{_short.get(k, k)}{v}"
+                                  for k, v in sorted(env.items()))
+        # Older files predate dkv_env; fall back to the filename so they are
+        # still distinguishable rather than silently merged.
+        if arm in rows:
+            arm = f"{arm}|{os.path.basename(p).split('.')[0][-18:]}"
         meta_by_arm[arm] = meta
         by_item.setdefault(arm, {})
         per: Dict[str, List[float]] = defaultdict(list)
@@ -566,7 +579,8 @@ def compare_files(paths: List[str]) -> None:
     print(f"\n=== LongBench — {m0.get('model','?')} "
           f"@ max_length {m0.get('max_length','?')}, quant {m0.get('quant','?')}, "
           f"thinking {m0.get('thinking', '?')} ===")
-    hdr = f"{'arm':>14} " + " ".join(f"{t[:12]:>13}" for t in tasks) + f" {'MACRO':>7} {'KV GB':>7} {'cmp x':>6}"
+    _w = max(14, min(34, max((len(a) for a in rows), default=14)))
+    hdr = f"{'arm':>{_w}} " + " ".join(f"{t[:12]:>13}" for t in tasks) + f" {'MACRO':>7} {'KV GB':>7} {'cmp x':>6}"
     print(hdr)
     print("-" * len(hdr))
 
@@ -587,7 +601,7 @@ def compare_files(paths: List[str]) -> None:
         s = sysm.get(arm, {})
         kv = (sum(s["kv_physical_gb"]) / len(s["kv_physical_gb"])) if s.get("kv_physical_gb") else float("nan")
         cx = (sum(s["kv_compression_x"]) / len(s["kv_compression_x"])) if s.get("kv_compression_x") else float("nan")
-        print(f"{arm:>14} " + " ".join(cells) + f" {macro} {kv:>7.3f} {cx:>6.1f}")
+        print(f"{arm:>{_w}} " + " ".join(cells) + f" {macro} {kv:>7.3f} {cx:>6.1f}")
 
     missing = [a for a, per in rows.items() if len(per) < len(tasks)]
     if missing:
@@ -599,7 +613,7 @@ def compare_files(paths: List[str]) -> None:
     if "dense" in by_item and len(by_item) > 1:
         print(f"\nPaired against dense, on the items both arms answered "
               f"(95% CI, 10k bootstrap resamples over items):")
-        print(f"{'arm':>14} {'n':>5} {'mean delta':>11} {'95% CI':>20}  verdict")
+        print(f"{'arm':>{_w}} {'n':>5} {'mean delta':>11} {'95% CI':>20}  verdict")
         for arm in sorted(a for a in by_item if a != "dense"):
             shared = sorted(set(by_item[arm]) & set(by_item["dense"]))
             if not shared:
@@ -612,7 +626,7 @@ def compare_files(paths: List[str]) -> None:
             verdict = ("worse than dense" if hi < 0 else
                        "better than dense" if lo > 0 else
                        "NOT RESOLVED at this n")
-            print(f"{arm:>14} {len(shared):>5} {mean:>11.2f} "
+            print(f"{arm:>{_w}} {len(shared):>5} {mean:>11.2f} "
                   f"{f'[{lo:+.2f}, {hi:+.2f}]':>20}  {verdict}")
         print("\nPaired because every arm answers the SAME items: bootstrapping\n"
               "the per-item difference takes item difficulty out of the variance.\n"
@@ -685,6 +699,13 @@ def main():
            "baseline_params": json.loads(args.baseline_params),
            "thinking": bool(args.thinking),
            "query_first": bool(args.query_first),
+           # Knobs that change what DKV computes but live in the environment.
+           # Unrecorded, four capacity diagnostics were indistinguishable from
+           # each other and from the shipped preset.
+           "dkv_env": {k: os.environ[k] for k in
+                       ("DKV_MAX_RESIDUAL_TOKENS", "DKV_RSVD_MAX_RPROJ",
+                        "DKV_RANK", "DKV_BLOCK_SIZE", "DKV_MICRO_BLOCK_SIZE")
+                       if k in os.environ} or None,
            "decode_defaults": "serving" if args.arm == "dkv" else None,
            # The attention path the PREFILL ran under. Recorded because
            # snapkv/h2o used to force a whole-model eager load, which made

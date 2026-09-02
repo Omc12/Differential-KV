@@ -123,3 +123,10 @@ benchmarks/ruler_official/data/synthetic/json/hotpotqa.json
 # The PREDICTIONS and scores under paper/results/ruler/ are tracked; the inputs
 # they were produced from are regenerated, not stored.
 paper/results/ruler_data/
+
+# `LongBench/` at line 61 was meant for a vendored checkout of the benchmark
+# repo. On Windows core.ignorecase makes it match paper/results/longbench as
+# well, and git will NOT re-include a file whose parent DIRECTORY is excluded --
+# so the *.jsonl negations above silently did nothing for that folder and every
+# LongBench result was untracked. Un-exclude the directory itself.
+!paper/results/longbench/
