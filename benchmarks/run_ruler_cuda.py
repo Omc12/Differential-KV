@@ -170,6 +170,89 @@ def score_files(paths: List[str]) -> None:
                   f"| KV {avg('kv_physical_gb'):.3f} GB ({avg('kv_compression_x'):.1f}x)")
 
 
+def compare_files(paths):
+    """Every arm on one grid, plus a PAIRED comparison against dense.
+
+    RULER runs 20 samples per (task, length) here and its per-item scores are
+    frequently 0 or 1, so a bare average invites reading noise as a result.
+    Every arm answers the SAME generated items, so bootstrapping the per-item
+    DIFFERENCE against dense removes item difficulty from the variance and is
+    far tighter than two independent intervals at this n.
+    """
+    sys.path.insert(0, HERE)
+    from run_longbench_cuda import _paired_bootstrap
+    metrics = official_metric_fns()
+
+    rows = {}
+    by_item = {}
+    meta_by_arm = {}
+
+    for p in sorted(paths):
+        store = ResumableJSONL(p, config=None, strict_config=False)
+        latest = store.load_latest()
+        store.close()
+        recs = [r for r in latest.values() if not r.get("error")]
+        if not recs:
+            continue
+        meta = {}
+        if os.path.exists(p + ".meta.json"):
+            with open(p + ".meta.json", encoding="utf-8") as f:
+                meta = json.load(f)
+        arm = meta.get("arm", "?")
+        if meta.get("preset") and arm == "dkv":
+            arm = "dkv/" + str(meta["preset"])
+        meta_by_arm[arm] = meta
+        by_item.setdefault(arm, {})
+        per = defaultdict(list)
+        for r in recs:
+            fam = TASK_FAMILY.get(r.get("task"))
+            if fam is None:
+                continue
+            v = metrics[fam]([r.get("text", "")], [r.get("outputs", [])])
+            per[r["length"]].append(v)
+            key = r.get("key") or (str(r["length"]) + "/" + r["task"] + "#" + str(r["idx"]))
+            by_item[arm][key] = v
+        rows[arm] = per
+
+    if not rows:
+        print("no scoreable RULER results")
+        return
+
+    lengths = sorted({L for per in rows.values() for L in per})
+    m0 = next(iter(meta_by_arm.values()), {})
+    print("")
+    print("=== RULER — " + str(m0.get("model", "?")) + ", quant "
+          + str(m0.get("quant", "?")) + " (13 tasks, avg over tasks x samples) ===")
+    hdr = "{:>14} ".format("arm") + " ".join("{:>9}".format(L) for L in lengths)
+    print(hdr)
+    print("-" * len(hdr))
+    for arm in sorted(rows, key=lambda a: (a != "dense", a)):
+        cells = []
+        for L in lengths:
+            v = rows[arm].get(L)
+            cells.append("{:>9.1f}".format(sum(v) / len(v)) if v else "{:>9}".format("-"))
+        print("{:>14} ".format(arm) + " ".join(cells))
+
+    if "dense" in by_item and len(by_item) > 1:
+        print("")
+        print("Paired against dense, on the items both arms answered "
+              "(95% CI, 10k bootstrap resamples over items):")
+        print("{:>14} {:>5} {:>11} {:>20}  verdict".format(
+            "arm", "n", "mean delta", "95% CI"))
+        for arm in sorted(a for a in by_item if a != "dense"):
+            shared = sorted(set(by_item[arm]) & set(by_item["dense"]))
+            if not shared:
+                continue
+            deltas = [by_item[arm][k] - by_item["dense"][k] for k in shared]
+            mean = sum(deltas) / len(deltas)
+            lo, hi = _paired_bootstrap(deltas)
+            verdict = ("worse than dense" if hi < 0 else
+                       "better than dense" if lo > 0 else
+                       "NOT RESOLVED at this n")
+            print("{:>14} {:>5} {:>11.2f} {:>20}  {}".format(
+                arm, len(shared), mean, "[{:+.2f}, {:+.2f}]".format(lo, hi), verdict))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="ibm-granite/granite-4.2-8b")
@@ -185,7 +268,17 @@ def main():
     ap.add_argument("--tasks", nargs="+", default=RULER_13)
     ap.add_argument("--baseline-params", default="{}")
     ap.add_argument("--score", nargs="*", default=None)
+    ap.add_argument("--compare", nargs="*", default=None,
+                    help="one RULER table with every arm as a row, and exit")
     args = ap.parse_args()
+
+    if args.compare is not None:
+        paths = []
+        for pat in (args.compare or ["paper/results/ruler/*.jsonl"]):
+            paths.extend(sorted(glob.glob(pat)))
+        if not paths:
+            raise SystemExit("no result files matched")
+        return compare_files(paths)
 
     if args.score is not None:
         paths: List[str] = []
