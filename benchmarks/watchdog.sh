@@ -52,7 +52,18 @@ while true; do
     echo "WATCHDOG: $locks result files locked at once — concurrent writers contend for the GPU"
   fi
 
-  # 4. A finished campaign is worth one line.
+  # 4. ORPHANED CHAINS. A killed chain's bash can survive, blocked forever on a
+  #    log marker that is no longer written -- harmless until the day that
+  #    string appears and it launches an arm alongside the live campaign. Two
+  #    were found this way. Counts DISTINCT chain scripts; a parent/child bash
+  #    pair of the same script is normal and is not double-counted.
+  chains=$(tasklist //FI "IMAGENAME eq bash.exe" //FO CSV //NH 2>/dev/null | wc -l)
+  distinct=$(ps -W 2>/dev/null | grep -o 'chain_[a-z]*\.sh' | sort -u | wc -l)
+  if [ "${distinct:-0}" -gt 2 ]; then
+    echo "WATCHDOG: $distinct distinct chain scripts alive — expected at most 2 (main + tail); an orphan may fire unexpectedly"
+  fi
+
+  # 5. A finished campaign is worth one line.
   if grep -aq "ALL CAMPAIGNS DONE" "$LOG" 2>/dev/null; then
     echo "WATCHDOG: ALL CAMPAIGNS DONE — $rows rows recorded, $fails failing files"
     exit 0
