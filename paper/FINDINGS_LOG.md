@@ -642,6 +642,79 @@ comparison.
 
 ---
 
+## 4c. Limitations the paper must state
+
+Written as limitations rather than left to be discovered in review. Each is a
+consequence of the hardware or of a known defect, not of an oversight, and each
+has the evidence for why it was handled this way.
+
+### 4c.1 Batch and concurrency are NOT measured
+
+The systems numbers are single-request: TTFT, decode throughput, peak memory,
+and multi-query prefix reuse — all at batch size 1. There is no
+requests-per-second-under-concurrency figure, which a serving paper would
+normally carry.
+
+**Why it was not run.** The DKV wrapper is session-based, and the repo carries
+`colab/repro_batch_engine_corruption.py` — a standing reproducer for corruption
+on the batched engine path. Numbers from a path with an open correctness bug
+are worse than no numbers: they would either flatter DKV (if the corruption
+costs accuracy that a throughput table does not show) or understate it (if the
+workaround costs speed), and there is no way to tell which from the throughput
+figure alone.
+
+**What the paper should say.** That DKV's serving evaluation is single-request,
+that batching is unvalidated on this path, and that concurrent throughput is
+future work — not that it was measured and found acceptable.
+
+The multi-query experiment (§1.4 / `bench_multiquery_cuda.py`) is the honest
+partial substitute: it measures *sequential* reuse of one compressed context
+across many queries, which is the property the architecture actually claims,
+without asserting anything about parallel requests.
+
+### 4c.2 Sample counts are ~10x below each benchmark's own standard
+
+| benchmark | its standard | used here |
+|---|---|---|
+| LongBench | ~200 per task | 20 (50 for the four claim-carrying arms) |
+| RULER | 500 per task | 20 |
+
+**Consequence, stated precisely.** The paired bootstrap keeps *within-study*
+comparisons valid — that is what licenses "SnapKV is not resolved from dense"
+and "DKV/high is worse than dense" as claims. What it does NOT license is
+placing these absolute numbers beside published LongBench or RULER tables as
+though they were comparable; the intervals here are far wider than a
+500-sample run's.
+
+Forced by a single 12 GB card and a matrix that already runs ~18 GPU-hours.
+The four arms that carry claims were re-run at n=50 to halve their intervals,
+because `dkv/high` at −2.72 [−5.19, −0.39] was close enough to zero that the
+sample size, not the effect, was the weakest part of the claim.
+
+### 4c.3 The max-context result is architecture-conditional
+
+98,304 vs 49,152 is measured on hybrid models. On dense-GQA granite DKV's
+slope matches dense's and its ceiling does not exceed dense's (§1.2). The
+cause is identified and is a defect rather than a property: on granite the
+dense KV is never released, so peak = dense peak + pool (§4.1 arithmetic).
+Fixing it would extend the claim, and granite compresses *better* (4.1x vs
+3.4x), so the ceiling is not what limits it.
+
+### 4c.4 One competitor at RULER lengths
+
+RULER carries SnapKV only; H2O, StreamingLLM and KIVI are characterised at 12k
+and extrapolated. Reasons and costs in §4b.
+
+### 4c.5 `noremat` returns NaN
+
+The project-then-attend Triton path (`DKV_REMAT_CACHE=0`) produces NaN logits
+even with the attention scale corrected. It is not the shipped path — the
+default `remat` route is exact against a dense control — but it is an open
+correctness defect on a supported configuration and should be named, not
+omitted. Three suspects already eliminated by measurement (§5).
+
+---
+
 ## 5. Open
 
 - **`noremat` returns NaN.** The project-then-attend Triton path
