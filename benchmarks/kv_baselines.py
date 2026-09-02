@@ -150,17 +150,33 @@ def cache_num_layers(pkv) -> int:
 
 
 def cache_get_kv(pkv, i):
+    """(keys, values) for layer i, or (None, None) if it holds no KV.
+
+    On a hybrid model most layers are not attention layers at all. Qwen3.5-4B is
+    8 of 32; the others are LinearAttentionLayer and carry a recurrent state
+    with no `.keys`. Returning None lets every caller skip them uniformly
+    instead of each one growing its own hasattr dance.
+    """
     if hasattr(pkv, "layers"):
         lyr = pkv.layers[i]
-        return lyr.keys, lyr.values
+        k = getattr(lyr, "keys", None)
+        v = getattr(lyr, "values", None)
+        if k is None or v is None:
+            return None, None
+        return k, v
     entry = pkv[i]
+    if entry is None or len(entry) < 2:
+        return None, None
     return entry[0], entry[1]
 
 
 def cache_set_kv(pkv, i, k, v) -> None:
     if hasattr(pkv, "layers"):
-        pkv.layers[i].keys = k
-        pkv.layers[i].values = v
+        lyr = pkv.layers[i]
+        if getattr(lyr, "keys", None) is None:
+            return                       # no KV here; nothing to write back
+        lyr.keys = k
+        lyr.values = v
         return
     raise TypeError(
         "cannot write back to this cache type; expected a DynamicCache with "
@@ -321,8 +337,16 @@ def _evict_by_observed_attention(model, ids: List[int], device: str, chunk: int,
     past_out = out.past_key_values
     total_bytes = 0.0
     keep = min(budget, plen)
+    n_kv = n_skipped = 0
     for l in range(cache_num_layers(past_out)):
         K, V = cache_get_kv(past_out, l)
+        # Hybrid models interleave layers that have no KV cache at all. They
+        # have nothing to evict, and out.attentions has no usable entry for
+        # them either.
+        if K is None or l >= len(out.attentions) or out.attentions[l] is None:
+            n_skipped += 1
+            continue
+        n_kv += 1
         A = out.attentions[l]                                    # [B,n_q,W,S]
         scores = A[..., :plen].to(torch.float32).sum(dim=2)      # [B,n_q,plen]
         # GQA: attention is per QUERY head, the cache is per KV head. Pool the
@@ -341,6 +365,10 @@ def _evict_by_observed_attention(model, ids: List[int], device: str, chunk: int,
         Vc = torch.cat([torch.gather(V[:, :, :plen, :], 2, gi), V[:, :, plen:, :]], dim=2)
         cache_set_kv(past_out, l, Kc, Vc)
         total_bytes += (Kc.numel() + Vc.numel()) * 2.0
+    if n_kv == 0:
+        raise RuntimeError(
+            f"attention-observation eviction found no KV-bearing layer "
+            f"({n_skipped} skipped) -- nothing was evicted.")
     return past_out, out.logits[0, -1].float(), total_bytes / 1e9
 
 
@@ -372,6 +400,14 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
     L = cfg.num_hidden_layers
     Hkv = getattr(cfg, "num_key_value_heads", cfg.num_attention_heads)
     hd = getattr(cfg, "head_dim", None) or (cfg.hidden_size // cfg.num_attention_heads)
+    # On a hybrid, only SOME layers hold KV. Counting all of them inflates the
+    # dense baseline and therefore every compression ratio measured against it.
+    # `full_attention_layers`/`layer_types` is how the configs express this.
+    _lt = getattr(cfg, "layer_types", None)
+    if _lt:
+        _n_attn = sum(1 for t in _lt if "full" in str(t) or "attention" == str(t))
+        if 0 < _n_attn < L:
+            L = _n_attn
     dense_kv_gb = (L * prompt_len * Hkv * hd * 2 * 2) / 1e9
 
     # ── prefill (+ compression, for the attention-observation methods) ──
@@ -396,13 +432,23 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
         phys_gb = dense_kv_gb
         t1 = time.perf_counter()
         if method in KV_TRANSFORMS:
-            total = 0.0
+            total, n_kv, n_skipped = 0.0, 0, 0
             for li in range(cache_num_layers(past)):
                 k, v = cache_get_kv(past, li)
+                if k is None:
+                    n_skipped += 1       # linear-attention layer: no KV
+                    continue
                 k2, v2, gb = KV_TRANSFORMS[method](k, v, **params)
                 cache_set_kv(past, li, k2, v2)
                 total += gb
+                n_kv += 1
+            if n_kv == 0:
+                raise RuntimeError(
+                    f"{method}: no layer in this cache holds KV "
+                    f"({n_skipped} skipped) -- nothing was compressed, so any "
+                    f"footprint reported here would be meaningless.")
             phys_gb = total
+            attn_layers, skipped_layers = n_kv, n_skipped
         elif method != "dense":
             raise ValueError(f"unknown baseline method: {method}")
         if cuda:
