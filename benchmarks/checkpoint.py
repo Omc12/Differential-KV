@@ -32,7 +32,27 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any, Dict, Iterable, Optional, Set
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if that pid is a live process. Conservative: unknown -> alive."""
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            import subprocess
+            out = subprocess.run(
+                ["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=30).stdout
+            return str(pid) in out
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except Exception:                                            # noqa: BLE001
+        return False
 
 
 class ResumableJSONL:
@@ -45,6 +65,7 @@ class ResumableJSONL:
         self.meta_path = self.path + ".meta.json"
         self.config = dict(config or {})
         self._check_config(strict_config)
+        self._acquire_lock()
         self._fh = open(self.path, "a", encoding="utf-8", newline="\n")
 
     # ── config guard ────────────────────────────────────────────────────────
@@ -67,6 +88,64 @@ class ResumableJSONL:
                   "configuration. Appending to them would build one table out of\n"
                   "two experiments. Point --out at a new file, or delete the old\n"
                   "one if those rows are meant to be discarded.\n")
+
+    # ── single-writer lock ──────────────────────────────────────────────────
+    def _acquire_lock(self) -> None:
+        """Refuse to open a store another LIVE process is already writing.
+
+        Two harness invocations were once left running against the same output
+        file at once -- an orphaned arm plus a restarted campaign. Append+fsync
+        meant neither corrupted a line, and load_latest() deduplicates by key,
+        so the QUALITY rows survived. What did not survive is everything
+        measured while both were resident on one 12 GB card: peak memory and
+        latency were recorded under contention, at 96% GPU and 11.8 GB, with
+        both processes spilling.
+
+        Nothing in the data marks that. A lock is the only place to catch it.
+        """
+        self.lock_path = self.path + ".lock"
+        if os.path.exists(self.lock_path):
+            try:
+                with open(self.lock_path, encoding="utf-8") as f:
+                    prev = json.load(f)
+            except Exception:                                    # noqa: BLE001
+                prev = {}
+            pid = prev.get("pid")
+            if pid and _pid_alive(int(pid)):
+                raise SystemExit(
+                    "\nANOTHER RUN IS ALREADY WRITING %s\n"
+                    "  pid %s, started %s\n\n"
+                    "Two processes sharing one output file also share one GPU:\n"
+                    "every peak-memory and latency number either of them records\n"
+                    "is measured under contention. Stop that process, or point\n"
+                    "--out somewhere else.\n"
+                    % (self.path, pid, prev.get("started")))
+            print("[ckpt] reclaiming stale lock from pid %s (not running)" % pid)
+        with open(self.lock_path, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(),
+                       "started": time.strftime("%Y-%m-%d %H:%M:%S")}, f)
+
+    def _release_lock(self) -> None:
+        lp = getattr(self, "lock_path", None)
+        if not lp or not os.path.exists(lp):
+            return
+        # READ FIRST, THEN REMOVE. Windows refuses to delete an open file, so
+        # calling os.remove() inside the `with open(...)` block raises
+        # PermissionError -- which the blanket except below then swallows,
+        # leaving the lock behind. Every subsequent run of the same arm would
+        # have died with "another run is already writing", pointing at a pid
+        # that had exited cleanly.
+        try:
+            with open(lp, encoding="utf-8") as f:
+                owner = json.load(f).get("pid")
+        except Exception:                                        # noqa: BLE001
+            owner = None
+        if owner is not None and owner != os.getpid():
+            return                       # not ours; leave it alone
+        try:
+            os.remove(lp)
+        except Exception:                                        # noqa: BLE001
+            pass
 
     # ── resume ──────────────────────────────────────────────────────────────
     def load_done(self, include_errors: bool = False) -> Set[str]:
@@ -146,6 +225,7 @@ class ResumableJSONL:
             self._fh.close()
         except Exception:                                        # noqa: BLE001
             pass
+        self._release_lock()
 
     def __enter__(self):
         return self
