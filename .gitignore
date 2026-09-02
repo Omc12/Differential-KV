@@ -116,3 +116,10 @@ docs/turboquant_dkv_hybrid_roadmap.md
 benchmarks/ruler_official/data/synthetic/json/PaulGrahamEssays.json
 benchmarks/ruler_official/data/synthetic/json/squad.json
 benchmarks/ruler_official/data/synthetic/json/hotpotqa.json
+
+# Generated RULER inputs: 143 MB, and exactly reproducible from the vendored
+# generators (fixed --random_seed 42, pinned tokenizer per model) via
+#   benchmarks/generate_ruler_data.sh
+# The PREDICTIONS and scores under paper/results/ruler/ are tracked; the inputs
+# they were produced from are regenerated, not stored.
+paper/results/ruler_data/
