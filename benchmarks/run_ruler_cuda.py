@@ -307,6 +307,11 @@ def main():
     ap.add_argument("--max-length", type=int, default=0,
                     help="skip generated lengths above this (the model's measured "
                          "non-spilling ceiling). 0 = run everything generated.")
+    ap.add_argument("--min-length", type=int, default=0,
+                    help="skip generated lengths BELOW this. A 64k campaign with "
+                         "only --max-length re-runs 4k/8k/16k/32k as well -- 1,300 "
+                         "items per arm where 260 are new -- and those rungs were "
+                         "already measured by the 32k campaign.")
     ap.add_argument("--tasks", nargs="+", default=RULER_13)
     ap.add_argument("--baseline-params", default="{}")
     ap.add_argument("--thinking", action="store_true",
@@ -347,6 +352,7 @@ def main():
            "preset": args.preset if args.arm == "dkv" else None,
            "baseline_params": json.loads(args.baseline_params),
            "data_dir": os.path.abspath(data_dir),
+           "min_length": args.min_length or None,
            "decode_defaults": "serving" if args.arm == "dkv" else None,
            "prefill_attn": "sdpa",
            "thinking": bool(args.thinking),
@@ -360,7 +366,8 @@ def main():
 
     items = [it for it in load_generated(data_dir)
              if it["task"] in args.tasks
-             and (not args.max_length or it["length"] <= args.max_length)]
+             and (not args.max_length or it["length"] <= args.max_length)
+             and (not args.min_length or it["length"] >= args.min_length)]
     work = [it for it in items if f"{it['length']}/{it['task']}#{it['idx']}" not in done]
     print(f"[ckpt] {out}\n[ckpt] {len(done)} recorded, {len(work)} pending "
           f"(of {len(items)} generated)")

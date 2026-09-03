@@ -36,7 +36,7 @@ run_arm () {
   echo "### RULER ARM: $name   model=$TAG  max_length=$MAXLEN"
   echo "############################################################"
   "$PY" benchmarks/run_ruler_cuda.py \
-      --model "$MODEL" --max-length "$MAXLEN" --out "$out" "$@"
+      --model "$MODEL" --max-length "$MAXLEN" ${MINLEN:+--min-length "$MINLEN"}       --out "$out" "$@"
   echo "### RULER ARM $name exit=$?"
 }
 
