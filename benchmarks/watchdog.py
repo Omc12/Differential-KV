@@ -89,8 +89,12 @@ def main():
         try:
             r = subprocess.run([sys.executable, py], capture_output=True,
                                text=True, cwd=REPO, timeout=600)
-            bad = [l for l in (r.stdout or "").splitlines() if "FAIL" in l
-                   and "A FAIL means" not in l]
+            # Only real failure ROWS. The validator also prints a TALLY
+            # ("24 ok, 3 warn, 0 FAIL") and an explanatory sentence, both of
+            # which contain the word -- matching those made the watchdog fire
+            # every interval on a clean run.
+            bad = [l for l in (r.stdout or "").splitlines()
+                   if l.lstrip().startswith("[ FAIL ]")]
             if bad:
                 print(f"AUDIT: {len(bad)} FAIL line(s) -- "
                       f"{bad[0].strip()[:110]}", flush=True)
