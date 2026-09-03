@@ -75,7 +75,8 @@ def run_point(args) -> Dict[str, Any]:
     from context_ladder import build_filler
     import kv_baselines as KB
 
-    res: Dict[str, Any] = {"arm": args.arm, "ctx": args.ctx, "n_queries": args.n}
+    res: Dict[str, Any] = {"arm": args.arm, "ctx": args.ctx,
+                           "n_queries": args.n, "pattern": args.pattern}
 
     if args.arm == "dkv":
         os.environ.setdefault("DKV_RSVD_SEED", "1234")
@@ -105,19 +106,38 @@ def run_point(args) -> Dict[str, Any]:
     per_query, texts = [], []
 
     if args.arm == "dkv":
-        # ONE session. The wrapper's prefix check makes the second and later
-        # prefills incremental over the resident compressed cache.
+        # ONE session. WHICH PATTERN IS SERVED MATTERS, and the first version
+        # of this harness measured only the one DKV cannot do.
+        #
+        # The prefix check (hf_dkv_wrapper.py:1758) reuses only when the new
+        # prompt STRICTLY EXTENDS the stored session, because the session
+        # records prompt+completion:
+        #
+        #   append       ctx q1 a1 q2  extends  ctx q1 a1  -> reuse fires
+        #   independent  ctx q2        is SHORTER          -> guard fails,
+        #                                                     session cleared
+        #
+        # So 'independent' measures an unsupported pattern, and it cannot show
+        # a difference anyway -- SnapKV cannot reuse there either. 'append' is
+        # the multi-turn pattern where DKV appends while SnapKV must re-evict
+        # against its new observation window: the only place the claim is
+        # actually testable.
         sid = f"mq-{args.ctx}-{time.time_ns()}"
         w.active_session = sid
+        transcript = ctx_text
         for q in qs:
+            prompt = transcript + "\n\nQuestion: " + q + "\nAnswer:"
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-            out = w.generate(ctx_text + "\n\nQuestion: " + q + "\nAnswer:",
-                             max_new_tokens=args.gen, temperature=0.0,
+            out = w.generate(prompt, max_new_tokens=args.gen, temperature=0.0,
                              top_p=1.0, repetition_penalty=1.0)
             torch.cuda.synchronize()
             per_query.append(time.perf_counter() - t0)
             texts.append((out or "")[-120:])
+            if args.pattern == "append":
+                # generate() returns prompt+completion, so this IS the
+                # extended transcript the next turn must strictly extend.
+                transcript = out or prompt
         try:
             w.clear_session(sid)
         except Exception:                                        # noqa: BLE001
@@ -150,7 +170,15 @@ def run_point(args) -> Dict[str, Any]:
                     past = o.past_key_values
                     lg = o.logits[0, -1]
                     cur += 1
-            past.crop(base_len)          # restore the shared prefix
+            if args.pattern == "independent":
+                # Restore the shared prefix. Needs an EXACT rollback, which a
+                # linear-attention layer's fixed-size recurrent state cannot
+                # give -- on hybrid models this raises, and that is a property
+                # of the architecture, not a defect in this harness.
+                past.crop(base_len)
+            else:
+                # append: the conversation legitimately grows, nothing to undo.
+                base_len = cur
             torch.cuda.synchronize()
             per_query.append(time.perf_counter() - t0)
             texts.append(tok.decode(gen, skip_special_tokens=True)[:120])
@@ -160,16 +188,20 @@ def run_point(args) -> Dict[str, Any]:
         # prefilled and evicted again for every one. Not a handicap imposed
         # here -- it is what the method requires.
         bparams = json.loads(args.baseline_params)
+        transcript = ctx_text
         for q in qs:
-            ids = tok(ctx_text + "\n\nQuestion: " + q + "\nAnswer:",
-                      add_special_tokens=False).input_ids
+            prompt = transcript + "\n\nQuestion: " + q + "\nAnswer:"
+            ids = tok(prompt, add_special_tokens=False).input_ids
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             r = KB.run_baseline(model, tok, ids, args.arm, "cuda", args.gen,
                                 set(), args.chunk, bparams)
             torch.cuda.synchronize()
             per_query.append(time.perf_counter() - t0)
-            texts.append((r.get("text") or "")[:120])
+            txt = (r.get("text") or "")
+            texts.append(txt[:120])
+            if args.pattern == "append":
+                transcript = prompt + txt
 
     total = torch.cuda.get_device_properties(0).total_memory / 1e9
     peak = torch.cuda.max_memory_allocated() / 1e9
@@ -234,6 +266,14 @@ def main():
     ap.add_argument("--gen", type=int, default=16)
     ap.add_argument("--chunk", type=int, default=1024)
     ap.add_argument("--baseline-params", default='{"budget": 2016, "window": 32}')
+    ap.add_argument("--pattern", default="append",
+                    choices=["append", "independent"],
+                    help="append: multi-turn, each prompt extends the last "
+                         "-- the pattern the prefix check supports, and where "
+                         "SnapKV must re-evict against a new observation "
+                         "window. independent: one context, a different query "
+                         "each time, which needs an exact rollback DKV has no "
+                         "API for and hybrid models cannot do at all.")
     ap.add_argument("--out", default="")
     ap.add_argument("--arm", default="")
     ap.add_argument("--ctx", type=int, default=0)
@@ -258,8 +298,12 @@ def main():
     import subprocess
     import tempfile
     tag = args.model.split("/")[-1]
+    # The run key is arm@ctx, so an append run would collide with the
+    # independent rows already in the old file and be skipped on resume.
+    # The pattern belongs in the filename, not only in the row.
     out = args.out or os.path.join(REPO, "paper", "results", "multiquery",
-                                   f"{tag}_{args.preset}_n{args.n}.jsonl")
+                                   f"{tag}_{args.preset}_n{args.n}_"
+                                   f"{args.pattern}.jsonl")
     cfg = {"model": args.model, "preset": args.preset, "quant": args.quant,
            "n_queries": args.n, "gen": args.gen, "chunk": args.chunk,
            "dkv_decode_rev": decode_fingerprint(), "protocol": "multiquery-v1"}
