@@ -675,6 +675,57 @@ exactly what bit-exact tokens buy, and at 64k mid's budget is spread across
 twice the tokens it was at 32k. The failure is a budget-density effect, not a
 rank effect.
 
+### 1.7c "Collapse" is the wrong word for mid -- 84% of its deficit is two tasks
+
+An earlier draft of 1.7 described mid at 64k as failing or collapsing. That
+characterisation does not survive the per-task arithmetic and is corrected here.
+
+Comparing mid@64k against dense@32k (dense has no 64k row -- 4b.6), the deficit
+is 225.6 points summed across 13 tasks. **190.0 of those points, 84%, are the
+two lookalike-haystack tasks alone.**
+
+| view | dense@32k | mid@32k | mid@64k |
+|---|---|---|---|
+| all 13 tasks | 84.8 | 69.8 | 67.5 |
+| minus the 2 lookalike tasks (11) | 82.1 | 78.9 | **78.9** |
+| minus lookalikes and vt (10) | 90.3 | 86.7 | 86.6 |
+
+`vt` is excluded in the third row because DENSE scores 0.0 on it -- it is a model
+ceiling, not a compression deficit, and charging it to DKV would be wrong.
+
+**The strongest number in this table is that mid@32k and mid@64k are identical
+at 78.9 on the non-lookalike subset.** Doubling the context costs mid nothing
+measurable outside the adversarial constructions. Its deficit is a property of
+the task type, not of the context length.
+
+**Corroborated by a second, independent benchmark.** LongBench carries no
+lookalike-haystack construction, and there dkv/mid is -3.97 [-6.35, -1.87]
+against dense -- which agrees closely with the 3.2-point non-lookalike gap
+measured here. Two benchmarks with different data, different scorers and
+different failure surfaces converge on the same realistic-task deficit.
+
+### What must stay attached to this framing
+
+Three things, or the analysis becomes cherry-picking:
+
+1. **The 13-task average stays the headline.** 67.5 is the number. Dropping the
+   tasks an arm loses on and reporting the remainder is precisely what a
+   reviewer is right to punish. The subset is diagnostic, not the result.
+2. **It is not only the lookalikes.** `qa_1` and `qa_2` -- extractive QA on
+   SQuAD and HotpotQA, entirely ordinary -- cost 15 points each. That is 13% of
+   the deficit and it is on realistic tasks.
+3. **The lookalike haystack is not purely artificial.** RAG over homogeneous
+   records -- log lines, SKUs, customer IDs, near-duplicate chunks retrieved
+   from one document -- IS this pattern in production. Conversational use is
+   unlikely to stress it; record-lookup retrieval is exactly what does.
+
+**How to state it in the paper.** Not "mid fails at 64k". Rather: *DKV's deficit
+is concentrated in discriminating among near-identical candidates; on the other
+eleven RULER tasks and on LongBench it is roughly three points below dense while
+serving twice the context.* That is a narrower and more defensible claim than
+either "compression is free" or "mid collapses", and it is the one the data
+supports.
+
 ### 1.7b The ceiling and the quality are measured at DIFFERENT presets
 
 **This undercuts the headline if not handled.** Every ladder file is
