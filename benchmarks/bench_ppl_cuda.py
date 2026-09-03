@@ -49,25 +49,49 @@ from code_fingerprint import decode_fingerprint                  # noqa: E402
 SKIP_TOKENS = 5120
 
 
-def load_text(name: str, min_chars: int) -> str:
+def load_text(name: str, min_chars: int):
+    """Return (text, source). Tries several spellings before giving up.
+
+    Every point failed on the first run with
+        ValueError: Couldn't find cache for wikitext for config
+        'wikitext-103-raw-v1'. Available configs in the cache:
+        ['wikitext-2-raw-v1']
+    -- the bare repo id `wikitext` is no longer resolvable on the Hub (it moved
+    to Salesforce/wikitext) so `datasets` fell back to the local cache, which
+    holds only the -2 config. Rather than pin one spelling, try the candidates
+    in order and RECORD WHICH ONE WAS USED, so a perplexity number can always
+    be traced to the corpus it came from.
+    """
     from datasets import load_dataset
     if name == "pg19":
-        ds = load_dataset("deepmind/pg19", split="test", streaming=True)
-        key = "text"
+        cands = [(("deepmind/pg19",), {"split": "test", "streaming": True}),
+                 (("pg19",), {"split": "test", "streaming": True})]
     else:
-        ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="test")
-        key = "text"
-    buf = []
-    n = 0
-    for row in ds:
-        t = row.get(key) or ""
-        if not t.strip():
-            continue
-        buf.append(t)
-        n += len(t)
-        if n >= min_chars:
-            break
-    return "\n\n".join(buf)
+        cands = [(("Salesforce/wikitext", "wikitext-103-raw-v1"), {"split": "test"}),
+                 (("wikitext", "wikitext-103-raw-v1"), {"split": "test"}),
+                 (("Salesforce/wikitext", "wikitext-2-raw-v1"), {"split": "test"}),
+                 (("wikitext", "wikitext-2-raw-v1"), {"split": "test"})]
+    last = None
+    for a, kw in cands:
+        try:
+            ds = load_dataset(*a, **kw)
+            src = "/".join(str(x) for x in a)
+            buf, n = [], 0
+            for row in ds:
+                t = row.get("text") or ""
+                if not t.strip():
+                    continue
+                buf.append(t)
+                n += len(t)
+                if n >= min_chars:
+                    break
+            if n < min_chars // 2:
+                last = f"{src}: only {n} chars, needed {min_chars}"
+                continue
+            return "\n\n".join(buf), src
+        except Exception as e:                                   # noqa: BLE001
+            last = f"{a}: {type(e).__name__}: {str(e)[:120]}"
+    raise SystemExit(f"no usable corpus for '{name}'. Last: {last}")
 
 
 def score(model_or_wrapper, tok, ids, chunk, is_dkv, sid_prefix):
@@ -144,7 +168,7 @@ def run_point(args) -> Dict[str, Any]:
         tok, model = load_plain(args.model, args.quant, eager=False)
         obj, is_dkv = model, False
 
-    text = load_text(args.data, args.ctx * 8)
+    text, res["corpus"] = load_text(args.data, args.ctx * 8)
     ids = tok(text, add_special_tokens=False).input_ids[:args.ctx]
     res["ctx_actual"] = len(ids)
     torch.cuda.reset_peak_memory_stats()

@@ -141,33 +141,49 @@ def run_point(args) -> Dict[str, Any]:
 
 
 def report(paths: List[str]) -> None:
-    rows = []
+    # GROUPED BY MODEL. Reporting them together silently mixed granite
+    # (4k/8k/16k) with Qwen3.5-4B (8k/16k/32k), so the shared 8k and 16k
+    # columns held whichever model was read last -- a table where every number
+    # looked plausible and half of them were the wrong model.
+    by_model = {}
     for p in paths:
+        meta = {}
+        if os.path.exists(p + ".meta.json"):
+            with open(p + ".meta.json", encoding="utf-8") as f:
+                meta = json.load(f)
+        model = meta.get("model") or os.path.basename(p)
         st = ResumableJSONL(p, config=None, strict_config=False, read_only=True)
-        rows += [r for r in st.load_latest().values() if not r.get("error")]
+        by_model.setdefault(model, []).extend(
+            r for r in st.load_latest().values() if not r.get("error"))
         st.close()
-    if not rows:
+    if not by_model:
         print("no systems results")
         return
-    arms = sorted({r["arm"] for r in rows})
-    ctxs = sorted({r["ctx"] for r in rows})
-    for title, key, unit, hi_good in [("TTFT (s, lower better)", "ttft_s", "s", False),
-                                      ("decode throughput (tok/s, higher better)", "decode_tps", "", True),
-                                      ("peak VRAM (GB)", "peak_gb", "GB", False)]:
-        print(f"\n=== {title} ===")
-        print(f"{'arm':>10} " + " ".join(f"{c:>10}" for c in ctxs))
-        print("-" * (11 + 11 * len(ctxs)))
-        for a in arms:
-            cells = []
-            for c in ctxs:
-                m = [r for r in rows if r["arm"] == a and r["ctx"] == c]
-                if not m:
-                    cells.append(f"{'-':>10}")
-                    continue
-                v = m[0].get(key)
-                mark = "*" if m[0].get("spilled") else " "
-                cells.append(f"{v:>9.2f}{mark}" if v is not None else f"{'-':>10}")
-            print(f"{a:>10} " + " ".join(cells))
+
+    for model in sorted(by_model):
+        rows = by_model[model]
+        if not rows:
+            continue
+        arms = sorted({r["arm"] for r in rows}, key=lambda a: (a != "dense", a))
+        ctxs = sorted({r["ctx"] for r in rows})
+        print(f"\n################ {model} ################")
+        for title, key in [("TTFT (s, lower better)", "ttft_s"),
+                           ("decode throughput (tok/s, higher better)", "decode_tps"),
+                           ("peak VRAM (GB)", "peak_gb")]:
+            print(f"\n=== {title} ===")
+            print(f"{'arm':>10} " + " ".join(f"{c:>10}" for c in ctxs))
+            print("-" * (11 + 11 * len(ctxs)))
+            for a in arms:
+                cells = []
+                for c in ctxs:
+                    m = [r for r in rows if r["arm"] == a and r["ctx"] == c]
+                    if not m:
+                        cells.append(f"{'-':>10}")
+                        continue
+                    v = m[0].get(key)
+                    mark = "*" if m[0].get("spilled") else " "
+                    cells.append(f"{v:>9.2f}{mark}" if v is not None else f"{'-':>10}")
+                print(f"{a:>10} " + " ".join(cells))
     print("\n* = spilled to host memory; that timing is PCIe bandwidth, not compute.")
 
 
