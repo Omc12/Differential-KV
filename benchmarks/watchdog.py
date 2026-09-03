@@ -54,6 +54,19 @@ def held_locks(alive: set[int]):
     return out
 
 
+def gpu_memory_gb():
+    """(used, total) GB from nvidia-smi, or (0, 0) if it cannot be read."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        u, t = out.splitlines()[0].split(",")
+        return int(u) / 1024.0, int(t) / 1024.0
+    except Exception:                                            # noqa: BLE001
+        return 0.0, 0.0
+
+
 def marginal_costs(log: str, tail: int = 4000):
     """(n, seconds) for recent items, from the cumulative average."""
     try:
@@ -79,6 +92,10 @@ def main():
     ap.add_argument("--interval", type=int, default=1800)
     ap.add_argument("--stall-min", type=int, default=45)
     ap.add_argument("--cliff", type=float, default=6.0)
+    ap.add_argument("--mem-frac", type=float, default=0.85,
+                    help="fraction of the card that must be resident before a "
+                         "latency cliff is reported as a spill. Without it the "
+                         "detector fires on any long-generation task.")
     a = ap.parse_args()
 
     sizes: dict[str, tuple[int, float]] = {}
@@ -138,10 +155,21 @@ def main():
             med = statistics.median(s for _, s in mc)
             recent = mc[-3:]
             if med > 0 and all(s > a.cliff * med for _, s in recent):
-                print(f"CLIFF: last 3 items cost "
-                      f"{', '.join(f'{s:.0f}s' for _, s in recent)} vs median "
-                      f"{med:.0f}s -- spill signature; the displayed average "
-                      f"will NOT show this", flush=True)
+                # A slow patch is only a SPILL if the card is nearly full. Long
+                # generation budgets produce the same latency ratio with plenty
+                # of memory free: granite's gov_report runs 79.9s against a
+                # 6.1s whole-run median purely because it generates 512 tokens
+                # where the other LongBench tasks generate 3-30, and its peak
+                # (8.28 GB) is LOWER than theirs (8.45) on a 12.28 GB card.
+                # The dense@64k spill this was built for sat at 11.2/12.28.
+                used, total = gpu_memory_gb()
+                if total and used / total >= a.mem_frac:
+                    print(f"CLIFF: last 3 items cost "
+                          f"{', '.join(f'{s:.0f}s' for _, s in recent)} vs "
+                          f"median {med:.0f}s at {used:.1f}/{total:.1f} GB "
+                          f"({100 * used / total:.0f}% of the card) -- spill; "
+                          f"the displayed average will NOT show this",
+                          flush=True)
 
         time.sleep(a.interval)
 
