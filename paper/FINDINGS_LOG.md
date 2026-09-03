@@ -642,6 +642,68 @@ comparison.
 
 ---
 
+## 1.7 At 64k the preset gap becomes the result
+
+RULER @64k, Qwen3.5-4B. No baseline appears because none can run there (4b.6),
+so the comparison is each preset against its own 32k row, task for task.
+
+| task | high @32k | high @64k | mid @32k | mid @64k |
+|---|---|---|---|---|
+| niah_single_1 | 100.0 | 100.0 | 100.0 | 100.0 |
+| niah_multikey_1 | 100.0 | 95.0 | 100.0 | 100.0 |
+| **niah_multikey_2** | 60.0 | **55.0** | 25.0 | **0.0** |
+| **niah_multikey_3** | 95.0 | **80.0** | 15.0 | **10.0** |
+| niah_multivalue | 100.0 | 100.0 | 100.0 | 100.0 |
+| niah_multiquery | 100.0 | 96.2 | 100.0 | 96.2 |
+| cwe | 52.5 | 52.5 | 52.0 | 53.5 |
+| fwe | 100.0 | 95.0 | 100.0 | 96.7 |
+| **matched mean** | **88.4** | **84.2** | **74.0** | **69.6** |
+
+mid's full 13-task average at 64k is 67.5 (complete, 260/260).
+
+**DKV works at 64k, at preset high.** A 4.2-point loss from 32k to 64k is
+gentle degradation, not collapse, and it happens at a length where dense,
+SnapKV and StreamingLLM all exceed the card. This is the result the regime
+argument needs.
+
+**The residual budget is the lever, and the evidence is now unambiguous.** On
+the lookalike-haystack task at 64k, mid scores 0.0 and high scores 55.0. The two
+presets differ in residual budget (128 vs 256 exact tokens); rank is NOT the
+distinguishing variable, since r_proj clamps both to 32 (see the preset-rank
+note). Residuals are the bit-exact token budget, lookalike discrimination is
+exactly what bit-exact tokens buy, and at 64k mid's budget is spread across
+twice the tokens it was at 32k. The failure is a budget-density effect, not a
+rank effect.
+
+### 1.7b The ceiling and the quality are measured at DIFFERENT presets
+
+**This undercuts the headline if not handled.** Every ladder file is
+`*_mid_nf4.jsonl` -- the 98,304-token ceiling is a preset-MID measurement. But
+mid is the preset that scores 0.0 on niah_multikey_2 at 64k. The preset that
+holds quality, high, is unmeasured on the ladder above 64k, and it compresses
+far less:
+
+| preset | KV at 64k | compression | peak |
+|---|---|---|---|
+| mid | 1.686 GB | 5.1x | 8.50 GB |
+| high | 4.438 GB | 1.9x | 9.30 GB |
+
+Extrapolated, high's KV reaches ~6.7 GB at 98k, which on a 12.28 GB card is
+likely to spill before mid's ceiling. If that is confirmed, then **"2x context"
+and "quality preserved" are two different operating points and the paper must
+not claim them in one sentence.**
+
+Queued as a ladder run at preset high over 32k-131k
+(`paper/results/ladder/Qwen3.5-4B_high_nf4.jsonl`). Until it lands, the honest
+statement is: the ceiling is 2x at mid; high's ceiling is unmeasured.
+
+Note also that compression MOVES WITH CONTEXT and with preset in opposite
+directions: mid goes 2.9x at 32k -> 5.1x at 64k (the architecture pays off
+further out), while high is 1.4x at 32k -> 1.9x at 64k. Both improve; high
+starts much lower because its residual budget is the dominant term.
+
+---
+
 ## 4b.6 RULER @64k carries DKV only -- no baseline can run there
 
 **The result, stated plainly: on a 12 GB card at 64k, DKV is the only arm that
