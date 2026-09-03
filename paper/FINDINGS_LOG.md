@@ -590,6 +590,82 @@ dense and means nothing.
 
 ---
 
+## 4.6b gemma is not an architecture limit -- it is a 4x geometry over-allocation
+
+The ladder records DKV as WORSE than dense on gemma-4-12B (32,768 vs 49,152),
+and 4c.3 currently reports that as an architecture-conditional property. The
+per-token arithmetic says it is a bug.
+
+| model | dense GB/1k | DKV GB/1k | |
+|---|---|---|---|
+| Qwen3.5-4B | 0.0902 | 0.0413 | DKV 2.2x lower -- wins |
+| granite-4.2-8b | 0.2213 | 0.2230 | identical -- the release defect (4.1) |
+| gemma-4-12B-it | 0.0164 | 0.0725 | **DKV 4.4x HIGHER** |
+
+The floors are effectively equal (8.37 vs 8.38 GB), so this is not the pool's
+fixed cost. DKV is storing more PER TOKEN than the cache it replaces.
+
+### Why gemma's dense slope is so flat
+
+48 layers, but `layer_types` is 40 `sliding_attention` + 8 `full_attention`, and
+`sliding_window=1024`. Only the 8 global layers grow with context; the other 40
+are capped. So context growth is an 8-layer cost, not a 48-layer one.
+
+**This is the correct answer to "more layers = more compression room": only if
+those layers hold KV that GROWS.** gemma has the most layers of any model here
+and the least to compress. DKV already handles this -- `is_dkv_attention_layer`
+explicitly skips bounded sliding-window layers, and the patch leaves them on
+their native forward.
+
+### The actual defect: the global layers have their OWN geometry
+
+    head_dim = 256                num_key_value_heads = 8          <- sliding
+    global_head_dim = 512         num_global_key_value_heads = 1   <- global
+
+Two arithmetic checks, both exact:
+
+    global geometry:  8 layers x 2 x 1 head  x 512 x 2 B = 16.0 KB/tok
+                      -> 0.0164 GB per 1k  == the MEASURED dense slope, exactly
+
+    sliding geometry: 8 layers x 2 x 8 heads x 256 x 2 B = 64.0 KB/tok
+                      -> 0.0655 GB per 1k  == DKV's 0.0725 minus ~10% overhead
+
+DKV is sizing its store for the SLIDING layers' geometry while compressing the
+GLOBAL layers -- 8x256=2048 values per layer-token where the real figure is
+1x512=512. **A 4x over-allocation**, which is precisely the ratio between the
+two slopes.
+
+Corroborating: the strings `global_head_dim` and `num_global_key_value_heads`
+do not appear anywhere in ACTIVE_RUNTIME. The MLX side knows the shape exists
+(`tests/test_gemma4_mlx_wrapper.py` builds a global layer with head_dim=512),
+so this is a CUDA-side gap, not a misunderstanding of the model.
+
+The likely mechanism is the known layer-0 probe: gemma's global layers sit at
+indices 5, 11, 17, 23, 29, 35, 41, 47, so layer 0 is a SLIDING layer and any
+geometry read from it is the wrong one. The same probe pattern is already
+documented as a hybrid-model hazard at kv_runtime_manager.py:2704. The exact
+resolution site is NOT yet pinned -- that is the next step, and the claim above
+rests on the arithmetic, not on having found the line.
+
+### What this changes
+
+4c.3 says the max-context result is architecture-conditional and names gemma as
+a case where DKV is worse. **One of the four models in that claim is a defect,
+not a property.** Fixing it should move gemma's DKV slope from 0.0725 to roughly
+0.018 before compression, i.e. at or below dense, and the ceiling with it.
+
+Do not ship 4c.3 in its current form. The honest statement until the fix is
+measured is: DKV wins on both hybrid models, is neutral on granite because the
+dense KV is never released (4.1), and is untested on gemma because the runtime
+reads the wrong head geometry there. Two of the three non-wins are bugs with
+identified causes.
+
+Third instance of the head-geometry hazard in this repo, and the memory note
+already warns "read geometry from live layers, never derive it" -- reading from
+live layer 0 is not enough when layer 0 is not a layer DKV compresses.
+
+---
+
 ## 4.7 "Compress once, serve many" is NOT supported by the shipped wrapper
 
 The differentiator the architecture claims -- one compressed context reused
