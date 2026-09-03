@@ -107,19 +107,28 @@ def main():
                   + " -- two live writers share one card; peak-memory and "
                     "latency rows written now are contaminated", flush=True)
 
+        # ONLY the stores a live writer currently holds. The first version
+        # tested every jsonl under paper/results whenever ANY lock was held,
+        # so one healthy run made all 25 FINISHED files look stalled -- a
+        # finished file not growing is the normal case, not a fault. It fired
+        # 25 lines in one interval, which is how a watchdog gets ignored.
         now = time.time()
+        active = {n for n, _ in locks}
+        owner = dict(locks)
         for f in glob.glob(os.path.join(REPO, "paper", "results", "*", "*.jsonl")):
+            key = os.path.basename(f)
+            if key not in active:
+                sizes.pop(key, None)      # forget history while it is idle
+                continue
             try:
                 sz = os.path.getsize(f)
             except OSError:
                 continue
-            key = os.path.basename(f)
             prev = sizes.get(key)
-            if prev and sz == prev[0] and locks and \
-                    (now - prev[1]) > a.stall_min * 60:
-                print(f"STALL: {key} unchanged for "
-                      f"{int((now - prev[1]) / 60)} min while a writer holds a "
-                      f"lock", flush=True)
+            if prev and sz == prev[0] and (now - prev[1]) > a.stall_min * 60:
+                print(f"STALL: {key} has not grown in "
+                      f"{int((now - prev[1]) / 60)} min although its writer "
+                      f"(pid {owner.get(key)}) is alive", flush=True)
                 sizes[key] = (sz, now)
             elif not prev or sz != prev[0]:
                 sizes[key] = (sz, now)
