@@ -590,7 +590,56 @@ dense and means nothing.
 
 ---
 
-## 4.6b gemma is not an architecture limit -- it is a 4x geometry over-allocation
+## 4.6b gemma's 4x slope: RETRACTED diagnosis, cause still unknown
+
+> **RETRACTED, 2026-09-04.** The diagnosis below -- that DKV reads the sliding
+> layers' head geometry instead of the global layers' -- is WRONG. The fix was
+> written, applied, and the gemma ladder was rerun: **the result is byte-identical
+> to the original**, slope still 0.0725 GB/1k, still spilling at 49,152.
+>
+> The runtime already does the right thing. `hf_dkv_wrapper.py:943` calls
+> `resolve_attn_geometry(self.model)`, which reads head geometry from LIVE
+> MODULES -- "the first layer DKV will really patch" -- and its comment names
+> this exact case: *"Gemma 4's global layers carry head_dim 512 and (on 12B) 1
+> KV head, while text_config reports the sliding layers' 256 and 8."* The
+> correct 1x512 was in use the whole time, so a config-level fix could not
+> change anything, and did not.
+>
+> **What misled me:** the arithmetic. 8 x 2 x 8 heads x 256 x 2B = 0.0655 GB/1k
+> sits within 10% of the measured 0.0725, and 8 x 2 x 1 x 512 x 2B = 0.0164
+> reproduces the dense slope exactly. Two clean matches in both directions felt
+> like proof. They were a coincidence -- 4x is simply the ratio between the two
+> geometries, and any mechanism that inflates gemma's DKV store by 4x would
+> produce the same numbers.
+>
+> **What I should have done first:** check whether the geometry was already
+> resolved correctly, which is one grep, before writing a finding. The memory
+> note "read geometry from live layers, never derive it" describes what the code
+> ALREADY DOES; I read it as a warning about what the code fails to do. I also
+> wrote in the original entry that "the exact resolution site is NOT yet pinned"
+> and then reasoned as though it were.
+>
+> **Consequences.**
+> * The patch is reverted. It was inert, and it changed the decode fingerprint
+>   (0b6920b5 -> 9992703f), which failed 13 previously-good DKV result files.
+>   Reverting restored the fingerprint and the audit: 30 ok, 5 warn, 0 FAIL.
+> * 4c.3 stands as originally written after all: gemma IS a case where DKV is
+>   worse, and it is not explained. Only ONE of the three non-wins (granite's
+>   unreleased dense KV) has an identified cause, not two.
+> * The gemma rerun is not wasted: it is an independent replication of the
+>   original ladder, to the decimal, on a different day and process. The gemma
+>   numbers are reproducible.
+>
+> **Still open.** Why DKV's per-token cost on gemma is 4.4x dense's when the
+> geometry it uses is correct. The pool arithmetic does not obviously account
+> for it: residuals plus rank factors over a 1024-token block at 1x512 come to
+> roughly 2 KB/token across 8 layers, two orders below the 72.5 KB/token
+> measured. Something else is scaling with context on that model and it has not
+> been found.
+
+<details>
+<summary>The retracted reasoning, kept for the record</summary>
+
 
 The ladder records DKV as WORSE than dense on gemma-4-12B (32,768 vs 49,152),
 and 4c.3 currently reports that as an architecture-conditional property. The
@@ -663,6 +712,10 @@ identified causes.
 Third instance of the head-geometry hazard in this repo, and the memory note
 already warns "read geometry from live layers, never derive it" -- reading from
 live layer 0 is not enough when layer 0 is not a layer DKV compresses.
+
+---
+
+</details>
 
 ---
 
