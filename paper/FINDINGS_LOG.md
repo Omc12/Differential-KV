@@ -908,6 +908,59 @@ starts much lower because its residual budget is the dominant term.
 
 ---
 
+## 4b.7 granite RULER @16k cut, and what it revealed about the ladder
+
+Stage E (RULER on granite-4.2-8b at 16k, dense + dkv_high) was stopped at
+566/780 items on the dense arm. Two reasons, and the second matters more than
+the arm did.
+
+### It was spilling, and the cost was 16 hours
+
+The card sat at 11,975 / 12,282 MiB (97.5%) and per-item marginal cost went
+16s -> 72, 467, 73, 470s on `niah_multikey_1`. At ~270s average the remaining
+214 items were **~16 hours**, for the stage already logged as the most cuttable
+in this campaign: it is confirmatory, granite already carries 9 LongBench arms
+and a full ladder, and the only open question was whether the lookalike-haystack
+failure reproduces on dense-GQA.
+
+The 566 dense rows are kept. Spilling changes SPEED, not arithmetic, so their
+SCORES stand; their timings do not and must not enter any latency table.
+
+### The ladder underestimates a real serving process by ~2.5 GB
+
+This is the part worth carrying into the paper. The ladder records granite dense
+at 16,384 tokens as **9.42 GB, status ok**. The same model at the same context,
+under RULER, needed **11.98 GB** and spilled.
+
+Same model, same quantization, same context length, 2.5 GB apart. The
+difference is process lifetime:
+
+  * `context_ladder.py` runs ONE SUBPROCESS PER POINT (line 348). Every rung
+    gets a fresh allocator, measures its peak, and exits.
+  * a serving process -- and `run_ruler_cuda.py` -- holds one process across
+    hundreds of items, and the caching allocator fragments.
+
+So the ladder measures **the best case: peak memory for a cold process serving
+one request.** A deployment serving many requests from one process reaches the
+ceiling EARLIER than the ladder says.
+
+**Consequence for the headline.** Every ceiling in this campaign -- dense 49,152
+and DKV 98,304 on Qwen3.5-4B included -- is a cold-process figure. The 2x RATIO
+is likely robust, since both arms are measured the same way, but the ABSOLUTE
+numbers are optimistic for a long-lived server. The paper must say the ladder is
+a cold-start measurement rather than let a reader assume it is a serving figure.
+
+Not yet measured: whether the ~2.5 GB gap is constant, proportional, or
+architecture-dependent. Quantifying it would need a long-running process at each
+rung, which is a different and considerably more expensive experiment. Naming
+the limitation is honest; guessing its size is not.
+
+This is the third measurement defect in this campaign where the INSTRUMENT, not
+the system, was the thing that was wrong (SS 3), and the second where a synthetic
+harness flattered reality.
+
+---
+
 ## 4b.6 RULER @64k carries DKV only -- no baseline can run there
 
 **The result, stated plainly: on a 12 GB card at 64k, DKV is the only arm that
