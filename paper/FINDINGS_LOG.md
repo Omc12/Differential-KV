@@ -642,6 +642,54 @@ comparison.
 
 ---
 
+## 4b.6 RULER @64k carries DKV only -- no baseline can run there
+
+**The result, stated plainly: on a 12 GB card at 64k, DKV is the only arm that
+fits.** This is not a gap in the evaluation; it is the evaluation.
+
+The context ladder had already measured it, per arm, on Qwen3.5-4B:
+
+| arm | max clean rung | 65,536 |
+|---|---|---|
+| dense | 49,152 | spills |
+| snapkv | 49,152 | spills |
+| streamingllm | 49,152 | spills |
+| **dkv** | **98,304** | **fits** |
+
+A RULER table at 64k with a dense or SnapKV column is therefore not something
+this hardware can produce. At 64k the honest comparison is DKV against the
+context limit itself, not against another method.
+
+### How it was nearly gotten wrong
+
+A dense@64k arm was queued anyway, without consulting the ladder, and it ran
+1,046 items before the cost was examined. The per-item cost is the tell, but
+only after backing the MARGINAL cost out of the running average the harness
+prints -- the average is cumulative over all items and hides the cliff:
+
+    item 1040 (32k):  marginal  11.9 s      avg 11.9 s
+    item 1041 (64k):  marginal 532.4 s      avg 12.4 s
+    item 1045 (64k):  marginal 849.9 s      avg 14.7 s
+
+A 45-72x cliff at constant 100% GPU utilisation and 11.2 / 12.28 GB -- the WDDM
+spill signature (SS 3.x), where the work is PCIe bandwidth rather than compute.
+The displayed average still read "14.7s/item, ~62 min left" while the true
+remaining cost was 255 x ~530 s = **over 37 hours**, every timing contaminated.
+
+The file was deleted rather than kept: all 1,040 of its sub-64k rows were
+already present in the 32k campaign's file, so the only unique content was 6
+spill-contaminated rows.
+
+**Two lessons, both cheap and both missed.**
+1. The ladder is a PRECONDITION for every long-context arm, not a separate
+   result to report at the end. It knew the answer before the arm was queued.
+2. A cumulative average is the wrong instrument for detecting a cliff. Any
+   progress display that averages over the whole run will show a reassuring
+   number while the marginal cost explodes. Consistent with SS 3: the
+   instrument was wrong before the system was.
+
+---
+
 ## 4c. Limitations the paper must state
 
 Written as limitations rather than left to be discovered in review. Each is a
