@@ -76,13 +76,19 @@ def marginal_costs(log: str, tail: int = 4000):
     pts = []
     for ln in lines:
         m = re.search(r"\[(\d+)/\d+\].*?\(([\d.]+)s/item", ln)
-        if m:
-            pts.append((int(m.group(1)), float(m.group(2))))
+        if not m:
+            continue
+        # The task name, so an item is compared with its own kind. Two shapes:
+        #   LongBench  [224/300] gov_report#23 12015 tok -> ...
+        #   RULER      [1041/1300] 65536/cwe#0 -> ...
+        t = re.search(r"\]\s+(?:\d+/)?([A-Za-z][A-Za-z_0-9]*)#", ln)
+        pts.append((int(m.group(1)), float(m.group(2)),
+                    t.group(1) if t else "?"))
     out = []
     for i in range(1, len(pts)):
-        (n0, a0), (n1, a1) = pts[i - 1], pts[i]
+        (n0, a0, _), (n1, a1, task) = pts[i - 1], pts[i]
         if n1 > n0:
-            out.append((n1, (a1 * n1 - a0 * n0) / (n1 - n0)))
+            out.append((n1, (a1 * n1 - a0 * n0) / (n1 - n0), task))
     return out
 
 
@@ -92,7 +98,7 @@ def main():
     ap.add_argument("--interval", type=int, default=1800)
     ap.add_argument("--stall-min", type=int, default=45)
     ap.add_argument("--cliff", type=float, default=6.0)
-    ap.add_argument("--mem-frac", type=float, default=0.85,
+    ap.add_argument("--mem-frac", type=float, default=0.90,
                     help="fraction of the card that must be resident before a "
                          "latency cliff is reported as a spill. Without it the "
                          "detector fires on any long-generation task.")
@@ -152,9 +158,15 @@ def main():
 
         mc = marginal_costs(os.path.join(REPO, a.log))
         if len(mc) >= 8:
-            med = statistics.median(s for _, s in mc)
+            # WITHIN-TASK baseline. A whole-run median mixes tasks whose
+            # generation budgets differ by 100x -- gov_report generates 512
+            # tokens where qasper generates 24 -- so walking into a long-output
+            # task trips it every time, which is what happened twice.
             recent = mc[-3:]
-            if med > 0 and all(s > a.cliff * med for _, s in recent):
+            task = recent[-1][2]
+            same = [s for _, s, t in mc if t == task]
+            med = statistics.median(same) if len(same) >= 5 else 0.0
+            if med > 0 and all(s > a.cliff * med for _, s, _ in recent):
                 # A slow patch is only a SPILL if the card is nearly full. Long
                 # generation budgets produce the same latency ratio with plenty
                 # of memory free: granite's gov_report runs 79.9s against a
@@ -164,9 +176,10 @@ def main():
                 # The dense@64k spill this was built for sat at 11.2/12.28.
                 used, total = gpu_memory_gb()
                 if total and used / total >= a.mem_frac:
-                    print(f"CLIFF: last 3 items cost "
-                          f"{', '.join(f'{s:.0f}s' for _, s in recent)} vs "
-                          f"median {med:.0f}s at {used:.1f}/{total:.1f} GB "
+                    print(f"CLIFF: {task} last 3 items cost "
+                          f"{', '.join(f'{s:.0f}s' for _, s, _ in recent)} vs "
+                          f"{med:.0f}s median FOR THAT SAME TASK, at "
+                          f"{used:.1f}/{total:.1f} GB "
                           f"({100 * used / total:.0f}% of the card) -- spill; "
                           f"the displayed average will NOT show this",
                           flush=True)
