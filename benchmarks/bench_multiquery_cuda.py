@@ -35,7 +35,9 @@ and the outputs are recorded so a run that served nothing cannot look fast.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob
+import io
 import json
 import os
 import statistics
@@ -103,7 +105,7 @@ def run_point(args) -> Dict[str, Any]:
     res["ctx_actual"] = len(tok(ctx_text, add_special_tokens=False).input_ids)
 
     torch.cuda.reset_peak_memory_stats()
-    per_query, texts = [], []
+    per_query, texts, reuse_hits = [], [], []
 
     if args.arm == "dkv":
         # ONE session. WHICH PATTERN IS SERVED MATTERS, and the first version
@@ -128,11 +130,17 @@ def run_point(args) -> Dict[str, Any]:
         for q in qs:
             prompt = transcript + "\n\nQuestion: " + q + "\nAnswer:"
             torch.cuda.synchronize()
+            _cap = io.StringIO()
             t0 = time.perf_counter()
-            out = w.generate(prompt, max_new_tokens=args.gen, temperature=0.0,
-                             top_p=1.0, repetition_penalty=1.0)
+            with contextlib.redirect_stdout(_cap):
+                out = w.generate(prompt, max_new_tokens=args.gen,
+                                 temperature=0.0, top_p=1.0,
+                                 repetition_penalty=1.0)
             torch.cuda.synchronize()
             per_query.append(time.perf_counter() - t0)
+            _txt = _cap.getvalue()
+            sys.stdout.write(_txt)
+            reuse_hits.append(int('Reusing KV cache' in _txt))
             texts.append((out or "")[-120:])
             if args.pattern == "append":
                 # generate() returns prompt+completion, so this IS the
@@ -215,6 +223,12 @@ def run_point(args) -> Dict[str, Any]:
         "peak_gb": peak, "vram_total_gb": total,
         "spilled": bool(peak > total * 0.94),
         "n_answered": sum(1 for t in texts if t.strip()),
+        # How many queries actually hit the prefix cache. 0 with a flat
+        # timing curve means the check never matched; >0 with a flat
+        # curve would mean it matched and bought nothing -- a completely
+        # different finding.
+        "reuse_hits": sum(reuse_hits) if reuse_hits else None,
+        "reuse_of": len(reuse_hits) or None,
         "sample_texts": texts[:3],
     })
     return res
