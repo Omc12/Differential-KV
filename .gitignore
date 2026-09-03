@@ -140,3 +140,8 @@ paper/results/ruler_data/
 # Fidelity logs are the KL-vs-dense evidence behind the correctness claims.
 !paper/results/fidelity_q4/
 !paper/results/**/*.log
+
+# CRBench is a separate repository, cloned in for the supplementary run, and
+# third_party/Differential-KV inside it is a junction back to THIS repo -- git
+# must not try to walk that loop.
+benchmarks/CRBench/
