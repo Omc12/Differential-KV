@@ -590,6 +590,83 @@ dense and means nothing.
 
 ---
 
+## 4.7 "Compress once, serve many" is NOT supported by the shipped wrapper
+
+The differentiator the architecture claims -- one compressed context reused
+across many queries, where attention-observation eviction must redo its
+selection per query -- **does not happen**. Measured, Qwen3.5-4B, 8 queries over
+one context:
+
+| arm | ctx | first query | marginal | marginal/first |
+|---|---|---|---|---|
+| dkv | 16,384 | 8.83 s | 8.04 s | 0.91 |
+| dkv | 32,768 | 17.66 s | 16.70 s | 0.95 |
+| snapkv | 16,384 | 7.76 s | 7.42 s | 0.96 |
+| snapkv | 32,768 | 16.03 s | 15.58 s | 0.97 |
+
+DKV's per-query series is flat -- 8.83, 8.18, 7.60, 7.62, 7.58, 8.11, 8.04,
+8.20 -- with no drop after the first. SnapKV's flatness is EXPECTED and correct:
+its selection depends on the query, so it must re-prefill. DKV showing the same
+shape means it is re-prefilling too. All 8 queries were answered by both arms
+with sensible text, so this is a real absence of reuse, not a failed run.
+
+### Root cause, read from the code
+
+`hf_dkv_wrapper.py:1758`:
+
+    cached_len = 0
+    if seq_len > 0 and seq_len < len(prompt_ids):
+        if prompt_ids[:seq_len] == stored_ids[:seq_len]:
+            cached_len = seq_len
+
+After query 1 the session holds `ctx + q1 + answer1`. Query 2's prompt is
+`ctx + q2`, which is **shorter** than the stored length, so `seq_len <
+len(prompt_ids)` fails outright; and even if it did not, the token comparison
+diverges at the first query token. `cached_len` stays 0, which falls through to
+`self.manager.clear_session(session_id)` -- a full re-prefill, every query.
+
+Confirmed independently: the wrapper's own `"Reusing KV cache!"` line appears
+**0 times** across the whole run.
+
+**The prefix check only handles strictly-APPENDING conversations** (chat turns
+that extend the previous prompt exactly). It cannot serve the one-context /
+many-different-queries pattern, which is precisely the pattern the claim is
+about. What is missing is the ability to roll a session back to a common prefix
+and prefill only the divergent tail.
+
+### The nuance that decides whether this is a competitive loss
+
+On **hybrid** models this is NOT a disadvantage against dense, because dense
+cannot do it either. The dense arm failed both contexts with
+
+    RuntimeError: `crop` was called, but the current layer does not support it
+
+Qwen3.5-4B is 24 `linear_attention` + 8 `full_attention` layers, and a
+fixed-size recurrent state has no exact rollback to an arbitrary prefix. On
+hybrid architectures **no method can do exact prefix reuse across divergent
+queries.** That is a property of the architecture class, not a defect in DKV.
+
+granite-4.2-8b is uniform full attention, so `crop` works and dense reuse is
+genuine there. That is the only configuration in which the claim is falsifiable,
+and it is queued (`bench_multiquery_cuda.py --model ibm-granite/granite-4.2-8b`).
+
+### What the paper must do
+
+Until the granite run lands, **the multi-query differentiator cannot be
+claimed.** Options, in order of honesty:
+
+1. Report it as measured: DKV re-prefills like SnapKV, and on hybrid models so
+   does dense. Cite the wrapper limitation as future work with the exact line.
+2. If granite shows dense reusing and DKV not, report that as a **limitation**:
+   the architecture permits reuse, the runtime does not implement it.
+
+What must NOT happen is the assertion surviving into the paper unmeasured. It
+was listed as the differentiator in the positioning memo on the strength of the
+docstring; the docstring describes an intent the code does not implement. Fourth
+instance of prose drifting from code in this campaign.
+
+---
+
 ## 4b. Scope decisions — what was NOT run, and why
 
 Recorded so a reviewer (or a later session) can see these were budget decisions
