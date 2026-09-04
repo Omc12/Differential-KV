@@ -1,0 +1,57 @@
+[ckpt] C:\Users\USER\Desktop\Differential KV\paper\results\ladder\granite-4.2-8b_mid_nf4.jsonl
+[ckpt] 0 points already recorded
+  running dense@4096 ...
+    dense@4096: ok peak=6.69803008 (23s)
+  running dense@8192 ...
+    dense@8192: ok peak=7.60465408 (25s)
+  running dense@16384 ...
+    dense@16384: ok peak=9.417511936 (30s)
+  running dense@24576 ...
+    dense@24576: spilled peak=11.231481856 (84s)
+  dense: stopping, ceiling found below 32768
+  dense: stopping, ceiling found below 49152
+  dense: stopping, ceiling found below 65536
+  dense: stopping, ceiling found below 98304
+  dense: stopping, ceiling found below 131072
+  running dkv@4096 ...
+    dkv@4096: ok peak=8.719533568 (30s)
+  running dkv@8192 ...
+    dkv@8192: ok peak=9.472034304 (31s)
+  running dkv@16384 ...
+    dkv@16384: ok peak=11.299137024 (39s)
+  running dkv@24576 ...
+    dkv@24576: spilled peak=12.118303232 (65s)
+  dkv: stopping, ceiling found below 32768
+  dkv: stopping, ceiling found below 49152
+  dkv: stopping, ceiling found below 65536
+  dkv: stopping, ceiling found below 98304
+  dkv: stopping, ceiling found below 131072
+
+
+=== granite-4.2-8b_mid_nf4.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense     4096     4096      6.70      2.6    0.671       ok
+ dense     8192     8192      7.60      4.8    1.342       ok
+ dense    16384    16384      9.42     10.0    2.684       ok
+ dense    24576    24576     11.23     63.6    4.027  spilled
+ dense    32768        -         -        -        - skipped_after_oom
+ dense    49152        -         -        -        - skipped_after_oom
+ dense    65536        -         -        -        - skipped_after_oom
+ dense    98304        -         -        -        - skipped_after_oom
+ dense   131072        -         -        -        - skipped_after_oom
+   dkv     4096     4096      8.72      4.4    0.327       ok
+   dkv     8192     8192      9.47      6.6    0.431       ok
+   dkv    16384    16384     11.30     13.6    0.653       ok
+   dkv    24576    24576     12.12     39.7    0.874  spilled
+   dkv    32768        -         -        -        - skipped_after_oom
+   dkv    49152        -         -        -        - skipped_after_oom
+   dkv    65536        -         -        -        - skipped_after_oom
+   dkv    98304        -         -        -        - skipped_after_oom
+   dkv   131072        -         -        -        - skipped_after_oom
+  dense: 0.2213 GB per 1k tokens, floor 5.79 GB  (max OK 16384 tok @ 9.42 GB)
+         predicted ceiling ~28,530 tok on a 12.9 GB card
+         first spill at 24576 tok (11.23 GB) -- timings at and above this length are host-memory bound, not compute
+  dkv: 0.2230 GB per 1k tokens, floor 7.64 GB  (max OK 16384 tok @ 11.30 GB)
+         predicted ceiling ~19,999 tok on a 12.9 GB card
+         first spill at 24576 tok (12.12 GB) -- timings at and above this length are host-memory bound, not compute

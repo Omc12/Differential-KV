@@ -1,0 +1,14 @@
+{
+  "baseline_params": {
+    "budget": 2016,
+    "window": 32
+  },
+  "chunk": 1024,
+  "dkv_decode_rev": "0b6920b57cae",
+  "gen": 32,
+  "model": "Qwen/Qwen3.5-4B",
+  "preset": "mid",
+  "protocol": "systems-v1",
+  "quant": "nf4",
+  "reps": 3
+}

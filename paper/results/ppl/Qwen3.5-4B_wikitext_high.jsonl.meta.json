@@ -1,0 +1,10 @@
+{
+  "chunk": 1024,
+  "data": "wikitext",
+  "dkv_decode_rev": "0b6920b57cae",
+  "model": "Qwen/Qwen3.5-4B",
+  "preset": "high",
+  "protocol": "ppl-chunked-v1",
+  "quant": "nf4",
+  "skip_tokens": 5120
+}

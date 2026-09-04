@@ -1,0 +1,53 @@
+[ckpt] C:\Users\USER\Desktop\Differential KV\paper\results\ladder\Qwen3.5-4B_mid_nf4.jsonl
+[ckpt] 0 points already recorded
+  running dense@8192 ...
+    dense@8192: ok peak=3.926769152 (30s)
+  running dense@16384 ...
+    dense@16384: ok peak=4.666276864 (24s)
+  running dense@32768 ...
+    dense@32768: ok peak=6.143982592 (31s)
+  running dense@49152 ...
+    dense@49152: ok peak=7.621164032 (40s)
+  running dense@65536 ...
+    dense@65536: spilled peak=9.09886976 (141s)
+  dense: stopping, ceiling found below 98304
+  dense: stopping, ceiling found below 131072
+  running dkv@8192 ...
+    dkv@8192: ok peak=3.98487296 (26s)
+  running dkv@16384 ...
+    dkv@16384: ok peak=4.513536 (29s)
+  running dkv@32768 ...
+    dkv@32768: ok peak=5.789700608 (38s)
+  running dkv@49152 ...
+    dkv@49152: ok peak=7.167877632 (50s)
+  running dkv@65536 ...
+    dkv@65536: ok peak=8.535798784 (64s)
+  running dkv@98304 ...
+    dkv@98304: ok peak=9.890739712 (99s)
+  running dkv@131072 ...
+    dkv@131072: spilled peak=11.221849088 (160s)
+
+
+=== Qwen3.5-4B_mid_nf4.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense     8192     8192      3.93      4.3    1.074       ok
+ dense    16384    16384      4.67      6.6    2.147       ok
+ dense    32768    32768      6.14     13.6    4.295       ok
+ dense    49152    49152      7.62     22.8    6.442       ok
+ dense    65536    65536      9.10    122.7    8.590  spilled
+ dense    98304        -         -        -        - skipped_after_oom
+ dense   131072        -         -        -        - skipped_after_oom
+   dkv     8192     8192      3.98      4.5    0.446       ok
+   dkv    16384    16384      4.51      7.6    0.623       ok
+   dkv    32768    32768      5.79     16.3    0.977       ok
+   dkv    49152    49152      7.17     28.1    1.332       ok
+   dkv    65536    65536      8.54     42.7    1.686       ok
+   dkv    98304    98304      9.89     76.7    2.395       ok
+   dkv   131072   131072     11.22    137.5    3.104  spilled
+  dense: 0.0902 GB per 1k tokens, floor 3.19 GB  (max OK 49152 tok @ 7.62 GB)
+         predicted ceiling ~98,888 tok on a 12.9 GB card
+         first spill at 65536 tok (9.10 GB) -- timings at and above this length are host-memory bound, not compute
+  dkv: 0.0413 GB per 1k tokens, floor 5.83 GB  (max OK 98304 tok @ 9.89 GB)
+         predicted ceiling ~151,864 tok on a 12.9 GB card
+         first spill at 131072 tok (11.22 GB) -- timings at and above this length are host-memory bound, not compute

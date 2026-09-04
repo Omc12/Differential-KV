@@ -1,0 +1,7 @@
+{
+  "chunk": 1024,
+  "gen": 8,
+  "model": "Qwen/Qwen3.5-4B",
+  "preset": "high",
+  "quant": "nf4"
+}

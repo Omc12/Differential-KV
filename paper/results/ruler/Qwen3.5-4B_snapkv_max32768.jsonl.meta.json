@@ -1,0 +1,17 @@
+{
+  "arm": "snapkv",
+  "baseline_params": {
+    "budget": 2016,
+    "window": 32
+  },
+  "data_dir": "C:\\Users\\USER\\Desktop\\Differential KV\\paper\\results\\ruler_data\\Qwen3.5-4B",
+  "decode_defaults": null,
+  "dkv_decode_rev": null,
+  "model": "Qwen/Qwen3.5-4B",
+  "prefill_attn": "sdpa",
+  "preset": null,
+  "prompt_template": "model-chat-template",
+  "protocol": "ruler-official-generators",
+  "quant": "nf4",
+  "thinking": false
+}

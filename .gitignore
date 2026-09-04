@@ -145,3 +145,7 @@ paper/results/ruler_data/
 # third_party/Differential-KV inside it is a junction back to THIS repo -- git
 # must not try to walk that loop.
 benchmarks/CRBench/
+
+# Campaign run logs: large, machine-specific, and superseded by the jsonl
+# stores plus FINDINGS_LOG. The results themselves are tracked.
+paper/results/*.log

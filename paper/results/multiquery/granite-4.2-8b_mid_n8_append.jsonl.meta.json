@@ -1,0 +1,10 @@
+{
+  "chunk": 1024,
+  "dkv_decode_rev": "0b6920b57cae",
+  "gen": 16,
+  "model": "ibm-granite/granite-4.2-8b",
+  "n_queries": 8,
+  "preset": "mid",
+  "protocol": "multiquery-v1",
+  "quant": "nf4"
+}

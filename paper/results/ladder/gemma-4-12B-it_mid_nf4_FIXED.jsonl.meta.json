@@ -1,0 +1,7 @@
+{
+  "chunk": 1024,
+  "gen": 8,
+  "model": "google/gemma-4-12B-it",
+  "preset": "mid",
+  "quant": "nf4"
+}
