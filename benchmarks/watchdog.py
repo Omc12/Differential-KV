@@ -98,6 +98,9 @@ def main():
     ap.add_argument("--interval", type=int, default=1800)
     ap.add_argument("--stall-min", type=int, default=45)
     ap.add_argument("--cliff", type=float, default=6.0)
+    ap.add_argument("--log-stale-min", type=float, default=20.0,
+                    help="skip the cliff check when the log has not been "
+                         "written in this many minutes -- it is then history.")
     ap.add_argument("--mem-frac", type=float, default=0.90,
                     help="fraction of the card that must be resident before a "
                          "latency cliff is reported as a spill. Without it the "
@@ -156,7 +159,14 @@ def main():
             elif not prev or sz != prev[0]:
                 sizes[key] = (sz, now)
 
-        mc = marginal_costs(os.path.join(REPO, a.log))
+        # A cliff in a log nobody is writing is HISTORY, not news. all.log
+        # stopped growing when its campaign ended, so its tail stayed frozen on
+        # a real spill and the detector re-fired every interval for hours --
+        # pairing dead latency lines with live memory from an unrelated run.
+        _lp = os.path.join(REPO, a.log)
+        _fresh = (os.path.exists(_lp)
+                  and (time.time() - os.path.getmtime(_lp)) < a.log_stale_min * 60)
+        mc = marginal_costs(_lp) if _fresh else []
         if len(mc) >= 8:
             # WITHIN-TASK baseline. A whole-run median mixes tasks whose
             # generation budgets differ by 100x -- gov_report generates 512

@@ -235,35 +235,68 @@ def run_point(args) -> Dict[str, Any]:
 
 
 def report(paths: List[str]) -> None:
-    rows = []
+    # GROUPED BY (model, pattern). Keying cells on (arm, ctx) alone collapsed
+    # four distinct runs into one table: two models whose context ladders
+    # overlap at 16,384, each run under two access patterns. The 16k column then
+    # showed whichever file was read last, and the marginal-cost row read
+    # 2.59 / 1.80 / 2.84 across 8k/16k/32k -- a DKV cost that FALLS as context
+    # doubles, which is not a thing that happens. Same defect as the systems
+    # report had; fixed there, missed here.
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
     for p in paths:
+        meta = {}
+        if os.path.exists(p + ".meta.json"):
+            with open(p + ".meta.json", encoding="utf-8") as f:
+                meta = json.load(f)
+        model = meta.get("model") or os.path.basename(p)
         st = ResumableJSONL(p, config=None, strict_config=False, read_only=True)
-        rows += [r for r in st.load_latest().values() if not r.get("error")]
+        for r in st.load_latest().values():
+            if r.get("error"):
+                continue
+            pat = r.get("pattern") or meta.get("pattern") or "?"
+            groups.setdefault((model, pat), []).append(r)
         st.close()
-    if not rows:
+    if not groups:
         print("no multiquery results")
         return
-    ctxs = sorted({r["ctx"] for r in rows})
-    arms = sorted({r["arm"] for r in rows})
-    for title, key in [("first query (s) — includes compressing the context", "first_query_s"),
-                       ("MARGINAL per query (s) — what a warm server pays", "marginal_s"),
-                       ("total for N queries (s)", "total_s"),
-                       ("peak VRAM (GB)", "peak_gb")]:
-        print(f"\n=== {title} ===")
-        print(f"{'arm':>10} " + " ".join(f"{c:>10}" for c in ctxs))
-        print("-" * (11 + 11 * len(ctxs)))
-        for a in arms:
-            cells = []
-            for c in ctxs:
-                m = [r for r in rows if r["arm"] == a and r["ctx"] == c]
-                v = m[0].get(key) if m else None
-                mark = "*" if (m and m[0].get("spilled")) else " "
-                cells.append(f"{v:>9.2f}{mark}" if v is not None else f"{'-':>10}")
-            print(f"{a:>10} " + " ".join(cells))
-    bad = [r for r in rows if r.get("n_answered", 0) < r.get("n_queries", 0)]
-    if bad:
-        print(f"\n[warn] {len(bad)} point(s) produced fewer answers than queries "
-              f"— a fast run that served nothing is not a fast run.")
+
+    for (model, pat) in sorted(groups):
+        rows = groups[(model, pat)]
+        ctxs = sorted({r["ctx"] for r in rows})
+        arms = sorted({r["arm"] for r in rows}, key=lambda a: (a != "dense", a))
+        print(f"\n################ {model} — pattern: {pat} ################")
+        if pat == "independent":
+            print("(one context, a DIFFERENT query each time. DKV cannot reuse "
+                  "here -- it has no rollback to a shared prefix -- and neither "
+                  "can SnapKV, whose selection depends on the query.)")
+        elif pat == "append":
+            print("(multi-turn: each prompt extends the last. DKV appends to a "
+                  "resident compressed cache; SnapKV must re-evict against its "
+                  "new observation window every turn.)")
+        for title, key in [("first query (s) — includes compressing the context", "first_query_s"),
+                           ("MARGINAL per query (s) — what a warm server pays", "marginal_s"),
+                           ("total for N queries (s)", "total_s"),
+                           ("peak VRAM (GB)", "peak_gb")]:
+            print(f"\n=== {title} ===")
+            print(f"{'arm':>10} " + " ".join(f"{c:>10}" for c in ctxs))
+            print("-" * (11 + 11 * len(ctxs)))
+            for a in arms:
+                cells = []
+                for c in ctxs:
+                    m = [r for r in rows if r["arm"] == a and r["ctx"] == c]
+                    v = m[0].get(key) if m else None
+                    mark = "*" if (m and m[0].get("spilled")) else " "
+                    cells.append(f"{v:>9.2f}{mark}" if v is not None else f"{'-':>10}")
+                print(f"{a:>10} " + " ".join(cells))
+        hits = [(r["arm"], r["ctx"], r.get("reuse_hits"), r.get("reuse_of"))
+                for r in rows if r.get("reuse_of")]
+        if hits:
+            print("\n  prefix-cache hits: " + ", ".join(
+                f"{a}@{c} {h}/{n}" for a, c, h, n in sorted(hits)))
+        bad = [r for r in rows if r.get("n_answered", 0) < r.get("n_queries", 0)]
+        if bad:
+            print(f"\n[warn] {len(bad)} point(s) answered fewer queries than "
+                  f"asked — a fast run that served nothing is not a fast run.")
     print("\n* = spilled to host memory; that timing is bandwidth, not compute.")
 
 
