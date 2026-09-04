@@ -337,6 +337,13 @@ def main():
                    "--n", str(args.n), "--gen", str(args.gen),
                    "--chunk", str(args.chunk),
                    "--baseline-params", args.baseline_params,
+                   # MUST be forwarded. The parent used args.pattern for the
+                   # FILENAME while the child fell back to its default, so a run
+                   # launched as --pattern independent wrote append data into a
+                   # file named _independent. Caught by reuse_hits: 7 of 8 cache
+                   # hits in an "independent" file is impossible, because that
+                   # pattern can never reuse.
+                   "--pattern", args.pattern,
                    "--point-json", pj]
             print(f"  running {key} ...", flush=True)
             p = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)

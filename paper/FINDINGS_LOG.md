@@ -932,6 +932,80 @@ serving twice the context.* That is a narrower and more defensible claim than
 either "compression is free" or "mid collapses", and it is the one the data
 supports.
 
+### 1.7d RESOLVED: the ceiling is 2.0x at mid and 1.33x at high
+
+The preset-high ladder ran. 1.7b's concern was correct and is now quantified.
+
+| preset | max clean | vs dense (49,152) | quality at 64k |
+|---|---|---|---|
+| mid | **98,304** | **2.00x** | 67.5, and 0.0 on lookalike haystacks |
+| high | **65,536** | **1.33x** | 77.6, holds |
+| dense | 49,152 | 1.00x | cannot run at 64k |
+
+high spills at 98,304 (10.97 GB) where mid runs it clean at 9.89 GB, because
+high carries twice the residual budget: 0.0959 GB/1k against mid's 0.0413.
+
+**The headline "2x the context" is a PRESET-MID number and must be written that
+way.** At the preset that preserves lookalike discrimination the figure is 1.33x.
+The two cannot be claimed in one sentence, which is exactly what 1.7b warned.
+
+**How to state it.** Two operating points, both honest:
+
+* **mid -- 2.0x context, 5.1x compression.** ~3 points below dense on realistic
+  tasks (1.7c), collapses only on near-identical-candidate retrieval.
+* **high -- 1.33x context, 1.9x compression.** Holds quality at 64k (77.6 vs
+  79.8 at 32k).
+
+Even the weaker figure is a real result: 1.33x is context dense cannot serve at
+all on this card, and the quality there is measured, not extrapolated.
+
+---
+
+## 1.8 The multi-query differentiator, measured and confirmed
+
+4.7 reported that "compress once, serve many" was not implemented. That was
+measured on the wrong access pattern. Re-run on `append` -- multi-turn, each
+prompt extending the last, which is what the prefix check supports and what a
+chat server actually does:
+
+MARGINAL seconds per query (what a warm server pays):
+
+| arm | 8k | 16k | 32k |
+|---|---|---|---|
+| **dkv** | **2.59** | **1.80** | **2.84** |
+| snapkv | 4.49 | 7.50 | 15.59 |
+| dense | 2.00 | 3.52 | (does not fit) |
+
+**DKV's marginal cost is FLAT in context; SnapKV's is linear.** At 32k that is
+2.84s against 15.59s -- 5.5x -- and the gap widens with every doubling, because
+SnapKV's eviction depends on its observation window, so each new turn forces it
+to re-prefill and re-evict the whole context while DKV appends to a resident
+compressed cache.
+
+This is the architecture's central claim and it is now measured rather than
+argued. It is also the one axis where DKV beats SnapKV outright.
+
+**Verified, not assumed.** `reuse_hits` records how many queries hit the prefix
+cache: 7/8 and 6/8 on the append runs (query 1 is always a miss). A flat timing
+curve alone could not distinguish "the cache fired" from "the harness rebuilt
+the prompt so the token prefix never matched".
+
+### 1.8b The instrument caught a mislabelled file
+
+The same counter exposed a harness bug: `--pattern` was never forwarded to the
+per-point child process, so the child always ran its default (`append`) while
+the PARENT used the requested pattern for the FILENAME. A run launched as
+`--pattern independent` wrote append data into a file named `_independent`.
+
+It was visible only because 7 of 8 cache hits in an "independent" file is
+impossible -- that pattern can never reuse. Fixed by forwarding the flag; the
+mislabelled granite file was deleted and re-run.
+
+Sixth instance in this campaign of a flag, marker or detector that looked
+applied and was not.
+
+---
+
 ### 1.7b The ceiling and the quality are measured at DIFFERENT presets
 
 **This undercuts the headline if not handled.** Every ladder file is
