@@ -219,9 +219,30 @@ def compare_files(paths):
     from run_longbench_cuda import _paired_bootstrap
     metrics = official_metric_fns()
 
-    rows = {}
-    by_item = {}
-    meta_by_arm = {}
+    # KEY EVERYTHING ON (model, arm), AND MERGE RATHER THAN ASSIGN.
+    # Two defects lived here, and both were silent:
+    #
+    #   1. `rows[arm] = per` OVERWROTE. One arm is routinely spread over more
+    #      than one store -- `*_dkv_high_max32768.jsonl` holds 4k-32k and
+    #      `*_dkv_high_max65536.jsonl` holds 64k -- so the grid showed only
+    #      whichever file sorted last and the shorter lengths vanished from the
+    #      table. `by_item` used setdefault and merged, so the paired bootstrap
+    #      still saw everything: the printed n disagreed with the printed row
+    #      and nothing said so.
+    #
+    #   2. The arm was the WHOLE key, so a glob spanning two models merged
+    #      them. Given `paper/results/ruler/*.jsonl` this used granite's dense
+    #      arm as the reference for Qwen's arms and reported
+    #      `dkv/high +7.36 better than dense` -- nonsense, in the flattering
+    #      direction. The header printed one arbitrary model's name over it.
+    #
+    # Same family as the multiquery reporter fixed in 8ce99ce5: a cell keyed on
+    # fewer fields than the key space actually has. Callers may now pass a glob
+    # spanning models; each model is scored and printed on its own.
+    rows = defaultdict(lambda: defaultdict(list))    # (model, arm) -> L -> [v]
+    by_item = defaultdict(dict)                      # (model, arm) -> key -> v
+    meta_by = {}
+    collisions = defaultdict(int)
 
     for p in sorted(paths):
         store = ResumableJSONL(p, config=None, strict_config=False, read_only=True)
@@ -237,56 +258,72 @@ def compare_files(paths):
         arm = meta.get("arm", "?")
         if meta.get("preset") and arm == "dkv":
             arm = "dkv/" + str(meta["preset"])
-        meta_by_arm[arm] = meta
-        by_item.setdefault(arm, {})
-        per = defaultdict(list)
+        model = str(meta.get("model", "?"))
+        ident = (model, arm)
+        meta_by[ident] = meta
         for r in recs:
             fam = TASK_FAMILY.get(r.get("task"))
             if fam is None:
                 continue
             v = metrics[fam]([r.get("text", "")], [r.get("outputs", [])])
-            per[r["length"]].append(v)
             key = r.get("key") or (str(r["length"]) + "/" + r["task"] + "#" + str(r["idx"]))
-            by_item[arm][key] = v
-        rows[arm] = per
+            # Two stores for one arm should partition the items, not restate
+            # them. If they overlap, the average would double-count, so say so
+            # rather than let the last file win.
+            if key in by_item[ident]:
+                collisions[ident] += 1
+                continue
+            by_item[ident][key] = v
+            rows[ident][r["length"]].append(v)
 
     if not rows:
         print("no scoreable RULER results")
         return
 
-    lengths = sorted({L for per in rows.values() for L in per})
-    m0 = next(iter(meta_by_arm.values()), {})
-    print("")
-    print("=== RULER — " + str(m0.get("model", "?")) + ", quant "
-          + str(m0.get("quant", "?")) + " (13 tasks, avg over tasks x samples) ===")
-    hdr = "{:>14} ".format("arm") + " ".join("{:>9}".format(L) for L in lengths)
-    print(hdr)
-    print("-" * len(hdr))
-    for arm in sorted(rows, key=lambda a: (a != "dense", a)):
-        cells = []
-        for L in lengths:
-            v = rows[arm].get(L)
-            cells.append("{:>9.1f}".format(sum(v) / len(v)) if v else "{:>9}".format("-"))
-        print("{:>14} ".format(arm) + " ".join(cells))
+    for ident, n in sorted(collisions.items()):
+        print("WARNING: {} / {} -- {} duplicate item key(s) across stores, "
+              "ignored after the first. Two files for one arm should partition "
+              "the items.".format(ident[0], ident[1], n))
 
-    if "dense" in by_item and len(by_item) > 1:
+    for model in sorted({m for m, _ in rows}):
+        arms = [a for m, a in rows if m == model]
+        lengths = sorted({L for a in arms for L in rows[(model, a)]})
+        quant = meta_by.get((model, arms[0]), {}).get("quant", "?")
+        print("")
+        print("=== RULER — " + model + ", quant " + str(quant)
+              + " (13 tasks, avg over tasks x samples) ===")
+        hdr = "{:>14} ".format("arm") + " ".join("{:>9}".format(L) for L in lengths)
+        print(hdr)
+        print("-" * len(hdr))
+        for arm in sorted(arms, key=lambda a: (a != "dense", a)):
+            cells = []
+            for L in lengths:
+                v = rows[(model, arm)].get(L)
+                cells.append("{:>9.1f}".format(sum(v) / len(v)) if v
+                             else "{:>9}".format("-"))
+            print("{:>14} ".format(arm) + " ".join(cells))
+
+        dense = by_item.get((model, "dense"))
+        if not dense or len(arms) < 2:
+            continue
         print("")
         print("Paired against dense, on the items both arms answered "
               "(95% CI, 10k bootstrap resamples over items):")
         print("{:>14} {:>5} {:>11} {:>20}  verdict".format(
             "arm", "n", "mean delta", "95% CI"))
-        for arm in sorted(a for a in by_item if a != "dense"):
-            shared = sorted(set(by_item[arm]) & set(by_item["dense"]))
+        for arm in sorted(a for a in arms if a != "dense"):
+            shared = sorted(set(by_item[(model, arm)]) & set(dense))
             if not shared:
                 continue
-            deltas = [by_item[arm][k] - by_item["dense"][k] for k in shared]
+            deltas = [by_item[(model, arm)][k] - dense[k] for k in shared]
             mean = sum(deltas) / len(deltas)
             lo, hi = _paired_bootstrap(deltas)
             verdict = ("worse than dense" if hi < 0 else
                        "better than dense" if lo > 0 else
                        "NOT RESOLVED at this n")
             print("{:>14} {:>5} {:>11.2f} {:>20}  {}".format(
-                arm, len(shared), mean, "[{:+.2f}, {:+.2f}]".format(lo, hi), verdict))
+                arm, len(shared), mean, "[{:+.2f}, {:+.2f}]".format(lo, hi),
+                verdict))
 
 
 def main():
