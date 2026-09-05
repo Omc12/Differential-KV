@@ -149,3 +149,10 @@ benchmarks/CRBench/
 # Campaign run logs: large, machine-specific, and superseded by the jsonl
 # stores plus FINDINGS_LOG. The results themselves are tracked.
 paper/results/*.log
+
+# The MLSys writing dossier: the full research record, assembled from the result
+# stores so a paper can be written from measurements rather than from prose.
+# Deliberately untracked -- it is a working document, it restates data that IS
+# tracked, and it carries pre-submission framing that should not be public while
+# the repo is.
+paper/MLSYS_DOSSIER.md
