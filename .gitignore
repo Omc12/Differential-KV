@@ -156,3 +156,9 @@ paper/results/*.log
 # tracked, and it carries pre-submission framing that should not be public while
 # the repo is.
 paper/MLSYS_DOSSIER.md
+
+# MLSys submission bundle. Untracked for the same reason as the dossier: this
+# repository is PUBLIC and MLSys review is double-blind, so a submission PDF
+# sitting here is a deanonymisation vector. The result stores it is built from
+# are tracked; the paper is not. Remove these lines after notification.
+paper/mlsys2026/
