@@ -162,3 +162,9 @@ paper/MLSYS_DOSSIER.md
 # sitting here is a deanonymisation vector. The result stores it is built from
 # are tracked; the paper is not. Remove these lines after notification.
 paper/mlsys2026/
+
+# Prefill memory traces: the evidence behind the sampled-transient figure. These
+# ARE results, not profiler dumps -- ~1.7 MB of (t, allocated, reserved) triples
+# per arm, and the figure is regenerated from them.
+!paper/results/prefill_trace/
+!paper/results/prefill_trace/*.json
