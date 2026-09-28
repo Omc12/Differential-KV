@@ -645,7 +645,7 @@ def main():
     ap.add_argument("--model", default="ibm-granite/granite-4.2-8b")
     ap.add_argument("--arm", default="dkv",
                     help="dense | dkv | streamingllm | snapkv | h2o | kivi2 | "
-                         "kivi4 | int8_kv")
+                         "kivi4 | int8_kv | streamingllm_chunked | h2o_chunked")
     ap.add_argument("--preset", default="mid",
                     choices=["low", "mid", "high", "ultra"])
     ap.add_argument("--quant", default="nf4")
@@ -711,7 +711,8 @@ def main():
            # snapkv/h2o used to force a whole-model eager load, which made
            # their prefill ~5x slower than every arm they are compared with.
            # Rows from before that fix must not merge with rows after it.
-           "prefill_attn": "sdpa",
+           # h2o_chunked is the one arm whose prefill must run eager.
+           "prefill_attn": ("eager" if args.arm == "h2o_chunked" else "sdpa"),
            # Invalidates DKV rows when the decode ARITHMETIC changes. The
            # config guard alone cannot see a kernel fix: the attention-scale
            # correction left this dict byte-identical, so a resume appended

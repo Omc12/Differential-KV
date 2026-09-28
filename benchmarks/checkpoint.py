@@ -36,6 +36,30 @@ import time
 from typing import Any, Dict, Iterable, Optional, Set
 
 
+def _boot_time() -> float:
+    """Wall-clock time of the last boot, to within a second or two.
+
+    Used to tell a lock left by a run that died in a power cut from one held
+    by a live process. The uptime source must COUNT SLEEP: one that pauses
+    during sleep (time.monotonic can) moves the computed boot forward after
+    every sleep and would declare a live run's lock stale.
+    """
+    try:
+        if os.name == "nt":
+            import ctypes
+            tick = ctypes.windll.kernel32.GetTickCount64
+            tick.restype = ctypes.c_ulonglong   # default int32 wraps at 24.8 days
+            return time.time() - tick() / 1000.0          # counts sleep
+
+        with open("/proc/stat", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("btime"):
+                    return float(line.split()[1])
+    except Exception:                                            # noqa: BLE001
+        pass
+    return time.time() - time.monotonic()
+
+
 def _pid_alive(pid: int) -> bool:
     """True if that pid is a live process. Conservative: unknown -> alive."""
     if pid <= 0:
@@ -46,7 +70,9 @@ def _pid_alive(pid: int) -> bool:
             out = subprocess.run(
                 ["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
                 capture_output=True, text=True, timeout=30).stdout
-            return str(pid) in out
+            # Only a PYTHON process can be a harness holding this lock; a
+            # reused pid belonging to anything else is not a live run.
+            return ('"%d"' % pid) in out and "python" in out.lower()
         os.kill(pid, 0)
         return True
     except PermissionError:
@@ -79,13 +105,59 @@ class ResumableJSONL:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         self._check_config(strict_config)
         self._acquire_lock()
+        self._repair_torn_tail()
         self._fh = open(self.path, "a", encoding="utf-8", newline="\n")
+
+    # ── power-cut repair ────────────────────────────────────────────────────
+    def _repair_torn_tail(self) -> None:
+        """Make the file end on a record boundary before appending to it.
+
+        A power cut mid-write leaves a final line with no newline. The readers
+        tolerate that -- but only while it is LAST. Opening in append mode
+        without repairing it glues the next record onto the fragment, the
+        fragment is no longer last, and the following resume dies on a
+        JSONDecodeError in the middle of the file. So: a tail that parses is a
+        complete record missing only its newline, and gets one; a tail that
+        does not is cut off and kept in a .torn sidecar for the record.
+        """
+        if not os.path.exists(self.path) or os.path.getsize(self.path) == 0:
+            return
+        with open(self.path, "rb") as f:
+            data = f.read()
+        if data.endswith(b"\n"):
+            return
+        cut = data.rfind(b"\n") + 1              # 0 when there is no newline
+        tail = data[cut:]
+        try:
+            json.loads(tail.decode("utf-8"))
+            with open(self.path, "ab") as f:
+                f.write(b"\n")
+                f.flush()
+                os.fsync(f.fileno())
+            print(f"[ckpt] terminated an unterminated final record in {self.path}")
+            return
+        except (ValueError, UnicodeDecodeError):
+            pass
+        with open(self.path + ".torn", "ab") as f:
+            f.write(tail + b"\n")
+        with open(self.path, "r+b") as f:
+            f.truncate(cut)
+            f.flush()
+            os.fsync(f.fileno())
+        print(f"[ckpt] cut a torn final record ({len(tail)} bytes) from "
+              f"{self.path}; kept in .torn")
 
     # ── config guard ────────────────────────────────────────────────────────
     def _check_config(self, strict: bool) -> None:
         if not os.path.exists(self.meta_path):
-            with open(self.meta_path, "w", encoding="utf-8") as f:
+            # Atomic: a power cut during a plain write leaves a truncated
+            # .meta.json, and every later resume then dies parsing it.
+            tmp = self.meta_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.meta_path)
             return
         with open(self.meta_path, encoding="utf-8") as f:
             old = json.load(f)
@@ -124,7 +196,13 @@ class ResumableJSONL:
             except Exception:                                    # noqa: BLE001
                 prev = {}
             pid = prev.get("pid")
-            if pid and _pid_alive(int(pid)):
+            # A lock written before the last boot is stale whatever its pid
+            # says: after a power cut Windows hands small pids out again, so
+            # the dead run's pid can belong to an unrelated live process and
+            # the store would refuse to resume forever.
+            before_boot = (prev.get("boot") is not None
+                           and abs(prev["boot"] - _boot_time()) > 120)
+            if pid and not before_boot and _pid_alive(int(pid)):
                 raise SystemExit(
                     "\nANOTHER RUN IS ALREADY WRITING %s\n"
                     "  pid %s, started %s\n\n"
@@ -133,9 +211,11 @@ class ResumableJSONL:
                     "is measured under contention. Stop that process, or point\n"
                     "--out somewhere else.\n"
                     % (self.path, pid, prev.get("started")))
-            print("[ckpt] reclaiming stale lock from pid %s (not running)" % pid)
+            print("[ckpt] reclaiming stale lock from pid %s (%s)"
+                  % (pid, "from before the last boot" if before_boot
+                     else "not running"))
         with open(self.lock_path, "w", encoding="utf-8") as f:
-            json.dump({"pid": os.getpid(),
+            json.dump({"pid": os.getpid(), "boot": _boot_time(),
                        "started": time.strftime("%Y-%m-%d %H:%M:%S")}, f)
 
     def _release_lock(self) -> None:

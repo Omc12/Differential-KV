@@ -391,7 +391,8 @@ def main():
            "data_dir": os.path.abspath(data_dir),
            "min_length": args.min_length or None,
            "decode_defaults": "serving" if args.arm == "dkv" else None,
-           "prefill_attn": "sdpa",
+           # h2o_chunked is the one arm whose prefill must run eager.
+           "prefill_attn": ("eager" if args.arm == "h2o_chunked" else "sdpa"),
            "thinking": bool(args.thinking),
            "prompt_template": "model-chat-template",
            # See run_longbench_cuda: a kernel change must invalidate DKV rows,

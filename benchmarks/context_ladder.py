@@ -191,7 +191,8 @@ def run_point(args) -> None:
                                 json.loads(args.baseline_params))
             res["wall_s"] = time.perf_counter() - t0
             for k in ("prefill_s", "decode_s", "decode_tps", "ttft_s",
-                      "kv_physical_gb", "kv_dense_equiv_gb"):
+                      "kv_physical_gb", "kv_dense_equiv_gb", "params",
+                      "max_cache_tokens", "attn_eager"):
                 res[k] = r.get(k)
         res["peak_gb"] = torch.cuda.max_memory_allocated() / 1e9
         res["peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 1e9
@@ -331,6 +332,7 @@ def main():
     done = store.load_done()
     print(f"[ckpt] {out}\n[ckpt] {len(done)} points already recorded")
 
+    latest = store.load_latest()
     tmp = tempfile.mkdtemp(prefix="dkv-ladder-")
     for arm in args.arms:
         ooms = 0
@@ -338,7 +340,20 @@ def main():
         for ctx in sorted(args.contexts):
             key = f"{arm}@{ctx}"
             if key in done:
-                print(f"  skip {key} (done)")
+                # REPLAY the recorded point through the same state the live
+                # loop keeps. Skipping it silently reset `ooms` and `last_rate`,
+                # so a ladder resumed after a power cut forgot that this arm
+                # had already spilled and climbed straight past its ceiling,
+                # and lost the cliff detector's baseline rate.
+                prev = latest.get(key, {})
+                st = prev.get("status")
+                if st in ("oom", "died", "timeout", "spilled", "degraded"):
+                    ooms += 1
+                elif st == "ok":
+                    ooms = 0
+                    if prev.get("sec_per_1k"):
+                        last_rate = prev["sec_per_1k"]
+                print(f"  skip {key} (done: {st})")
                 continue
             if ooms >= args.stop_after_oom:
                 print(f"  {arm}: stopping, ceiling found below {ctx}")

@@ -40,6 +40,33 @@ WHAT IS FAITHFUL AND WHAT IS NOT — read before quoting any number
                 window), which is the standard long-context adaptation. Report
                 it as "H2O-style (window-accumulated)", never as H2O.
 
+  streamingllm_chunked, h2o_chunked
+                EVICT DURING PREFILL, NOT AFTER IT. The two arms above build
+                the whole prompt's KV and only then prune it, so their PEAK is
+                dense's peak however small the cache they keep. That is fair
+                to SnapKV, whose ranking needs the question at the end of the
+                prompt, but not to these two: StreamingLLM is a streaming
+                policy by construction, and H2O's score is an online sum that
+                can be kept as the prompt arrives. Measuring them post-hoc
+                would make "eviction cannot raise the context ceiling" true
+                of our implementation rather than of the methods.
+
+                So these prefill in chunks and prune the cache after EVERY
+                chunk, holding it at the method's budget throughout. Each
+                chunk's queries see only what survived the previous chunks,
+                which is the real quality price of streaming eviction and is
+                what gets measured.
+
+                h2o_chunked is also CLOSER to H2O than the h2o arm: its score
+                is attention accumulated over EVERY query of the prompt (each
+                chunk adds its queries' attention to every surviving token),
+                not over a 32-token observation window. The cost is that the
+                whole prefill runs eager, because every chunk needs its
+                attention weights; the chunk is kept small (256) so the
+                [n_q, chunk, budget+chunk] maps stay bounded. Its prefill time
+                is therefore NOT comparable to the SDPA arms, and
+                `attn_eager` on its records says so.
+
   keynorm_hh    PROXY, AND SAYS SO. Ranks by key L2 norm instead of attention
                 mass. Cheap, needs no attention weights, correlates loosely.
                 Kept only as a contrast against the two real eviction methods.
@@ -277,7 +304,37 @@ KV_TRANSFORMS = {
 }
 
 # Methods whose reported KV bytes are actually allocated (see module docstring).
-_REALIZED = {"dense", "streamingllm", "keynorm_hh", "snapkv", "h2o"}
+_REALIZED = {"dense", "streamingllm", "keynorm_hh", "snapkv", "h2o",
+             "streamingllm_chunked", "h2o_chunked"}
+
+
+def attn_by_cache_layer(pkv, atts) -> Dict[int, torch.Tensor]:
+    """Map `out.attentions` onto the cache layers that hold KV.
+
+    transformers 5 records attention per ATTENTION MODULE CALL, so on a hybrid
+    model the tuple has one entry per attention layer -- 8 on Qwen3.5-4B --
+    not one per decoder layer (32). Indexing it by decoder-layer number, as
+    this module once did, scores cache layer 3 with the 4th attention layer's
+    weights, cache layer 7 with the 8th's, and silently skips every KV layer
+    past index 7. Nothing raises, because the shapes agree.
+
+    So: KV-bearing layers in order, matched to the tuple in order, and the
+    counts must agree exactly. A dense model has one entry per layer and maps
+    identically; anything else refuses to guess.
+    """
+    kv_layers = [l for l in range(cache_num_layers(pkv))
+                 if cache_get_kv(pkv, l)[0] is not None]
+    present = [a for a in atts if a is not None]
+    if len(atts) == cache_num_layers(pkv) and all(
+            (atts[l] is not None) == (l in kv_layers)
+            for l in range(len(atts))):
+        return {l: atts[l] for l in kv_layers}
+    if len(present) == len(kv_layers):
+        return dict(zip(kv_layers, present))
+    raise RuntimeError(
+        f"cannot align {len(atts)} attention entries ({len(present)} non-None) "
+        f"with {len(kv_layers)} KV-bearing cache layers of "
+        f"{cache_num_layers(pkv)}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -338,16 +395,21 @@ def _evict_by_observed_attention(model, ids: List[int], device: str, chunk: int,
     total_bytes = 0.0
     keep = min(budget, plen)
     n_kv = n_skipped = 0
+    # NOT out.attentions[l]. On a hybrid the tuple has one entry per attention
+    # layer, so decoder-layer indexing evicted only cache layers 3 and 7 of
+    # Qwen3.5-4B's eight -- with the wrong layers' attention -- and left six
+    # at full length. Measured by selfcheck_chunked_eviction.py; every SnapKV
+    # number on a hybrid model from before this line is from that arm.
+    by_layer = attn_by_cache_layer(past_out, out.attentions)
     for l in range(cache_num_layers(past_out)):
         K, V = cache_get_kv(past_out, l)
         # Hybrid models interleave layers that have no KV cache at all. They
-        # have nothing to evict, and out.attentions has no usable entry for
-        # them either.
-        if K is None or l >= len(out.attentions) or out.attentions[l] is None:
+        # have nothing to evict.
+        if K is None:
             n_skipped += 1
             continue
         n_kv += 1
-        A = out.attentions[l]                                    # [B,n_q,W,S]
+        A = by_layer[l]                                          # [B,n_q,W,S]
         scores = A[..., :plen].to(torch.float32).sum(dim=2)      # [B,n_q,plen]
         # GQA: attention is per QUERY head, the cache is per KV head. Pool the
         # query-head scores inside each group or the indices address the wrong
@@ -373,6 +435,144 @@ def _evict_by_observed_attention(model, ids: List[int], device: str, chunk: int,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Streaming eviction: prune after EVERY prefill chunk (see module docstring)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cache_bytes(pkv) -> float:
+    total = 0
+    for l in range(cache_num_layers(pkv)):
+        K, V = cache_get_kv(pkv, l)
+        if K is not None:
+            total += K.numel() * K.element_size() + V.numel() * V.element_size()
+    return total / 1e9
+
+
+def _streamingllm_chunked(model, ids: List[int], device: str, chunk: int,
+                          n_sink: int, recency_window: int):
+    """Chunked prefill that holds the cache at sinks + recency window.
+
+    Returns (past, last_logits, kv_gb, max_cache_tokens). max_cache_tokens is
+    the largest cache ANY layer held at any point, which is what bounds this
+    arm's memory: cap + one chunk, independent of the prompt length.
+    """
+    cap = n_sink + recency_window
+    past, last, max_len = None, None, 0
+    with torch.no_grad():
+        for cs in range(0, len(ids), chunk):
+            ch = ids[cs:cs + chunk]
+            pos = torch.tensor([list(range(cs, cs + len(ch)))], device=device)
+            out = model(input_ids=torch.tensor([ch], device=device),
+                        position_ids=pos, past_key_values=past, use_cache=True)
+            past = out.past_key_values
+            last = out.logits[0, -1].float()
+            del out
+            n_kv = 0
+            for l in range(cache_num_layers(past)):
+                K, V = cache_get_kv(past, l)
+                if K is None:
+                    continue                     # linear-attention layer
+                n_kv += 1
+                max_len = max(max_len, K.shape[2])
+                if K.shape[2] > cap:
+                    cache_set_kv(
+                        past, l,
+                        torch.cat([K[:, :, :n_sink], K[:, :, -recency_window:]], dim=2),
+                        torch.cat([V[:, :, :n_sink], V[:, :, -recency_window:]], dim=2))
+            if n_kv == 0:
+                raise RuntimeError("streamingllm_chunked: no layer holds KV -- "
+                                   "nothing was evicted")
+    return past, last, _cache_bytes(past), max_len
+
+
+def _h2o_chunked(model, ids: List[int], device: str, chunk: int,
+                 budget: int, recency_window: int):
+    """Chunked prefill with H2O's online heavy-hitter eviction.
+
+    Every chunk runs eager so its attention weights exist. Each surviving
+    token's score gains the attention every query of the chunk paid it (query
+    heads summed within their KV group), so a token's score is its attention
+    accumulated over every query that could see it -- H2O's criterion. After
+    the chunk, each KV head keeps its `recency_window` newest tokens plus the
+    `budget - recency_window` highest-scoring older ones.
+    """
+    if not 0 <= recency_window < budget:
+        raise ValueError(f"h2o_chunked needs 0 <= recency_window < budget, "
+                         f"got {recency_window}, {budget}")
+    past, last, max_len = None, None, 0
+    acc: Dict[int, torch.Tensor] = {}
+    with eager_attention(model), torch.no_grad():
+        for cs in range(0, len(ids), chunk):
+            ch = ids[cs:cs + chunk]
+            n_new = len(ch)
+            pos = torch.tensor([list(range(cs, cs + n_new))], device=device)
+            out = model(input_ids=torch.tensor([ch], device=device),
+                        position_ids=pos, past_key_values=past, use_cache=True,
+                        output_attentions=True)
+            past = out.past_key_values
+            last = out.logits[0, -1].float()
+            atts = out.attentions
+            del out
+            if not atts:
+                raise RuntimeError("h2o_chunked got no attention weights; the "
+                                   "eager switch did not take effect")
+            by_layer = attn_by_cache_layer(past, atts)
+            n_kv = 0
+            for l in range(cache_num_layers(past)):
+                K, V = cache_get_kv(past, l)
+                if K is None:
+                    continue
+                A = by_layer.get(l)
+                S = K.shape[2]
+                if A is None or A.shape[-1] != S or A.shape[2] != n_new:
+                    raise RuntimeError(
+                        f"h2o_chunked: layer {l} holds KV of length {S} but its "
+                        f"attention is {None if A is None else tuple(A.shape)}")
+                n_kv += 1
+                max_len = max(max_len, S)
+                s = A.to(torch.float32).sum(dim=2)               # [B, n_q, S]
+                n_q, n_h = s.shape[1], K.shape[1]
+                if n_q != n_h:
+                    if n_q % n_h:
+                        raise RuntimeError(f"h2o_chunked: {n_q} query heads do "
+                                           f"not group onto {n_h} KV heads")
+                    s = s.view(s.shape[0], n_h, n_q // n_h, S).sum(dim=2)
+                prev = acc.get(l)
+                if prev is not None:
+                    s[..., :prev.shape[-1]] += prev
+                if S > budget:
+                    n_old = S - recency_window
+                    top = torch.topk(s[..., :n_old], k=budget - recency_window,
+                                     dim=-1).indices.sort(dim=-1).values
+                    recent = torch.arange(n_old, S, device=s.device).expand(
+                        top.shape[0], top.shape[1], recency_window)
+                    idx = torch.cat([top, recent], dim=-1)
+                    gi = idx.unsqueeze(-1).expand(-1, -1, -1, K.shape[-1])
+                    cache_set_kv(past, l, torch.gather(K, 2, gi),
+                                 torch.gather(V, 2, gi))
+                    s = torch.gather(s, 2, idx)
+                acc[l] = s
+            del atts
+            if n_kv == 0:
+                raise RuntimeError("h2o_chunked: no layer holds KV -- nothing "
+                                   "was evicted")
+    return past, last, _cache_bytes(past), max_len
+
+
+# Default parameters. Budgets match the post-hoc arms they are compared with:
+# 2,048 tokens kept, i.e. streamingllm's 4 + 2,044 and h2o's 2,048 incl. 512
+# recent, so any difference is WHEN eviction happens, not how much is kept.
+CHUNKED_DEFAULTS = {
+    "streamingllm_chunked": {"n_sink": 4, "recency_window": 2044},
+    "h2o_chunked": {"budget": 2048, "recency_window": 512, "prefill_chunk": 256},
+}
+
+
+def prefill_attn(method: str) -> str:
+    """The attention path this arm's PREFILL runs under, for store configs."""
+    return "eager" if method == "h2o_chunked" else "sdpa"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # The one entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -383,7 +583,7 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
     """Prefill -> compress -> greedy decode, for one baseline method.
 
     `method`: dense | int8_kv | kivi2 | kivi4 | streamingllm | keynorm_hh
-              | snapkv | h2o
+              | snapkv | h2o | streamingllm_chunked | h2o_chunked
     """
     params = dict(params or {})
     stop_ids = stop_ids or set()
@@ -424,6 +624,21 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
             torch.cuda.synchronize()
         prefill_s = time.perf_counter() - t0
         compress_s = 0.0
+    elif method in CHUNKED_DEFAULTS:
+        for k_, v_ in CHUNKED_DEFAULTS[method].items():
+            params.setdefault(k_, v_)
+        if method == "streamingllm_chunked":
+            past, last_logits, phys_gb, max_cache = _streamingllm_chunked(
+                model, ids, device, chunk, params["n_sink"],
+                params["recency_window"])
+        else:
+            past, last_logits, phys_gb, max_cache = _h2o_chunked(
+                model, ids, device, params["prefill_chunk"], params["budget"],
+                params["recency_window"])
+        if cuda:
+            torch.cuda.synchronize()
+        prefill_s = time.perf_counter() - t0
+        compress_s = 0.0          # eviction is inside the prefill, and timed there
     else:
         past, last_logits = chunked_prefill(model, ids, device, chunk)
         if cuda:
@@ -500,7 +715,10 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
         # Whether this arm's PREFILL ran under eager attention. False for every
         # arm now: snapkv/h2o switch only for the observation window, so their
         # prefill/TTFT is comparable to the SDPA arms again.
-        "attn_eager": False,
+        "attn_eager": prefill_attn(method) == "eager",
+        # Largest cache any layer held during prefill (chunked arms only):
+        # the evidence that the arm really streamed rather than built it all.
+        "max_cache_tokens": (max_cache if method in CHUNKED_DEFAULTS else None),
         "reads_attention_weights": needs_attention_weights(method),
         "gen_tokens": len(gen_ids),
         "text": tokenizer.decode(gen_ids, skip_special_tokens=True),
@@ -509,7 +727,7 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
 
 def needs_attention_weights(method: str) -> bool:
     """Reads real attention weights (only for the observation window)."""
-    return method in ("snapkv", "h2o")
+    return method in ("snapkv", "h2o", "h2o_chunked")
 
 
 def needs_eager(method: str) -> bool:
