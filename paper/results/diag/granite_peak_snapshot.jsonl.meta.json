@@ -1,0 +1,36 @@
+{
+  "points": [
+    [
+      "ibm-granite/granite-4.2-8b",
+      "dkv",
+      8192
+    ],
+    [
+      "ibm-granite/granite-4.2-8b",
+      "dkv",
+      16384
+    ],
+    [
+      "ibm-granite/granite-4.2-8b",
+      "dense",
+      8192
+    ],
+    [
+      "ibm-granite/granite-4.2-8b",
+      "dense",
+      16384
+    ],
+    [
+      "Qwen/Qwen3.5-4B",
+      "dkv",
+      16384
+    ],
+    [
+      "Qwen/Qwen3.5-4B",
+      "dkv",
+      32768
+    ]
+  ],
+  "preset": "mid",
+  "quant": "nf4"
+}

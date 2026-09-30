@@ -140,6 +140,16 @@ STEPS = [
         "--out", os.path.join(RES, "ruler",
                               "Qwen3.5-4B_h2o_chunked_max65536.jsonl")),
      False, "ruler/Qwen3.5-4B_h2o_chunked_max65536.jsonl"),
+
+    # What granite's peak is made of: allocator trace at the peak, bucketed by
+    # the code site that allocated it, at two lengths, with Qwen as control.
+    ("diag_granite_snapshot", _b("diag_granite_snapshot.py"),
+     False, "diag/granite_peak_snapshot.jsonl"),
+
+    # Users per GPU: sessions of 16k held resident at once until the card
+    # spills, one process per arm.
+    ("concurrency_qwen4b_16k", _b("bench_concurrency_cuda.py"),
+     False, "concurrency/Qwen3.5-4B_ctx16384.jsonl"),
 ]
 
 

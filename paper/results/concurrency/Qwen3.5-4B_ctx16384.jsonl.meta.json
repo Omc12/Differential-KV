@@ -1,0 +1,7 @@
+{
+  "ctx": 16384,
+  "dkv_pool_gb": 9.0,
+  "gen": 8,
+  "model": "Qwen/Qwen3.5-4B",
+  "n_max": 32
+}

@@ -210,13 +210,22 @@ def cache_set_kv(pkv, i, k, v) -> None:
         f".layers, got {type(pkv).__name__}")
 
 
-def chunked_prefill(model, ids: List[int], device: str, chunk: int = 1024):
+def chunked_prefill(model, ids: List[int], device: str, chunk: int = 1024,
+                    defrag: bool = False):
     """Dense prefill in chunks -> (past_key_values, last-position logits).
 
     Chunked because the lm_head runs on every position: a single-shot forward
     over 16k tokens and a 150k vocab materializes ~5 GB of logits on top of the
     weights. Chunking is numerically free (attention is causal) as long as
     position_ids are passed explicitly, which they are.
+
+    defrag=True returns the allocator's cached-but-free blocks to the device
+    after every chunk. DynamicCache grows each layer by torch.cat, so every
+    chunk allocates a slightly larger tensor and frees the old one; the
+    caching allocator cannot reuse the smaller freed blocks for the larger
+    request, and RESERVED memory balloons far past what is ALLOCATED. Measured
+    on Qwen3.5-4B at 65,536: 7.18 GB allocated, 15.04 GB reserved -- dense
+    spilled on fragmentation, not on its KV. Arithmetic is unchanged.
     """
     past, out = None, None
     with torch.no_grad():
@@ -226,6 +235,13 @@ def chunked_prefill(model, ids: List[int], device: str, chunk: int = 1024):
             out = model(input_ids=torch.tensor([ch], device=device),
                         position_ids=pos, past_key_values=past, use_cache=True)
             past = out.past_key_values
+            if defrag:
+                last = out.logits[0, -1].float()
+                del out
+                torch.cuda.empty_cache()
+                out = None
+    if defrag:
+        return past, last
     return past, out.logits[0, -1].float()
 
 
@@ -640,7 +656,10 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
         prefill_s = time.perf_counter() - t0
         compress_s = 0.0          # eviction is inside the prefill, and timed there
     else:
-        past, last_logits = chunked_prefill(model, ids, device, chunk)
+        defrag = bool(params.pop("defrag", False)) if method == "dense" else False
+        past, last_logits = chunked_prefill(model, ids, device, chunk, defrag=defrag)
+        if defrag:
+            params["defrag"] = True          # keep it on the record
         if cuda:
             torch.cuda.synchronize()
         prefill_s = time.perf_counter() - t0
@@ -670,6 +689,7 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
             torch.cuda.synchronize()
         compress_s = time.perf_counter() - t1
     peak_prefill = torch.cuda.max_memory_allocated() / 1e9 if cuda else 0.0
+    peak_prefill_resv = torch.cuda.max_memory_reserved() / 1e9 if cuda else 0.0
 
     # ── greedy decode ──
     if cuda:
@@ -704,6 +724,7 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
         "decode_tps": len(gen_ids) / decode_s if decode_s > 0 else 0.0,
         "ttft_s": prefill_s + compress_s,
         "peak_prefill_gb": peak_prefill,
+        "peak_prefill_reserved_gb": peak_prefill_resv,
         "peak_decode_gb": torch.cuda.max_memory_allocated() / 1e9 if cuda else 0.0,
         "kv_physical_gb": phys_gb,
         "kv_dense_equiv_gb": dense_kv_gb,

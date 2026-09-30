@@ -1,0 +1,19 @@
+{
+  "dkv_env": {
+    "DKV_REMAT_CACHE": "0"
+  },
+  "points": [
+    [
+      "ibm-granite/granite-4.2-8b",
+      "dkv",
+      8192
+    ],
+    [
+      "ibm-granite/granite-4.2-8b",
+      "dkv",
+      16384
+    ]
+  ],
+  "preset": "mid",
+  "quant": "nf4"
+}

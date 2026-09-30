@@ -1,0 +1,20 @@
+{
+  "arm": "h2o_chunked",
+  "baseline_params": {
+    "budget": 2048,
+    "prefill_chunk": 256,
+    "recency_window": 512
+  },
+  "decode_defaults": null,
+  "dkv_decode_rev": null,
+  "dkv_env": null,
+  "max_length": 12000,
+  "model": "ibm-granite/granite-4.2-8b",
+  "num_samples": 20,
+  "prefill_attn": "eager",
+  "preset": null,
+  "protocol": "longbench-official-v1",
+  "quant": "nf4",
+  "query_first": false,
+  "thinking": false
+}

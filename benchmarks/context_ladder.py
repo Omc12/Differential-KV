@@ -148,6 +148,11 @@ def run_point(args) -> None:
             tok, model = load_plain(args.model, args.quant,
                                     _KB.needs_eager(args.arm))
         res["load_s"] = time.time() - t_load
+        # DKV behaviour switched by environment (e.g. DKV_REMAT_CACHE) must be
+        # on the record, or two ladders measuring different code paths look
+        # identical in the store.
+        res["dkv_env"] = {k: v for k, v in os.environ.items()
+                          if k.startswith("DKV_")} or None
         res["weights_gb"] = torch.cuda.memory_allocated() / 1e9
 
         prompt = build_filler(tok, args.ctx)
@@ -192,7 +197,8 @@ def run_point(args) -> None:
             res["wall_s"] = time.perf_counter() - t0
             for k in ("prefill_s", "decode_s", "decode_tps", "ttft_s",
                       "kv_physical_gb", "kv_dense_equiv_gb", "params",
-                      "max_cache_tokens", "attn_eager"):
+                      "max_cache_tokens", "attn_eager", "peak_prefill_gb",
+                      "peak_prefill_reserved_gb"):
                 res[k] = r.get(k)
         res["peak_gb"] = torch.cuda.max_memory_allocated() / 1e9
         res["peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 1e9
@@ -203,7 +209,12 @@ def run_point(args) -> None:
         # Reserved is the honest figure to compare: it is what the allocator
         # actually took from the device.
         usable = total * SPILL_FRACTION
-        res["spilled"] = bool(max(res["peak_gb"], res["peak_reserved_gb"]) > usable)
+        # run_baseline resets the peak counters between prefill and decode, so
+        # for baseline arms peak_gb is the DECODE peak; the prefill peaks it
+        # reports separately must count too, or a prefill spill is invisible.
+        res["spilled"] = bool(max(res["peak_gb"], res["peak_reserved_gb"],
+                                  res.get("peak_prefill_gb") or 0,
+                                  res.get("peak_prefill_reserved_gb") or 0) > usable)
         res["status"] = "spilled" if res["spilled"] else "ok"
     except torch.cuda.OutOfMemoryError as e:                     # noqa: BLE001
         res["status"] = "oom"
