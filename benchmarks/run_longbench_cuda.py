@@ -709,7 +709,8 @@ def main():
                         # recorded when set, so default stores are unchanged.
                         "DKV_STREAMING_COMPRESS", "DKV_PREFILL_LOWMEM",
                         "DKV_REMAT_CACHE", "DKV_RESIDUAL_QUANT",
-                        "DKV_DECODE_RESIDUALS")
+                        "DKV_DECODE_RESIDUALS", "DKV_STREAM_AUTO_TOKENS",
+                        "DKV_STREAM_PROFILE")
                        if k in os.environ} or None,
            "decode_defaults": "serving" if args.arm == "dkv" else None,
            # The attention path the PREFILL ran under. Recorded because

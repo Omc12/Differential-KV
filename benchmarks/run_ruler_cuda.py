@@ -350,6 +350,12 @@ def main():
                          "items per arm where 260 are new -- and those rungs were "
                          "already measured by the 32k campaign.")
     ap.add_argument("--tasks", nargs="+", default=RULER_13)
+    ap.add_argument("--per-task", type=int, default=0,
+                    help="run only the first N generated items of each "
+                         "(length, task). At 131k one DKV item costs ~270 s, so "
+                         "20 per task is ~20 h; the same first N are what every "
+                         "arm answers, so paired comparisons still hold. "
+                         "0 = all.")
     ap.add_argument("--baseline-params", default="{}")
     ap.add_argument("--thinking", action="store_true",
                     help="let a reasoning model emit its <think> block. OFF by "
@@ -402,15 +408,20 @@ def main():
            # default path, so existing stores keep matching.
            "dkv_env": {k: os.environ[k] for k in
                        ("DKV_STREAMING_COMPRESS", "DKV_PREFILL_LOWMEM",
-                        "DKV_REMAT_CACHE") if k in os.environ} or None,
+                        "DKV_REMAT_CACHE", "DKV_STREAM_AUTO_TOKENS",
+                        "DKV_STREAM_PROFILE") if k in os.environ} or None,
            "protocol": "ruler-official-generators"}
+    # Only when used, so stores written before the option existed still match.
+    if args.per_task:
+        cfg["per_task"] = args.per_task
     store = ResumableJSONL(out, config=cfg)
     done = store.load_done()
 
     items = [it for it in load_generated(data_dir)
              if it["task"] in args.tasks
              and (not args.max_length or it["length"] <= args.max_length)
-             and (not args.min_length or it["length"] >= args.min_length)]
+             and (not args.min_length or it["length"] >= args.min_length)
+             and (not args.per_task or it["idx"] < args.per_task)]
     work = [it for it in items if f"{it['length']}/{it['task']}#{it['idx']}" not in done]
     print(f"[ckpt] {out}\n[ckpt] {len(done)} recorded, {len(work)} pending "
           f"(of {len(items)} generated)")
