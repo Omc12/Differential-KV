@@ -43,6 +43,18 @@ OUT="${OUT:-$WORK/generated/$TAG}"
 TASKS="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery vt cwe fwe qa_1 qa_2"
 
 mkdir -p "$OUT"
+# The work copy lives under %TEMP%, which Windows clears. When prepare.py is
+# gone every task "fails" with no samples and the script still exits 0 (that is
+# how 39 tasks came back empty on 2026-09-30), so rebuild it from the repo's
+# copy rather than trusting it to be there.
+#
+# The WHOLE tree, not just data/: prepare.py opens ../synthetic.yaml, so a copy
+# of data/ alone fails the same silent way.
+if [ ! -f "$WORK/data/prepare.py" ] || [ ! -f "$WORK/synthetic.yaml" ]; then
+  echo "rebuilding the RULER work copy at $WORK from benchmarks/ruler_official ..."
+  mkdir -p "$WORK"
+  cp -r "$REPO/benchmarks/ruler_official/." "$WORK/" || exit 1
+fi
 cd "$WORK/data" || exit 1
 
 for L in $LENGTHS; do

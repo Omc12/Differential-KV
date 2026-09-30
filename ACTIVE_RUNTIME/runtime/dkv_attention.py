@@ -831,7 +831,11 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
         print(f"[PTR] _remat_attend ENTER L{captured_layer_idx} "
               f"enabled={_REMAT_ENABLED} bi={None if block_indices is None else int(block_indices.numel())} "
               f"dlen={dense_len}", flush=True, file=_s.stderr)
-    if not _REMAT_ENABLED:
+    # _REMAT_ENABLED is read once at import. The streaming profile
+    # (hf_dkv_wrapper) turns the cache off per prompt by setting
+    # DKV_REMAT_CACHE=0 at run time, so honour an explicit "0" here too. With
+    # the variable unset -- the default -- this is the import-time value alone.
+    if not _REMAT_ENABLED or os.environ.get("DKV_REMAT_CACHE") == "0":
         _remat_why("disabled")
         return None
     if block_indices is None or block_indices.numel() == 0:

@@ -1918,6 +1918,39 @@ class PyTorchDKVHFWrapper:
                   f"{'STREAMING' if _as_stream else 'EXACT'} -- {total_new} prompt "
                   f"tokens vs exact limit {_as_limit or 'unset'}", flush=True)
 
+        # ── Streaming profile: the fixes streaming prefill needs, only for it ──
+        # A prompt that streams turns these on; a prompt that prefills exactly
+        # runs with them as the caller left them (off by default), so the exact
+        # path stays the default code path.
+        #   DKV_PREFILL_LOWMEM       history attention without the [N,H,Q,P,D]
+        #                            broadcast (27.7 GB at 16k on granite without)
+        #   DKV_REMAT_CACHE=0        no dense-size K/V copy held through decode
+        #   DKV_ROUTER_SLOT_DEQUANT  router dequantizes its candidate slots, not
+        #                            the whole pool
+        #   DKV_CLAMP_DECODE_RANK    decode kernels read the STORED rank; without
+        #                            it remat-off decode reads past each block
+        # They are process-wide switches read at their call sites, so this is
+        # per PROMPT, which is right for one request at a time; interleaved
+        # exact and streaming sessions would need them threaded per session.
+        # DKV_STREAM_PROFILE=0 leaves all four to the caller.
+        if (_is_cuda_device and cached_len == 0
+                and os.environ.get("DKV_STREAM_PROFILE", "1") != "0"
+                and hasattr(self.manager, "streaming_compress_active")):
+            _sp = {"DKV_PREFILL_LOWMEM": "1", "DKV_REMAT_CACHE": "0",
+                   "DKV_ROUTER_SLOT_DEQUANT": "1", "DKV_CLAMP_DECODE_RANK": "1"}
+            _sp_saved = getattr(self, "_stream_profile_saved", None)
+            if self.manager.streaming_compress_active(session_id):
+                if _sp_saved is None:
+                    self._stream_profile_saved = {k: os.environ.get(k) for k in _sp}
+                os.environ.update(_sp)
+            elif _sp_saved is not None:
+                for _k, _v in _sp_saved.items():
+                    if _v is None:
+                        os.environ.pop(_k, None)
+                    else:
+                        os.environ[_k] = _v
+                self._stream_profile_saved = None
+
         for chunk_idx, chunk_start in enumerate(range(0, total_new, PREFILL_CHUNK)):
             chunk_end = min(chunk_start + PREFILL_CHUNK, total_new)
             chunk = new_ids_list[chunk_start:chunk_end]
