@@ -39,9 +39,17 @@ _VSWHERE = os.path.join(
 # Only these are taken from the developer environment. Importing everything
 # vcvars sets would drag in unrelated state and could clobber variables the
 # benchmark itself relies on.
+#
+# VCToolsVersion MUST travel with VCINSTALLDIR. triton-windows' find_msvc_env()
+# treats VCINSTALLDIR as "MSVC is configured" and then does
+# `Path(VCINSTALLDIR)/"Tools"/"MSVC" / os.getenv("VCToolsVersion")`; with the
+# first imported and the second not, that is WindowsPath / None -> TypeError
+# while building a kernel launcher. DKV's sparse decode kernel caught it and
+# fell back to the PyTorch decoder on EVERY step of every serving-default run
+# that reached it, silently, so those timings were the fallback's.
 _WANTED = ("PATH", "INCLUDE", "LIB", "LIBPATH", "VCINSTALLDIR",
-           "VCToolsInstallDir", "WindowsSdkDir", "WindowsSDKVersion",
-           "UCRTVersion", "VSINSTALLDIR")
+           "VCToolsInstallDir", "VCToolsVersion", "WindowsSdkDir",
+           "WindowsSDKVersion", "UCRTVersion", "VSINSTALLDIR")
 
 
 def _find_vcvars() -> str:

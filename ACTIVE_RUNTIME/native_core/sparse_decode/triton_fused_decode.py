@@ -3096,7 +3096,15 @@ def native_triton_sparse_attn_decode(
 ) -> torch.Tensor:
     bsz, H_q, q_len, D = q.shape
     assert bsz == 1 and q_len == 1
-    
+
+    # Clamp R to the stored rank; see native_triton_sparse_attn_decode_combined.
+    # Applied before the HAS_TRITON split so the PyTorch fallback gets it too.
+    _U_pool = getattr(pool, "U", None)
+    if _U_pool is not None and _U_pool.dim() == 3:
+        if int(R) > int(_U_pool.shape[2]) and os.environ.get("DKV_DEBUG_BOUNDS") == "1":
+            print(f"[DKV_DEBUG_BOUNDS] clamped R {int(R)} -> {int(_U_pool.shape[2])}", flush=True)
+        R = min(int(R), int(_U_pool.shape[2]))
+
     if not HAS_TRITON:
         # SAME N==0 GUARD the Triton branch grew at the `else` further down.
         # Without it this early return lands in
@@ -3814,6 +3822,21 @@ def native_triton_sparse_attn_decode_combined(
     bsz, H_q, q_len, D = q.shape
     assert bsz == 1 and q_len == 1
 
+    # CLAMP R TO THE RANK THE POOL ACTUALLY STORES. The caller passes the
+    # per-layer SCHEDULED rank (get_layer_rank: 0.5x the declared rank on the
+    # first quarter of layers, i.e. 48 at mid's declared 96), but the pool is
+    # allocated at the capped rank -- 32 on head_dim 128. The kernel masks its
+    # loads by R, so R > stored rank reads 16 columns past each block's factors:
+    # the next block's data mid-pool (silently wrong output) and past the
+    # allocation at the last slot ("illegal memory access", granite 24k / Qwen
+    # 32k under streaming prefill with remat off). _reconstruct_blocks already
+    # clamps the same way (remat_cache.py: r = min(rank, V_K.shape[1], U.shape[2])).
+    _U_pool = getattr(pool, "U", None)
+    if _U_pool is not None and _U_pool.dim() == 3:
+        if int(R) > int(_U_pool.shape[2]) and os.environ.get("DKV_DEBUG_BOUNDS") == "1":
+            print(f"[DKV_DEBUG_BOUNDS] clamped R {int(R)} -> {int(_U_pool.shape[2])}", flush=True)
+        R = min(int(R), int(_U_pool.shape[2]))
+
     N = block_indices.shape[0] if block_indices is not None else 0
     # has_dense is driven by dense_len (actual valid tokens), not the padded buffer shape.
     if dense_len is None:
@@ -3844,6 +3867,41 @@ def native_triton_sparse_attn_decode_combined(
         w_r = w.view(H_kv, n_rep, L_dense)
         out = torch.bmm(w_r, dv).view(H_q, D)
         return out.unsqueeze(0).unsqueeze(2).to(q.dtype)
+
+    if os.environ.get("DKV_DEBUG_BOUNDS") == "1":
+        # Opt-in diagnostic (default off: no sync, no cost). The Triton kernel
+        # does no bounds checking, so an out-of-range index surfaces only as
+        # "illegal memory access" with no hint of which input was wrong. This
+        # validates every index against the tensor it addresses and names the
+        # offender. Found for: streaming prefill + remat off + selective routing
+        # (N compressed blocks > K) crashing at 24k on granite / 32k on Qwen.
+        _bad = []
+        _U = getattr(pool, "U", None)
+        if _U is not None and N > 0:
+            _bi = block_indices.long()
+            if int(_bi.min()) < 0 or int(_bi.max()) >= _U.shape[0]:
+                _bad.append(f"block_indices range [{int(_bi.min())}, {int(_bi.max())}] vs pool rows {_U.shape[0]}")
+            if S_MAX > _U.shape[1]:
+                _bad.append(f"S_MAX {S_MAX} > pool U rows-per-block {_U.shape[1]}")
+            if R > _U.shape[2]:
+                _bad.append(f"R {R} > pool U rank {_U.shape[2]}")
+            _sl = getattr(pool, "seq_lens", None)
+            if _sl is not None and int(_bi.max()) < _sl.shape[0]:
+                _mx = int(_sl[_bi].max())
+                if _mx > S_MAX:
+                    _bad.append(f"routed block seq_len {_mx} > S_MAX {S_MAX}")
+        if anchor_indices is not None and cos is not None and N > 0:
+            _ai = anchor_indices.long()
+            _tab = cos.shape[-2] if cos.dim() >= 2 else cos.shape[0]
+            if int(_ai.min()) < 0 or int(_ai.max()) + S_MAX >= _tab:
+                _bad.append(f"anchor_indices range [{int(_ai.min())}, {int(_ai.max())}] + S_MAX {S_MAX} vs RoPE table {_tab} (cos shape {tuple(cos.shape)})")
+            if anchor_indices.shape[0] != N:
+                _bad.append(f"anchor_indices len {anchor_indices.shape[0]} != N {N}")
+        if dense_k is not None and dense_len > dense_k.shape[2]:
+            _bad.append(f"dense_len {dense_len} > dense workspace {dense_k.shape[2]}")
+        if _bad:
+            raise RuntimeError("DKV_DEBUG_BOUNDS: " + "; ".join(_bad)
+                               + f"  [N={N}, H_q={H_q}, D={D}, R={R}, S_MAX={S_MAX}]")
 
     try:
         inv_scale = resolve_attn_scale(pool, D)

@@ -225,8 +225,14 @@ def run_point(args) -> None:
         # helper. Classify on the message so the ladder does not report a real
         # ceiling as an unrelated crash.
         msg = str(e)
-        res["status"] = ("oom" if ("out of memory" in msg.lower()
-                                   or "CUDA error" in msg) else "error")
+        # An illegal memory access is a kernel BUG, not a ceiling: labelling
+        # it "oom" stopped the granite streaming ladder at 24,576 as if the
+        # card were full (it was at 8.6 GB one rung earlier).
+        if "illegal memory access" in msg.lower() or "illegal address" in msg.lower():
+            res["status"] = "error"
+        else:
+            res["status"] = ("oom" if ("out of memory" in msg.lower()
+                                       or "CUDA error" in msg) else "error")
         res["error"] = f"{type(e).__name__}: {msg[:300]}"
     with open(args.point_json, "w", encoding="utf-8") as f:
         json.dump(res, f)
