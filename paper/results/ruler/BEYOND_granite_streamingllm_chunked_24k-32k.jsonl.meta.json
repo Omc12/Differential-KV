@@ -1,0 +1,20 @@
+{
+  "arm": "streamingllm_chunked",
+  "baseline_params": {
+    "n_sink": 4,
+    "recency_window": 2044
+  },
+  "data_dir": "C:\\Users\\USER\\Desktop\\Differential KV\\paper\\results\\ruler_data\\granite-4.2-8b",
+  "decode_defaults": null,
+  "dkv_decode_rev": null,
+  "dkv_env": null,
+  "min_length": 24576,
+  "model": "ibm-granite/granite-4.2-8b",
+  "per_task": 10,
+  "prefill_attn": "sdpa",
+  "preset": null,
+  "prompt_template": "model-chat-template",
+  "protocol": "ruler-official-generators",
+  "quant": "nf4",
+  "thinking": false
+}
