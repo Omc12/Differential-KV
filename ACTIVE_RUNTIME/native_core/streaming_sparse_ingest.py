@@ -1550,8 +1550,12 @@ class StreamingSparseIngestManager:
             if dense_tokens > self.stats["total_dense_tokens_peak"]:
                 self.stats["total_dense_tokens_peak"] = dense_tokens
 
-        # Compress during the forward pass:
-        if os.environ.get("DKV_STREAMING_COMPRESS", "0") == "1":
+        # Compress during the forward pass (DKV_STREAMING_COMPRESS=1, or "auto"
+        # once the manager has switched this session):
+        _mgr = getattr(self, "manager", None)
+        if (_mgr.streaming_compress_active(session_id)
+                if hasattr(_mgr, "streaming_compress_active")
+                else os.environ.get("DKV_STREAMING_COMPRESS", "0") == "1"):
             self.compress_deferred_blocks_for_layer(session_id, layer_idx)
 
     def _submit_blocks_batched(self, session_id: str, layer_idx: int, blocks_list: List[StreamingKVBlock]):

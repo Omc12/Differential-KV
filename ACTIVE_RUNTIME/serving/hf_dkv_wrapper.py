@@ -1876,6 +1876,48 @@ class PyTorchDKVHFWrapper:
         _prefill_buf = torch.zeros((1, PREFILL_CHUNK), dtype=torch.long)
         _pos_buf     = torch.zeros((1, PREFILL_CHUNK), dtype=torch.long)
 
+        # ── DKV_STREAMING_COMPRESS=auto: decide ONCE per prompt, by LENGTH ───
+        # A prompt of at most DKV_STREAM_AUTO_TOKENS tokens is prefilled exactly,
+        # as with "0"; a longer one streams from its first chunk, as with "1".
+        # The limit is the measured exact ceiling for the model on the card
+        # (context_ladder, default-DKV arm: 16,384 for granite-4.2-8b and 98,304
+        # for Qwen3.5-4B on a 12.9 GB card). Unset, "auto" stays exact.
+        #
+        # Two memory-driven rules were tried first and are why this is a length:
+        #  * Switch LATE, when reserved crossed 80% of the card. The switch must
+        #    compress all the exact history accumulated so far while it is still
+        #    resident: +1.8 GB after 22,550 tokens on granite (12.21 GB
+        #    reserved) and +6 GB after 102,500 on Qwen3.5-4B (16.20 GB, 1,303 s
+        #    -- pure streaming holds that prompt at 9.42 GB).
+        #  * Project the exact peak from the first three chunks. The growth seen
+        #    there is the KV alone; exact prefill peaks at its END, in the
+        #    batched compression, which was 1.8x (granite) to 3.1x (Qwen) the
+        #    projected growth. It called Qwen 131,072 "fits" (7.93 GB); it
+        #    reserved 13.67 GB.
+        # A length also makes the path a function of the prompt alone, so a
+        # benchmark item takes the same path on every run, which a rule reading
+        # the allocator's state would not guarantee.
+        _auto_stream = (_is_cuda_device
+                        and os.environ.get("DKV_STREAMING_COMPRESS", "0") == "auto"
+                        and hasattr(self.manager, "enable_streaming_compress"))
+        if _auto_stream and cached_len == 0:
+            self.manager.disable_streaming_compress(session_id)
+            try:
+                _as_limit = int(os.environ.get("DKV_STREAM_AUTO_TOKENS", "0"))
+            except ValueError:
+                _as_limit = 0
+            _as_stream = _as_limit > 0 and total_new > _as_limit
+            if _as_stream:
+                self.manager.enable_streaming_compress(session_id)
+            if not hasattr(self, "_auto_stream_decision"):
+                self._auto_stream_decision = {}
+            self._auto_stream_decision[session_id] = {
+                "streaming": _as_stream, "prompt_tokens": total_new,
+                "limit_tokens": _as_limit}
+            print(f"[DKV] auto-stream: session {session_id} "
+                  f"{'STREAMING' if _as_stream else 'EXACT'} -- {total_new} prompt "
+                  f"tokens vs exact limit {_as_limit or 'unset'}", flush=True)
+
         for chunk_idx, chunk_start in enumerate(range(0, total_new, PREFILL_CHUNK)):
             chunk_end = min(chunk_start + PREFILL_CHUNK, total_new)
             chunk = new_ids_list[chunk_start:chunk_end]
@@ -1960,6 +2002,25 @@ class PyTorchDKVHFWrapper:
                     torch.mps.empty_cache()
                 except Exception:
                     pass
+
+        # ── EXPERIMENTAL (opt-in): decode with fewer residuals than prefill ──
+        # DKV_DECODE_RESIDUALS=n marks every stored residual past the first n of
+        # each block as unused (position -1, which every decode kernel masks)
+        # once prefill is done. Prefill -- and under streaming compression, the
+        # history every later chunk attends -- used the full budget; decode sees
+        # n. Residuals are stored best-first (lowrank._select_residual_rows), so
+        # the first n are the ones a budget of n would have chosen. This measures
+        # the QUALITY of "prefill at 512, decode at 128"; it does NOT free the
+        # pool's wider residual arrays, so peak memory here is still the 512 one.
+        _dec_res = os.environ.get("DKV_DECODE_RESIDUALS")
+        if _dec_res:
+            _pool = getattr(self.manager, "native_pool", None)
+            if (_pool is not None and getattr(_pool, "_allocated", False)
+                    and getattr(_pool, "residual_K_positions", None) is not None):
+                _n = max(0, int(_dec_res))
+                if _n < _pool.residual_K_positions.shape[1]:
+                    _pool.residual_K_positions[:, _n:] = -1
+                    _pool.residual_V_positions[:, _n:] = -1
 
         # Build SRL index once compression is completed
         if hasattr(self.manager, "finalize_srl_index"):

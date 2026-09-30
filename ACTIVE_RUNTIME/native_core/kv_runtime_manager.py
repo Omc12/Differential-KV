@@ -1754,9 +1754,42 @@ class KVRuntimeManager:
         # store setting.
         self.ingest_streaming(session_id, layer_idx, K, V)
 
-        # Compress during the forward pass if DKV_STREAMING_COMPRESS=1 is enabled:
-        if os.environ.get("DKV_STREAMING_COMPRESS", "0") == "1" and self._streaming_mgr is not None:
+        # Compress during the forward pass if streaming is on for this session
+        # (DKV_STREAMING_COMPRESS=1, or "auto" once switched; see
+        # streaming_compress_active):
+        if self.streaming_compress_active(session_id) and self._streaming_mgr is not None:
             self._streaming_mgr.compress_deferred_blocks_for_layer(session_id, layer_idx)
+
+    def streaming_compress_active(self, session_id: str) -> bool:
+        """Whether blocks of this session compress DURING prefill right now.
+
+        DKV_STREAMING_COMPRESS:
+          unset / "0"  never -- the default; every chunk attends exact history.
+          "1"          always -- streaming from the first chunk.
+          "auto"       only once the session has been switched by
+                       `enable_streaming_compress`, which the wrapper does when
+                       finishing the prompt exactly is projected to exceed the
+                       memory budget. Until then prefill is exact, so a prompt
+                       that fits is processed exactly as with "0".
+
+        The "0" and "1" answers are exactly the env checks this replaced, so
+        neither existing mode changes.
+        """
+        mode = os.environ.get("DKV_STREAMING_COMPRESS", "0")
+        if mode == "1":
+            return True
+        if mode == "auto":
+            return session_id in getattr(self, "_stream_on_sessions", ())
+        return False
+
+    def enable_streaming_compress(self, session_id: str) -> None:
+        """Switch one session to streaming compression (sticky until cleared)."""
+        if not hasattr(self, "_stream_on_sessions"):
+            self._stream_on_sessions = set()
+        self._stream_on_sessions.add(session_id)
+
+    def disable_streaming_compress(self, session_id: str) -> None:
+        getattr(self, "_stream_on_sessions", set()).discard(session_id)
 
     def compress_prefill_kv(self, session_id: str) -> None:
         """
@@ -1783,7 +1816,7 @@ class KVRuntimeManager:
         # of the whole prompt.  Trade-off: later chunks attend the compressed
         # (lossy) form of far-back blocks rather than raw KV, so it is opt-in
         # and A/B-gated — validate retrieval (NIAH) before defaulting it on.
-        if _os.environ.get("DKV_STREAMING_COMPRESS", "0") == "1" \
+        if self.streaming_compress_active(session_id) \
                 and self._streaming_mgr is not None:
             self._streaming_mgr.compress_deferred_blocks(session_id)
 

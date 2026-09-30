@@ -1,0 +1,23 @@
+{
+  "dkv_env": {
+    "DKV_MAX_RESIDUAL_TOKENS": "512",
+    "DKV_PREFILL_LOWMEM": "1",
+    "DKV_REMAT_CACHE": "0",
+    "DKV_STREAMING_COMPRESS": "1",
+    "DKV_TRITON_STRICT": "1"
+  },
+  "points": [
+    [
+      "ibm-granite/granite-4.2-8b",
+      "dkv",
+      16384
+    ],
+    [
+      "ibm-granite/granite-4.2-8b",
+      "dkv",
+      24576
+    ]
+  ],
+  "preset": "mid",
+  "quant": "nf4"
+}

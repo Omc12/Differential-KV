@@ -1224,7 +1224,11 @@ def route_blocks_relevance(
     # the largest allocation in the streaming-prefill trace: 4.63 GB at 24,576
     # on granite with 512 residuals (1.16 GB at 128), all of it discarded.
     # Dequantize only the candidate slots; the arithmetic on them is identical.
-    _res_k_subset = (getattr(pool, "residual_quant", None) in ("int4", "int8")
+    # Opt-in (DKV_ROUTER_SLOT_DEQUANT=1) so the default path is the pre-fix code
+    # byte for byte, memory and timing included, until the streaming
+    # architecture is adopted. Output is identical either way.
+    _res_k_subset = (os.environ.get("DKV_ROUTER_SLOT_DEQUANT", "0") == "1"
+                     and getattr(pool, "residual_quant", None) in ("int4", "int8")
                      and hasattr(pool, "get_residual_k"))
     if _res_k_subset:
         res_k = (pool.get_residual_k(slots_long)
