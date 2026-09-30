@@ -76,6 +76,12 @@ ARMS = {
     # the routed gather -- and neither attention implementation is at fault.
     # If they split, the defect is inside whichever one is worse.
     "noremat":    {"DKV_REMAT_CACHE": "0"},
+    # Track A: compression DURING prefill (later chunks attend compressed
+    # history) + low-memory history attention + no remat. Read against
+    # `noremat`, which differs only in keeping prefill history exact: the gap
+    # between the two is what streaming prefill itself costs.
+    "streamlow":  {"DKV_STREAMING_COMPRESS": "1", "DKV_PREFILL_LOWMEM": "1",
+                   "DKV_REMAT_CACHE": "0"},
     # remat, but with its attention run in fp32 instead of q.dtype. Reading,
     # decided first: if this lands near `noremat` the root is PRECISION -- fp16
     # cannot resolve a softmax whose scores reach ~1e4; if it stays near
@@ -102,7 +108,7 @@ ARM_CONFIG = {
 _ARM_KEYS = ("DKV_SHARED_BASIS", "DKV_SHARED_BASIS_FRAC", "DKV_COMPRESSED_DECODE",
              "DKV_TOPK_BLOCKS", "DKV_BLOCKS_PER_CHUNK", "DKV_MAX_RESIDUAL",
              "DKV_REMAT_CACHE", "DKV_ROTATED_POOL", "DKV_DECODE_CACHE",
-             "DKV_REMAT_FP32")
+             "DKV_REMAT_FP32", "DKV_STREAMING_COMPRESS", "DKV_PREFILL_LOWMEM")
 
 
 def _run_dense_true(args):
@@ -223,6 +229,16 @@ def run_one_arm(args):
     os.chdir(ACTIVE)
     sys.path.insert(0, ACTIVE)
     sys.path.insert(0, BENCH)
+    if os.environ.get("LF_SERVING_DEFAULTS") == "1":
+        # Measure the configuration the quality harnesses measure: MSVC on the
+        # path (Inductor + the Triton launcher build) and the shipped decode
+        # defaults, which run_longbench_cuda / run_ruler_cuda apply and this
+        # tool historically did not. Explicit arm env still wins (setdefault).
+        from msvc_env import ensure_msvc
+        ensure_msvc()
+        if args.arm != "dense_true":
+            from serving.decode_config import apply_best_decode_defaults
+            apply_best_decode_defaults()
     if args.arm == "dense_true":
         return _run_dense_true(args)
     import torch

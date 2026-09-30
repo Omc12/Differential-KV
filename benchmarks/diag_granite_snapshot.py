@@ -55,7 +55,23 @@ TOP = 25
 
 
 def site_of(frames) -> str:
-    """Innermost frame that is not torch internals: the code that asked."""
+    """Innermost frame that is not torch internals: the code that asked.
+
+    DIAG_DEPTH=n (default 1) appends the next n-1 non-torch CALLERS, so a
+    generic helper (a dequantizer, say) is attributed to whoever called it.
+    """
+    depth = max(1, int(os.environ.get("DIAG_DEPTH", "1")))
+    if depth > 1:
+        parts = []
+        for fr in frames or []:
+            fn = (fr.get("filename") or "").replace("\\", "/")
+            if not fn or "/torch/" in fn or fn.startswith("<") or "/contextlib" in fn:
+                continue
+            short = fn.rsplit("/", 1)[-1]
+            parts.append(f"{short}:{fr.get('line')} {fr.get('name')}")
+            if len(parts) >= depth:
+                break
+        return " <- ".join(parts) if parts else "<torch internal>"
     for fr in frames or []:
         fn = (fr.get("filename") or "").replace("\\", "/")
         if not fn or "/torch/" in fn or fn.startswith("<") or "/contextlib" in fn:

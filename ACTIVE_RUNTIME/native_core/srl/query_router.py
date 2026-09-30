@@ -1217,7 +1217,20 @@ def route_blocks_relevance(
     s_anc = s_anc.reshape(H_kv, gpk, L, N)
 
     res_scores = None
-    res_k = getattr(pool, "residual_K_values", None)
+    # NOT `pool.residual_K_values`. On a quantized pool that property
+    # dequantizes the residuals of EVERY slot -- every layer, every residual --
+    # and this function then reads res_k[slots_long, :R]: one layer's candidate
+    # blocks and at most 64 residuals. Called per layer per decode step, it was
+    # the largest allocation in the streaming-prefill trace: 4.63 GB at 24,576
+    # on granite with 512 residuals (1.16 GB at 128), all of it discarded.
+    # Dequantize only the candidate slots; the arithmetic on them is identical.
+    _res_k_subset = (getattr(pool, "residual_quant", None) in ("int4", "int8")
+                     and hasattr(pool, "get_residual_k"))
+    if _res_k_subset:
+        res_k = (pool.get_residual_k(slots_long)
+                 if getattr(pool, "comp_res_k_q", None) is not None else None)
+    else:
+        res_k = getattr(pool, "residual_K_values", None)
     res_pos = getattr(pool, "residual_K_positions", None)
     route_prefill_res = (os.environ.get("DKV_ROUTE_PREFILL_RESID", "0") == "1")
     if res_k is not None and res_pos is not None and res_k.numel() > 0 and (not is_3d or route_prefill_res):
@@ -1261,7 +1274,8 @@ def route_blocks_relevance(
         #
         # DKV_ROUTE_RESIDUALS>0 still sets it explicitly, same as MLX.
         R = min(R_all, r_route) if r_route > 0 else min(64, R_all)
-        rk = res_k[slots_long, :R].clone()                      # [N, R, H_kv, D]
+        rk = (res_k[:, :R] if _res_k_subset                     # already gathered
+              else res_k[slots_long, :R]).clone()               # [N, R, H_kv, D]
         # Needed BEFORE the rotation branch below, which now folds the anchor in
         # so the exact key is rotated as one vector.
         try:

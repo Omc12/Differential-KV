@@ -708,7 +708,7 @@ def main():
                         # Track A: prefill-time compression mode. Only
                         # recorded when set, so default stores are unchanged.
                         "DKV_STREAMING_COMPRESS", "DKV_PREFILL_LOWMEM",
-                        "DKV_REMAT_CACHE")
+                        "DKV_REMAT_CACHE", "DKV_RESIDUAL_QUANT")
                        if k in os.environ} or None,
            "decode_defaults": "serving" if args.arm == "dkv" else None,
            # The attention path the PREFILL ran under. Recorded because
