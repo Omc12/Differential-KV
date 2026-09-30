@@ -398,6 +398,11 @@ def main():
            # See run_longbench_cuda: a kernel change must invalidate DKV rows,
            # and the config alone cannot see one.
            "dkv_decode_rev": (decode_fingerprint() if args.arm == "dkv" else None),
+           # Track A: prefill-time compression mode; None (absent) on the
+           # default path, so existing stores keep matching.
+           "dkv_env": {k: os.environ[k] for k in
+                       ("DKV_STREAMING_COMPRESS", "DKV_PREFILL_LOWMEM",
+                        "DKV_REMAT_CACHE") if k in os.environ} or None,
            "protocol": "ruler-official-generators"}
     store = ResumableJSONL(out, config=cfg)
     done = store.load_done()

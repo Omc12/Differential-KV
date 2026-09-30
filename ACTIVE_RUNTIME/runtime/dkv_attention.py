@@ -3222,7 +3222,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                     # ── O5b: Single JIT dispatch covering all inner math ─────────────
                     # result[0] = out_hist  [1, H, q_len, D]
                     # result[1, 0, :, :, 0] = lse_hist [H, q_len]  (last dim replicated)
-                    result = _prefill_fused_history_attend(
+                    _hist_kw = dict(
                         U          = U_stack,
                         V_K        = v_k_rep.permute(0, 2, 1, 3),   # [N, R, H, D]
                         V_V        = v_v_rep.permute(0, 2, 1, 3),   # [N, R, H, D]
@@ -3231,7 +3231,6 @@ def apply_dkv_attention_patch(model, kv_manager):
                         scales     = scales_1d,
                         cos_sliced = cos_sliced,
                         sin_sliced = sin_sliced,
-                        q          = q,
                         seq_lens   = seq_lens_t,
                         inv_scale  = inv_scale_val,
                         residual_K_positions = res_K_pos,
@@ -3242,6 +3241,19 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # torch.jit.script'ed and TorchScript cannot read os.environ.
                         exact_residual = _exact_residual_semantics(q.device),
                     )
+                    if os.environ.get("DKV_PREFILL_LOWMEM", "0") == "1":
+                        # EXPERIMENTAL, opt-in. Each query row's softmax is over
+                        # history only, so rows are independent: slicing the
+                        # chunk's queries is exact and bounds the [H, Q, history]
+                        # score/weight tensors, which otherwise grow with the
+                        # whole compressed history on every chunk.
+                        _qs = max(1, int(os.environ.get("DKV_PREFILL_Q_SLICE", "256")))
+                        result = torch.cat(
+                            [_prefill_fused_history_attend(
+                                q=q[:, :, _s:_s + _qs], lowmem=True, **_hist_kw)
+                             for _s in range(0, q.shape[2], _qs)], dim=3)
+                    else:
+                        result = _prefill_fused_history_attend(q=q, **_hist_kw)
                     out_hist  = result[0]                     # [1, H, q_len, D]
                     lse_hist  = result[1, 0, :, :, 0]        # [H, q_len]
                     lse_hist  = lse_hist.unsqueeze(0)        # [1, H, q_len]  — matches _combine_outputs API

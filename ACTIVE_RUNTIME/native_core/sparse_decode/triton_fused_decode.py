@@ -1352,7 +1352,14 @@ def _prefill_fused_history_attend_compiled(
     residual_V_positions: torch.Tensor,
     residual_V_values: torch.Tensor,
     exact_residual: bool = False,
+    lowmem: bool = False,
 ) -> torch.Tensor:
+    # `lowmem` (opt-in, DKV_PREFILL_LOWMEM=1 at the call site) computes the V
+    # residual correction as a contraction instead of broadcast-then-sum. Same
+    # arithmetic; without it the broadcast materialises [N, H, Q, P, D] -- the
+    # dominant allocation under streaming prefill, measured at 7.5 GB for one
+    # layer-call at 10k on granite. Off by default so the default path is
+    # unchanged to the bit.
     # `exact_residual` is a plain bool argument, not an os.environ read, because
     # this function is torch.jit.script'ed on the no-compile path and TorchScript
     # cannot compile os.environ -- reading the flag inside would drop the whole
@@ -1455,7 +1462,10 @@ def _prefill_fused_history_attend_compiled(
             dv = torch.einsum('npr,nrhd->nphd', u_at.float(), V_V.float())
             dv = dv * scales.reshape(-1, 1, 1, 1).float()
             res_val_V_perm = res_val_V_perm - dv.permute(0, 2, 1, 3).to(res_val_V_perm.dtype)
-        O_res = torch.sum(w_res_V.unsqueeze(-1) * res_val_V_perm.unsqueeze(2), dim=(0, 3))
+        if lowmem:
+            O_res = torch.einsum('nhqp,nhpd->hqd', w_res_V, res_val_V_perm)
+        else:
+            O_res = torch.sum(w_res_V.unsqueeze(-1) * res_val_V_perm.unsqueeze(2), dim=(0, 3))
         out_hist = out_hist + O_res.unsqueeze(0).to(out_hist.dtype)
 
     lse_out  = lse_hist.to(q.dtype).unsqueeze(0)

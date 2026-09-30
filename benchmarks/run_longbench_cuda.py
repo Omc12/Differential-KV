@@ -704,7 +704,11 @@ def main():
            # each other and from the shipped preset.
            "dkv_env": {k: os.environ[k] for k in
                        ("DKV_MAX_RESIDUAL_TOKENS", "DKV_RSVD_MAX_RPROJ",
-                        "DKV_RANK", "DKV_BLOCK_SIZE", "DKV_MICRO_BLOCK_SIZE")
+                        "DKV_RANK", "DKV_BLOCK_SIZE", "DKV_MICRO_BLOCK_SIZE",
+                        # Track A: prefill-time compression mode. Only
+                        # recorded when set, so default stores are unchanged.
+                        "DKV_STREAMING_COMPRESS", "DKV_PREFILL_LOWMEM",
+                        "DKV_REMAT_CACHE")
                        if k in os.environ} or None,
            "decode_defaults": "serving" if args.arm == "dkv" else None,
            # The attention path the PREFILL ran under. Recorded because
