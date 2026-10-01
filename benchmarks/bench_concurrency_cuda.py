@@ -72,6 +72,10 @@ def run_arm(args):
             w.ensure_loaded()
             tok = w.tokenizer
             rec["dkv_pool_budget_gb"] = args.dkv_pool_gb
+            # The streaming profile and the remat switch change the per-session
+            # footprint; a row without them recorded cannot be told apart.
+            rec["dkv_env"] = {k: v for k, v in sorted(os.environ.items())
+                              if k.startswith("DKV_") and k != "DKV_POOL_BUDGET_GB"}
         else:
             from run_longbench_cuda import load_plain
             import kv_baselines as KB

@@ -211,7 +211,7 @@ def cache_set_kv(pkv, i, k, v) -> None:
 
 
 def chunked_prefill(model, ids: List[int], device: str, chunk: int = 1024,
-                    defrag: bool = False):
+                    defrag: bool = False, static_len: int = 0):
     """Dense prefill in chunks -> (past_key_values, last-position logits).
 
     Chunked because the lm_head runs on every position: a single-shot forward
@@ -226,8 +226,18 @@ def chunked_prefill(model, ids: List[int], device: str, chunk: int = 1024,
     request, and RESERVED memory balloons far past what is ALLOCATED. Measured
     on Qwen3.5-4B at 65,536: 7.18 GB allocated, 15.04 GB reserved -- dense
     spilled on fragmentation, not on its KV. Arithmetic is unchanged.
+
+    static_len>0 preallocates the whole cache up front with transformers'
+    StaticCache (prompt + generation budget), which every chunk and every
+    decode step writes into in place. Nothing grows and nothing is copied, so
+    this is the strongest dense baseline the framework offers: its peak is the
+    final cache plus one chunk's activations. It attends over the full
+    preallocated length under a mask, which costs time, not memory.
     """
     past, out = None, None
+    if static_len:
+        from transformers import StaticCache
+        past = StaticCache(config=model.config, max_cache_len=int(static_len))
     with torch.no_grad():
         for cs in range(0, len(ids), chunk):
             ch = ids[cs:cs + chunk]
@@ -657,9 +667,16 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
         compress_s = 0.0          # eviction is inside the prefill, and timed there
     else:
         defrag = bool(params.pop("defrag", False)) if method == "dense" else False
-        past, last_logits = chunked_prefill(model, ids, device, chunk, defrag=defrag)
+        static = bool(params.pop("static", False)) if method == "dense" else False
+        # +1: the decode loop writes one position per generated token, and the
+        # last prefill logits produce the first of them.
+        static_len = (prompt_len + gen_len + 1) if static else 0
+        past, last_logits = chunked_prefill(model, ids, device, chunk,
+                                            defrag=defrag, static_len=static_len)
         if defrag:
             params["defrag"] = True          # keep it on the record
+        if static:
+            params["static"] = True
         if cuda:
             torch.cuda.synchronize()
         prefill_s = time.perf_counter() - t0
