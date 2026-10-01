@@ -1,0 +1,1 @@
+{"key": "dkv@16384", "arm": "dkv", "ctx": 16384, "ctx_actual": 16384, "ttft_s": 25.697585399990203, "ttft_min": 25.391721499996493, "ttft_max": 25.873070300003747, "decode_tps": 4.9885066366076085, "tps_min": 4.903639424481931, "tps_max": 5.166821822001081, "peak_gb": 8.10841088, "vram_total_gb": 12.878086144, "spilled": false, "gen_tokens": 32, "reps": 3, "inductor_fused": true}
