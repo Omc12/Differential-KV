@@ -1,0 +1,21 @@
+{
+  "arm": "h2o_chunked",
+  "baseline_params": {
+    "budget": 2048,
+    "prefill_chunk": 256,
+    "recency_window": 512
+  },
+  "data_dir": "C:\\Users\\USER\\Desktop\\Differential KV\\paper\\results\\ruler_data\\Qwen3.5-4B",
+  "decode_defaults": null,
+  "dkv_decode_rev": null,
+  "dkv_env": null,
+  "min_length": 131072,
+  "model": "Qwen/Qwen3.5-4B",
+  "per_task": 5,
+  "prefill_attn": "eager",
+  "preset": null,
+  "prompt_template": "model-chat-template",
+  "protocol": "ruler-official-generators",
+  "quant": "nf4",
+  "thinking": false
+}
