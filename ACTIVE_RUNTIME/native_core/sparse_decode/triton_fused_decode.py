@@ -3099,10 +3099,10 @@ def native_triton_sparse_attn_decode(
 
     # Clamp R to the stored rank; see native_triton_sparse_attn_decode_combined.
     # Applied before the HAS_TRITON split so the PyTorch fallback gets it too.
-    # Opt-in (DKV_CLAMP_DECODE_RANK=1): the default path never reaches R >
-    # stored rank (verified), and stays the pre-fix code until adoption.
+    # On by default (DKV_CLAMP_DECODE_RANK=0 restores the unclamped read). The
+    # exact path never reaches R > stored rank, so this changes nothing there.
     _U_pool = getattr(pool, "U", None)
-    if (os.environ.get("DKV_CLAMP_DECODE_RANK", "0") == "1"
+    if (os.environ.get("DKV_CLAMP_DECODE_RANK", "1") != "0"
             and _U_pool is not None and _U_pool.dim() == 3):
         if int(R) > int(_U_pool.shape[2]) and os.environ.get("DKV_DEBUG_BOUNDS") == "1":
             print(f"[DKV_DEBUG_BOUNDS] clamped R {int(R)} -> {int(_U_pool.shape[2])}", flush=True)
@@ -3834,10 +3834,10 @@ def native_triton_sparse_attn_decode_combined(
     # allocation at the last slot ("illegal memory access", granite 24k / Qwen
     # 32k under streaming prefill with remat off). _reconstruct_blocks already
     # clamps the same way (remat_cache.py: r = min(rank, V_K.shape[1], U.shape[2])).
-    # Opt-in (DKV_CLAMP_DECODE_RANK=1): the default path never reaches R >
-    # stored rank (verified), and stays the pre-fix code until adoption.
+    # On by default (DKV_CLAMP_DECODE_RANK=0 restores the unclamped read). The
+    # exact path never reaches R > stored rank, so this changes nothing there.
     _U_pool = getattr(pool, "U", None)
-    if (os.environ.get("DKV_CLAMP_DECODE_RANK", "0") == "1"
+    if (os.environ.get("DKV_CLAMP_DECODE_RANK", "1") != "0"
             and _U_pool is not None and _U_pool.dim() == 3):
         if int(R) > int(_U_pool.shape[2]) and os.environ.get("DKV_DEBUG_BOUNDS") == "1":
             print(f"[DKV_DEBUG_BOUNDS] clamped R {int(R)} -> {int(_U_pool.shape[2])}", flush=True)

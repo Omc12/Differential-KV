@@ -1,0 +1,19 @@
+{
+  "arm": "dkv",
+  "baseline_params": {},
+  "data_dir": "C:\\Users\\USER\\Desktop\\Differential KV\\paper\\results\\ruler_data\\granite-4.2-8b",
+  "decode_defaults": "serving",
+  "dkv_decode_rev": "2bffcd2d1ae0",
+  "dkv_env": {
+    "DKV_PREFILL_LOWMEM": "0"
+  },
+  "min_length": 8192,
+  "model": "ibm-granite/granite-4.2-8b",
+  "per_task": 2,
+  "prefill_attn": "sdpa",
+  "preset": "mid",
+  "prompt_template": "model-chat-template",
+  "protocol": "ruler-official-generators",
+  "quant": "nf4",
+  "thinking": false
+}

@@ -3245,8 +3245,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # torch.jit.script'ed and TorchScript cannot read os.environ.
                         exact_residual = _exact_residual_semantics(q.device),
                     )
-                    if os.environ.get("DKV_PREFILL_LOWMEM", "0") == "1":
-                        # EXPERIMENTAL, opt-in. Each query row's softmax is over
+                    if os.environ.get("DKV_PREFILL_LOWMEM", "1") != "0":
+                        # On by default (DKV_PREFILL_LOWMEM=0 disables). Each query row's softmax is over
                         # history only, so rows are independent: slicing the
                         # chunk's queries is exact and bounds the [H, Q, history]
                         # score/weight tensors, which otherwise grow with the

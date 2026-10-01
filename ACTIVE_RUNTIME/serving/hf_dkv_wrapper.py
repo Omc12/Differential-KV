@@ -1918,10 +1918,12 @@ class PyTorchDKVHFWrapper:
                   f"{'STREAMING' if _as_stream else 'EXACT'} -- {total_new} prompt "
                   f"tokens vs exact limit {_as_limit or 'unset'}", flush=True)
 
-        # ── Streaming profile: the fixes streaming prefill needs, only for it ──
-        # A prompt that streams turns these on; a prompt that prefills exactly
-        # runs with them as the caller left them (off by default), so the exact
-        # path stays the default code path.
+        # ── Streaming profile: the fixes streaming prefill needs ──
+        # LOWMEM, ROUTER_SLOT_DEQUANT and CLAMP_DECODE_RANK are now on by
+        # default everywhere (each =0 opts out); output is unchanged on the
+        # exact path. REMAT_CACHE stays on for exact prompts (it buys decode
+        # speed) and is turned off only while a prompt streams. Setting all four
+        # here keeps a streaming prompt correct even if a caller opted out.
         #   DKV_PREFILL_LOWMEM       history attention without the [N,H,Q,P,D]
         #                            broadcast (27.7 GB at 16k on granite without)
         #   DKV_REMAT_CACHE=0        no dense-size K/V copy held through decode
