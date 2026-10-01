@@ -63,4 +63,24 @@ set DKV_REMAT_CACHE=
 rem ── 4. preallocated dense latency, three repetitions ───────────────────────
 "%PY%" benchmarks\bench_systems_cuda.py --model %QW% --arms dense --contexts 32768 65536 --baseline-params "%ST%" --out %R%\systems\MIDNIGHT_Qwen3.5-4B_dense_static.jsonl
 
+rem ── 5. fill the paper's empty cells ───────────────────────────────────────
+rem SnapKV on granite was never laddered (ceiling table) or timed at its ceiling.
+"%PY%" benchmarks\context_ladder.py --model %GR% --arms snapkv --contexts 16384 24576 32768 --out %R%\ladder\granite-4.2-8b_mid_nf4_snapkv_aligned.jsonl
+"%PY%" benchmarks\context_ladder.py --model %GR% --arms snapkv --gen 128 --contexts 16384 24576 32768 --out %R%\ladder\GEN128_granite_snapkv_aligned.jsonl
+"%PY%" benchmarks\bench_systems_cuda.py --model %GR% --arms snapkv --contexts 16384 24576 --out %R%\systems\MIDNIGHT_granite_snapkv_aligned.jsonl
+rem Streaming DKV timed at a length every arm serves (forced; the system would
+rem prefill these exactly), so the latency table compares like with like.
+set DKV_STREAMING_COMPRESS=1
+"%PY%" benchmarks\bench_systems_cuda.py --model %QW% --arms dkv --contexts 32768 --out %R%\systems\MIDNIGHT_Qwen3.5-4B_dkv_forced_stream_32k.jsonl
+"%PY%" benchmarks\bench_systems_cuda.py --model %GR% --arms dkv --contexts 16384 --out %R%\systems\MIDNIGHT_granite_dkv_forced_stream_16k.jsonl
+set DKV_STREAMING_COMPRESS=
+rem DKV/high beyond its exact limit (65,536 on Qwen3.5-4B): does it fit at 131k,
+rem and what does it score there. The RULER run is the long one (~5.5 h).
+set DKV_STREAMING_COMPRESS=auto
+set DKV_STREAM_AUTO_TOKENS=65536
+"%PY%" benchmarks\context_ladder.py --model %QW% --arms dkv --preset high --contexts 131072 --out %R%\ladder\Qwen3.5-4B_high_nf4_dkv_auto.jsonl
+"%PY%" benchmarks\run_ruler_cuda.py --model %QW% --arm dkv --preset high --min-length 131072 --max-length 131072 --per-task 5 --out %R%\ruler\BEYOND_Qwen3.5-4B_dkv_high_auto_131k.jsonl
+set DKV_STREAMING_COMPRESS=
+set DKV_STREAM_AUTO_TOKENS=
+
 echo MIDNIGHT CAMPAIGN COMPLETE
