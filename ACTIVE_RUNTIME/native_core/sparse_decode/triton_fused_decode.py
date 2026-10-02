@@ -1474,6 +1474,42 @@ def _prefill_fused_history_attend_compiled(
     return torch.stack([out_hist, lse_padded], dim=0)
 
 
+def history_attend_block_tiled(attend_fn, kw, tile, out_dtype):
+    """Prefill history attention over the compressed blocks, `tile` at a time.
+
+    `attend_fn(kw)` returns the stacked [out, lse] result of
+    _prefill_fused_history_attend for the blocks in `kw`. It reconstructs and
+    scores all of them at once, so its transient grows with the whole
+    compressed history. Each tile's output is softmax-normalised over its own
+    blocks and carries its log-sum-exp; merging the tiles by log-sum-exp is the
+    softmax over their union, so the result equals the untiled call up to float
+    rounding while the transient is bounded by one tile. tile <= 0 or a history
+    no larger than one tile calls attend_fn once, unchanged.
+    """
+    n = kw["U"].shape[0]
+    if tile <= 0 or n <= tile:
+        return attend_fn(kw)
+    outs, lses = [], []
+    for b0 in range(0, n, tile):
+        sub = {k: (v[b0:b0 + tile]
+                   if torch.is_tensor(v) and v.dim() > 0 and v.shape[0] == n else v)
+               for k, v in kw.items()}
+        r = attend_fn(sub)
+        outs.append(r[0].float())                 # [1, H, Q, D]
+        lses.append(r[1, 0, :, :, 0].float())     # [H, Q]
+    lse_all = torch.stack(lses, 0)                # [T, H, Q]
+    m = lse_all.max(dim=0).values
+    w = torch.exp(lse_all - m.unsqueeze(0))
+    wsum = w.sum(dim=0)
+    out = sum(o * wt.unsqueeze(0).unsqueeze(-1) for o, wt in zip(outs, w))
+    out = out / wsum.unsqueeze(0).unsqueeze(-1)
+    lse = m + torch.log(wsum)
+    d = out.shape[-1]
+    return torch.stack([out.to(out_dtype),
+                        lse.to(out_dtype).unsqueeze(0).unsqueeze(-1).expand(1, -1, -1, d)],
+                       dim=0)
+
+
 _IS_MPS_AVAILABLE = (hasattr(torch, "backends") and
                      hasattr(torch.backends, "mps") and
                      torch.backends.mps.is_available())

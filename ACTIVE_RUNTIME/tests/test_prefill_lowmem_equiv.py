@@ -49,3 +49,19 @@ def test_query_slicing_matches_whole(exact, qs):
                             lowmem=True, **kw)
                      for s in range(0, q.shape[2], qs)], dim=3)
     torch.testing.assert_close(got, ref, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("exact", [False, True])
+@pytest.mark.parametrize("tile", [1, 2, 3, 5, 0])
+def test_block_tiling_matches_whole(exact, tile):
+    """Attending the compressed blocks a tile at a time and merging by
+    log-sum-exp must equal attending them all at once."""
+    from native_core.sparse_decode.triton_fused_decode import (
+        history_attend_block_tiled)
+    kw = _inputs(seed=2, N=7)
+    q = kw.pop("q")
+    ref = attend(q=q, exact_residual=exact, lowmem=True, **kw)
+    got = history_attend_block_tiled(
+        lambda k: attend(q=q, exact_residual=exact, lowmem=True, **k),
+        kw, tile, torch.float32)
+    torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-4)

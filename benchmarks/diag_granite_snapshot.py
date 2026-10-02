@@ -140,7 +140,7 @@ def run_point(model_id, arm, ctx, out_json):
         rec["baseline_gb"] = torch.cuda.memory_allocated() / 1e9
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.memory._record_memory_history(
-            enabled="all", context="alloc", stacks="python", max_entries=2_000_000)
+            enabled="all", context="alloc", stacks="python", max_entries=8_000_000)
         if arm == "dkv":
             w.active_session = "diag"
             w.generate(prompt, max_new_tokens=1, temperature=0.0, top_p=1.0,

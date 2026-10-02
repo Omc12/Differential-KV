@@ -3252,10 +3252,26 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # score/weight tensors, which otherwise grow with the
                         # whole compressed history on every chunk.
                         _qs = max(1, int(os.environ.get("DKV_PREFILL_Q_SLICE", "256")))
-                        result = torch.cat(
-                            [_prefill_fused_history_attend(
-                                q=q[:, :, _s:_s + _qs], lowmem=True, **_hist_kw)
-                             for _s in range(0, q.shape[2], _qs)], dim=3)
+
+                        def _hist_qsliced(kw):
+                            return torch.cat(
+                                [_prefill_fused_history_attend(
+                                    q=q[:, :, _s:_s + _qs], lowmem=True, **kw)
+                                 for _s in range(0, q.shape[2], _qs)], dim=3)
+
+                        # Tile over BLOCKS as well. The callee reconstructs every
+                        # history block's keys and scores them all at once, so its
+                        # transient grows with the whole compressed history (the
+                        # dominant term in the streaming peak at length). Each tile
+                        # returns its own softmax-normalised output and log-sum-exp;
+                        # merging tiles by log-sum-exp is the same softmax over the
+                        # union, so the result equals the untiled one up to float
+                        # rounding. DKV_PREFILL_BLOCK_TILE=0 disables.
+                        from native_core.sparse_decode.triton_fused_decode import (
+                            history_attend_block_tiled)
+                        _bt = int(os.environ.get("DKV_PREFILL_BLOCK_TILE", "16"))
+                        result = history_attend_block_tiled(
+                            _hist_qsliced, _hist_kw, _bt, q.dtype)
                     else:
                         result = _prefill_fused_history_attend(q=q, **_hist_kw)
                     out_hist  = result[0]                     # [1, H, q_len, D]
