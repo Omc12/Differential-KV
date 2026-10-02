@@ -331,7 +331,7 @@ KV_TRANSFORMS = {
 
 # Methods whose reported KV bytes are actually allocated (see module docstring).
 _REALIZED = {"dense", "streamingllm", "keynorm_hh", "snapkv", "h2o",
-             "streamingllm_chunked", "h2o_chunked"}
+             "streamingllm_chunked", "h2o_chunked", "kivi4_chunked"}
 
 
 def attn_by_cache_layer(pkv, atts) -> Dict[int, torch.Tensor]:
@@ -584,12 +584,125 @@ def _h2o_chunked(model, ids: List[int], device: str, chunk: int,
     return past, last, _cache_bytes(past), max_len
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Chunk-wise KIVI: quantize the cache AS IT IS BUILT
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The strongest streaming alternative to DKV that keeps every token: KIVI-style
+# 4-bit quantization applied after every prefill chunk, with the codes really
+# stored packed (two per byte), so the cache's bytes -- and therefore the peak --
+# shrink, not just its arithmetic. Keys are quantized per channel over groups of
+# G tokens, values per token; the most recent R tokens stay in 16 bits (KIVI's
+# residual window). Each forward dequantizes one layer's history at a time for
+# attention, so the transient is one layer's full-precision KV, not the model's.
+
+def _pack4(q: torch.Tensor) -> torch.Tensor:
+    return (q[..., 0::2] | (q[..., 1::2] << 4)).to(torch.uint8)
+
+
+def _unpack4(p: torch.Tensor) -> torch.Tensor:
+    return torch.stack((p & 15, p >> 4), dim=-1).flatten(-2)
+
+
+class _KiviLayerMixin:
+    """Grafted onto a transformers cache layer that holds attention KV."""
+    kivi_group = 32
+    kivi_residual = 128
+
+    def _kivi_state(self):
+        st = self.__dict__.get("_kivi")
+        if st is None:
+            st = {"k": [], "v": [], "rk": None, "rv": None, "n": 0}
+            self.__dict__["_kivi"] = st
+        return st
+
+    def update(self, key_states, value_states, *args, **kwargs):
+        if not self.is_initialized:
+            self.lazy_initialization(key_states, value_states)
+        st = self._kivi_state()
+        rk = key_states if st["rk"] is None else torch.cat([st["rk"], key_states], -2)
+        rv = value_states if st["rv"] is None else torch.cat([st["rv"], value_states], -2)
+        G, R = self.kivi_group, self.kivi_residual
+        n_res = rk.shape[-2]
+        n_q = ((n_res - R) // G) * G if n_res > R else 0
+        if n_q > 0:
+            k, v = rk[..., :n_q, :].float(), rv[..., :n_q, :].float()
+            B, H, _, Dk = k.shape
+            kg = k.reshape(B, H, n_q // G, G, Dk)               # per channel, per group
+            kmin = kg.amin(dim=3, keepdim=True)
+            ks = (kg.amax(dim=3, keepdim=True) - kmin).clamp_min(1e-8) / 15.0
+            kq = torch.clamp(torch.round((kg - kmin) / ks), 0, 15).to(torch.uint8)
+            vmin = v.amin(dim=-1, keepdim=True)                  # per token
+            vs = (v.amax(dim=-1, keepdim=True) - vmin).clamp_min(1e-8) / 15.0
+            vq = torch.clamp(torch.round((v - vmin) / vs), 0, 15).to(torch.uint8)
+            dt = rk.dtype
+            st["k"].append((_pack4(kq), ks.to(dt), kmin.to(dt)))
+            st["v"].append((_pack4(vq), vs.to(dt), vmin.to(dt)))
+            rk, rv = rk[..., n_q:, :].contiguous(), rv[..., n_q:, :].contiguous()
+        st["rk"], st["rv"] = rk, rv
+        st["n"] += key_states.shape[-2]
+        dt = rk.dtype
+        ks_ = [(_unpack4(p).to(dt) * s + z).flatten(2, 3) for p, s, z in st["k"]]
+        vs_ = [_unpack4(p).to(dt) * s + z for p, s, z in st["v"]]
+        return torch.cat(ks_ + [rk], -2), torch.cat(vs_ + [rv], -2)
+
+    def get_seq_length(self) -> int:
+        st = self.__dict__.get("_kivi")
+        return st["n"] if (self.is_initialized and st) else 0
+
+    def kivi_bytes(self) -> int:
+        st = self.__dict__.get("_kivi")
+        if not st:
+            return 0
+        tot = 0
+        for p, s, z in st["k"] + st["v"]:
+            tot += p.numel() * p.element_size() + 2 * s.numel() * s.element_size()
+        for t in (st["rk"], st["rv"]):
+            if t is not None:
+                tot += t.numel() * t.element_size()
+        return tot
+
+
+def _kivi_chunked(model, ids: List[int], device: str, chunk: int,
+                  group: int = 32, residual: int = 128):
+    """Prefill in chunks into a cache whose attention layers store 4-bit KV."""
+    from transformers import DynamicCache
+    from transformers.cache_utils import DynamicLayer
+    cache = DynamicCache(config=model.config)
+    n_patched = 0
+    for lyr in cache.layers:
+        if isinstance(lyr, DynamicLayer):
+            cls = lyr.__class__
+            lyr.__class__ = type("Kivi" + cls.__name__, (_KiviLayerMixin, cls),
+                                 {"kivi_group": group, "kivi_residual": residual})
+            n_patched += 1
+    if n_patched == 0:
+        raise RuntimeError("kivi4_chunked: no attention cache layer to quantize")
+    out, last = None, None
+    with torch.no_grad():
+        for cs in range(0, len(ids), chunk):
+            ch = ids[cs:cs + chunk]
+            pos = torch.tensor([list(range(cs, cs + len(ch)))], device=device)
+            out = model(input_ids=torch.tensor([ch], device=device),
+                        position_ids=pos, past_key_values=cache, use_cache=True)
+            last = out.logits[0, -1].float()
+            del out
+            # Each forward allocates one layer's dequantized history at a new
+            # size; return the freed blocks so the allocator does not fragment
+            # the way the growing dense cache does (the same treatment dense
+            # gets with its allocator fix).
+            torch.cuda.empty_cache()
+    phys = sum(l.kivi_bytes() for l in cache.layers if hasattr(l, "kivi_bytes")) / 1e9
+    return cache, last, phys, None
+
+
 # Default parameters. Budgets match the post-hoc arms they are compared with:
 # 2,048 tokens kept, i.e. streamingllm's 4 + 2,044 and h2o's 2,048 incl. 512
 # recent, so any difference is WHEN eviction happens, not how much is kept.
 CHUNKED_DEFAULTS = {
     "streamingllm_chunked": {"n_sink": 4, "recency_window": 2044},
     "h2o_chunked": {"budget": 2048, "recency_window": 512, "prefill_chunk": 256},
+    "kivi4_chunked": {"group": 32, "residual": 128},
 }
 
 
@@ -657,6 +770,9 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
             past, last_logits, phys_gb, max_cache = _streamingllm_chunked(
                 model, ids, device, chunk, params["n_sink"],
                 params["recency_window"])
+        elif method == "kivi4_chunked":
+            past, last_logits, phys_gb, max_cache = _kivi_chunked(
+                model, ids, device, chunk, params["group"], params["residual"])
         else:
             past, last_logits, phys_gb, max_cache = _h2o_chunked(
                 model, ids, device, params["prefill_chunk"], params["budget"],
