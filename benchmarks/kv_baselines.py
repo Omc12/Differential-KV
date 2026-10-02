@@ -670,11 +670,14 @@ def _kivi_chunked(model, ids: List[int], device: str, chunk: int,
     from transformers.cache_utils import DynamicLayer
     cache = DynamicCache(config=model.config)
     n_patched = 0
+    import types
     for lyr in cache.layers:
         if isinstance(lyr, DynamicLayer):
-            cls = lyr.__class__
-            lyr.__class__ = type("Kivi" + cls.__name__, (_KiviLayerMixin, cls),
-                                 {"kivi_group": group, "kivi_residual": residual})
+            # Bound per instance: re-classing the layer is refused by CPython
+            # ("object layout differs") for these ABC-derived classes.
+            lyr.kivi_group, lyr.kivi_residual = group, residual
+            for name in ("update", "get_seq_length", "kivi_bytes", "_kivi_state"):
+                setattr(lyr, name, types.MethodType(getattr(_KiviLayerMixin, name), lyr))
             n_patched += 1
     if n_patched == 0:
         raise RuntimeError("kivi4_chunked: no attention cache layer to quantize")
