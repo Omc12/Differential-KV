@@ -1,0 +1,20 @@
+{
+  "dkv_env": {
+    "DKV_STREAMING_COMPRESS": "1",
+    "DKV_TRITON_STRICT": "1"
+  },
+  "points": [
+    [
+      "Qwen/Qwen3.5-4B",
+      "dkv",
+      32768
+    ],
+    [
+      "Qwen/Qwen3.5-4B",
+      "dkv",
+      65536
+    ]
+  ],
+  "preset": "mid",
+  "quant": "nf4"
+}
