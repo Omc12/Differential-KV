@@ -849,6 +849,16 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
     if cuda:
         torch.cuda.synchronize()
     decode_s = time.perf_counter() - t2
+    if method == "kivi4_chunked":
+        # The per-instance bound methods make each layer reference itself, so
+        # without this the cache waits for the cycle collector and a run of
+        # many items piles caches up on the GPU until it spills.
+        for lyr in getattr(past, "layers", ()):
+            for name in ("_kivi", "update", "get_seq_length", "kivi_bytes", "_kivi_state"):
+                lyr.__dict__.pop(name, None)
+        past = out = None
+        if cuda:
+            torch.cuda.empty_cache()
 
     return {
         "method": method,
