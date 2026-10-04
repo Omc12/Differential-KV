@@ -317,7 +317,18 @@ def dkv_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
     r = int(getattr(pool, "rank", None) or mgr.rank)
 
     kv_tok = Hkv * d * fp16 * 2
-    lowrank_block = (B * r * 1 + 2 * Hkv * r * d * fp16 + 2 * Hkv * d * fp16 + 8)
+    _halves = int(getattr(pool, "_vkv_halves", 2) or 2)
+    lowrank_block = (B * r * 1 + _halves * Hkv * r * d * fp16 + 2 * Hkv * d * fp16 + 8)
+    # Hybrid store (DKV_KEY_QUANT): every key's per-channel codes plus one fp16
+    # scale and zero per channel per group; the factor holds the value half only
+    # (_halves == 1) and K residual values are read from the codes, so a
+    # residual row costs only its V half.
+    _kqb = int(getattr(pool, "key_quant_bits", 0) or 0)
+    res_tok = kv_tok
+    if _kqb:
+        _g = int(getattr(pool, "kq_group", 32) or 32)
+        lowrank_block += B * Hkv * d * _kqb // 8 + ((B + _g - 1) // _g) * Hkv * d * fp16 * 2
+        res_tok = kv_tok // 2
 
     s0 = mgr.sessions.get(sid) or {}
     nb = ((s0.get("num_blocks") or [0])[0]) or (seq_len // B) or 1
@@ -346,7 +357,7 @@ def dkv_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
     res_cap = int(res_cap)
     res_used = sum(min(int(x), res_cap) for x in res_n0) if res_n0 else nb * res_cap
 
-    store_used = L * (nb * lowrank_block + res_used * kv_tok + dl * kv_tok)
+    store_used = L * (nb * lowrank_block + res_used * res_tok + dl * kv_tok)
     pool_physical = 0
     if pool is not None and hasattr(pool, "_pool_mb"):
         try:

@@ -92,6 +92,10 @@ def test_compress_gpu_end_to_end():
     V_K0 = pool.V_KV[blocks[0].pool_idx, 0]                    # [R, kv_heads, head_dim]
     scale0 = float(pool.scales[blocks[0].pool_idx].item())
     recon_flat = (U0[:T].float() @ V_K0.reshape(rank, -1).float()) * scale0  # [T, kv*hd]
+    if getattr(pool, "kq_codes", None) is not None:
+        # Hybrid store (DKV_KEY_QUANT): keys live in the per-channel codes and
+        # the factor's key half is zero by design -- rebuild them from the codes.
+        recon_flat = pool.get_key_deltas(idx.to(pool.kq_codes.device))[0, :T].reshape(T, -1).float()
     anchor_K = pool.anchors_KV[blocks[0].pool_idx, 0].reshape(-1).float()    # [kv*hd]
     recon_K = recon_flat + anchor_K.unsqueeze(0)              # add anchor back
     err = (recon_K - orig_K).norm() / orig_K.norm()

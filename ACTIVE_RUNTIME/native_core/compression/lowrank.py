@@ -1312,33 +1312,6 @@ class _SkipJointSVD(Exception):
     """Control flow: DKV_KV_SPLIT computed the factors already."""
 
 
-def _parse_key_quant(s):
-    """'pc4' -> 4 (per-channel 4-bit keys); '' or malformed -> 0."""
-    s = (s or "").strip().lower()
-    if s.startswith("pc"):
-        try:
-            b = int(s[2:])
-            return b if 2 <= b <= 8 else 0
-        except ValueError:
-            return 0
-    return 0
-
-
-def _quant_keys_per_channel(dk, bits, group=32):
-    """KIVI's key layout: asymmetric `bits`-bit per channel over groups of
-    `group` consecutive tokens. dk [T, F] -> dequantized [T, F]."""
-    T = dk.shape[0]
-    out = torch.empty_like(dk)
-    q = float(2 ** bits - 1)
-    for g0 in range(0, T, group):
-        blk = dk[g0:g0 + group].float()
-        lo = blk.amin(dim=0, keepdim=True)
-        hi = blk.amax(dim=0, keepdim=True)
-        s = (hi - lo).clamp(min=1e-8) / q
-        out[g0:g0 + group] = (torch.round((blk - lo) / s).clamp(0, q) * s + lo).to(dk.dtype)
-    return out
-
-
 def _parse_kv_split(s):
     """'rK,rV' -> (rK, rV), or None when unset / malformed."""
     try:
@@ -1486,7 +1459,10 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     # (4 bits, groups of 32 tokens -- KIVI's key layout) for EVERY row, so the
     # factorization is spent on values alone. The K half of the SVD input is
     # zeroed here; the per-block loop below writes the quantized keys.
-    _kq_bits = _parse_key_quant(_local_os.environ.get("DKV_KEY_QUANT", ""))
+    # Taken from the POOL, not the environment: zeroing the key factor is only
+    # safe when the pool is the one storing the keys instead.
+    _kq_pool = getattr(manager, "native_pool", None) if manager is not None else None
+    _kq_bits = int(getattr(_kq_pool, "key_quant_bits", 0) or 0)
     if _kq_bits:
         # From the ORIGINAL deltas: the V gain above has already scaled
         # deltas_svd's V half, and with the gain dropped it would not be undone.
@@ -2462,12 +2438,11 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                     fact_positions_K, fact_positions_V = _all_rows, _other
                 else:
                     fact_positions_K, fact_positions_V = _other, _all_rows
-            if _kq_bits:
-                # Hybrid store: every key row is written (as its per-channel
-                # quantized value, below); values keep their worst rows.
-                fact_positions_K = _all_rows
-                fact_positions_V = torch.argsort(error_V, descending=True)[
-                    :int(os.environ.get("DKV_KEY_QUANT_VRES", "64"))]
+            # Hybrid store (DKV_KEY_QUANT): keys live in the pool's per-channel
+            # codes, so residual selection is unchanged -- one index set, the
+            # worst joint rows, kept exact for both K and V (and read by the
+            # router). The earlier measurement-only form, which wrote every key
+            # as a residual, is gone with the packed store.
             if os.environ.get("DKV_DBG_PROBE") == "1" and i == 0:
                 print(f"[DKV PROBE] T_active={T_active} n_max={n_max_residual} "
                       f"cap={_res_cap} force_exact={_force_exact} "
@@ -2520,14 +2495,10 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                 # when only compress_lowrank was converted.
                 if _exact_keys_enabled(gpu_device):
                     residual_K_vals = delta_K[fact_positions_K].to(torch.float16).to(gpu_device)
-                    if _kq_bits:
-                        residual_K_vals = _quant_keys_per_channel(
-                            delta_K, _kq_bits)[fact_positions_K].to(torch.float16).to(gpu_device)
                     # Single index set for both halves, as MLX does — see the
                     # matching note in compress_lowrank. (The diagnostic probe
-                    # and the hybrid store set the two sets apart on purpose.)
-                    if (os.environ.get("DKV_PROBE_EXACT_SIDE", "") not in ("K", "V")
-                            and not _kq_bits):
+                    # sets the two sets apart on purpose.)
+                    if os.environ.get("DKV_PROBE_EXACT_SIDE", "") not in ("K", "V"):
                         fact_positions_V = fact_positions_K
                 else:
                     residual_K_vals = (delta_K - recon_K_for_res)[fact_positions_K].to(torch.float16).to(gpu_device)
@@ -2692,6 +2663,11 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
             # off. Every block in a compress batch belongs to one layer.
             layer_idx=_batch_layer_idx(blocks_list),
             basis_rows=_basis_rows,
+            # Hybrid store: the exact anchor-relative keys of every token; the
+            # pool keeps them per-channel quantized (None when the store is off).
+            key_deltas=(delta_K_all.reshape(N_blocks, T_active, pool.V_KV.shape[3],
+                                            pool.V_KV.shape[4])
+                        if int(getattr(pool, "key_quant_bits", 0) or 0) else None),
         )
         # Clear local GPU tensors on blocks to prevent VRAM leak.
         for _b in blocks_list:

@@ -150,6 +150,95 @@ Still to check: granite (all 40 layers attend) beyond 16k.
   quantized values where low rank fails), decided per layer from measured error -- not
   per model.
 
+## Packed hybrid store (2026-10-04): implemented behind `DKV_KEY_QUANT=pc4` (off by default)
+
+- Pool: per-channel 4-bit key codes `[n, T, H_kv, D/2]` uint8 + fp16 scale/zero per
+  32-token group; allocated/grown/reset/written only when the switch is on; quantized
+  against fp16-rounded scales so encode and decode agree exactly. Per-block/CPU write
+  path refuses (raises) rather than store a slot without keys; batched write without
+  keys raises. CUDA graphs auto-disabled when on (keys decode through materialise).
+- Compressor: key half of the factorization zeroed (all rank to values); exact key
+  deltas handed to the pool; residual selection unchanged (one set, worst joint rows).
+- Decode: materialise path rebuilds keys from codes (anchor + dequant), values from the
+  factor; serves the hybrid even with the remat cache off (streaming) by rebuilding per
+  step and storing nothing; any decline on a hybrid pool prints a loud warning.
+- Streaming prefill: history attention takes compact codes, sliced per block tile, and
+  dequantizes per tile (keeps the tiling's memory bound).
+- Tests: tests/test_key_quant_hybrid.py (8: round trip vs reference for 4/8 bits incl.
+  ragged groups, pool alloc/write/grow/read, refusals, remat k_delta, history-attention
+  equivalence); smoke test learns the hybrid (key error 0.078 vs 0.867 low-rank);
+  existing parity suites unchanged (33 pass).
+- Store accounting (dkv_kv_bytes) counts the key codes.
+
+### Packed hybrid, tier 2 (2026-10-04, granite, 24 prompts, 374 steps)
+
+| Arm | KL (base 0.314) | dKL vs base [95% CI] | top-1 | store GB (cmp) | peak GB | dec tok/s |
+|---|---|---|---|---|---|---|
+| packed, exact | **0.183** | **-0.131 [-0.228, -0.054]** | +2.4% | 0.985 (2.26x; base 0.624, 3.56x) | 11.34 (+0.6) | 6.7 (-4%) |
+| packed, streaming | **0.270** | -0.044 (n.s.) | +0.8% | 0.985 | 9.33 (+1.3) | 3.0 (-45%) |
+| base, streaming | 0.527 | +0.213 [+0.113, +0.331] | -2.9% | 0.624 | 7.99 | 5.5 |
+
+No fallback warnings: every hybrid decode step was served by the materialise path.
+Streaming packed is as good as today's EXACT mode. Costs to address before it can ship:
+store +58% (keys at 4 bits are ~0.64 B/element incl. scales; on granite that would cut
+streaming reach from 131k to ~86k by extrapolation) and streaming decode -45% (routed
+blocks rebuilt every step). Store trims planned: drop the factor's zero key half,
+serve key residuals from the codes (~18%).
+
+Also fixed: the tiered block store pages slots to host memory and back, and did not
+know about the key codes, so a restored hybrid slot would have held stale keys. It now
+pages them. **Pre-existing, logged not fixed:** the pager also does not page residuals.
+**Audit item:** block-level `V` properties (kv_runtime_manager / streaming_sparse_ingest)
+rebuild keys from the factor; any consumer of them on a hybrid pool reads anchor copies.
+
+### Hybrid + attention-ranked residuals, tier 2 (2026-10-04)
+
+| Model | Arm | KL | dKL vs base [95% CI] | KL>0.5 | top-1 | dec tok/s |
+|---|---|---|---|---|---|---|
+| granite (374 steps) | base | 0.314 | - | 35 | 0.914 | 7.0 |
+| granite | packed | 0.183 | -0.131 [-0.228, -0.054] | 25 | +2.4% | 6.7 |
+| granite | **packed + `DKV_RESID_ATTN`** | **0.130** | **-0.184 [-0.326, -0.071]** | 24 | **+3.5%** | 5.9 |
+| granite | packed + resid-attn, streaming | 0.222 (base stream 0.527) | -0.091 (n.s.) | 27 | +0.8% | 3.5 |
+| Qwen2.5-7B (103 steps) | base | **1.114** | - | 26 | 0.816 | 13.5 |
+| Qwen2.5-7B | packed | 0.906 | -0.208 (n.s.) | 29 | -1.9% | 13.5 |
+| Qwen2.5-7B | resid-attn only | 0.926 | -0.188 (n.s.) | 16 | +4.9% | 13.6 |
+| Qwen2.5-7B | **packed + resid-attn** | **0.251** | **-0.863 [-1.345, -0.458]** | **6** | **+10.7%** | 13.3 |
+
+Reading: on a third architecture, neither fix alone is enough; together they cut KL by
+77% -- quantized keys fix the attention pattern, attention-ranked residuals fix the values
+attention actually reads. This is the architecture-level result: no model-specific code.
+
+### Store trims (2026-10-04, active only with `DKV_KEY_QUANT`)
+
+- Factor stores the value half only (`V_KV` second dim 1); `V_K` reads as a broadcast view
+  of zeros (no memory), so every reader's shapes stay valid; shared bases refused in the
+  hybrid. Block-level `V` properties now read through `pool.V_K/V_V` (raw half indexing
+  would raise with one half).
+- K residual values are no longer stored: `get_residual_k` dequantizes the key codes at
+  the residual positions (only the gathered rows). Gather and router recognise the codes
+  as a residual source (gather checks them first so it never dequantizes the whole pool).
+- Tests: 10 hybrid tests (adds value-only factor, codes-backed K residuals incl. padding
+  and growth, for int8 and fp16 residual formats); parity suites and smoke unchanged.
+- Tier 2 re-check of quality and store size running.
+
+## Values robust to outlier tokens (tier 1, 2026-10-04)
+
+| Value side (keys 4-bit per channel) | Qwen2.5-7B out_err | granite out_err | bytes |
+|---|---|---|---|
+| low rank, residuals by error | 0.594 | 0.076 | ref |
+| + per-row U scale / + 16 outliers excluded from the SVD | 0.594 / 0.594 | 0.076 / 0.077 | ~same |
+| + rank 64 / + 128 residuals by error | 0.548 / 0.586 | 0.062 / 0.070 | +7% / +5% |
+| per-layer fallback to 4-bit values (rel-error rule) | 0.076 | 0.094 (switched layers that were fine) | +22-25% |
+| **residuals ranked by error x attention received (whole prompt, per-block normalized)** | **0.101** | **0.060** | **same** |
+| KIVI-4 (reference) | 0.077 | 0.095 | |
+
+Reading: Qwen2.5's value failure was never low rank itself -- per-layer value error and
+rank-32 energy are the same as granite's (~0.6 / ~0.73), and its attention outputs are not
+small. It is WHICH tokens get exact values: a few heavily-attended tokens were missed by
+error-ranked selection. Attention-ranked selection (`DKV_RESID_ATTN`, already built, which
+did nothing alone because key errors dominated) fixes it at no byte cost. Next: tier 2 of
+packed hybrid + `DKV_RESID_ATTN` on granite and on Qwen2.5-7B.
+
 ## Instrument fixes
 
 | Date | Fix | Why |

@@ -210,8 +210,14 @@ def reconstruct_blocks(
     res_pos: Optional[torch.Tensor] = None,     # [N, MAX_RES]  -1 padded
     res_v: Optional[torch.Tensor] = None,       # [N, MAX_RES, H, D]
     res_pos_v: Optional[torch.Tensor] = None,   # [N, MAX_RES]  -1 padded
+    k_delta: Optional[torch.Tensor] = None,     # [N, S, H, D] hybrid store keys
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Materialise routed blocks to dense K/V.
+
+    `k_delta` (hybrid store, DKV_KEY_QUANT): the blocks' anchor-relative keys,
+    dequantized from the pool's per-channel codes. When given, keys are
+    anchor + k_delta and the key half of the factorization (zero in that
+    store) is not read; values are reconstructed from the factor as always.
 
         K[n, s] = anchors_K[n] + (U[n, s, :rank] @ V_K[n, :rank]) * scales[n]
                   + residual_K[n, s]        (sparse, where present)
@@ -245,9 +251,12 @@ def reconstruct_blocks(
         Uf = Uf * U_scale.view(N, 1, 1).float()
 
     # [N, S, r] @ [N, r, H*D] -> [N, S, H*D]
-    K = torch.bmm(Uf, V_K[:, :r].reshape(N, r, H * D).float())
     V = torch.bmm(Uf, V_V[:, :r].reshape(N, r, H * D).float())
-    K = K.reshape(N, S, H, D) * scales.view(N, 1, 1, 1).float() + anchors_K.unsqueeze(1).float()
+    if k_delta is not None:
+        K = k_delta[:, :S].float() + anchors_K.unsqueeze(1).float()
+    else:
+        K = torch.bmm(Uf, V_K[:, :r].reshape(N, r, H * D).float())
+        K = K.reshape(N, S, H, D) * scales.view(N, 1, 1, 1).float() + anchors_K.unsqueeze(1).float()
     V = V.reshape(N, S, H, D) * scales.view(N, 1, 1, 1).float() + anchors_V.unsqueeze(1).float()
 
     # Applied in fp32, before the cast back: the corrections are small deltas on

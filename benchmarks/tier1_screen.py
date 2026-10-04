@@ -208,33 +208,63 @@ def build_kivi(K, V, T, bits, group=32, resid=128):
     return Kh, Vh, nb, Q
 
 
-def lr_side(X, r, R, u_bits=8, res_bits=8, tok_bits=0, tok_group=64):
+def lr_side(X, r, R, u_bits=8, res_bits=8, tok_bits=0, tok_group=64,
+            u_mode="col", n_out=0, w=None):
     """Low-rank store for ONE side (K or V) of the blocks: anchor + factor of
     the offsets (r columns) + top-R 8-bit residual rows (+ optional per-token
-    low-bit residual). Returns (X_hat, bytes) for X [n, F] (anchor first)."""
+    low-bit residual). Returns (X_hat, bytes) for X [n, F] (anchor first).
+
+    u_mode: how U is quantized -- "col" one scale per column (tier-1 default),
+            "block" one scale per block (the runtime pool's int8 U), "row" one
+            scale per token (robust to a few huge-norm tokens).
+    n_out:  this many highest-norm rows are kept exact and EXCLUDED from the
+            factorization, so outlier tokens cannot bend the basis. They are
+            taken out of the residual budget R.
+    """
     a, d = X[:1], X[1:] - X[:1]
     m, F = d.shape
-    Us, Vh = factor(d, r, False)
-    s = Us.abs().amax(0).clamp(min=1e-8)
-    Us, Vh = Us / s, Vh * s[:, None]
+    keep = torch.ones(m, dtype=torch.bool, device=X.device)
+    out_idx = None
+    if n_out:
+        out_idx = torch.topk(d.norm(dim=1), min(n_out, m)).indices
+        keep[out_idx] = False
+    Us_k, Vh = factor(d[keep], r, False)
+    Us = torch.zeros(m, Us_k.shape[1], device=X.device)
+    Us[keep] = Us_k
     qm = 2 ** (u_bits - 1) - 1
-    Us = torch.round(Us * qm).clamp(-qm, qm) / qm
+    if u_mode == "row":
+        s = Us.abs().amax(1, keepdim=True).clamp(min=1e-8)
+        Us = torch.round(Us / s * qm).clamp(-qm, qm) / qm * s
+    elif u_mode == "block":
+        s = Us.abs().max().clamp(min=1e-8)
+        Us = torch.round(Us / s * qm).clamp(-qm, qm) / qm * s
+    else:
+        s = Us.abs().amax(0).clamp(min=1e-8)
+        Us, Vh = Us / s, Vh * s[:, None]
+        Us = torch.round(Us * qm).clamp(-qm, qm) / qm
     rec = Us @ Vh.half().float()
     e = d - rec
     Xh = a + rec
     if tok_bits:
         Xh = Xh + quant_rows(e, tok_bits, tok_group)
-    if R > 0:
-        i = torch.topk(e.norm(dim=1), min(R, m)).indices
+    if out_idx is not None:
+        Xh[out_idx] = a + quant_rows(d[out_idx], res_bits, 64)
+        e[out_idx] = 0
+    R_left = max(0, R - (out_idx.numel() if out_idx is not None else 0))
+    if R_left > 0:
+        sc = e.norm(dim=1)
+        if w is not None:                     # rank by error x attention received
+            sc = sc * (w[1:] / w[1:].mean().clamp(min=1e-12))
+        i = torch.topk(sc, min(R_left, m)).indices
         Xh[i] = a + quant_rows(d[i], res_bits, 64)
-    b = (F * 2 + m * r * u_bits / 8 + 4 * r + r * F * 2
+    b = (F * 2 + m * r * u_bits / 8 + (2 * m if u_mode == "row" else 4 * r) + r * F * 2
          + R * (F * res_bits / 8 + F / 64 * 4 + 2))
     if tok_bits:
         b += m * (F * tok_bits / 8 + F / tok_group * 4)
     return torch.cat([a, Xh]), b
 
 
-def build_hybrid(K, V, T, P):
+def build_hybrid(K, V, T, P, attn_w=None):
     """Per-side choice: keys and values each stored low-rank ('lr') or
     KIVI-quantized ('kq<bits>'), with DKV's dense window."""
     W = P["window"]
@@ -264,11 +294,28 @@ def build_hybrid(K, V, T, P):
                 Xh[:C] = quant_rows(X[:C], bits, 128)
                 nb += C * X.shape[1] * bits / 8 + C * (X.shape[1] / 128) * 4
         else:
+            # "lr" low rank; "auto" = low rank unless its relative error on THIS
+            # layer exceeds P["auto_thr"], then 4-bit per-token (decided per
+            # layer from a measured error, never per model)
+            parts, bsum = [], 0.0
             for b0 in range(0, C, BLOCK):
                 xb, b = lr_side(X[b0:b0 + BLOCK], P["hr"], P["hR"], P["u_bits"],
-                                tok_bits=P.get("htok", 0))
+                                tok_bits=P.get("htok", 0), u_mode=P.get("hu", "col"),
+                                n_out=P.get("hout", 0),
+                                w=(attn_w[b0:b0 + BLOCK] if (attn_w is not None
+                                   and P.get("hattn") and X is V) else None))
+                parts.append((b0, xb))
+                bsum += b
+            if side == "auto" and C > 0:
+                rel = ((torch.cat([p for _, p in parts]) - X[:C]).norm()
+                       / X[:C].norm().clamp(min=1e-8)).item()
+                if rel > P.get("auto_thr", 0.3):
+                    Xh[:C] = quant_rows(X[:C], 4, 128)
+                    nb += C * X.shape[1] * 4 / 8 + C * (X.shape[1] / 128) * 4
+                    continue
+            for b0, xb in parts:
                 Xh[b0:b0 + BLOCK] = xb
-                nb += b
+            nb += bsum
     nb += (T - C) * 2 * K.shape[1] * P["window_bits"] / 8 + (
         (T - C) * 2 * (K.shape[1] / 128) * 4 if P["window_bits"] < 16 else 0)
     if P["window_bits"] < 16:
@@ -281,7 +328,7 @@ def build_store(K, V, T, P, qstat, attn_w):
     if P.get("kivi"):
         return build_kivi(K, V, T, P["kivi"])
     if P.get("hK"):
-        return build_hybrid(K, V, T, P)
+        return build_hybrid(K, V, T, P, attn_w)
     W = P["window"]
     C = max(0, ((T - W) // BLOCK) * BLOCK)
     Kh, Vh = K.clone(), V.clone()
@@ -635,6 +682,21 @@ VARIANTS = {
     "H_kt4g64_vlr32": V_(hK="kt4g64", hV="lr", hr=32, hR=64, u_bits=4, window_bits=8),
     "H_kt4g128_vlr32": V_(hK="kt4g128", hV="lr", hr=32, hR=64, u_bits=4, window_bits=8),
     "H_kt8g64_vlr32": V_(hK="kt8g64", hV="lr", hr=32, hR=64, u_bits=4, window_bits=8),
+    # ── values robust to outlier tokens (runtime-faithful: int8 block U) ──
+    "Hv_block": V_(hK="kq4", hV="lr", hr=32, hR=64, u_bits=8, hu="block", window_bits=16),
+    "Hv_row": V_(hK="kq4", hV="lr", hr=32, hR=64, u_bits=8, hu="row", window_bits=16),
+    "Hv_out16": V_(hK="kq4", hV="lr", hr=32, hR=64, u_bits=8, hu="block", hout=16,
+                   window_bits=16),
+    "Hv_row_out16": V_(hK="kq4", hV="lr", hr=32, hR=64, u_bits=8, hu="row", hout=16,
+                       window_bits=16),
+    "Hv_auto": V_(hK="kq4", hV="auto", hr=32, hR=64, u_bits=8, hu="row", hout=16,
+                  auto_thr=0.3, window_bits=16),
+    "Hv_att": V_(hK="kq4", hV="lr", hr=32, hR=64, u_bits=8, hu="block", window_bits=16,
+                 hattn=True, attn_src="res256_blk"),
+    "Hv_att_R128": V_(hK="kq4", hV="lr", hr=32, hR=128, u_bits=8, hu="block",
+                      window_bits=16, hattn=True, attn_src="res256_blk"),
+    "Hv_R128": V_(hK="kq4", hV="lr", hr=32, hR=128, u_bits=8, hu="block", window_bits=16),
+    "Hv_r64": V_(hK="kq4", hV="lr", hr=64, hR=64, u_bits=8, hu="block", window_bits=16),
     "kivi4": V_(kivi=4),
     "kivi2": V_(kivi=2),
     "u4w8+r40+res160+vg0+att": V_(u_bits=4, u_colscale=True, window_bits=8, rank=40,

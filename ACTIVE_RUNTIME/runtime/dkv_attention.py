@@ -755,11 +755,37 @@ def _remat_why(code, extra=""):
           file=sys.stderr, flush=True)
 
 
+_HYBRID_FALLBACK_WARNED = False
+
+
 def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
-                  pool, block_indices, anchor_indices, cos_all, sin_all,
-                  layer_active_rank, q, dense_k, dense_v, dense_len,
-                  num_key_value_groups, curr_kv=None, dense_mask=None,
-                  dense_blocks=None):
+                  pool, block_indices, anchor_indices, *args, **kwargs):
+    """Materialise-then-attend; see _remat_attend_impl.
+
+    The wrapper exists for the hybrid store (DKV_KEY_QUANT): its keys live only
+    in per-channel codes that this path reads, so a decline here hands the step
+    to a kernel that would attend anchor copies. That must never be silent.
+    """
+    global _HYBRID_FALLBACK_WARNED
+    out = _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
+                             pool, block_indices, anchor_indices, *args, **kwargs)
+    if (out is None and getattr(pool, "kq_codes", None) is not None
+            and block_indices is not None and block_indices.numel() > 0
+            and not _HYBRID_FALLBACK_WARNED):
+        _HYBRID_FALLBACK_WARNED = True
+        print("[DKV WARNING] DKV_KEY_QUANT: the materialise path declined a "
+              "decode step, so it fell back to a kernel that cannot read the "
+              "hybrid store's key codes. Output for that step is WRONG. Run with "
+              "DKV_REMAT_WHY=1 to see the decline reason.", file=sys.stderr,
+              flush=True)
+    return out
+
+
+def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
+                       pool, block_indices, anchor_indices, cos_all, sin_all,
+                       layer_active_rank, q, dense_k, dense_v, dense_len,
+                       num_key_value_groups, curr_kv=None, dense_mask=None,
+                       dense_blocks=None):
     """MLX's decode form: materialise the routed blocks, then plain SDPA.
 
     MLX builds each routed block's real keys and values --
@@ -835,9 +861,17 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
     # (hf_dkv_wrapper) turns the cache off per prompt by setting
     # DKV_REMAT_CACHE=0 at run time, so honour an explicit "0" here too. With
     # the variable unset -- the default -- this is the import-time value alone.
+    # Hybrid store (DKV_KEY_QUANT): keys exist only as per-channel codes, which
+    # this materialise path reads and the project-then-attend kernel does not.
+    # So it serves the hybrid even with the cache off (streaming turns it off to
+    # bound memory) -- rebuilding every step and storing nothing.
+    _hybrid = getattr(pool, "kq_codes", None) is not None
+    _nostore = False
     if not _REMAT_ENABLED or os.environ.get("DKV_REMAT_CACHE") == "0":
-        _remat_why("disabled")
-        return None
+        if not _hybrid:
+            _remat_why("disabled")
+            return None
+        _nostore = True
     if block_indices is None or block_indices.numel() == 0:
         _remat_why("no-blocks")
         return None
@@ -1169,7 +1203,7 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
     _poolgen = (_smgr2._metadata_versions.get(sid, {}).get(captured_layer_idx, 0)
                 if _smgr2 is not None else 0)
     _rkey = _RC.make_key(captured_layer_idx, current_version, _poolgen, _step)
-    _hit = _rc.get(_rkey)
+    _hit = None if _nostore else _rc.get(_rkey)
     if _hit is None:
         # RAW on an unrotated pool -- see the rotation right after _rb below, and
         # the `raw_k` note in _gather_routed_blocks_for_kernel. On a rotated pool
@@ -1190,7 +1224,8 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
             res_k=_g["res_k"] if _has_res else None,
             res_pos=_g["res_pos"] if _has_res else None,
             res_v=_g["res_v"] if _has_res else None,
-            res_pos_v=_g["res_pos_v"] if _has_res else None)
+            res_pos_v=_g["res_pos_v"] if _has_res else None,
+            k_delta=_g.get("k_delta"))
         if _g.get("raw_k") and anchor_indices is not None and cos_all is not None:
             # ── EVERY KEY AT ITS OWN POSITION, which is MLX's form ───────────
             # _Km is now R-free: anchor_raw + delta_recon_raw + res_raw, one
@@ -1239,8 +1274,10 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                     res_k=_g2["res_k"] if _g2.get("has_res") else None,
                     res_pos=_g2["res_pos"] if _g2.get("has_res") else None,
                     res_v=_g2["res_v"] if _g2.get("has_res") else None,
-                    res_pos_v=_g2["res_pos_v"] if _g2.get("has_res") else None)
-        _rc.put(_rkey, _Km, _Vm)
+                    res_pos_v=_g2["res_pos_v"] if _g2.get("has_res") else None,
+                    k_delta=_g2.get("k_delta"))
+        if not _nostore:
+            _rc.put(_rkey, _Km, _Vm)
         # clone: under DKV_STATIC_GATHER the gather returns a PERSISTENT buffer
         # that the next layer's gather overwrites, and this is held across
         # tokens. _Km/_Vm are fresh bmm outputs, so only this needs it.
@@ -3349,6 +3386,28 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # torch.jit.script'ed and TorchScript cannot read os.environ.
                         exact_residual = _exact_residual_semantics(q.device),
                     )
+                    # Hybrid store (DKV_KEY_QUANT): hand the COMPACT key codes in,
+                    # sliced per block tile with everything else, and dequantize
+                    # per tile in _with_key_deltas -- dequantizing the whole
+                    # history at once would undo the block tiling's memory bound.
+                    if getattr(pool, "kq_codes", None) is not None:
+                        _hist_kw["kq_codes"] = pool.kq_codes[pool_indices_t]
+                        _hist_kw["kq_scale"] = pool.kq_scale[pool_indices_t]
+                        _hist_kw["kq_zero"]  = pool.kq_zero[pool_indices_t]
+
+                    def _with_key_deltas(kw):
+                        if "kq_codes" not in kw:
+                            return kw
+                        from runtime.native_block_pool import dequantize_keys_per_channel
+                        kw = dict(kw)
+                        _kd = dequantize_keys_per_channel(
+                            kw.pop("kq_codes"), kw.pop("kq_scale"), kw.pop("kq_zero"),
+                            pool.key_quant_bits, pool.kq_group, q.dtype)   # [n, S, kv, D]
+                        kw["key_deltas"] = repeat_kv(
+                            _kd.permute(0, 2, 1, 3), num_key_value_groups
+                        ).permute(0, 2, 1, 3)                              # [n, S, H, D]
+                        return kw
+
                     if os.environ.get("DKV_PREFILL_LOWMEM", "1") != "0":
                         # On by default (DKV_PREFILL_LOWMEM=0 disables). Each query row's softmax is over
                         # history only, so rows are independent: slicing the
@@ -3358,6 +3417,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                         _qs = max(1, int(os.environ.get("DKV_PREFILL_Q_SLICE", "256")))
 
                         def _hist_qsliced(kw):
+                            kw = _with_key_deltas(kw)
                             return torch.cat(
                                 [_prefill_fused_history_attend(
                                     q=q[:, :, _s:_s + _qs], lowmem=True, **kw)
@@ -3377,7 +3437,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                         result = history_attend_block_tiled(
                             _hist_qsliced, _hist_kw, _bt, q.dtype)
                     else:
-                        result = _prefill_fused_history_attend(q=q, **_hist_kw)
+                        result = _prefill_fused_history_attend(q=q, **_with_key_deltas(_hist_kw))
                     out_hist  = result[0]                     # [1, H, q_len, D]
                     lse_hist  = result[1, 0, :, :, 0]        # [H, q_len]
                     lse_hist  = lse_hist.unsqueeze(0)        # [1, H, q_len]  — matches _combine_outputs API

@@ -1353,7 +1353,11 @@ def _prefill_fused_history_attend_compiled(
     residual_V_values: torch.Tensor,
     exact_residual: bool = False,
     lowmem: bool = False,
+    key_deltas: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    # `key_deltas` [N, S, H, D] (hybrid store, DKV_KEY_QUANT): the blocks'
+    # anchor-relative keys dequantized from per-channel codes, used in place of
+    # the factor's key reconstruction (which is zero in that store).
     # `lowmem` (opt-in, DKV_PREFILL_LOWMEM=1 at the call site) computes the V
     # residual correction as a contraction instead of broadcast-then-sum. Same
     # arithmetic; without it the broadcast materialises [N, H, Q, P, D] -- the
@@ -1371,9 +1375,12 @@ def _prefill_fused_history_attend_compiled(
     Q = q.shape[2]
     D = q.shape[3]
 
-    V_K_flat = V_K.reshape(N, R, -1)
-    deltas_k_flat = torch.bmm(U, V_K_flat)
-    deltas_k = deltas_k_flat.reshape(N, S, H, D) * scales.view(N, 1, 1, 1).to(q.dtype)
+    if key_deltas is not None:
+        deltas_k = key_deltas[:, :S].to(q.dtype)
+    else:
+        V_K_flat = V_K.reshape(N, R, -1)
+        deltas_k_flat = torch.bmm(U, V_K_flat)
+        deltas_k = deltas_k_flat.reshape(N, S, H, D) * scales.view(N, 1, 1, 1).to(q.dtype)
 
     K_unrot_full = torch.cat(
         [anchors_K.unsqueeze(1), anchors_K.unsqueeze(1) + deltas_k], dim=1
@@ -2046,10 +2053,22 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
         anchors_K = _partial_rope_apply(anchors_K, cos_anc_2d, sin_anc_2d)
     g["anchors_K"] = anchors_K
     g["V_K"]       = V_K
+    # Hybrid store (DKV_KEY_QUANT): the routed blocks' keys, dequantized from
+    # the pool's per-channel codes, anchor-relative, in the same frame as V_K
+    # (raw when raw_k, else rotated at the anchor like V_K). Only the
+    # materialise path reads it; None when the store is off.
+    _kd = (base_pool.get_key_deltas(indices)
+           if getattr(base_pool, "kq_codes", None) is not None else None)
+    if _kd is not None and do_rot:
+        _kd = _partial_rope_apply(_kd, cos_anc.to(_kd.dtype), sin_anc.to(_kd.dtype))
+    g["k_delta"] = _kd
 
     res_pos = getattr(base_pool, "residual_K_positions", None)
     res_pos_v = getattr(base_pool, "residual_V_positions", None)
     has_res_pool = (
+        # Hybrid store: K residual values come from the key codes. Checked FIRST:
+        # the residual_K_values fallback below would dequantize the whole pool.
+        (getattr(base_pool, "kq_codes", None) is not None) or
         (getattr(base_pool, "comp_res_k_q", None) is not None) or
         (getattr(base_pool, "_residual_K_values", None) is not None) or
         (getattr(base_pool, "residual_K_values", None) is not None)

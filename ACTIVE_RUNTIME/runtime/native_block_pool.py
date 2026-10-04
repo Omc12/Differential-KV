@@ -27,6 +27,64 @@ _SRL_DESC_DIM = 64
 
 _BLOCK_TRUNCATION_WARNED = False
 
+# ── Hybrid store: per-channel quantized keys (DKV_KEY_QUANT) ─────────────────
+# Tokens per scale/zero group. KIVI's key layout; 32 is what the tier-1/tier-2
+# measurements in docs/IMPROVEMENTS_LOG.md used.
+KEY_QUANT_GROUP = 32
+
+
+def _key_quant_bits_from_env() -> int:
+    """DKV_KEY_QUANT=pc4 -> 4, pc8 -> 8; unset or anything else -> 0 (off)."""
+    s = (os.environ.get("DKV_KEY_QUANT", "") or "").strip().lower()
+    return {"pc4": 4, "pc8": 8}.get(s, 0)
+
+
+def quantize_keys_per_channel(x: torch.Tensor, bits: int, group: int = KEY_QUANT_GROUP):
+    """Asymmetric per-channel quantization over groups of `group` tokens.
+
+    x: [N, S, H, D] anchor-relative keys. Returns (codes, scale, zero):
+      codes [N, S, H, D/2] uint8 (two 4-bit codes per byte, even channel in the
+            low nibble) for bits=4, or [N, S, H, D] uint8 for bits=8;
+      scale, zero [N, ceil(S/group), H, D] fp16.
+    The codes are computed against the fp16-ROUNDED scale and zero, so the
+    stored triple dequantizes to exactly what this function measured.
+    """
+    N, S, H, D = x.shape
+    G = (S + group - 1) // group
+    pad = G * group - S
+    xf = x.float()
+    if pad:
+        # Pad by repeating the last row: it widens no group's range.
+        xf = torch.cat([xf, xf[:, -1:].expand(N, pad, H, D)], dim=1)
+    xg = xf.view(N, G, group, H, D)
+    lo = xg.amin(dim=2)
+    hi = xg.amax(dim=2)
+    q = float(2 ** bits - 1)
+    scale = ((hi - lo).clamp(min=1e-8) / q).to(torch.float16)
+    zero = lo.to(torch.float16)
+    s32, z32 = scale.float().unsqueeze(2), zero.float().unsqueeze(2)
+    codes = torch.round((xg - z32) / s32).clamp(0, q).to(torch.uint8)
+    codes = codes.view(N, G * group, H, D)[:, :S]
+    if bits == 4:
+        codes = codes[..., 0::2] | (codes[..., 1::2] << 4)
+    return codes.contiguous(), scale, zero
+
+
+def dequantize_keys_per_channel(codes: torch.Tensor, scale: torch.Tensor,
+                                zero: torch.Tensor, bits: int,
+                                group: int = KEY_QUANT_GROUP,
+                                dtype: torch.dtype = torch.float16) -> torch.Tensor:
+    """Inverse of quantize_keys_per_channel -> [N, S, H, D] in `dtype`."""
+    if bits == 4:
+        lo4 = codes & 15
+        hi4 = codes >> 4
+        codes = torch.stack((lo4, hi4), dim=-1).flatten(-2)
+    N, S, H, D = codes.shape
+    gi = torch.arange(S, device=codes.device) // group                       # [S]
+    s = scale[:, gi].float()                                                   # [N,S,H,D]
+    z = zero[:, gi].float()
+    return (codes.float() * s + z).to(dtype)
+
 
 def _warn_block_truncation(seq_len: int, pool_max_seq: int) -> None:
     """Block content dropped on write because it exceeded pool capacity.
@@ -258,6 +316,30 @@ class NativeBlockPool:
         else:
             _res_bytes = 2 * self.max_residual_tokens * num_kv_heads * head_dim * 2
 
+        # ── Hybrid store (DKV_KEY_QUANT=pc4, default off) ────────────────────
+        # Keys kept for EVERY token as per-channel quantized codes (KIVI's key
+        # layout: asymmetric, one scale and zero per channel per group of
+        # KEY_QUANT_GROUP tokens), values kept low-rank as before. Measured in
+        # docs/IMPROVEMENTS_LOG.md: keys limit real decode, and this layout holds
+        # the attention pattern at KIVI-4's accuracy. Off: nothing below exists
+        # and the pool is byte-identical to before.
+        self.key_quant_bits = _key_quant_bits_from_env()
+        self.kq_group = KEY_QUANT_GROUP
+        _kq_bytes = 0
+        if self.key_quant_bits:
+            _res_bytes = _res_bytes // 2      # K residual values come from the codes
+            _ng_t = (max_seq_len + self.kq_group - 1) // self.kq_group
+            _kq_bytes = (max_seq_len * num_kv_heads * head_dim * self.key_quant_bits // 8
+                         + 2 * _ng_t * num_kv_heads * head_dim * 2)
+            # The hybrid's keys are rebuilt by the materialise-then-attend
+            # decode path; a CUDA graph captured on the project-then-attend
+            # kernel would read keys the pool no longer stores in factor form.
+            if _os.environ.get("DKV_DISABLE_CUDA_GRAPH") != "1":
+                _os.environ["DKV_DISABLE_CUDA_GRAPH"] = "1"
+                print("[DKV] DKV_KEY_QUANT: CUDA graph capture disabled (the "
+                      "hybrid store decodes through the materialise path).",
+                      flush=True)
+
         # ── Shared low-rank bases (DKV_SHARED_BASIS, default off) ────────────
         # When on, V_KV holds ceil(frac * n_blocks) BASIS rows instead of one
         # per block, and `basis_of` maps a slot to the row it reads.  See
@@ -390,6 +472,13 @@ class NativeBlockPool:
                           "DKV_SHARED_BASIS_ALLOW_ROTATED=1 to measure it "
                           "anyway.", flush=True)
                     self._shared_basis = False
+        if self._shared_basis and self.key_quant_bits:
+            print("[DKV] DKV_SHARED_BASIS ignored: the hybrid store "
+                  "(DKV_KEY_QUANT) keeps a value-only factor.", flush=True)
+            self._shared_basis = False
+        # Halves stored in V_KV: 2 = [V_K, V_V]; the hybrid store keeps keys in
+        # per-channel codes, so its factor holds the value half only.
+        self._vkv_halves = 1 if self.key_quant_bits else 2
 
         self.basis_of = None          # [n_blocks] int32 device tensor, or None
         self.basis_registry = None
@@ -402,12 +491,13 @@ class NativeBlockPool:
         _v_share = self._basis_frac if self._shared_basis else 1.0
         self._bytes_per_block = (
             max_seq_len * rank * 1 +              # U  (int8)
-            int(rank * num_kv_heads * head_dim * 2 * 2 * _v_share) +  # V_K + V_V (fp16)
+            int(rank * num_kv_heads * head_dim * 2 * self._vkv_halves * _v_share) +  # V_K + V_V (fp16)
             num_kv_heads * head_dim * 2 * 2 +     # anchors K + V (fp16)
             6 + 2 +                               # scales (2B) + seq_lens (4B) + U_scale (2B)
             self.max_residual_tokens * 2 +        # residual_K_positions (2B, int16)
             self.max_residual_tokens * 2 +        # residual_V_positions (2B, int16)
-            _res_bytes
+            _res_bytes +
+            _kq_bytes                             # hybrid key codes + scales (0 when off)
         )
 
 
@@ -680,7 +770,7 @@ class NativeBlockPool:
         else:
             self.U_sem = self.U_sem_scale = self.U_fact = self.n_semantic = None
         n_basis = self._n_basis_rows(n_blocks)
-        self.V_KV       = torch.zeros((n_basis, 2, self.rank, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+        self.V_KV       = torch.zeros((n_basis, self._vkv_halves, self.rank, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
         self._init_basis_map(n_blocks)
         self.anchors_KV = torch.zeros((n_blocks, 2, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
         self.scales     = torch.zeros((n_blocks,), device=self.device, dtype=self.dtype)
@@ -695,10 +785,12 @@ class NativeBlockPool:
             group_size = self.residual_quant_group_size
             packed_width = (self.head_dim * bits + 31) // 32
             num_groups = self.head_dim // group_size
-            self.comp_res_k_q = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, packed_width), device=self.device, dtype=torch.int32)
+            self.comp_res_k_q = (None if self.key_quant_bits else torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, packed_width), device=self.device, dtype=torch.int32))
             self.comp_res_v_q = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, packed_width), device=self.device, dtype=torch.int32)
-            self.comp_res_k_s = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
-            self.comp_res_k_b = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
+            # Hybrid store: K residual values are read from the key codes (see
+            # get_residual_k), so they are not stored.
+            self.comp_res_k_s = (None if self.key_quant_bits else torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, num_groups), device=self.device, dtype=torch.float16))
+            self.comp_res_k_b = (None if self.key_quant_bits else torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, num_groups), device=self.device, dtype=torch.float16))
             self.comp_res_v_s = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
             self.comp_res_v_b = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
             self._residual_K_values = None
@@ -708,8 +800,10 @@ class NativeBlockPool:
             self.comp_res_v_q = None
             self.comp_res_k_s = self.comp_res_k_b = None
             self.comp_res_v_s = self.comp_res_v_b = None
-            self._residual_K_values = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+            self._residual_K_values = (None if self.key_quant_bits else torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype))
             self._residual_V_values = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+
+        self.kq_codes, self.kq_scale, self.kq_zero = self._alloc_key_codes(n_blocks)
 
         # Fact Anchors (Solution 3) — CPU-compress path only; None on the CUDA
         # GPU path so the decode kernel gets HAS_FACT=False instead of looping
@@ -735,6 +829,59 @@ class NativeBlockPool:
         # Re-attach W_proj at the new size if it was already set
         if self.W_proj is not None and self.W_proj.device != torch.device("cpu"):
             pass  # W_proj is a [DESC_DIM, head_dim] matrix — shape is independent of n_blocks
+
+    # ── Hybrid store: per-channel quantized keys ─────────────────────────────
+    def _alloc_key_codes(self, n_blocks: int):
+        """(codes, scale, zero) for DKV_KEY_QUANT, or (None, None, None)."""
+        if not getattr(self, "key_quant_bits", 0):
+            return None, None, None
+        T, H, D = self.max_seq_len, self.num_kv_heads, self.head_dim
+        G = (T + self.kq_group - 1) // self.kq_group
+        width = D // 2 if self.key_quant_bits == 4 else D
+        codes = torch.zeros((n_blocks, T, H, width), device=self.device, dtype=torch.uint8)
+        scale = torch.zeros((n_blocks, G, H, D), device=self.device, dtype=torch.float16)
+        zero = torch.zeros((n_blocks, G, H, D), device=self.device, dtype=torch.float16)
+        return codes, scale, zero
+
+    def write_key_codes(self, pidx: torch.Tensor, key_deltas: torch.Tensor, write_seq: int):
+        """Quantize anchor-relative keys [N, S, H, D] into the slots `pidx`."""
+        codes, scale, zero = quantize_keys_per_channel(
+            key_deltas[:, :write_seq], self.key_quant_bits, self.kq_group)
+        self.kq_codes[pidx] = 0
+        self.kq_codes[pidx, :write_seq] = codes
+        g = scale.shape[1]
+        self.kq_scale[pidx] = 0.0
+        self.kq_zero[pidx] = 0.0
+        self.kq_scale[pidx, :g] = scale
+        self.kq_zero[pidx, :g] = zero
+
+    def _residual_k_from_codes(self, indices=None) -> torch.Tensor:
+        """Hybrid store: the K residual values [N, MAX_RES, H, D] are the key
+        codes dequantized at the residual positions (zero where -1), so they
+        are never stored twice. Only the gathered rows are dequantized."""
+        if indices is None:
+            indices = torch.arange(self.kq_codes.shape[0], device=self.kq_codes.device)
+        pos = self.residual_K_positions[indices].long()                   # [N, R]
+        valid = pos >= 0
+        p = pos.clamp(min=0)
+        n = torch.arange(p.shape[0], device=p.device).unsqueeze(1)
+        codes = self.kq_codes[indices][n, p]                              # [N, R, H, w]
+        if self.key_quant_bits == 4:
+            codes = torch.stack((codes & 15, codes >> 4), dim=-1).flatten(-2)
+        g = p // self.kq_group
+        vals = (codes.float() * self.kq_scale[indices][n, g].float()
+                + self.kq_zero[indices][n, g].float())                    # [N, R, H, D]
+        return torch.where(valid.unsqueeze(-1).unsqueeze(-1), vals,
+                           torch.zeros_like(vals)).to(self.dtype)
+
+    def get_key_deltas(self, indices) -> Optional[torch.Tensor]:
+        """Dequantized anchor-relative keys [N, S, H, D] for slots `indices`,
+        or None when the hybrid store is off."""
+        if self.kq_codes is None:
+            return None
+        return dequantize_keys_per_channel(
+            self.kq_codes[indices], self.kq_scale[indices], self.kq_zero[indices],
+            self.key_quant_bits, self.kq_group, self.dtype)
 
     @property
     def residual_K_values(self):
@@ -764,6 +911,8 @@ class NativeBlockPool:
     def get_residual_k(self, indices=None) -> Optional[torch.Tensor]:
         """Unified interface for retrieving K residuals for specified block indices."""
         self._ensure()
+        if getattr(self, "kq_codes", None) is not None:
+            return self._residual_k_from_codes(indices)
         if self.residual_quant in ("int4", "int8"):
             if getattr(self, "comp_res_k_q", None) is None:
                 return None
@@ -833,7 +982,8 @@ class NativeBlockPool:
                  "comp_res_k_q", "comp_res_k_s", "comp_res_k_b",
                  "comp_res_v_q", "comp_res_v_s", "comp_res_v_b",
                  "U_sem", "U_sem_scale", "U_fact", "n_semantic",
-                 "fact_anchors_K", "fact_anchors_V", "fact_anchor_positions")
+                 "fact_anchors_K", "fact_anchors_V", "fact_anchor_positions",
+                 "kq_codes", "kq_scale", "kq_zero")
         for attr in attrs:
             t = getattr(self, attr, None)
             if t is not None:
@@ -890,7 +1040,7 @@ class NativeBlockPool:
         new_U_fact = torch.zeros((new_blocks, max_seq_len, rank), device=self.device, dtype=self.dtype) if _legacy else None
         new_n_semantic = torch.zeros((new_blocks,), device=self.device, dtype=torch.int16) if _legacy else None
         new_n_basis = self._n_basis_rows(new_blocks)
-        new_V_KV = torch.zeros((new_n_basis, 2, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+        new_V_KV = torch.zeros((new_n_basis, self._vkv_halves, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         new_anchors_KV = torch.zeros((new_blocks, 2, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         new_scales = torch.zeros((new_blocks,), device=self.device, dtype=self.dtype)
         new_seq_lens = torch.zeros((new_blocks,), device=self.device, dtype=torch.int32)
@@ -904,10 +1054,10 @@ class NativeBlockPool:
             group_size = self.residual_quant_group_size
             packed_width = (head_dim * bits + 31) // 32
             num_groups = head_dim // group_size
-            new_comp_res_k_q = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, packed_width), device=self.device, dtype=torch.int32)
+            new_comp_res_k_q = (None if self.key_quant_bits else torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, packed_width), device=self.device, dtype=torch.int32))
             new_comp_res_v_q = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, packed_width), device=self.device, dtype=torch.int32)
-            new_comp_res_k_s = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
-            new_comp_res_k_b = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
+            new_comp_res_k_s = (None if self.key_quant_bits else torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, num_groups), device=self.device, dtype=torch.float16))
+            new_comp_res_k_b = (None if self.key_quant_bits else torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, num_groups), device=self.device, dtype=torch.float16))
             new_comp_res_v_s = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
             new_comp_res_v_b = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, num_groups), device=self.device, dtype=torch.float16)
             new_res_K_val = None
@@ -916,8 +1066,16 @@ class NativeBlockPool:
             new_comp_res_k_q = new_comp_res_v_q = None
             new_comp_res_k_s = new_comp_res_k_b = None
             new_comp_res_v_s = new_comp_res_v_b = None
-            new_res_K_val = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+            new_res_K_val = (None if self.key_quant_bits else torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype))
             new_res_V_val = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+
+        new_kq_codes, new_kq_scale, new_kq_zero = self._alloc_key_codes(new_blocks)
+        if new_kq_codes is not None:
+            new_kq_codes[:old_blocks] = self.kq_codes
+            new_kq_scale[:old_blocks] = self.kq_scale
+            new_kq_zero[:old_blocks] = self.kq_zero
+            del self.kq_codes, self.kq_scale, self.kq_zero
+        self.kq_codes, self.kq_scale, self.kq_zero = new_kq_codes, new_kq_scale, new_kq_zero
 
         new_fact_anc_K = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype) if _legacy else None
         new_fact_anc_V = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype) if _legacy else None
@@ -939,14 +1097,17 @@ class NativeBlockPool:
         new_res_K_pos[:old_blocks] = self.residual_K_positions
         new_res_V_pos[:old_blocks] = self.residual_V_positions
         if self.residual_quant in ("int4", "int8"):
-            new_comp_res_k_q[:old_blocks] = self.comp_res_k_q
+            if new_comp_res_k_q is not None:
+                new_comp_res_k_q[:old_blocks] = self.comp_res_k_q
             new_comp_res_v_q[:old_blocks] = self.comp_res_v_q
-            new_comp_res_k_s[:old_blocks] = self.comp_res_k_s
-            new_comp_res_k_b[:old_blocks] = self.comp_res_k_b
+            if new_comp_res_k_s is not None:
+                new_comp_res_k_s[:old_blocks] = self.comp_res_k_s
+                new_comp_res_k_b[:old_blocks] = self.comp_res_k_b
             new_comp_res_v_s[:old_blocks] = self.comp_res_v_s
             new_comp_res_v_b[:old_blocks] = self.comp_res_v_b
         else:
-            new_res_K_val[:old_blocks] = self._residual_K_values
+            if new_res_K_val is not None:
+                new_res_K_val[:old_blocks] = self._residual_K_values
             new_res_V_val[:old_blocks] = self._residual_V_values
 
         if _legacy:
@@ -1162,6 +1323,13 @@ class NativeBlockPool:
         exceeds the pool's allocated rank dimension.
         """
         self._ensure()  # Trigger lazy allocation if pool not yet created
+        if getattr(self, "kq_codes", None) is not None:
+            # The hybrid store's keys arrive only through the batched GPU path
+            # (write_blocks_batched(key_deltas=...)). A slot written here would
+            # hold no keys and decode as anchor copies: fail loudly instead.
+            raise RuntimeError("DKV_KEY_QUANT: write_block (per-block/CPU path) "
+                               "cannot store hybrid keys; the GPU compressor must "
+                               "be used (DKV_GPU_COMPRESS=1)")
         import math as _math
         
         # Sanitize inputs to prevent NaN/Inf propagation.
@@ -1367,6 +1535,7 @@ class NativeBlockPool:
         res_V_values=None,
         layer_idx=-1,            # int — which layer these blocks belong to
         basis_rows=None,         # [N] long — rows from a prior assign_basis()
+        key_deltas=None,         # [N, S, kv, hd] anchor-relative keys (hybrid store)
     ):
         """Vectorized equivalent of N write_block() calls that share seq_len.
 
@@ -1449,11 +1618,20 @@ class NativeBlockPool:
             vk = Vd[:, :write_rank, :num_kv * h_dim].reshape(N, write_rank, num_kv, h_dim)
             vv = Vd[:, :write_rank, num_kv * h_dim:].reshape(N, write_rank, num_kv, h_dim)
             self.V_KV[pidx] = 0
-            self.V_KV[pidx, 0, :write_rank] = vk.to(self.dtype)
-            self.V_KV[pidx, 1, :write_rank] = vv.to(self.dtype)
+            if self._vkv_halves == 2:
+                self.V_KV[pidx, 0, :write_rank] = vk.to(self.dtype)
+            self.V_KV[pidx, self._vkv_halves - 1, :write_rank] = vv.to(self.dtype)
 
         self.anchors_KV[pidx, 0] = anchor_K.to(device=dev, dtype=self.dtype)
         self.anchors_KV[pidx, 1] = anchor_V.to(device=dev, dtype=self.dtype)
+
+        # Hybrid store: every key, per-channel quantized. The caller zeroed the
+        # K half of the factorization, so these codes ARE the keys.
+        if self.kq_codes is not None:
+            if key_deltas is None:
+                raise ValueError("DKV_KEY_QUANT is on but the compressor passed no "
+                                 "key_deltas: the slot would hold no keys")
+            self.write_key_codes(pidx, key_deltas.to(dev), write_seq)
 
         # Sanitize non-finite scales exactly like write_block's per-block guard.
         sc = scales.to(device=dev).float()
@@ -1495,21 +1673,25 @@ class NativeBlockPool:
         self.residual_K_positions[pidx] = -1
         self.residual_V_positions[pidx] = -1
         if self.residual_quant in ("int4", "int8"):
-            self.comp_res_k_q[pidx] = 0
-            self.comp_res_k_s[pidx] = 0.0
-            self.comp_res_k_b[pidx] = 0.0
+            if self.comp_res_k_q is not None:
+                self.comp_res_k_q[pidx] = 0
+                self.comp_res_k_s[pidx] = 0.0
+                self.comp_res_k_b[pidx] = 0.0
             self.comp_res_v_q[pidx] = 0
             self.comp_res_v_s[pidx] = 0.0
             self.comp_res_v_b[pidx] = 0.0
         else:
-            self._residual_K_values[pidx] = 0.0
+            if self._residual_K_values is not None:
+                self._residual_K_values[pidx] = 0.0
             self._residual_V_values[pidx] = 0.0
 
         if res_K_positions is not None and res_K_positions.numel() > 0:
             mr = min(res_K_positions.shape[1], self.max_residual_tokens)
             self.residual_K_positions[pidx, :mr] = res_K_positions[:, :mr].to(device=dev, dtype=torch.int16)
             k_val = res_K_values[:, :mr].to(device=dev, dtype=self.dtype)
-            if self.residual_quant in ("int4", "int8"):
+            if self.key_quant_bits:
+                pass        # hybrid: K residual values come from the key codes
+            elif self.residual_quant in ("int4", "int8"):
                 from native_core.compression.residual_quant import quantize_residuals_group_asymmetric
                 q_k, s_k, b_k = quantize_residuals_group_asymmetric(
                     k_val, group_size=self.residual_quant_group_size, bits=self.residual_quant_bits
@@ -1574,7 +1756,7 @@ class NativeBlockPool:
                     * self.U_scale[pidx].float().view(N, 1, 1)                          # [N, s, r]
                 mean_u = U_f32.mean(dim=1)                                              # [N, r]
                 _vidx = basis_rows if basis_rows is not None else pidx
-                vk_mean = self.V_KV[_vidx, 0, :write_rank].float().mean(dim=2)          # [N, r, hd]
+                vk_mean = self.V_K[_vidx, :write_rank].float().mean(dim=2)              # [N, r, hd]
                 delta_centroid = torch.bmm(mean_u.unsqueeze(1), vk_mean).squeeze(1)     # [N, hd]
                 centroid = anchor_mean + delta_centroid                                 # [N, hd]
                 desc = centroid @ self.W_proj.float().t()                               # [N, DESC]
@@ -1591,7 +1773,8 @@ class NativeBlockPool:
         attrs = ("U", "U_scale", "V_KV", "anchors_KV", "scales", "seq_lens", "desc",
                  "residual_K_positions", "residual_K_values", "residual_V_positions", "residual_V_values",
                  "U_sem", "U_sem_scale", "U_fact", "n_semantic",
-                 "fact_anchors_K", "fact_anchors_V", "fact_anchor_positions")
+                 "fact_anchors_K", "fact_anchors_V", "fact_anchor_positions",
+                 "kq_codes", "kq_scale", "kq_zero")
         for attr in attrs:
             if hasattr(self, attr):
                 delattr(self, attr)
@@ -1641,11 +1824,15 @@ class NativeBlockPool:
     # Contiguous property views for backward-compatibility with callers/kernels
     @property
     def V_K(self):
+        if getattr(self, "_vkv_halves", 2) == 1:
+            # Hybrid store: no key factor is stored. A broadcast view of zeros
+            # (no memory) keeps every reader's shapes and indexing valid.
+            return self.V_KV[:, 0].new_zeros(()).expand_as(self.V_KV[:, 0])
         return self.V_KV[:, 0]
 
     @property
     def V_V(self):
-        return self.V_KV[:, 1]
+        return self.V_KV[:, getattr(self, "_vkv_halves", 2) - 1]
 
     @property
     def anchors_K(self):

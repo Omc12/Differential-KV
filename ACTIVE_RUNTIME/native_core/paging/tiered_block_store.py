@@ -156,6 +156,13 @@ class TieredBlockStore:
                 'anchors_KV': cpu_anchors_kv,
                 'seq_len': seq_len
             }
+            # Hybrid store (DKV_KEY_QUANT): the slot's keys live in the per-
+            # channel codes, so they must page with it or a restored block
+            # would come back holding whatever the slot held meanwhile.
+            if getattr(self.pool, "kq_codes", None) is not None:
+                self._cpu_store[slot_id]['kq'] = tuple(
+                    t[slot_id].contiguous().cpu()
+                    for t in (self.pool.kq_codes, self.pool.kq_scale, self.pool.kq_zero))
             
             # Zero GPU slot to mark empty
             self.pool.seq_lens[slot_id] = 0
@@ -190,6 +197,10 @@ class TieredBlockStore:
                 if store_data['V_KV'] is not None:      # None under shared bases
                     self.pool.V_KV[slot_id].copy_(store_data['V_KV'], non_blocking=not blocking)
                 self.pool.anchors_KV[slot_id].copy_(store_data['anchors_KV'], non_blocking=not blocking)
+                if store_data.get('kq') is not None:
+                    for _dst, _src in zip((self.pool.kq_codes, self.pool.kq_scale,
+                                           self.pool.kq_zero), store_data['kq']):
+                        _dst[slot_id].copy_(_src, non_blocking=not blocking)
                 self.pool.seq_lens[slot_id] = store_data['seq_len']
                 
                 event = torch.cuda.Event()
@@ -208,6 +219,10 @@ class TieredBlockStore:
             if store_data['V_KV'] is not None:          # None under shared bases
                 self.pool.V_KV[slot_id].copy_(store_data['V_KV'].to(self.device))
             self.pool.anchors_KV[slot_id].copy_(store_data['anchors_KV'].to(self.device))
+            if store_data.get('kq') is not None:
+                for _dst, _src in zip((self.pool.kq_codes, self.pool.kq_scale,
+                                       self.pool.kq_zero), store_data['kq']):
+                    _dst[slot_id].copy_(_src.to(self.device))
             self.pool.seq_lens[slot_id] = store_data['seq_len']
             
             self._tier[slot_id] = 'GPU'

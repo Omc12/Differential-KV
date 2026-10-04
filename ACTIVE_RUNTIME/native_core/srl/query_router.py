@@ -1232,7 +1232,8 @@ def route_blocks_relevance(
                      and hasattr(pool, "get_residual_k"))
     if _res_k_subset:
         res_k = (pool.get_residual_k(slots_long)
-                 if getattr(pool, "comp_res_k_q", None) is not None else None)
+                 if (getattr(pool, "comp_res_k_q", None) is not None
+                     or getattr(pool, "kq_codes", None) is not None) else None)
     else:
         res_k = getattr(pool, "residual_K_values", None)
     res_pos = getattr(pool, "residual_K_positions", None)
