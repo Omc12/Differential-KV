@@ -163,6 +163,37 @@ dense) by declining to cache layers when memory is short; cost is per-step rebui
 those layers (16k decode ~13% slower); nothing changes when memory is ample. Candidate
 for default-on after the paper ladders.
 
+**D2 elastic streaming window** -- `DKV_STREAM_ELASTIC=1` (off by default;
+streaming_sparse_ingest.py `_elastic_hold`). In streaming mode, blocks that left the
+recency window stay EXACT while allocated memory + 2 GB headroom
+(`DKV_STREAM_ELASTIC_RESERVE_GB`) is under 94% of the card; once it is not, the oldest are
+compressed, at most 4 per layer per chunk (`DKV_STREAM_ELASTIC_BATCH`). The prefill
+boundary compresses everything as before (`compress_deferred_blocks(final=True)`), so
+the decode store and its bytes are unchanged; only the prefill sees exact history.
+
+- v1 gated only the per-layer compress path. Streaming also runs a per-session pass after
+  every chunk, which compressed the held blocks a moment later, so v1 measured
+  bit-identical to plain streaming (KL 0.2193 per step). v2 gates both mid-prefill
+  paths; a debug print confirms both hold.
+- Tier 2 (granite, hybrid store, 374 steps):
+
+| arm | KL | dKL vs base [95% CI] | top-1 | store GB | peak GB | dec tok/s |
+|---|---|---|---|---|---|---|
+| hybrid exact | 0.1350 | -0.179 [-0.319, -0.067] | 0.949 | 0.809 | 11.11 | 8.7 |
+| hybrid streaming | 0.2193 | -0.094 [-0.238, +0.039] | 0.920 | 0.809 | 10.94 | 8.3 |
+| **hybrid streaming + elastic** | **0.1350** | -0.179 [-0.319, -0.067] | 0.949 | 0.809 | 10.91 | 8.1 |
+
+  Reading: where the history fits (all 24 prompts, up to 16k), streaming + elastic IS
+  exact mode, bit for bit, at a lower peak. Streaming only pays its quality cost when
+  memory forces it.
+- Reach: the 65k spill seen in v1's ladder (TEST_granite_hybrid_elastic_ladder.jsonl; v1
+  was inert, so that ladder is plain hybrid streaming) is NOT elastic's: plain hybrid
+  streaming spills too (TEST_granite_hybrid_stream_65k.jsonl: 11.91 alloc / 12.17
+  reserved; line 12.11). Shipped tiled DKV at 65k peaks 9.36. Cause: the memory-sized
+  remat cache fills headroom up to its gate, and the gate's fixed 1.5 GB step headroom
+  (`DKV_REMAT_RESERVE_GB`) is smaller than the 65k decode transient. Test of 2.5 / 3.5 GB
+  queued (benchmarks/run_remat_reserve.cmd); v2 elastic 65k running.
+
 ## Generality (tier 1, 2026-10-04): the hybrid on three architectures
 
 | Model | Store | out_err | attn KL | B/tok |
@@ -286,6 +317,66 @@ KL 0.219 at 8.3 tok/s (base streaming 0.527 at 5.5). Store 0.809 GB (2.75x; base
 3.56x) = +30% with the corrected accounting. Streaming peak 10.94 GB vs 7.99: the
 memory-sized cache using free headroom under the spill line (gives way to the store;
 reach to be confirmed by ladder).
+
+## Batch E: prefill speed and baseline fairness (2026-10-04)
+
+**E2 larger prefill chunks -- no code.** `DKV_PREFILL_CHUNK_SIZE` already sets it
+(rounded up to whole blocks: 2048 -> 2050 = 2 blocks per chunk). Measurement queued
+(benchmarks/run_e2_chunks.cmd): tier 2 at 2048/4096 exact and streaming, and 32k prefill
+time. An older single-seed note in config.py links chunk 2048 to a lower score; tier 2
+decides.
+
+**E1 fused history attention** -- `DKV_PREFILL_SDPA=1` (off by default;
+`history_attend_sdpa_tile` in triton_fused_decode.py). Streaming prefill attends the
+compressed history by rebuilding each block tile's K/V and scoring every query against
+every key in explicit [H, Q, keys] tensors, sliced into 256-query pieces to bound them.
+E1 rebuilds K/V once per tile at KV-head width (every `groups`-th head of the repeated
+inputs is the KV head), folds the GQA group into the query length, drops padded columns
+instead of masking them, and runs torch's memory-efficient attention, which returns the
+log-sum-exp the tile merge needs. No query slicing, no score tensors, no per-model code.
+Tile 64 blocks (`DKV_PREFILL_SDPA_TILE`).
+- Tests: tests/test_prefill_sdpa.py (5): both residual semantics, tiled vs untiled, no
+  GQA, hybrid key codes. Both paths sit the same distance from an fp32 reference (0.011
+  on outputs of 8.8 each), so the bound is relative.
+- Real-model fidelity and 32k prefill time: queued with E2.
+
+**E3 tiled KIVI-4 baseline** -- new arm `kivi4_tiled` (benchmarks/kv_baselines.py). Same
+quantizer and bytes as `kivi4_chunked`. kivi4_chunked's ceiling (49k granite, 98k Qwen)
+was its DECODE peak (12.96 GB at 65k vs 10.49 prefill): update() returned the whole
+dequantized history every step. kivi4_tiled returns only the 16-bit window, and a
+registered attention function (transformers AttentionInterface, so any model on that
+interface) reads the 4-bit history in 8k-token tiles, merged by log-sum-exp, the same
+treatment DKV's streaming path gets. One difference, in KIVI's favour: tokens are
+quantized at the start of the next forward, so a prefill chunk attends its own tokens in
+16 bits (as KIVI's reference prefill does); it also removes masking from the codes.
+The model's own attention implementation is restored after each item.
+- Tests: tests/test_kivi_tiled.py (3): prefill chunk with mask, first chunk without, decode;
+  multi-tile; equals attention over the dequantized cache.
+- Reach smoke (granite 65k/98k) and RULER 24k agreement vs kivi4_chunked: queued
+  (benchmarks/run_e3_kivi_tiled.cmd).
+
+## Untried ideas on the hybrid's value side (tier 1, 2026-10-04)
+
+All on top of the hybrid with attention-ranked residuals (`Hv_att`); keys unchanged, so
+attention KL is identical across rows and out_err decides. benchmarks/tier1_screen.py,
+CPU, all captures (granite 6 prompts, Qwen2.5-7B 3 prompts).
+
+| idea | variant | granite out_err / B/tok | Qwen2.5 out_err / B/tok | verdict |
+|---|---|---|---|---|
+| reference | Hv_att | 0.0624 / 1279 | 0.1011 / 661 | |
+| B2 attention-weighted SVD (rows weighted after token-norm normalization) | U_B2_svdw | 0.0640 / 1279 | 0.1049 / 661 | drop: no gain |
+| B5 per-KV-head factors, rank 4 / 8 per head | U_B5_head4/8 | 0.1032 / 0.0860 | 0.1393 / 0.1280 | drop: much worse; the joint factor's shared U is what makes it cheap |
+| DuoAttention-style: heads with the most far-history mass keep 4-bit values | U_duo12/25 | 0.0614 / 1337, 0.0667 / 1395 | 0.0952 / 719 | drop: worse per byte than more rank |
+| B4 energy-adaptive rank per block (e=0.80, cap 64) | U_B4_e80 | 0.0587 / 1297 | 0.0853 / 686 | marginal, closed (below) |
+| rank 64 for comparison | Hv_r64att | 0.0524 / 1361 | 0.0808 / 716 | |
+| KIVI-4 | kivi4 | 0.0955 / 1215 | 0.0769 / 611 | |
+
+B4 closed: the runtime already truncates rank by energy (`DKV_SVD_ENERGY`), and its
+stored rank is capped at 32 by the batched-solver limit (`_pool_rproj_cap`, see
+memory note on preset rank), so B4's gain is the blocks that would go above 32. That
+needs the cap lifted (measured +13% forward, ~+1.9 s/prefill), and value-side precision
+was not significant in tier 2 on granite (exact-values probe n.s.). Revisit only if a
+model shows value-limited tier-2 error (Qwen2.5-7B is the candidate).
 
 ## Values robust to outlier tokens (tier 1, 2026-10-04)
 

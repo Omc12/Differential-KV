@@ -1517,6 +1517,87 @@ def history_attend_block_tiled(attend_fn, kw, tile, out_dtype):
                        dim=0)
 
 
+def history_attend_sdpa_tile(q, kw, groups, kq_bits=0, kq_group=32):
+    """Prefill history attention for one block tile through a fused attention
+    kernel (DKV_PREFILL_SDPA=1, default off). Same inputs and the same stacked
+    [out, lse] result as _prefill_fused_history_attend, same arithmetic up to
+    float rounding, without its [H, Q, keys] score and weight tensors:
+
+    - K/V are rebuilt once per tile at KV-head width. The call site hands in
+      head-repeated tensors (repeat_kv: query head h reads kv head h // groups),
+      so every `groups`-th head IS the kv head; striding recovers it free.
+    - The GQA group folds into the query length: the queries of one group all
+      read the same keys, so [1, H, Q, D] becomes [1, H_kv, groups*Q, D].
+    - Padded columns (col > seq_len) are dropped rather than masked. History
+      precedes the whole chunk, so no other mask exists and none is passed.
+    - torch's memory-efficient attention returns the log-sum-exp the tile
+      merge (history_attend_block_tiled) needs.
+    """
+    U = kw["U"]
+    N, S, R = U.shape
+    H, Q, D = q.shape[1], q.shape[2], q.shape[3]
+    g = max(1, int(groups))
+    Hk = H // g
+    sl = slice(None, None, g)
+    dt = q.dtype
+    sc = kw["scales"].view(N, 1, 1, 1).to(dt)
+    Us = U.to(dt)
+
+    def _lowrank(VX):                             # [N, R, H, D] -> [N, S, Hk, D]
+        return torch.bmm(Us, VX[:, :, sl].reshape(N, R, Hk * D).to(dt)).view(N, S, Hk, D) * sc
+
+    dv = _lowrank(kw["V_V"])
+    if "kq_codes" in kw:
+        from runtime.native_block_pool import dequantize_keys_per_channel
+        dk = dequantize_keys_per_channel(kw["kq_codes"], kw["kq_scale"], kw["kq_zero"],
+                                         kq_bits, kq_group, dt)[:, :S]
+    else:
+        dk = _lowrank(kw["V_K"])
+    exact = bool(kw.get("exact_residual", False))
+
+    # Residuals, exactly as the fused path applies them: an additive
+    # correction, or under exact_residual a substitution expressed as
+    # (residual - low-rank twin) so invalid slots still add zero.
+    for pos, val, delta in ((kw["residual_K_positions"], kw["residual_K_values"], dk),
+                            (kw["residual_V_positions"], kw["residual_V_values"], dv)):
+        if pos is None or val is None or pos.numel() == 0:
+            continue
+        p = pos.clamp(min=0).long()
+        idx = p.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, Hk, D)
+        v = val[:, :, sl].to(dt)
+        if exact:
+            v = v - torch.gather(delta, 1, idx)
+        v = v * (pos >= 0).unsqueeze(-1).unsqueeze(-1).to(dt)
+        delta.scatter_add_(1, idx, v)
+
+    aK = kw["anchors_K"][:, sl].to(dt).unsqueeze(1)          # [N, 1, Hk, D]
+    aV = kw["anchors_V"][:, sl].to(dt).unsqueeze(1)
+    K = torch.cat([aK, aK + dk], dim=1)                       # [N, 1+S, Hk, D]
+    V = torch.cat([aV, aV + dv], dim=1)
+    cos = kw["cos_sliced"].to(dt)                             # [N, 1+S, 1, D]
+    sin = kw["sin_sliced"].to(dt)
+    h = D // 2
+    K = K * cos + torch.cat([-K[..., h:], K[..., :h]], dim=-1) * sin
+
+    col = torch.arange(1 + S, device=q.device)
+    keep = (col.unsqueeze(0) <= kw["seq_lens"].long().unsqueeze(1)).reshape(-1)
+    idx = keep.nonzero().squeeze(1)
+    M = int(idx.numel())
+    if M == 0:
+        out = q.new_zeros(1, H, Q, D)
+        lse = q.new_full((1, H, Q, D), float("-inf"))
+        return torch.stack([out, lse], dim=0)
+    Kc = K.reshape(N * (1 + S), Hk, D).index_select(0, idx).transpose(0, 1).unsqueeze(0)
+    Vc = V.reshape(N * (1 + S), Hk, D).index_select(0, idx).transpose(0, 1).unsqueeze(0)
+    qf = q.reshape(1, Hk, g * Q, D)
+    out, lse = torch.ops.aten._scaled_dot_product_efficient_attention(
+        qf.contiguous(), Kc.contiguous(), Vc.contiguous(), None, True,
+        scale=float(kw["inv_scale"]))[:2]
+    out = out.reshape(1, H, Q, D)
+    lse = lse[:, :, :g * Q].reshape(1, H, Q).to(dt)
+    return torch.stack([out.to(dt), lse.unsqueeze(-1).expand(1, H, Q, D)], dim=0)
+
+
 _IS_MPS_AVAILABLE = (hasattr(torch, "backends") and
                      hasattr(torch.backends, "mps") and
                      torch.backends.mps.is_available())

@@ -609,6 +609,26 @@ class StreamingKVBlock:
         )
 _original_is_compression_eligible = StreamingKVBlock.is_compression_eligible
 
+def _elastic_room() -> bool:
+    """DKV_STREAM_ELASTIC: is there memory to keep history exact this chunk?
+
+    True while allocated memory plus DKV_STREAM_ELASTIC_RESERVE_GB (default 2.0)
+    stays under 94% of the card -- the spill line the ceiling measurements use.
+    Allocated rather than reserved: during prefill the allocator's reserve sits
+    near the card from the start, so reserved would answer "no" immediately.
+    Any failure answers "no", which only compresses (the safe direction).
+    """
+    try:
+        import torch as _t
+        if not _t.cuda.is_available():
+            return False
+        total = _t.cuda.get_device_properties(_t.cuda.current_device()).total_memory
+        reserve = float(os.environ.get("DKV_STREAM_ELASTIC_RESERVE_GB", "2.0")) * 1e9
+        return _t.cuda.memory_allocated() + reserve < 0.94 * total
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
 def _is_block_compression_eligible(block: StreamingKVBlock, is_last_block: bool = False,
                                    ignore_skip_compression: bool = False) -> bool:
     # protect_block_zero exists to keep a "sink" region out of LOSSY SVD
@@ -1932,6 +1952,8 @@ class StreamingSparseIngestManager:
                     blocks_to_compress.append(b)
                     self.update_metadata_state(session_id, layer_idx, b)
 
+        blocks_to_compress = self._elastic_hold(session_id, layer_idx, blocks_to_compress, total_seq_len)
+
         if blocks_to_compress:
             try:
                 self._submit_blocks_batched(session_id, layer_idx, blocks_to_compress)
@@ -1944,7 +1966,42 @@ class StreamingSparseIngestManager:
                     if _b.state == "SUBMITTED":
                         _b.state = "ACCUMULATING"
 
-    def compress_deferred_blocks(self, session_id: str) -> None:
+    def _elastic_hold(self, session_id, layer_idx, blocks_to_compress, total_seq_len):
+        """ELASTIC WINDOW (DKV_STREAM_ELASTIC=1, default off).
+
+        Compress only as far as memory forces: while allocated memory plus a
+        headroom (DKV_STREAM_ELASTIC_RESERVE_GB, default 2.0 -- it must cover a
+        compression batch's transients and the chunk's attention) stays under
+        94% of the card, history stays EXACT and later chunks attend it as
+        exact prefill would. Once it does not, the OLDEST eligible blocks are
+        compressed, at most DKV_STREAM_ELASTIC_BATCH (default 4) per layer per
+        chunk, so the switch is gradual -- compressing everything at once is
+        what made the earlier late-switch rule spike +6 GB.
+
+        Applied by BOTH mid-prefill compress paths (per layer during the
+        forward, and per session after each chunk); the first version gated
+        only the per-layer one and the per-session pass compressed every held
+        block a moment later, so the switch measured identical to plain
+        streaming. The prefill boundary (final=True) is NOT gated: the decode
+        store is the same as plain streaming, only the prefill is better.
+        """
+        if not blocks_to_compress or os.environ.get("DKV_STREAM_ELASTIC", "0") != "1":
+            return blocks_to_compress
+        # blocks_to_compress is in block order, i.e. OLDEST first.
+        n_now = 0 if _elastic_room() else max(1, int(os.environ.get(
+            "DKV_STREAM_ELASTIC_BATCH", "4")))
+        if os.environ.get("DKV_DBG_ELASTIC") == "1":
+            import torch as _t
+            print(f"[ELASTIC] seq={total_seq_len} layer={layer_idx} "
+                  f"eligible={len(blocks_to_compress)} compress_now={n_now} "
+                  f"alloc={_t.cuda.memory_allocated() / 1e9:.2f} "
+                  f"resv={_t.cuda.memory_reserved() / 1e9:.2f}", flush=True)
+        for _b in blocks_to_compress[n_now:]:
+            _b.state = "ACCUMULATING"               # stays exact for now
+            self.update_metadata_state(session_id, layer_idx, _b)
+        return blocks_to_compress[:n_now]
+
+    def compress_deferred_blocks(self, session_id: str, final: bool = False) -> None:
         """
         Scan all layers of the session, identify blocks that have left the
         recency window (last 512 tokens), and submit them to SVD compression.
@@ -2037,6 +2094,9 @@ class StreamingSparseIngestManager:
                         b.state = "SUBMITTED"
                         blocks_to_compress.append(b)
                         self.update_metadata_state(session_id, layer_idx, b)
+
+            if not final:
+                blocks_to_compress = self._elastic_hold(session_id, layer_idx, blocks_to_compress, total_seq_len)
 
             if _diag and layer_idx == 0:
                 print(f"[DIAG compress_deferred] layer=0 blocks_to_compress={len(blocks_to_compress)}", flush=True)

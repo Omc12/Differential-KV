@@ -209,7 +209,8 @@ def build_kivi(K, V, T, bits, group=32, resid=128):
 
 
 def lr_side(X, r, R, u_bits=8, res_bits=8, tok_bits=0, tok_group=64,
-            u_mode="col", n_out=0, w=None):
+            u_mode="col", n_out=0, w=None, svd_w=None, heads=1, energy=0.0,
+            r_max=64):
     """Low-rank store for ONE side (K or V) of the blocks: anchor + factor of
     the offsets (r columns) + top-R 8-bit residual rows (+ optional per-token
     low-bit residual). Returns (X_hat, bytes) for X [n, F] (anchor first).
@@ -220,6 +221,14 @@ def lr_side(X, r, R, u_bits=8, res_bits=8, tok_bits=0, tok_group=64,
     n_out:  this many highest-norm rows are kept exact and EXCLUDED from the
             factorization, so outlier tokens cannot bend the basis. They are
             taken out of the residual budget R.
+    svd_w:  B2 -- attention received per row [m+1] (anchor first): the basis is
+            fit to rows scaled by sqrt(weight) AFTER token-norm normalization
+            (before it the normalization would cancel the weight), then every
+            row is projected onto it.
+    heads:  B5 -- factor each of `heads` equal column slices (KV heads)
+            separately, each at rank r (bytes counted per head).
+    energy: B4 -- per block, the smallest rank whose normalized-row energy
+            reaches this fraction (capped at r_max) replaces r.
     """
     a, d = X[:1], X[1:] - X[:1]
     m, F = d.shape
@@ -228,7 +237,34 @@ def lr_side(X, r, R, u_bits=8, res_bits=8, tok_bits=0, tok_group=64,
     if n_out:
         out_idx = torch.topk(d.norm(dim=1), min(n_out, m)).indices
         keep[out_idx] = False
-    Us_k, Vh = factor(d[keep], r, False)
+    dk = d[keep]
+    if energy:
+        tn = dk.norm(dim=1, keepdim=True).clamp(min=1e-5)
+        sv = torch.linalg.svdvals(dk / tn) ** 2
+        cum = sv.cumsum(0) / sv.sum().clamp(min=1e-12)
+        r = int(min(r_max, max(1, int((cum < energy).sum().item()) + 1)))
+    Fh = F // heads
+    Us_parts, Vh_parts = [], []
+    for h in range(heads):
+        xs = dk[:, h * Fh:(h + 1) * Fh]
+        if svd_w is not None:
+            tn = xs.norm(dim=1, keepdim=True).clamp(min=1e-5)
+            ww = (svd_w[1:][keep] / svd_w[1:][keep].mean().clamp(min=1e-12)).sqrt()
+            _, _, Vh_h = svd_r(xs / tn * ww[:, None], r)
+            Us_h = xs @ Vh_h.T
+        else:
+            Us_h, Vh_h = factor(xs, r, False)
+        Us_parts.append(Us_h)
+        Vh_parts.append(Vh_h)
+    # block-diagonal assembly: head h's U columns only reach head h's channels
+    rr = sum(u.shape[1] for u in Us_parts)
+    Us_k = torch.cat(Us_parts, 1)
+    Vh = torch.zeros(rr, F, device=X.device)
+    c0 = 0
+    for h, Vh_h in enumerate(Vh_parts):
+        Vh[c0:c0 + Vh_h.shape[0], h * Fh:(h + 1) * Fh] = Vh_h
+        c0 += Vh_h.shape[0]
+    r = rr
     Us = torch.zeros(m, Us_k.shape[1], device=X.device)
     Us[keep] = Us_k
     qm = 2 ** (u_bits - 1) - 1
@@ -257,8 +293,8 @@ def lr_side(X, r, R, u_bits=8, res_bits=8, tok_bits=0, tok_group=64,
             sc = sc * (w[1:] / w[1:].mean().clamp(min=1e-12))
         i = torch.topk(sc, min(R_left, m)).indices
         Xh[i] = a + quant_rows(d[i], res_bits, 64)
-    b = (F * 2 + m * r * u_bits / 8 + (2 * m if u_mode == "row" else 4 * r) + r * F * 2
-         + R * (F * res_bits / 8 + F / 64 * 4 + 2))
+    b = (F * 2 + m * r * u_bits / 8 + (2 * m if u_mode == "row" else 4 * r)
+         + r * (F // heads) * 2 + R * (F * res_bits / 8 + F / 64 * 4 + 2))
     if tok_bits:
         b += m * (F * tok_bits / 8 + F / tok_group * 4)
     return torch.cat([a, Xh]), b
@@ -299,11 +335,16 @@ def build_hybrid(K, V, T, P, attn_w=None):
             # layer from a measured error, never per model)
             parts, bsum = [], 0.0
             for b0 in range(0, C, BLOCK):
+                aw = attn_w[b0:b0 + BLOCK] if attn_w is not None else None
                 xb, b = lr_side(X[b0:b0 + BLOCK], P["hr"], P["hR"], P["u_bits"],
                                 tok_bits=P.get("htok", 0), u_mode=P.get("hu", "col"),
                                 n_out=P.get("hout", 0),
-                                w=(attn_w[b0:b0 + BLOCK] if (attn_w is not None
-                                   and P.get("hattn") and X is V) else None))
+                                w=(aw if (P.get("hattn") and X is V) else None),
+                                svd_w=(aw if (P.get("hsvdw") and X is V) else None),
+                                heads=((P["_hkv"] if P.get("hheads") == -1 else
+                                        P.get("hheads", 1)) if X is V else 1),
+                                energy=(P.get("henergy", 0.0) if X is V else 0.0),
+                                r_max=P.get("hrmax", 64))
                 parts.append((b0, xb))
                 bsum += b
             if side == "auto" and C > 0:
@@ -316,6 +357,19 @@ def build_hybrid(K, V, T, P, attn_w=None):
             for b0, xb in parts:
                 Xh[b0:b0 + BLOCK] = xb
             nb += bsum
+            duo = P.get("hduo", 0.0)
+            if duo and X is V and C > 0 and P.get("_head_far") is not None:
+                # Duo: the KV heads that put the most attention on far history
+                # (beyond the window, from sampled prompt queries) keep 4-bit
+                # per-token values there instead of the low-rank store. Their
+                # low-rank bytes are kept on the bill (upper bound).
+                hf = P["_head_far"]
+                Dh = X.shape[1] // hf.numel()
+                n_duo = max(1, int(round(duo * hf.numel())))
+                for h in torch.topk(hf, n_duo).indices.tolist():
+                    sl = slice(h * Dh, (h + 1) * Dh)
+                    Xh[:C, sl] = quant_rows(X[:C, sl].contiguous(), 4, min(Dh, 128))
+                    nb += C * Dh * 4 / 8 + C * (Dh / min(Dh, 128)) * 4
     nb += (T - C) * 2 * K.shape[1] * P["window_bits"] / 8 + (
         (T - C) * 2 * (K.shape[1] / 128) * 4 if P["window_bits"] < 16 else 0)
     if P["window_bits"] < 16:
@@ -442,9 +496,21 @@ def evaluate(rec, layers, variants, device):
                 w[b0:b1] = p.sum(0) / vis[rows].float().sum(0).clamp(min=1)
             return w
 
+        head_far = None
+        if any(P_.get("hduo") for P_ in variants.values()):
+            idx = pick
+            Qt = rot(Qp[idx], cos[qpp[idx]], sin[qpp[idx]])
+            lg = torch.einsum("shd,phd->hsp", Qt, Kr_T) * scale
+            vis = ar[None, :] <= qpp[idx][:, None]
+            lg = lg.masked_fill(~vis[None], float("-inf"))
+            pr = torch.softmax(lg, -1)                                       # [Hq,s,T]
+            _win = next(v for v in variants.values() if v.get("hduo")).get("window", 1536)
+            far = ar[None, :] < (qpp[idx][:, None] - _win)
+            head_far = (pr * far[None]).sum(-1).mean(-1).view(Hkv, grp).mean(1)
         attn_src = {"tail": received(qpp >= max(0, T - 1024)), "all": received(qpp >= 0),
                     "res256": received(res256), "res256_blk": received_blockwise(res256)}
         for name, P in variants.items():
+            P = dict(P, _head_far=head_far, _hkv=Hkv)
             Kh, Vh, nb, C = build_store(K, V, T, P, qstat, attn_src[P.get("attn_src", "tail")])
             p1, o1 = attend(Kh, Vh)
             err = ((o1 - o0).norm(dim=-1) / o0.norm(dim=-1).clamp(min=1e-8)).mean().item()
@@ -697,6 +763,21 @@ VARIANTS = {
                       window_bits=16, hattn=True, attn_src="res256_blk"),
     "Hv_R128": V_(hK="kq4", hV="lr", hr=32, hR=128, u_bits=8, hu="block", window_bits=16),
     "Hv_r64": V_(hK="kq4", hV="lr", hr=64, hR=64, u_bits=8, hu="block", window_bits=16),
+    # ── untried ideas on the hybrid's value side (Hv_att is the reference) ──
+    "U_B2_svdw": V_(hK="kq4", hV="lr", hr=32, hR=64, u_bits=8, hu="block", window_bits=16,
+                    hattn=True, hsvdw=True, attn_src="res256_blk"),
+    "U_B5_head4": V_(hK="kq4", hV="lr", hr=4, hR=64, u_bits=8, hu="block", window_bits=16,
+                     hattn=True, hheads=-1, attn_src="res256_blk"),
+    "U_B5_head8": V_(hK="kq4", hV="lr", hr=8, hR=64, u_bits=8, hu="block", window_bits=16,
+                     hattn=True, hheads=-1, attn_src="res256_blk"),
+    "U_B4_e90": V_(hK="kq4", hV="lr", hr=32, hR=64, u_bits=8, hu="block", window_bits=16,
+                   hattn=True, henergy=0.90, attn_src="res256_blk"),
+    "U_B4_e95": V_(hK="kq4", hV="lr", hr=32, hR=64, u_bits=8, hu="block", window_bits=16,
+                   hattn=True, henergy=0.95, attn_src="res256_blk"),
+    "U_duo25": V_(hK="kq4", hV="lr", hr=32, hR=64, u_bits=8, hu="block", window_bits=16,
+                  hattn=True, hduo=0.25, attn_src="res256_blk"),
+    "U_duo12": V_(hK="kq4", hV="lr", hr=32, hR=64, u_bits=8, hu="block", window_bits=16,
+                  hattn=True, hduo=0.125, attn_src="res256_blk"),
     "kivi4": V_(kivi=4),
     "kivi2": V_(kivi=2),
     "u4w8+r40+res160+vg0+att": V_(u_bits=4, u_colscale=True, window_bits=8, rank=40,
@@ -764,7 +845,8 @@ def main():
             k, mean(rows, "err"), rel, mean(rows, "kl"), mean(rows, "bpt"), mean(rows, "cmp")))
     with open(os.path.join(args.dir, "screen.jsonl"), "a") as fh:
         for k, rows in agg.items():
-            fh.write(json.dumps({"variant": k, "params": variants.get(k), "rows": rows}) + "\n")
+            fh.write(json.dumps({"variant": k, "params": variants.get(k), "rows": rows},
+                                default=str) + "\n")
 
 
 if __name__ == "__main__":

@@ -1948,7 +1948,7 @@ class KVRuntimeManager:
         # blocks from the rotated buffer first (no-op unless that path was used).
         self.finalize_contiguous_prefill(session_id)
         if self._streaming_mgr is not None:
-            self._streaming_mgr.compress_deferred_blocks(session_id)
+            self._streaming_mgr.compress_deferred_blocks(session_id, final=True)
             # The coarse shadow publishes at the SAME boundary. If it were left
             # deferred its blocks would still be ACCUMULATING when decode starts
             # and the coarse scale would silently contribute nothing -- the exact
@@ -1956,7 +1956,7 @@ class KVRuntimeManager:
             if self.dual_scale and not is_coarse_session(session_id):
                 _csid = coarse_session_id(session_id)
                 if _csid in self._streaming_mgr.session_blocks:
-                    self._streaming_mgr.compress_deferred_blocks(_csid)
+                    self._streaming_mgr.compress_deferred_blocks(_csid, final=True)
 
             # Drain the compression queue before decode starts. Blocks queued
             # above are SUBMITTED, which is in NEITHER collection

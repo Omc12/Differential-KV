@@ -3461,7 +3461,20 @@ def apply_dkv_attention_patch(model, kv_manager):
                         ).permute(0, 2, 1, 3)                              # [n, S, H, D]
                         return kw
 
-                    if os.environ.get("DKV_PREFILL_LOWMEM", "1") != "0":
+                    if os.environ.get("DKV_PREFILL_SDPA", "0") == "1":
+                        # E1 (default off): fused attention per block tile, no
+                        # [H, Q, keys] tensors, so no query slicing either; see
+                        # history_attend_sdpa_tile.
+                        from native_core.sparse_decode.triton_fused_decode import (
+                            history_attend_block_tiled, history_attend_sdpa_tile)
+                        _kqb = int(getattr(pool, "key_quant_bits", 0) or 0)
+                        _kqg = int(getattr(pool, "kq_group", 32) or 32)
+                        result = history_attend_block_tiled(
+                            lambda kw: history_attend_sdpa_tile(
+                                q, kw, num_key_value_groups, _kqb, _kqg),
+                            _hist_kw, int(os.environ.get("DKV_PREFILL_SDPA_TILE", "64")),
+                            q.dtype)
+                    elif os.environ.get("DKV_PREFILL_LOWMEM", "1") != "0":
                         # On by default (DKV_PREFILL_LOWMEM=0 disables). Each query row's softmax is over
                         # history only, so rows are independent: slicing the
                         # chunk's queries is exact and bounds the [H, Q, history]
