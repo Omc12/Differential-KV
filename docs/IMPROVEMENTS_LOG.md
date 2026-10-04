@@ -200,7 +200,8 @@ the decode store and its bytes are unchanged; only the prefill sees exact histor
   point (plain hybrid streaming 478 s). Its gate read allocated memory only (the remat
   gate's first mistake again). v3: allocated AND reserved must leave the headroom; when
   reserved alone blocks, free cached blocks are returned once and it is re-read.
-  Retest at 65k queued.
+  v3 at 65k: still spilled, 11.84 alloc / 12.60 reserved, 429 s (v2 2,095 s). Retest
+  with 3.5 GB elastic headroom running.
 
 ## Generality (tier 1, 2026-10-04): the hybrid on three architectures
 
@@ -353,8 +354,13 @@ Tile 64 blocks (`DKV_PREFILL_SDPA_TILE`).
   on outputs of 8.8 each), so the bound is relative.
 - Result (granite hybrid streaming): tier 2 KL 0.2253 vs 0.2193, paired +0.006 [-0.005,
   +0.017] (no difference); 32k ladder point **52.6 s vs 110.4 s wall (2.1x), 1.60 vs 3.37
-  s/1k**, peak 11.56 GB both. Default-on candidate once its reach is checked at 65k-131k
-  and it is run on the shipped (non-hybrid) streaming store.
+  s/1k**, peak 11.56 GB both.
+- Shipped store (granite, streaming auto at 16k, as the shipped ceiling ladder): tier 2
+  +0.006 [-0.004, +0.017] vs plain streaming; **65k 149 s vs 354 s (2.4x), 131k 416 s vs
+  1,226 s (2.9x)**, peaks 9.36 / 10.86 GB vs 9.36 / 11.00. Same reach.
+- **ON by default on CUDA from 2026-10-04** (`DKV_PREFILL_SDPA` default `auto` = on when
+  the queries are on CUDA; `=0` restores the previous path). Paper speed numbers measured
+  before this date used the previous path.
 
 **E3 tiled KIVI-4 baseline** -- new arm `kivi4_tiled` (benchmarks/kv_baselines.py). Same
 quantizer and bytes as `kivi4_chunked`. kivi4_chunked's ceiling (49k granite, 98k Qwen)

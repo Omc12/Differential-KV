@@ -3463,10 +3463,16 @@ def apply_dkv_attention_patch(model, kv_manager):
                         ).permute(0, 2, 1, 3)                              # [n, S, H, D]
                         return kw
 
-                    if os.environ.get("DKV_PREFILL_SDPA", "0") == "1":
-                        # E1 (default off): fused attention per block tile, no
-                        # [H, Q, keys] tensors, so no query slicing either; see
-                        # history_attend_sdpa_tile.
+                    _sdpa_env = os.environ.get("DKV_PREFILL_SDPA", "auto")
+                    if _sdpa_env == "1" or (_sdpa_env == "auto" and q.is_cuda):
+                        # E1: fused attention per block tile, no [H, Q, keys]
+                        # tensors, so no query slicing either; see
+                        # history_attend_sdpa_tile. ON by default on CUDA since
+                        # 2026-10-04 (DKV_PREFILL_SDPA=0 restores the previous
+                        # path): granite tier 2 equal to it on both stores
+                        # (+0.006 [-0.004, +0.017] shipped, +0.006 [-0.005,
+                        # +0.017] hybrid), streaming 2.4x faster at 65k and
+                        # 2.9x at 131k, same reach, peak equal or lower.
                         from native_core.sparse_decode.triton_fused_decode import (
                             history_attend_block_tiled, history_attend_sdpa_tile)
                         _kqb = int(getattr(pool, "key_quant_bits", 0) or 0)
