@@ -2137,7 +2137,8 @@ def _get_prefill_chunk_size(kv_manager, session_id: str, device) -> int:
 
 
 def _resid_attn_enabled() -> bool:
-    return os.environ.get("DKV_RESID_ATTN", "0") == "1"
+    from runtime.native_block_pool import resid_attn_enabled
+    return resid_attn_enabled()
 
 
 def _find_rotary(model):

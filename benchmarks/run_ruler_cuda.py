@@ -409,7 +409,12 @@ def main():
            "dkv_env": {k: os.environ[k] for k in
                        ("DKV_STREAMING_COMPRESS", "DKV_PREFILL_LOWMEM",
                         "DKV_REMAT_CACHE", "DKV_STREAM_AUTO_TOKENS",
-                        "DKV_STREAM_PROFILE") if k in os.environ} or None,
+                        "DKV_STREAM_PROFILE",
+                        # store / schedule switches (2026-10-04); recorded only
+                        # when set, so default stores keep matching
+                        "DKV_STORE", "DKV_KEY_QUANT", "DKV_RESID_ATTN",
+                        "DKV_STREAM_ELASTIC", "DKV_PREFILL_SDPA",
+                        "DKV_REMAT_GATE") if k in os.environ} or None,
            "protocol": "ruler-official-generators"}
     # Only when used, so stores written before the option existed still match.
     if args.per_task:

@@ -35,6 +35,11 @@ _DECODE_SOURCES = (
     "ACTIVE_RUNTIME/native_core/sparse_decode/remat_cache.py",
     "ACTIVE_RUNTIME/runtime/dkv_attention.py",
     "ACTIVE_RUNTIME/native_core/config.py",
+    # Added 2026-10-04: the store and the streaming schedule decide what decode
+    # reads (elastic window, hybrid store), and were outside the hash.
+    "ACTIVE_RUNTIME/native_core/streaming_sparse_ingest.py",
+    "ACTIVE_RUNTIME/native_core/compression/lowrank.py",
+    "ACTIVE_RUNTIME/runtime/native_block_pool.py",
 )
 
 

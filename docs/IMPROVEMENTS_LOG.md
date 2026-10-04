@@ -200,8 +200,14 @@ the decode store and its bytes are unchanged; only the prefill sees exact histor
   point (plain hybrid streaming 478 s). Its gate read allocated memory only (the remat
   gate's first mistake again). v3: allocated AND reserved must leave the headroom; when
   reserved alone blocks, free cached blocks are returned once and it is re-read.
-  v3 at 65k: still spilled, 11.84 alloc / 12.60 reserved, 429 s (v2 2,095 s). Retest
-  with 3.5 GB elastic headroom running.
+  v3 at 65k: still spilled, 11.84 alloc / 12.60 reserved, 429 s (v2 2,095 s).
+- Elastic headroom 3.5 GB (now the default): hybrid 65k ok, 11.37 / 11.70 GB, 191 s.
+- Shipped store (granite): tier 2 KL 0.378 vs plain streaming 0.527, **paired -0.148
+  [-0.241, -0.074]**, vs exact +0.065 [+0.009, +0.136] (the 3.5 GB headroom compresses
+  earlier on this store, so it does not reach exact here as the hybrid did); 131k ok,
+  10.87 / 11.26 GB, 499 s (416 s without elastic).
+- **ON by default from 2026-10-04** (`DKV_STREAM_ELASTIC=0` disables). Streaming quality
+  numbers measured before this date used plain streaming.
 
 ## Generality (tier 1, 2026-10-04): the hybrid on three architectures
 
@@ -326,6 +332,28 @@ KL 0.219 at 8.3 tok/s (base streaming 0.527 at 5.5). Store 0.809 GB (2.75x; base
 3.56x) = +30% with the corrected accounting. Streaming peak 10.94 GB vs 7.99: the
 memory-sized cache using free headroom under the spill line (gives way to the store;
 reach to be confirmed by ladder).
+
+## Store modes (2026-10-04)
+
+`DKV_STORE=lowrank` (default) | `hybrid`. `hybrid` is shorthand for `DKV_KEY_QUANT=pc4` +
+`DKV_RESID_ATTN=1` (an explicitly set switch wins) and works in exact and streaming mode
+alike (runtime/native_block_pool.py `store_mode`). RULER / LongBench runners now record
+DKV_STORE, DKV_KEY_QUANT, DKV_RESID_ATTN, DKV_STREAM_ELASTIC, DKV_PREFILL_SDPA and
+DKV_REMAT_GATE in their config when set (they recorded a fixed list, so a hybrid run
+would have matched a low-rank store), and the code fingerprint now also hashes
+streaming_sparse_ingest.py, lowrank.py and native_block_pool.py.
+
+**Which old results stand** (after E1 and elastic went default-on):
+
+| results | status |
+|---|---|
+| DKV exact: quality, peak, reach, decode speed | valid (nothing changed on that path) |
+| DKV streaming: peak, reach | valid (equal or lower peak, 131k still reached) |
+| DKV streaming: prefill time, s/1k | stale (E1: 2.4-2.9x faster) |
+| DKV streaming: quality | stale for the new default (elastic: better); valid as "plain streaming" |
+| KIVI-4 reach | stale (kivi4_chunked harness); use kivi4_tiled |
+| KIVI-4 quality | re-run with kivi4_tiled for consistency |
+| hybrid mode | none yet: LongBench, RULER, ladders in both modes, both models |
 
 ## Batch E: prefill speed and baseline fairness (2026-10-04)
 

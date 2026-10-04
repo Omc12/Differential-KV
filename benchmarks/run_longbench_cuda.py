@@ -721,7 +721,10 @@ def main():
                         "DKV_STREAMING_COMPRESS", "DKV_PREFILL_LOWMEM",
                         "DKV_REMAT_CACHE", "DKV_RESIDUAL_QUANT",
                         "DKV_DECODE_RESIDUALS", "DKV_STREAM_AUTO_TOKENS",
-                        "DKV_STREAM_PROFILE")
+                        "DKV_STREAM_PROFILE",
+                        # store / schedule switches (2026-10-04)
+                        "DKV_STORE", "DKV_KEY_QUANT", "DKV_RESID_ATTN",
+                        "DKV_STREAM_ELASTIC", "DKV_PREFILL_SDPA", "DKV_REMAT_GATE")
                        if k in os.environ} or None,
            "decode_defaults": "serving" if args.arm == "dkv" else None,
            # The attention path the PREFILL ran under. Recorded because

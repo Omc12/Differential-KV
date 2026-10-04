@@ -612,7 +612,7 @@ _original_is_compression_eligible = StreamingKVBlock.is_compression_eligible
 def _elastic_room() -> bool:
     """DKV_STREAM_ELASTIC: is there memory to keep history exact this chunk?
 
-    True while allocated memory plus DKV_STREAM_ELASTIC_RESERVE_GB (default 2.0)
+    True while allocated memory plus DKV_STREAM_ELASTIC_RESERVE_GB (default 3.5; 2.0 spilled at 65k on granite)
     stays under 94% of the card -- the spill line the ceiling measurements use --
     AND reserved memory does too. The first version read allocated only and at
     65k on granite let reserved reach 16.5 GB on a 12.9 GB card (Windows pages
@@ -626,7 +626,7 @@ def _elastic_room() -> bool:
         if not _t.cuda.is_available():
             return False
         total = _t.cuda.get_device_properties(_t.cuda.current_device()).total_memory
-        reserve = float(os.environ.get("DKV_STREAM_ELASTIC_RESERVE_GB", "2.0")) * 1e9
+        reserve = float(os.environ.get("DKV_STREAM_ELASTIC_RESERVE_GB", "3.5")) * 1e9
         line = 0.94 * total
         if _t.cuda.memory_allocated() + reserve >= line:
             return False
@@ -1978,7 +1978,7 @@ class StreamingSparseIngestManager:
         """ELASTIC WINDOW (DKV_STREAM_ELASTIC=1, default off).
 
         Compress only as far as memory forces: while allocated memory plus a
-        headroom (DKV_STREAM_ELASTIC_RESERVE_GB, default 2.0 -- it must cover a
+        headroom (DKV_STREAM_ELASTIC_RESERVE_GB, default 3.5 -- it must cover a
         compression batch's transients and the chunk's attention) stays under
         94% of the card, history stays EXACT and later chunks attend it as
         exact prefill would. Once it does not, the OLDEST eligible blocks are
@@ -1993,7 +1993,10 @@ class StreamingSparseIngestManager:
         streaming. The prefill boundary (final=True) is NOT gated: the decode
         store is the same as plain streaming, only the prefill is better.
         """
-        if not blocks_to_compress or os.environ.get("DKV_STREAM_ELASTIC", "0") != "1":
+        # ON by default since 2026-10-04 (DKV_STREAM_ELASTIC=0 disables): granite
+        # shipped store, tier 2 -0.148 [-0.241, -0.074] KL vs plain streaming,
+        # 131k still ok (10.87 GB); hybrid store identical to exact mode.
+        if not blocks_to_compress or os.environ.get("DKV_STREAM_ELASTIC", "1") != "1":
             return blocks_to_compress
         # blocks_to_compress is in block order, i.e. OLDEST first.
         n_now = 0 if _elastic_room() else max(1, int(os.environ.get(

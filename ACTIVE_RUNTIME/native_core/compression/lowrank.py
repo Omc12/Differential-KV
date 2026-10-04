@@ -2376,7 +2376,8 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                 # at equal bytes). Query-agnostic, and computed per block, so
                 # exact and streaming compression rank identically.
                 _aw = None
-                if os.environ.get("DKV_RESID_ATTN", "0") == "1":
+                from runtime.native_block_pool import resid_attn_enabled as _rae
+                if _rae():
                     try:
                         from runtime.dkv_attention import resid_attn_weight
                         _aw = resid_attn_weight(manager, block, stacked_k[i, :T_active])

@@ -33,9 +33,33 @@ _BLOCK_TRUNCATION_WARNED = False
 KEY_QUANT_GROUP = 32
 
 
+def store_mode() -> str:
+    """DKV_STORE: which store DKV builds, in exact and streaming mode alike.
+
+      lowrank (default) -- joint low-rank K/V factor + int8 residual rows.
+      hybrid            -- keys per-channel 4-bit (KIVI layout), values low rank
+                           with residual rows ranked by error x attention
+                           received. Shorthand for DKV_KEY_QUANT=pc4 +
+                           DKV_RESID_ATTN=1; either switch set explicitly wins.
+    """
+    s = (os.environ.get("DKV_STORE", "lowrank") or "lowrank").strip().lower()
+    return s if s in ("lowrank", "hybrid") else "lowrank"
+
+
+def resid_attn_enabled() -> bool:
+    """Residual rows ranked by error x attention received (DKV_RESID_ATTN)."""
+    v = os.environ.get("DKV_RESID_ATTN")
+    if v is not None:
+        return v == "1"
+    return store_mode() == "hybrid"
+
+
 def _key_quant_bits_from_env() -> int:
-    """DKV_KEY_QUANT=pc4 -> 4, pc8 -> 8; unset or anything else -> 0 (off)."""
+    """DKV_KEY_QUANT=pc4 -> 4, pc8 -> 8, off/none -> 0; unset -> 4 under
+    DKV_STORE=hybrid, else 0."""
     s = (os.environ.get("DKV_KEY_QUANT", "") or "").strip().lower()
+    if not s:
+        return 4 if store_mode() == "hybrid" else 0
     return {"pc4": 4, "pc8": 8}.get(s, 0)
 
 
