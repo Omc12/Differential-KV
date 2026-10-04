@@ -912,6 +912,11 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
         # line): rebuilding is then paid once per refresh interval instead of
         # every step where memory allows, and never at the cost of reach.
         _nostore = not _remat_fits(pool, block_indices)
+    elif os.environ.get("DKV_REMAT_GATE", "0") == "1":
+        # Same memory gate for the default (exact-mode) cache, which otherwise
+        # keeps every layer unconditionally -- at length a dense-size copy that
+        # can carry decode past the card. Off by default until measured.
+        _nostore = not _remat_fits(pool, block_indices)
     if block_indices is None or block_indices.numel() == 0:
         _remat_why("no-blocks")
         return None

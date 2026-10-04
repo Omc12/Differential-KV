@@ -131,6 +131,38 @@ despite tier 1's 20% dropped mass (only 8 of 32 layers attend; recurrent layers 
 the rest). Second time tier 1's single-layer metric overstated an effect: tier 2 decides.
 Still to check: granite (all 40 layers attend) beyond 16k.
 
+### Batch C on granite (2026-10-04, hybrid streaming, 8 RULER prompts at 24k-32k, 140 steps)
+
+| Arm | KL | dKL vs top-16 [95% CI] | dec tok/s |
+|---|---|---|---|
+| top-16 (shipped) | 0.074 | - | 5.5 |
+| all blocks | 0.074 | +0.0001 [-0.009, +0.008] | 2.4 |
+| top-32 (= all at 32k) | 0.074 | identical | 2.2 |
+
+**Decision: keep top-16; batch C closed on both architectures** (Qwen hybrid-attention
+and granite all-attention). The hybrid in streaming mode at 24-32k reads KL 0.074.
+
+## Batch D (2026-10-04)
+
+**D3 granite decode defect -- already resolved.** Root cause (wrong attention scale in the
+decode kernels) was fixed 2026-09-02; the remaining open item then (NaN on the
+project-then-attend path) is not observed: today's streaming arms take that path and
+return finite, sensible logits on all 374 tier-2 steps. No change.
+
+**D1 memory-sized remat cache for the DEFAULT exact mode** -- `DKV_REMAT_GATE=1` (off by
+default; the hybrid already uses the gate). Short ladder, granite exact, 128-token answers:
+
+| rung | no gate (alloc / reserved, status) | gate |
+|---|---|---|
+| 16,384 | 11.49 / 11.93 ok, 2.31 s/1k | 11.05 / 11.39 ok, 2.61 s/1k |
+| 20,480 | 11.69 / 12.46 **spilled** | 11.28 / 11.95 **ok** |
+| 24,576 | - | 11.37 / 12.15 spilled (exact prefill holds dense KV) |
+
+Reading: the gate lifts granite's exact-mode ceiling 16k -> 20k (+25%, = preallocated
+dense) by declining to cache layers when memory is short; cost is per-step rebuilds for
+those layers (16k decode ~13% slower); nothing changes when memory is ample. Candidate
+for default-on after the paper ladders.
+
 ## Generality (tier 1, 2026-10-04): the hybrid on three architectures
 
 | Model | Store | out_err | attn KL | B/tok |
