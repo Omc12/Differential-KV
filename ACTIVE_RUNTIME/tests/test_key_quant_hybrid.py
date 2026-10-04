@@ -190,3 +190,20 @@ def test_history_attention_key_deltas_equivalent():
     ref = f(U=U, V_K=V_K, **common)
     got = f(U=U, V_K=torch.zeros_like(V_K), key_deltas=kd, **common)
     assert torch.allclose(got.float(), ref.float(), atol=1e-4), (got - ref).abs().max()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="SDPA fp16 on CUDA")
+def test_gqa_fold_equivalent():
+    """Folding query-head groups along the query axis == expanding K/V."""
+    from native_core.sparse_decode.remat_cache import attend_with_remat
+    torch.manual_seed(0)
+    N, S, Hkv, D, g = 3, 9, 2, 16, 4
+    K = torch.randn(N, S, Hkv, D, device="cuda", dtype=torch.float16)
+    V = torch.randn_like(K)
+    dk = torch.randn(1, Hkv, 7, D, device="cuda", dtype=torch.float16)
+    dv = torch.randn_like(dk)
+    q = torch.randn(1, Hkv * g, 1, D, device="cuda", dtype=torch.float16)
+    sl = torch.tensor([8, 5, 8], device="cuda")
+    a = attend_with_remat(q, K, V, sl, dk, dv, 7, g, attn_scale=0.2)
+    b = attend_with_remat(q, K, V, sl, dk, dv, 7, g, attn_scale=0.2, fold_gqa=True)
+    assert a.shape == b.shape and torch.allclose(a, b, atol=2e-3)

@@ -76,14 +76,25 @@ def dequantize_keys_per_channel(codes: torch.Tensor, scale: torch.Tensor,
                                 dtype: torch.dtype = torch.float16) -> torch.Tensor:
     """Inverse of quantize_keys_per_channel -> [N, S, H, D] in `dtype`."""
     if bits == 4:
-        lo4 = codes & 15
-        hi4 = codes >> 4
-        codes = torch.stack((lo4, hi4), dim=-1).flatten(-2)
+        codes = torch.stack((codes & 15, codes >> 4), dim=-1).flatten(-2)
     N, S, H, D = codes.shape
-    gi = torch.arange(S, device=codes.device) // group                       # [S]
-    s = scale[:, gi].float()                                                   # [N,S,H,D]
-    z = zero[:, gi].float()
-    return (codes.float() * s + z).to(dtype)
+    G = scale.shape[1]
+    # Broadcast each group's scale/zero over its rows instead of gathering a
+    # full [N, S, H, D] copy of them (the decode-path profile put the gather at
+    # most of the dequant's cost). Pad S up to whole groups, then trim.
+    # fp32 arithmetic, one rounding at the end: every reader of the codes
+    # (decode keys, codes-backed K residuals, history attention) then agrees
+    # bit-for-bit, which half-precision arithmetic here did not.
+    ct = torch.float32
+    pad = G * group - S
+    if pad < 0:                       # more rows than the stored groups cover
+        gi = torch.arange(S, device=codes.device) // group
+        return (codes.to(ct) * scale[:, gi].to(ct) + zero[:, gi].to(ct)).to(dtype)
+    if pad:
+        codes = torch.cat([codes, codes.new_zeros((N, pad, H, D))], dim=1)
+    out = (codes.view(N, G, group, H, D).to(ct) * scale.unsqueeze(2).to(ct)
+           + zero.unsqueeze(2).to(ct))
+    return out.view(N, G * group, H, D)[:, :S].to(dtype)
 
 
 def _warn_block_truncation(seq_len: int, pool_max_seq: int) -> None:

@@ -2075,7 +2075,13 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     )
     g["has_res"] = bool(has_res_pool and res_pos is not None and res_pos_v is not None)
     if g["has_res"]:
-        if hasattr(base_pool, "get_residual_k"):
+        if _kd is not None:
+            # Hybrid store: a key residual IS the key code at that row, which
+            # k_delta already carries -- substituting it would rebuild the same
+            # value. Skip K and keep only the value residuals.
+            res_k_g = None
+            res_v_g = base_pool.get_residual_v(indices)
+        elif hasattr(base_pool, "get_residual_k"):
             res_k_g = base_pool.get_residual_k(indices)
             res_v_g = base_pool.get_residual_v(indices)
         else:
@@ -2083,7 +2089,7 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
             res_v_g = base_pool.residual_V_values[indices]
         res_pos_g = res_pos[indices]                    # [N, MAX_RES] within-block offsets (-1 padded)
 
-        if do_rot:
+        if do_rot and res_k_g is not None:
             # By default the residual K is rotated at the block ANCHOR position
             # (like V_K) — the PTA approximation. That scrambles the high-frequency
             # RoPE dims of tokens far from the anchor.  A skip block's exact

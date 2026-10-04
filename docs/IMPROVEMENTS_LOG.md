@@ -219,7 +219,41 @@ attention actually reads. This is the architecture-level result: no model-specif
   as a residual source (gather checks them first so it never dequantizes the whole pool).
 - Tests: 10 hybrid tests (adds value-only factor, codes-backed K residuals incl. padding
   and growth, for int8 and fp16 residual formats); parity suites and smoke unchanged.
-- Tier 2 re-check of quality and store size running.
+- Tier 2 re-check (2026-10-04): quality unchanged -- granite exact KL 0.1325 (-0.181
+  [-0.323, -0.068], top-1 +3.7%), streaming 0.220; Qwen2.5-7B 0.249 (-0.865 [-1.354,
+  -0.459]). Peak -0.19 GB and exact decode 5.9 -> 6.6 tok/s vs the untrimmed hybrid.
+- Store (accounting fixed to count a value-only factor and V-only residual rows), granite
+  per 1,024-token block per layer: shipped DKV 676 KB (6.1x), hybrid 996 KB (4.1x, was
+  1,201 KB before the trims), dense 4,096 KB. The +47% is the inherent cost of 4-bit keys.
+- Committed f913d7db (switch off by default; revert = leave it off or git revert).
+
+**Open costs before the hybrid can be a default:** streaming decode 3.4 tok/s vs 5.5 for
+streaming base (routed blocks rebuilt every step; a fused kernel reading the codes, or a
+bounded remat cache, is the fix); reach on granite (store +47% -> ceiling to be measured by
+ladder in the overnight runs).
+
+### Hybrid streaming decode speed (2026-10-04; hybrid-only unless noted)
+
+Profiled with benchmarks/profile_hybrid_decode.py (synchronized timers around each
+decode-path function; granite, 16k, 48 tokens; ms/token incl. sync overhead):
+
+| Change | ms/token | Notes |
+|---|---|---|
+| start (hybrid streaming) | 435 | base streaming 217 |
+| dequant broadcasts scales (no [N,S,H,D] gather), fp32 math, one rounding | -- | all readers agree bit-for-bit |
+| skip key residuals in the materialise path (the codes already give those keys) | 391 | |
+| rebuild in the factor dtype (fp16), no fp32 intermediates | 322 | substitution, not small-delta addition, so no precision loss |
+| memory-sized remat cache (`_remat_fits`): keep a layer's rebuilt blocks while reserved memory after the entry + 1.5 GB step headroom stays under 94% of the card; always look up, drop stale entries that cannot refresh | 274 | 33/40 layers cached at 16k, no paging. First two gate versions were wrong and are recorded: driver "free" ignores reserved-but-unused memory (refused at 1.3 GB "free"); allocated-only + 1 GB let reserved pass the card (attention 98 -> 149 ms from paging) |
+| GQA fold in `attend_with_remat`: one decode token, the query heads of a KV head laid along the query axis, no K/V copies | **232** | bit-identical to expansion (test); on for the hybrid, `DKV_REMAT_GQA_FOLD=1` extends it to every materialise step (default path untouched until measured) |
+
+Tests: test_key_quant_hybrid.py now 11 (adds the GQA fold equivalence).
+
+Tier 2 (granite, 374 steps): quality unchanged and decode now FASTER than shipped DKV --
+hybrid exact KL 0.135 (-0.179 [-0.319, -0.067]) at 8.7 tok/s (base 7.0); hybrid streaming
+KL 0.219 at 8.3 tok/s (base streaming 0.527 at 5.5). Store 0.809 GB (2.75x; base 0.624,
+3.56x) = +30% with the corrected accounting. Streaming peak 10.94 GB vs 7.99: the
+memory-sized cache using free headroom under the spill line (gives way to the store;
+reach to be confirmed by ladder).
 
 ## Values robust to outlier tokens (tier 1, 2026-10-04)
 

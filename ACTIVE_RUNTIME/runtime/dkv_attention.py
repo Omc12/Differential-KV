@@ -758,6 +758,40 @@ def _remat_why(code, extra=""):
 _HYBRID_FALLBACK_WARNED = False
 
 
+def _remat_fits(pool, block_indices) -> bool:
+    """Is there room to keep one more layer's materialised blocks resident?
+
+    Entry size = routed blocks x (1 + block span) x kv heads x head dim x K and V
+    x element size. Fits when ALLOCATED memory plus the entry stays under the
+    spill line the ceiling measurements use (94% of the card) less
+    DKV_REMAT_RESERVE_GB (default 1.0) of headroom for the step's transients.
+    Allocated, not the driver's free figure: the caching allocator holds
+    reserved-but-unused memory that the driver reports as taken, which made the
+    first version of this refuse at 1.3 GB "free" with GBs actually available.
+    Any failure answers "no": the fallback is a per-step rebuild, never a spill.
+    """
+    try:
+        if not torch.cuda.is_available() or block_indices is None:
+            return False
+        n = int(block_indices.numel())
+        S = int(pool.U.shape[1]) + 1
+        H, D = int(pool.num_kv_heads), int(pool.head_dim)
+        need = n * S * H * D * 2 * torch.finfo(pool.dtype).bits // 8
+        total = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
+        reserve = float(os.environ.get("DKV_REMAT_RESERVE_GB", "1.5")) * 1e9
+        # What spills is RESERVED memory. The allocator usually already holds
+        # free reserved blocks (prefill transients), so the entry plus a step's
+        # transient headroom can come from them; reserved only grows when
+        # allocated + entry + headroom exceeds it. Budget whichever is larger.
+        # Headroom 1.5 GB: with 1.0 GB a granite 16k step's transients (GQA-
+        # expanded K/V for SDPA among them) pushed reserved past the card.
+        after = max(torch.cuda.memory_reserved(),
+                    torch.cuda.memory_allocated() + need + reserve)
+        return after < 0.94 * total
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
 def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
                   pool, block_indices, anchor_indices, *args, **kwargs):
     """Materialise-then-attend; see _remat_attend_impl.
@@ -871,7 +905,13 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
         if not _hybrid:
             _remat_why("disabled")
             return None
-        _nostore = True
+        # MEMORY-SIZED CACHE. Streaming turns the cache off because at length a
+        # cache of every layer's rebuilt blocks costs memory the store needs.
+        # Keep this layer's entry only while free memory stays above a reserve
+        # (DKV_REMAT_RESERVE_GB, default 1.0, plus 6% of the card -- the spill
+        # line): rebuilding is then paid once per refresh interval instead of
+        # every step where memory allows, and never at the cost of reach.
+        _nostore = not _remat_fits(pool, block_indices)
     if block_indices is None or block_indices.numel() == 0:
         _remat_why("no-blocks")
         return None
@@ -1203,7 +1243,12 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
     _poolgen = (_smgr2._metadata_versions.get(sid, {}).get(captured_layer_idx, 0)
                 if _smgr2 is not None else 0)
     _rkey = _RC.make_key(captured_layer_idx, current_version, _poolgen, _step)
-    _hit = None if _nostore else _rc.get(_rkey)
+    # Always LOOK UP: an entry kept earlier is reused whatever memory is now;
+    # only keeping a new one depends on room. A stale entry that cannot be
+    # refreshed is dropped, not left holding memory.
+    _hit = _rc.get(_rkey)
+    if _hit is None and _nostore:
+        _rc.invalidate_layer(captured_layer_idx)
     if _hit is None:
         # RAW on an unrotated pool -- see the rotation right after _rb below, and
         # the `raw_k` note in _gather_routed_blocks_for_kernel. On a rotated pool
@@ -1432,7 +1477,10 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
     out = _awr(q, _Km, _Vm, _seq_cached, dense_k, dense_v, dense_len,
                num_key_value_groups, trace_row=_trace_row, trace_tok=_trace_tok,
                extra=_extra, curr_kv=curr_kv, dense_mask=dense_mask,
-               attn_scale=_scale)
+               attn_scale=_scale,
+               # Opt-in hybrid store first; DKV_REMAT_GQA_FOLD=1 extends it to
+               # every materialise step once measured there too.
+               fold_gqa=(_hybrid or os.environ.get("DKV_REMAT_GQA_FOLD", "0") == "1"))
     # Advance once per token, on the LAST DKV layer. _LAST_DKV_LAYER learns the
     # max layer index by watching layers go by, so on the FIRST token it equals
     # the current layer at every layer; only advance once it has stopped growing.

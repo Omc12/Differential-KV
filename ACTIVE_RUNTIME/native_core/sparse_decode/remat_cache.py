@@ -246,6 +246,28 @@ def reconstruct_blocks(
     H, D = V_K.shape[2], V_K.shape[3]
     r = min(int(rank), V_K.shape[1], U.shape[2])
 
+    if k_delta is not None:
+        # Hybrid store: keys come straight from the codes, and the value
+        # multiply runs in the factor's own dtype (tensor cores accumulate in
+        # fp32), not fp32 -- the decode profile put the fp32 bmm at ~20% of a
+        # step. Values are cast to that dtype on return either way.
+        # Everything stays in that dtype: fp32 intermediates of [N, S, H, D]
+        # were most of this function's time. Residuals here are SUBSTITUTED
+        # (exact rows replace their twins), so there is no small-delta-on-large-
+        # anchor addition for half precision to round away.
+        dt = V_V.dtype
+        Uh = U[:, :, :r].to(dt)
+        if U_scale is not None:
+            Uh = Uh * U_scale.view(N, 1, 1).to(dt)
+        V = torch.bmm(Uh, V_V[:, :r].reshape(N, r, H * D)).view(N, S, H, D)
+        V = torch.addcmul(anchors_V.unsqueeze(1).to(dt), V, scales.view(N, 1, 1, 1).to(dt))
+        K = k_delta[:, :S].to(dt) + anchors_K.unsqueeze(1).to(dt)
+        K = _scatter_residuals(K, res_k, res_pos, anchors_K.to(dt))
+        V = _scatter_residuals(V, res_v, res_pos_v, anchors_V.to(dt))
+        K = torch.cat([anchors_K.unsqueeze(1).to(dt), K], dim=1)
+        V = torch.cat([anchors_V.unsqueeze(1).to(dt), V], dim=1)
+        return K, V
+
     Uf = U[:, :, :r].float()
     if U_scale is not None:
         Uf = Uf * U_scale.view(N, 1, 1).float()
@@ -359,8 +381,13 @@ def attend_with_remat(
     curr_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     dense_mask: Optional[torch.Tensor] = None,
     attn_scale: Optional[float] = None,
+    fold_gqa: bool = False,
 ) -> torch.Tensor:
     """One plain attention over [materialised routed blocks | dense window].
+
+    `fold_gqa`: for a single decode token, attend each KV head once with its
+    group of query heads laid along the query axis, instead of copying K and V
+    once per query head. Same arithmetic; no [1, H_q, T, D] copies.
 
     This is what makes the cache pay: with K/V already materialised there is no
     reconstruction left in the inner loop, so the step is an ordinary SDPA —
@@ -452,7 +479,13 @@ def attend_with_remat(
     # in both orders (~8.7%). Expanding first hands SDPA contiguous inputs and a
     # fast backend; enable_gqa together with an attn_mask does not get one, so
     # the broadcast it saves costs more than the copy it avoids.
-    if num_key_value_groups > 1:
+    _fold = (fold_gqa and q.shape[2] == 1 and num_key_value_groups > 1
+             and trace_row is None)
+    if _fold:
+        # q heads are ordered kv-major (head h reads kv head h // groups), so a
+        # view regroups them with no copy; the [1,1,1,T] mask broadcasts.
+        q = q.reshape(1, H_kv, num_key_value_groups, D)
+    elif num_key_value_groups > 1:
         K_all = K_all.repeat_interleave(num_key_value_groups, dim=1)
         V_all = V_all.repeat_interleave(num_key_value_groups, dim=1)
 
@@ -545,14 +578,16 @@ def attend_with_remat(
                "flash": SDPBackend.FLASH_ATTENTION}.get(
                    os.environ.get("DKV_DET_BACKEND", "math"), SDPBackend.MATH)
         with sdpa_kernel(_bk):
-            return torch.nn.functional.scaled_dot_product_attention(
+            _o = torch.nn.functional.scaled_dot_product_attention(
                 q, K_all, V_all, attn_mask=attn_mask, scale=attn_scale)
+        return _o.reshape(1, H_q, 1, D) if _fold else _o
     # `scale=None` is torch's own default (1/sqrt(E)), so passing it through is
     # a no-op for models where that is right and a correction where it is not.
     # Leaving it unset asserted 1/sqrt(head_dim) for every model, which is
     # 11.3x too hot on granite and 22.6x on gemma-4.
-    return torch.nn.functional.scaled_dot_product_attention(
+    _o = torch.nn.functional.scaled_dot_product_attention(
         q, K_all, V_all, attn_mask=attn_mask, scale=attn_scale)  # [1, H_q, 1, D]
+    return _o.reshape(1, H_q, 1, D) if _fold else _o
 
 
 if __name__ == "__main__":
