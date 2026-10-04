@@ -192,7 +192,12 @@ the decode store and its bytes are unchanged; only the prefill sees exact histor
   reserved; line 12.11). Shipped tiled DKV at 65k peaks 9.36. Cause: the memory-sized
   remat cache fills headroom up to its gate, and the gate's fixed 1.5 GB step headroom
   (`DKV_REMAT_RESERVE_GB`) is smaller than the 65k decode transient. Test of 2.5 / 3.5 GB
-  queued (benchmarks/run_remat_reserve.cmd); v2 elastic 65k running.
+  queued (benchmarks/run_remat_reserve.cmd).
+- v2 elastic at 65k: **spilled badly** -- 12.74 alloc / 16.54 GB reserved, 2,095 s for one
+  point (plain hybrid streaming 478 s). Its gate read allocated memory only (the remat
+  gate's first mistake again). v3: allocated AND reserved must leave the headroom; when
+  reserved alone blocks, free cached blocks are returned once and it is re-read.
+  Retest at 65k queued.
 
 ## Generality (tier 1, 2026-10-04): the hybrid on three architectures
 
@@ -325,6 +330,11 @@ reach to be confirmed by ladder).
 (benchmarks/run_e2_chunks.cmd): tier 2 at 2048/4096 exact and streaming, and 32k prefill
 time. An older single-seed note in config.py links chunk 2048 to a lower score; tier 2
 decides.
+- Result (granite hybrid, 374 steps; paired vs chunk 1024): exact 2k +0.026 [-0.002,
+  +0.060], 4k +0.010 [-0.009, +0.033]; streaming 2k **+0.039 [+0.012, +0.072]**, 4k +0.011
+  [-0.014, +0.038]. 32k streaming wall: 1024 110.4 s, 2048 97.6 s (-12%), 4096 spilled
+  (12.28 GB reserved). **Closed: chunk stays 1024.** The speed is small, the quality cost is
+  real for 2k, and 4k breaks reach; E1 gives 2x without either.
 
 **E1 fused history attention** -- `DKV_PREFILL_SDPA=1` (off by default;
 `history_attend_sdpa_tile` in triton_fused_decode.py). Streaming prefill attends the
@@ -338,7 +348,10 @@ Tile 64 blocks (`DKV_PREFILL_SDPA_TILE`).
 - Tests: tests/test_prefill_sdpa.py (5): both residual semantics, tiled vs untiled, no
   GQA, hybrid key codes. Both paths sit the same distance from an fp32 reference (0.011
   on outputs of 8.8 each), so the bound is relative.
-- Real-model fidelity and 32k prefill time: queued with E2.
+- Result (granite hybrid streaming): tier 2 KL 0.2253 vs 0.2193, paired +0.006 [-0.005,
+  +0.017] (no difference); 32k ladder point **52.6 s vs 110.4 s wall (2.1x), 1.60 vs 3.37
+  s/1k**, peak 11.56 GB both. Default-on candidate once its reach is checked at 65k-131k
+  and it is run on the shipped (non-hybrid) streaming store.
 
 **E3 tiled KIVI-4 baseline** -- new arm `kivi4_tiled` (benchmarks/kv_baselines.py). Same
 quantizer and bytes as `kivi4_chunked`. kivi4_chunked's ceiling (49k granite, 98k Qwen)
@@ -352,8 +365,13 @@ quantized at the start of the next forward, so a prefill chunk attends its own t
 The model's own attention implementation is restored after each item.
 - Tests: tests/test_kivi_tiled.py (3): prefill chunk with mask, first chunk without, decode;
   multi-tile; equals attention over the dequantized cache.
-- Reach smoke (granite 65k/98k) and RULER 24k agreement vs kivi4_chunked: queued
-  (benchmarks/run_e3_kivi_tiled.cmd).
+- Result (granite): 65k ok, peak 9.11 GB (prefill 9.47), 155 s; 98k ok, peak 10.66
+  (prefill 11.06), 255 s. kivi4_chunked spilled at 65k (12.96). So KIVI-4's reach on
+  granite is at least 98k once tiled (shipped DKV tiled streaming: 131k at 11.00). RULER
+  24k, 1 item per task (13): tiled 62.8 vs chunked 59.0, decode 3.5 vs 2.5 tok/s, peak 7.15
+  vs 8.47 GB; the score gap is within one item per task and in the expected direction
+  (own-chunk attention in 16 bits). The paper's KIVI reach numbers must use kivi4_tiled;
+  131k point to run with the paper ladders.
 
 ## Untried ideas on the hybrid's value side (tier 1, 2026-10-04)
 

@@ -613,9 +613,12 @@ def _elastic_room() -> bool:
     """DKV_STREAM_ELASTIC: is there memory to keep history exact this chunk?
 
     True while allocated memory plus DKV_STREAM_ELASTIC_RESERVE_GB (default 2.0)
-    stays under 94% of the card -- the spill line the ceiling measurements use.
-    Allocated rather than reserved: during prefill the allocator's reserve sits
-    near the card from the start, so reserved would answer "no" immediately.
+    stays under 94% of the card -- the spill line the ceiling measurements use --
+    AND reserved memory does too. The first version read allocated only and at
+    65k on granite let reserved reach 16.5 GB on a 12.9 GB card (Windows pages
+    instead of failing; 35 min for one point). When reserved alone is the
+    blocker, the allocator's free cached blocks are returned once and it is
+    re-read, so cached-but-free memory does not end the window by itself.
     Any failure answers "no", which only compresses (the safe direction).
     """
     try:
@@ -624,7 +627,12 @@ def _elastic_room() -> bool:
             return False
         total = _t.cuda.get_device_properties(_t.cuda.current_device()).total_memory
         reserve = float(os.environ.get("DKV_STREAM_ELASTIC_RESERVE_GB", "2.0")) * 1e9
-        return _t.cuda.memory_allocated() + reserve < 0.94 * total
+        line = 0.94 * total
+        if _t.cuda.memory_allocated() + reserve >= line:
+            return False
+        if _t.cuda.memory_reserved() + reserve >= line:
+            _t.cuda.empty_cache()
+        return _t.cuda.memory_reserved() + reserve < line
     except Exception:                                            # noqa: BLE001
         return False
 
