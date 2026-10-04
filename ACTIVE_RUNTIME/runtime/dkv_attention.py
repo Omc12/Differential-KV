@@ -764,7 +764,7 @@ def _remat_fits(pool, block_indices) -> bool:
     Entry size = routed blocks x (1 + block span) x kv heads x head dim x K and V
     x element size. Fits when ALLOCATED memory plus the entry stays under the
     spill line the ceiling measurements use (94% of the card) less
-    DKV_REMAT_RESERVE_GB (default 1.0) of headroom for the step's transients.
+    DKV_REMAT_RESERVE_GB (default 2.5) of headroom for the step's transients.
     Allocated, not the driver's free figure: the caching allocator holds
     reserved-but-unused memory that the driver reports as taken, which made the
     first version of this refuse at 1.3 GB "free" with GBs actually available.
@@ -778,13 +778,15 @@ def _remat_fits(pool, block_indices) -> bool:
         H, D = int(pool.num_kv_heads), int(pool.head_dim)
         need = n * S * H * D * 2 * torch.finfo(pool.dtype).bits // 8
         total = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
-        reserve = float(os.environ.get("DKV_REMAT_RESERVE_GB", "1.5")) * 1e9
+        reserve = float(os.environ.get("DKV_REMAT_RESERVE_GB", "2.5")) * 1e9
         # What spills is RESERVED memory. The allocator usually already holds
         # free reserved blocks (prefill transients), so the entry plus a step's
         # transient headroom can come from them; reserved only grows when
         # allocated + entry + headroom exceeds it. Budget whichever is larger.
-        # Headroom 1.5 GB: with 1.0 GB a granite 16k step's transients (GQA-
-        # expanded K/V for SDPA among them) pushed reserved past the card.
+        # Headroom 2.5 GB: with 1.0 GB a granite 16k step's transients (GQA-
+        # expanded K/V for SDPA among them) pushed reserved past the card, and
+        # with 1.5 GB granite hybrid streaming at 65k reached 12.17 GB reserved
+        # (spill line 12.11); 2.5 GB: 11.70, ok, 383 s vs 478 s.
         after = max(torch.cuda.memory_reserved(),
                     torch.cuda.memory_allocated() + need + reserve)
         return after < 0.94 * total
@@ -908,7 +910,7 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
         # MEMORY-SIZED CACHE. Streaming turns the cache off because at length a
         # cache of every layer's rebuilt blocks costs memory the store needs.
         # Keep this layer's entry only while free memory stays above a reserve
-        # (DKV_REMAT_RESERVE_GB, default 1.0, plus 6% of the card -- the spill
+        # (DKV_REMAT_RESERVE_GB, default 2.5, plus 6% of the card -- the spill
         # line): rebuilding is then paid once per refresh interval instead of
         # every step where memory allows, and never at the cost of reach.
         _nostore = not _remat_fits(pool, block_indices)

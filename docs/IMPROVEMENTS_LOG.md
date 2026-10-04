@@ -191,8 +191,11 @@ the decode store and its bytes are unchanged; only the prefill sees exact histor
   streaming spills too (TEST_granite_hybrid_stream_65k.jsonl: 11.91 alloc / 12.17
   reserved; line 12.11). Shipped tiled DKV at 65k peaks 9.36. Cause: the memory-sized
   remat cache fills headroom up to its gate, and the gate's fixed 1.5 GB step headroom
-  (`DKV_REMAT_RESERVE_GB`) is smaller than the 65k decode transient. Test of 2.5 / 3.5 GB
-  queued (benchmarks/run_remat_reserve.cmd).
+  (`DKV_REMAT_RESERVE_GB`) is smaller than the 65k decode transient. **2.5 GB: 65k ok,
+  11.37 alloc / 11.70 reserved, 383 s** (1.5 GB: spilled, 478 s; shipped tiled DKV 354 s).
+  Default raised to 2.5 GB (affects the hybrid and the opt-in `DKV_REMAT_GATE`; the
+  shipped path does not use this gate). The 3.5 GB point was cut by a runner time limit
+  and is not needed.
 - v2 elastic at 65k: **spilled badly** -- 12.74 alloc / 16.54 GB reserved, 2,095 s for one
   point (plain hybrid streaming 478 s). Its gate read allocated memory only (the remat
   gate's first mistake again). v3: allocated AND reserved must leave the headroom; when
