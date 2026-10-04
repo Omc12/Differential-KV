@@ -2124,6 +2124,10 @@ class KVRuntimeManager:
                   f"(was pending={_pending_before})")
 
     def clear_session(self, session_id: str):
+        # The DKV_RESID_ATTN query sample belongs to the prompt being cleared.
+        _qres = getattr(self, "_qres", None)
+        if _qres:
+            _qres.pop(session_id, None)
         # Drop the coarse shadow first. Its blocks hold pool slots keyed to a
         # session id nothing else will ever ask about, so missing this leaks the
         # whole coarse pool for the lifetime of the process.

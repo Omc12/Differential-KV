@@ -1308,6 +1308,93 @@ _ANCHOR_FP_SHOWN = 0
 _ANCHOR_FP_CASE = None   # DKV_ROUTE_TRACE_TOKEN of the prompt being compared
 
 
+class _SkipJointSVD(Exception):
+    """Control flow: DKV_KV_SPLIT computed the factors already."""
+
+
+def _parse_key_quant(s):
+    """'pc4' -> 4 (per-channel 4-bit keys); '' or malformed -> 0."""
+    s = (s or "").strip().lower()
+    if s.startswith("pc"):
+        try:
+            b = int(s[2:])
+            return b if 2 <= b <= 8 else 0
+        except ValueError:
+            return 0
+    return 0
+
+
+def _quant_keys_per_channel(dk, bits, group=32):
+    """KIVI's key layout: asymmetric `bits`-bit per channel over groups of
+    `group` consecutive tokens. dk [T, F] -> dequantized [T, F]."""
+    T = dk.shape[0]
+    out = torch.empty_like(dk)
+    q = float(2 ** bits - 1)
+    for g0 in range(0, T, group):
+        blk = dk[g0:g0 + group].float()
+        lo = blk.amin(dim=0, keepdim=True)
+        hi = blk.amax(dim=0, keepdim=True)
+        s = (hi - lo).clamp(min=1e-8) / q
+        out[g0:g0 + group] = (torch.round((blk - lo) / s).clamp(0, q) * s + lo).to(dk.dtype)
+    return out
+
+
+def _parse_kv_split(s):
+    """'rK,rV' -> (rK, rV), or None when unset / malformed."""
+    try:
+        a, b = (int(x) for x in s.split(","))
+        return (a, b) if a > 0 and b > 0 else None
+    except (ValueError, AttributeError):
+        return None
+
+
+def _split_kv_factors(deltas, half_d, split, n_oversamples, max_rproj, chnorm):
+    """Separate randomized SVDs of the K and V halves of `deltas` [N, T, 2F].
+
+    Each half is token-norm normalized (and optionally channel-normalized) as
+    the joint path is, factored at its own rank, and returned already scaled,
+    as U = [U_K | U_V] [N, T, rK + rV] with a block-diagonal Vh
+    [N, rK + rV, 2F]: U @ Vh reproduces K from U_K alone and V from U_V alone.
+    """
+    N, T, F2 = deltas.shape
+    Us, Vhs = [], []
+    for part, r in ((deltas[:, :, :half_d], split[0]), (deltas[:, :, half_d:], split[1])):
+        X = part
+        c = None
+        if chnorm:
+            c = X.pow(2).mean(dim=1).sqrt().clamp(min=1e-6)
+            X = X / c.unsqueeze(1)
+        tn = X.norm(dim=2).clamp(min=1e-5)
+        Xn = X / tn.unsqueeze(2)
+        rp = min(r + n_oversamples, T, half_d)
+        if max_rproj > 0:
+            rp = min(rp, max_rproj)
+        r = min(r, rp)
+        Om = _rsvd_omega(N, half_d, rp, device=deltas.device, dtype=torch.float32)
+        Y = torch.matmul(Xn, Om)
+        for _ in range(2):
+            Y = torch.matmul(Xn, torch.matmul(Xn.transpose(1, 2), Y))
+        Q, _ = torch.linalg.qr(Y, mode="reduced")
+        B = torch.matmul(Q.transpose(1, 2), Xn)
+        G = torch.matmul(B, B.transpose(1, 2))
+        ev, evec = torch.linalg.eigh(G)
+        ev, evec = ev.flip(-1).clamp(min=0.0), evec.flip(-1)
+        S = ev.sqrt()
+        Vh = torch.matmul(evec.transpose(1, 2), B) / S.clamp(min=1e-8).unsqueeze(-1)
+        U = torch.matmul(Q, evec)
+        U = (U * S.unsqueeze(1) * tn.unsqueeze(2))[:, :, :r]
+        Vh = Vh[:, :r, :]
+        if c is not None:
+            Vh = Vh * c.unsqueeze(1)
+        Us.append(U)
+        Vhs.append(Vh)
+    rK, rV = Us[0].shape[2], Us[1].shape[2]
+    Vh = torch.zeros(N, rK + rV, F2, device=deltas.device, dtype=Vhs[0].dtype)
+    Vh[:, :rK, :half_d] = Vhs[0]
+    Vh[:, rK:, half_d:] = Vhs[1]
+    return torch.cat(Us, dim=2), Vh
+
+
 def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     """
     Compress a list of StreamingKVBlock objects batched together entirely on the GPU.
@@ -1384,6 +1471,32 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         ], dim=2)
     else:
         deltas_svd = deltas
+
+    # ── Batch A switches (all OFF by default; nothing changes unless set) ──
+    # DKV_KV_SPLIT="rK,rV": factor K and V separately, rK + rV columns stored
+    #   as one U with a block-diagonal factor, so the decode kernels are
+    #   unchanged and bytes equal a joint factor of rank rK + rV.
+    # DKV_CHANNEL_NORM=1: normalize each feature channel to unit RMS before the
+    #   factorization (outlier channels stop consuming rank); the scale is
+    #   folded back into the stored factor.
+    # DKV_U_COLSCALE=1: equalize U's columns before the pool's int8 quantization,
+    #   moving the column scale into the 16-bit factor.
+    _kv_split = _parse_kv_split(_local_os.environ.get("DKV_KV_SPLIT", ""))
+    # DKV_KEY_QUANT=pc4 (hybrid store): keys are kept per-channel quantized
+    # (4 bits, groups of 32 tokens -- KIVI's key layout) for EVERY row, so the
+    # factorization is spent on values alone. The K half of the SVD input is
+    # zeroed here; the per-block loop below writes the quantized keys.
+    _kq_bits = _parse_key_quant(_local_os.environ.get("DKV_KEY_QUANT", ""))
+    if _kq_bits:
+        # From the ORIGINAL deltas: the V gain above has already scaled
+        # deltas_svd's V half, and with the gain dropped it would not be undone.
+        deltas_svd = torch.cat([torch.zeros_like(deltas[:, :, :_half_d]),
+                                deltas[:, :, _half_d:]], dim=2)
+        _v_gain = None
+    _chan_c = None
+    if _local_os.environ.get("DKV_CHANNEL_NORM", "0") == "1" and _kv_split is None:
+        _chan_c = deltas_svd.pow(2).mean(dim=1).sqrt().clamp(min=1e-6)        # [N, feat]
+        deltas_svd = deltas_svd / _chan_c.unsqueeze(1)
 
     # Token-wise Norm-Normalization (row-wise) on GPU (Phase 41).  Uses the
     # V-scaled deltas so U's per-token scaling matches the SVD input (MLX does
@@ -1463,7 +1576,28 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     if r_proj < 1:
         return False
 
+    if _kv_split is not None:
+        # Separate K and V factors, assembled as U = [U_K | U_V] (already scaled
+        # by singular values and token norms) with a block-diagonal factor. S
+        # and token_norms are then ones, so the shared finalization below
+        # computes U_scaled == U, and the energy truncation is skipped (both
+        # halves keep their full rank: their columns are not one spectrum).
+        try:
+            U, Vh = _split_kv_factors(deltas, _half_d, _kv_split, n_oversamples,
+                                      _max_rproj,
+                                      _local_os.environ.get("DKV_CHANNEL_NORM", "0") == "1")
+        except Exception as e:                                   # noqa: BLE001
+            print(f"[DKV GPU-rSVD] split K/V factorization failed: {e}")
+            return False
+        r_proj = U.shape[2]
+        S = torch.ones(N_blocks, r_proj, device=gpu_device)
+        token_norms = torch.ones(N_blocks, T_active, device=gpu_device)
+        _v_gain = None
+        block_ranks = [r_proj] * N_blocks
+
     try:
+        if _kv_split is not None:
+            raise _SkipJointSVD()
         Omega = _rsvd_omega(N_blocks, feat_dim, r_proj, device=gpu_device, dtype=torch.float32)
         Y = torch.matmul(deltas_normalized, Omega)                         # [N, T, r_proj]
         # Issue 3 fix: two power iterations instead of one — matches MLX rSVD (n_iter=2)
@@ -1521,6 +1655,8 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         if not _gram_ok:
             U_b, S, Vh = torch.linalg.svd(B, full_matrices=False)  # tiny matrix — fast!
         U = torch.matmul(Q, U_b)                               # [N, T, r_proj]
+    except _SkipJointSVD:
+        pass
     except Exception as e:
         print(f"[DKV GPU-rSVD] Batched randomized SVD failed: {e}. Falling back to CPU SVD.")
         return False
@@ -1553,6 +1689,10 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
 
     # 5. Conversion and Sanitization
     U_fp16 = U.to(torch.float16)
+    if _chan_c is not None:
+        # Undo the channel normalization on the factor, before the V-gain undo
+        # below (the SVD input was [dK, g*dV] / c, so c comes off first).
+        Vh = Vh * _chan_c.unsqueeze(1)
     Vh_fp16 = Vh.to(torch.float16)
     S_fp16 = S.to(torch.float16)
 
@@ -1641,6 +1781,26 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     U_scaled = U_scaled * token_norms.unsqueeze(2)         # [N, T, r_proj]
     U_masked = U_scaled * rank_mask.unsqueeze(1)           # zero cols ≥ k[i]
     V_masked = Vh_fp16 * rank_mask.unsqueeze(2)            # [N, r_proj, feat]
+    _u_bits = int(_local_os.environ.get("DKV_U_BITS", "8") or 8)
+    if _local_os.environ.get("DKV_U_COLSCALE", "0") == "1" or _u_bits < 8:
+        # The pool quantizes U to int8 with ONE scale per block, so a column
+        # whose values are small (a weak direction, or the V half under
+        # DKV_KV_SPLIT) keeps few levels. Equalize the columns and carry the
+        # scale in the 16-bit factor instead: U @ Vh is unchanged in exact
+        # arithmetic, and every column gets the full int8 range.
+        _cs = U_masked.float().abs().amax(dim=1).clamp(min=1e-6)            # [N, r]
+        _Ue = U_scaled.float() / _cs.unsqueeze(1)
+        if _u_bits < 8:
+            # DKV_U_BITS=4: put U on a symmetric 4-bit grid per column (columns
+            # are now in [-1, 1]). The pool still stores int8, so this measures
+            # QUALITY at 4 bits; the packed storage that realizes the bytes is
+            # a separate change, made only if the quality holds.
+            _ql = float(2 ** (_u_bits - 1) - 1)
+            _Ue = torch.round(_Ue * _ql) / _ql
+        U_scaled = _Ue.to(U_scaled.dtype)
+        Vh_fp16 = (Vh_fp16.float() * _cs.unsqueeze(2)).to(torch.float16)
+        U_masked = U_scaled * rank_mask.unsqueeze(1)
+        V_masked = Vh_fp16 * rank_mask.unsqueeze(2)
 
     # ── Shared basis, assigned HERE and not at write time ────────────────────
     # Residual selection below scores `delta - recon`, and under a shared basis
@@ -2233,6 +2393,23 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                 joint_err = torch.sqrt(error_K.float() ** 2 + _err_V_bal.float() ** 2)
                 if _boost_vec is not None:
                     joint_err = joint_err * _boost_vec.to(joint_err.dtype)
+                # DKV_RESID_ATTN=1: weight each row's error by the attention it
+                # receives from a uniform sample of the prompt's own queries, so
+                # the budget repairs tokens that are read, not merely tokens the
+                # factorization fits worst (tier-1: 0.69x attention-output error
+                # at equal bytes). Query-agnostic, and computed per block, so
+                # exact and streaming compression rank identically.
+                _aw = None
+                if os.environ.get("DKV_RESID_ATTN", "0") == "1":
+                    try:
+                        from runtime.dkv_attention import resid_attn_weight
+                        _aw = resid_attn_weight(manager, block, stacked_k[i, :T_active])
+                    except Exception as _awe:                        # noqa: BLE001
+                        if os.environ.get("DKV_DBG_RESIDUAL_ERRORS") == "1":
+                            print(f"[DKV] resid-attn weight failed: {_awe}", flush=True)
+                        _aw = None
+                    if _aw is not None:
+                        joint_err = joint_err * _aw.to(joint_err.dtype)
 
                 # RUN-ATOMIC. `_res_cap` -- not n_max_residual -- is what the pool
                 # actually keeps, and the budget FLOOR above can raise
@@ -2249,6 +2426,9 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                     if _boost_row_cpu is not None:
                         _joint_cpu_i = _joint_cpu_i * _np_l.asarray(
                             _boost_row_cpu, dtype=_joint_cpu_i.dtype)
+                    if _aw is not None:
+                        _joint_cpu_i = _joint_cpu_i * _aw.float().cpu().numpy().astype(
+                            _joint_cpu_i.dtype)
                 top_k_J = _select_residual_rows(
                     joint_err, n_max_residual, _cov_frac_batch,
                     runs=_runs, res_cap=_res_cap, scores_cpu=_joint_cpu_i)
@@ -2261,6 +2441,38 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                     (error_K[_idx] > 1e-4) | (error_V[_idx] > 1e-4))
                 fact_positions_K = _idx[mask_J]
                 fact_positions_V = fact_positions_K
+
+            # Set AFTER both branches above: when the residual budget covers the
+            # whole block, blocks take the store-everything branch, and logic
+            # placed only in the ranking branch silently never runs (the first
+            # K/V probe read KL 0.0008 for BOTH sides for exactly that reason).
+            #
+            # DIAGNOSTIC PROBE (DKV_PROBE_EXACT_SIDE=K|V): one side keeps a
+            # residual for EVERY row (near-exact at the pool's residual
+            # precision) while the other keeps its worst DKV_PROBE_OTHER_RES rows.
+            # Answers which side limits real decode. Needs
+            # DKV_MAX_RESIDUAL_TOKENS >= block size. Not a mode.
+            _probe = os.environ.get("DKV_PROBE_EXACT_SIDE", "")
+            _all_rows = torch.arange(T_active, device=error_K.device)
+            if _probe in ("K", "V"):
+                _je = torch.sqrt(error_K.float() ** 2 + error_V.float() ** 2)
+                _other = torch.argsort(_je, descending=True)[
+                    :int(os.environ.get("DKV_PROBE_OTHER_RES", "128"))]
+                if _probe == "K":
+                    fact_positions_K, fact_positions_V = _all_rows, _other
+                else:
+                    fact_positions_K, fact_positions_V = _other, _all_rows
+            if _kq_bits:
+                # Hybrid store: every key row is written (as its per-channel
+                # quantized value, below); values keep their worst rows.
+                fact_positions_K = _all_rows
+                fact_positions_V = torch.argsort(error_V, descending=True)[
+                    :int(os.environ.get("DKV_KEY_QUANT_VRES", "64"))]
+            if os.environ.get("DKV_DBG_PROBE") == "1" and i == 0:
+                print(f"[DKV PROBE] T_active={T_active} n_max={n_max_residual} "
+                      f"cap={_res_cap} force_exact={_force_exact} "
+                      f"K_rows={int(fact_positions_K.numel())} "
+                      f"V_rows={int(fact_positions_V.numel())}", flush=True)
 
             # ── DKV_DBG_RESIDUAL_TOKEN=<absolute token index> ────────────────
             # Diagnostic only. For the block that actually CONTAINS that token,
@@ -2308,9 +2520,15 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                 # when only compress_lowrank was converted.
                 if _exact_keys_enabled(gpu_device):
                     residual_K_vals = delta_K[fact_positions_K].to(torch.float16).to(gpu_device)
+                    if _kq_bits:
+                        residual_K_vals = _quant_keys_per_channel(
+                            delta_K, _kq_bits)[fact_positions_K].to(torch.float16).to(gpu_device)
                     # Single index set for both halves, as MLX does — see the
-                    # matching note in compress_lowrank.
-                    fact_positions_V = fact_positions_K
+                    # matching note in compress_lowrank. (The diagnostic probe
+                    # and the hybrid store set the two sets apart on purpose.)
+                    if (os.environ.get("DKV_PROBE_EXACT_SIDE", "") not in ("K", "V")
+                            and not _kq_bits):
+                        fact_positions_V = fact_positions_K
                 else:
                     residual_K_vals = (delta_K - recon_K_for_res)[fact_positions_K].to(torch.float16).to(gpu_device)
                 fact_positions_K = fact_positions_K.to(torch.int16).to(gpu_device)

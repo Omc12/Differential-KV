@@ -168,3 +168,8 @@ paper/mlsys2026/
 # per arm, and the figure is regenerated from them.
 !paper/results/prefill_trace/
 !paper/results/prefill_trace/*.json
+
+# tier-1 KV captures and decode-fidelity dense controls (GBs, regenerable)
+paper/results/diag/tier1*/*.pt
+paper/results/diag/fidelity*/dense_*.pt
+*.lock

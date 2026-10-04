@@ -2044,6 +2044,110 @@ def _get_prefill_chunk_size(kv_manager, session_id: str, device) -> int:
 
 
 
+def _resid_attn_enabled() -> bool:
+    return os.environ.get("DKV_RESID_ATTN", "0") == "1"
+
+
+def _find_rotary(model):
+    """The model's rotary-embedding module, found by role, not by family:
+    the first submodule whose class name ends in 'RotaryEmbedding'."""
+    for _n, m in model.named_modules():
+        if type(m).__name__.endswith("RotaryEmbedding"):
+            return m
+    return None
+
+
+def _qres_sample(mgr, model, session_ids, layer, q, position_ids, scale,
+                 keep=None, per_chunk=64):
+    """Uniform reservoir of rotated prompt queries per (session, layer).
+
+    Each prefill chunk offers `per_chunk` random rows; every row carries a
+    random priority and the `keep` highest survive, which is a uniform sample
+    of every row offered, at any prompt length, in constant memory
+    (keep x heads x head_dim x 2 bytes per layer: 2 MB at 256 x 32 x 128).
+    """
+    if keep is None:
+        keep = int(os.environ.get("DKV_RESID_ATTN_QUERIES", "256"))
+    store = getattr(mgr, "_qres", None)
+    if store is None:
+        store = mgr._qres = {}
+    if getattr(mgr, "_qres_rotary", None) is None:
+        mgr._qres_rotary = _find_rotary(model) or False
+    B, H, L, D = q.shape
+    n = min(per_chunk, L)
+    for b, sid in enumerate(session_ids):
+        if sid == "dummy_session":
+            continue
+        ent = store.setdefault(sid, {}).get(layer)
+        calls = (ent[4] + 1) if ent is not None else 0
+        gen = torch.Generator(device=q.device)
+        gen.manual_seed(1234 + 7919 * int(layer) + 104729 * calls)
+        idx = torch.randperm(L, generator=gen, device=q.device)[:n]
+        qs = q[b, :, idx, :].transpose(0, 1).to(torch.float16)            # [n,H,D]
+        if position_ids is not None:
+            pr_ = position_ids.reshape(position_ids.shape[0], -1)
+            ps = pr_[min(b, pr_.shape[0] - 1), idx].long()
+        else:
+            ps = idx.long()
+        pri = torch.rand(n, generator=gen, device=q.device)
+        if ent is not None:
+            qs = torch.cat([ent[0], qs])
+            ps = torch.cat([ent[1], ps])
+            pri = torch.cat([ent[2], pri])
+        if qs.shape[0] > keep:
+            k_ = torch.topk(pri, keep).indices
+            qs, ps, pri = qs[k_], ps[k_], pri[k_]
+        store[sid][layer] = (qs, ps, pri, float(scale), calls)
+
+
+def resid_attn_weight(manager, block, k_active):
+    """Attention each active row of `block` receives from the sampled queries
+    that can see it, normalized within the block, mean 1. None when there is
+    nothing to weight with (feature off, no sample, no rotary module).
+
+    k_active: [T_active, H_kv * D] unrotated keys of the block's active rows.
+    Rows no sampled query can see get weight 1 (neutral), not 0.
+    """
+    store = getattr(manager, "_qres", None)
+    rotary = getattr(manager, "_qres_rotary", None)
+    if not store or not rotary:
+        return None
+    ent = store.get(getattr(block, "session_id", None), {}).get(
+        getattr(block, "layer_idx", None))
+    if ent is None:
+        return None
+    Q, P, _pri, scale, _c = ent
+    T = k_active.shape[0]
+    toks = list(getattr(block, "token_indices", []) or [])
+    if len(toks) == T + 1:
+        toks = toks[1:]
+    if len(toks) != T:
+        return None
+    dev = k_active.device
+    pos = torch.as_tensor(toks, device=dev, dtype=torch.long)
+    Hq, D = Q.shape[1], Q.shape[2]
+    Hkv = k_active.shape[1] // D
+    k = k_active.view(T, Hkv, D).transpose(0, 1).unsqueeze(0).float()      # [1,Hkv,T,D]
+    cos, sin = rotary(k, pos.unsqueeze(0))
+    _, kr = apply_rotary_pos_emb(k, k, cos.float(), sin.float())
+    kr = kr[0].repeat_interleave(Hq // Hkv, 0)                              # [Hq,T,D]
+    vis = pos.unsqueeze(0) <= P.to(dev).unsqueeze(1)                        # [M,T]
+    rows = vis.any(1)
+    if not bool(rows.any()):
+        return None
+    lg = torch.einsum("mhd,htd->hmt", Q[rows].to(dev).float(), kr) * scale
+    lg = lg.masked_fill(~vis[rows].unsqueeze(0), float("-inf"))
+    p = torch.softmax(lg, dim=-1).mean(0)                                   # [m',T]
+    cnt = vis[rows].float().sum(0)
+    w = p.sum(0) / cnt.clamp(min=1)
+    w = w / w[cnt > 0].mean().clamp(min=1e-12)
+    # Engagement counter: a weighting that silently never fires (a layer-index
+    # mismatch between where queries were sampled and where blocks are
+    # compressed) would read as "no effect" instead of "not running".
+    manager._qres_used = getattr(manager, "_qres_used", 0) + 1
+    return torch.where(cnt > 0, w, torch.ones_like(w))
+
+
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
@@ -3404,6 +3508,14 @@ def apply_dkv_attention_patch(model, kv_manager):
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
                 session_ids = getattr(model, "_dkv_session_ids", ["default"] * bsz)
+
+                # DKV_RESID_ATTN=1: keep a uniform sample of this layer's prompt
+                # queries so compression can rank residual rows by the attention
+                # each token receives (query-agnostic: drawn from the whole
+                # prompt, never from a question).
+                if q_len > 1 and use_cache and _resid_attn_enabled():
+                    _qres_sample(kv_manager, model, session_ids, captured_layer_idx,
+                                 query_states, position_ids, attn_scale)
 
                 # Fix 3: Gate finalize_compressed_blocks to layer 0 only.
                 # The function is idempotent and protected by _pending_lock internally.
