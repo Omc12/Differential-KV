@@ -355,6 +355,25 @@ streaming_sparse_ingest.py, lowrank.py and native_block_pool.py.
 | KIVI-4 quality | re-run with kivi4_tiled for consistency |
 | hybrid mode | none yet: LongBench, RULER, ladders in both modes, both models |
 
+### V3 paper campaign (scripted 2026-10-04, not yet run)
+
+`python benchmarks/run_v3_campaign.py [a] [b] [c1] [c2]`; logs in
+paper/results/campaign/v3_*.log; every result in a new `V3_*` file, nothing old touched;
+resumable. Estimates from the old runs' wall times.
+
+| part | script | what | est. |
+|---|---|---|---|
+| A | run_v3_a_dkv_stream.cmd | DKV streaming, new defaults: ladders (granite 24k-131k, Qwen 131k-262k), LongBench forced stream, RULER Qwen forced 32k, RULER beyond limits (granite 24k-32k, Qwen 131k) | 4-5 h |
+| B | run_v3_b_kivi_tiled.cmd | kivi4_tiled: ladders both models, LongBench 12k, RULER granite 24k-32k, Qwen 32k and 131k | 6-7 h |
+| C1 | run_v3_c_hybrid.cmd c1 | hybrid exact: ladders, LongBench 12k, RULER Qwen 4k-32k and 64k | 7-8 h |
+| C2 | run_v3_c_hybrid.cmd c2 | hybrid streaming: the part-A set | 6-7 h |
+
+Pre-flight for part C (2026-10-05): the hybrid had never run on Qwen3.5-4B (hybrid
+architecture, head_dim 256) in the runtime. Smoke, 4 RULER 16k items, 32 steps: exact
+hybrid KL **0.0006** vs base 0.297 (paired -0.297 [-0.612, -0.039]), top-1 1.000, decode
+11.2 vs 2.7 tok/s, store 0.750 vs 0.595 GB. The streaming arms were not run (stopped:
+GPU needed by another project); run them before part C2.
+
 ## Batch E: prefill speed and baseline fairness (2026-10-04)
 
 **E2 larger prefill chunks -- no code.** `DKV_PREFILL_CHUNK_SIZE` already sets it
