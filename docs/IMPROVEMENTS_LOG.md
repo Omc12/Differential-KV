@@ -333,6 +333,26 @@ KL 0.219 at 8.3 tok/s (base streaming 0.527 at 5.5). Store 0.809 GB (2.75x; base
 memory-sized cache using free headroom under the spill line (gives way to the store;
 reach to be confirmed by ladder).
 
+## Exact mode reach: DKV_EXACT_LEAN (2026-10-06, code only, NOT yet tested)
+
+Why exact mode's ceiling sits below a preallocated dense cache (Qwen3.5-4B: 98,304 vs
+122,880): not chunking (prefill is already 1,025-token chunks) and not KV growth (each
+chunk's raw KV is one fixed tensor; boundary compression is per layer, synchronous, and
+frees each block's raw KV). It is the exact-prefill history attention: every layer, every
+chunk, it copies all raw history block by block, concatenates it, rotates it, and
+repeat_kv's K and V to every query head -- a transient of several times one layer's
+full KV. Plus the decode cache, which fills spare memory.
+
+`DKV_EXACT_LEAN=1` (default off): `_dense_history_attend_tiled` in dkv_attention.py
+assembles 8k-token tiles (`DKV_EXACT_TILE_TOKENS`) with one concatenation at KV-head
+width, rotates per tile, folds the GQA group into the query axis, attends with the
+efficient kernel and merges tiles by log-sum-exp; and turns on the decode-cache memory
+gate (`DKV_REMAT_GATE`). Same arithmetic up to rounding. Expected: exact ceiling close
+to the preallocated dense one; it cannot pass it (exact prefill must hold the raw KV).
+Tests written (tests/test_exact_lean.py, 5) and benchmarks/run_exact_lean.cmd (unit
+tests, tier 2 vs default exact, exact ladders granite 16k-28k, Qwen 98k-131k); not run
+(GPU busy with another project). Default-on only after they pass.
+
 ## Store modes (2026-10-04)
 
 `DKV_STORE=lowrank` (default) | `hybrid`. `hybrid` is shorthand for `DKV_KEY_QUANT=pc4` +

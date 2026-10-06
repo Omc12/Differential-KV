@@ -914,10 +914,11 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
         # line): rebuilding is then paid once per refresh interval instead of
         # every step where memory allows, and never at the cost of reach.
         _nostore = not _remat_fits(pool, block_indices)
-    elif os.environ.get("DKV_REMAT_GATE", "0") == "1":
+    elif os.environ.get("DKV_REMAT_GATE", "0") == "1" or _exact_lean():
         # Same memory gate for the default (exact-mode) cache, which otherwise
         # keeps every layer unconditionally -- at length a dense-size copy that
-        # can carry decode past the card. Off by default until measured.
+        # can carry decode past the card. Off by default until measured;
+        # DKV_EXACT_LEAN=1 turns it on together with the tiled exact prefill.
         _nostore = not _remat_fits(pool, block_indices)
     if block_indices is None or block_indices.numel() == 0:
         _remat_why("no-blocks")
@@ -2386,6 +2387,81 @@ def _to_device_positions(positions: list, device) -> torch.Tensor:
     evt.record()
     st["evt"][i] = evt
     return out
+
+
+def _exact_lean() -> bool:
+    """DKV_EXACT_LEAN=1 (default off until measured): exact prefill attends its
+    raw history a tile at a time (see _dense_history_attend_tiled) and the
+    decode cache takes the memory gate (DKV_REMAT_GATE). Same arithmetic up to
+    float rounding; only the transient memory changes."""
+    return os.environ.get("DKV_EXACT_LEAN", "0") == "1"
+
+
+def _dense_history_attend_tiled(chunk_q, dense_blocks, cos_all, sin_all, groups,
+                                scale, tile_tokens=None):
+    """Exact-prefill history attention over raw (uncompressed) blocks, a tile
+    at a time. Returns (out [1, H, Q, D], lse [1, H, Q]) for the whole history,
+    or (None, None) if there is none.
+
+    The default path builds the WHOLE history of the layer every chunk: one copy
+    per block (anchor + active), one concatenation, one RoPE pass, then
+    repeat_kv to every query head for K and V -- a transient of several times
+    the layer's full KV, which is what keeps exact mode below a preallocated
+    dense cache's ceiling. Here each tile is assembled with ONE concatenation at
+    KV-head width, rotated, and attended with the GQA group folded into the
+    query axis (query heads of one KV head read the same keys), so the
+    transient is one tile. Tiles merge by log-sum-exp: the softmax over their
+    union, exactly. All history precedes the chunk, so no mask is needed.
+    """
+    if not dense_blocks:
+        return None, None
+    if tile_tokens is None:
+        tile_tokens = int(os.environ.get("DKV_EXACT_TILE_TOKENS", "8192"))
+    dev = chunk_q.device
+    _, H, Q, D = chunk_q.shape
+    g = max(1, int(groups))
+    Hk = H // g
+    qf = chunk_q.reshape(1, Hk, g * Q, D).contiguous()
+    outs, lses = [], []
+    i, n = 0, len(dense_blocks)
+    while i < n:
+        parts_k, parts_v, pos, tok = [], [], [], 0
+        while i < n and (tok == 0 or tok < tile_tokens):
+            b = dense_blocks[i]
+            parts_k.append(b.anchor_kv[0, 0].unsqueeze(1))       # [Hk, 1, D]
+            parts_v.append(b.anchor_kv[0, 1].unsqueeze(1))
+            act = 0
+            if b.active_k is not None:
+                parts_k.append(b.active_k[0])
+                parts_v.append(b.active_v[0])
+                act = b.active_k.shape[2]
+            elif getattr(b, "active_k_cpu", None) is not None:
+                parts_k.append(b.active_k_cpu[0].to(dev, non_blocking=True))
+                parts_v.append(b.active_v_cpu[0].to(dev, non_blocking=True))
+                act = b.active_k_cpu.shape[2]
+            pos.extend(range(b.anchor_idx, b.anchor_idx + 1 + act))
+            tok += 1 + act
+            i += 1
+        k_t = torch.cat(parts_k, dim=1).unsqueeze(0)              # [1, Hk, T, D]
+        v_t = torch.cat(parts_v, dim=1).unsqueeze(0)
+        del parts_k, parts_v
+        pt = _to_device_positions(pos, dev)
+        k_t = _rope_history_k(k_t, cos_all[0, pt].unsqueeze(0).unsqueeze(1),
+                              sin_all[0, pt].unsqueeze(0).unsqueeze(1))
+        o, l = torch.ops.aten._scaled_dot_product_efficient_attention(
+            qf, k_t.to(qf.dtype).contiguous(), v_t.to(qf.dtype).contiguous(),
+            None, True, scale=float(scale))[:2]
+        outs.append(o.float())
+        lses.append(l[..., :g * Q].float())
+        del k_t, v_t
+    L = torch.stack(lses, 0)                                      # [T, 1, Hk, gQ]
+    m = L.max(0).values
+    w = torch.exp(L - m)
+    ws = w.sum(0)
+    out = sum(o * wt.unsqueeze(-1) for o, wt in zip(outs, w)) / ws.unsqueeze(-1)
+    lse = m + torch.log(ws)
+    # lse stays fp32, as the default path's efficient-attention lse does
+    return out.reshape(1, H, Q, D).to(chunk_q.dtype), lse.reshape(1, H, Q)
 
 
 def _rope_history_k(k, cos, sin):
@@ -6564,11 +6640,15 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         dense_k = []
                                         dense_v = []
                                         dense_positions_list = []
+                                        _lean = _exact_lean()
+                                        lean_blocks = []
 
                                         for b in history_blocks:
                                             if getattr(b, "state", None) == "COMPRESSED" \
                                                     and b.U is not None and b.V is not None:
                                                 comp_blocks.append(b)
+                                            elif _lean:
+                                                lean_blocks.append(b)
                                             else:
                                                 ak = b.anchor_kv[0, 0]
                                                 av = b.anchor_kv[0, 1]
@@ -6602,6 +6682,10 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             model, value_states[b_idx:b_idx + 1],
                                             max_pos, query_states.device)
 
+                                        if lean_blocks:
+                                            out_hist_dense, lse_hist_dense = _dense_history_attend_tiled(
+                                                chunk_q, lean_blocks, cos_all, sin_all,
+                                                num_key_value_groups, attn_scale)
                                         if dense_k:
                                             k_dense = torch.cat(dense_k, dim=1).unsqueeze(0)
                                             v_dense = torch.cat(dense_v, dim=1).unsqueeze(0)
