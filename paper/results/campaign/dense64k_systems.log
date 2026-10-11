@@ -1,0 +1,22 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dense@65536 ...
+    dense@65536: ttft=35.27534999999625 tps=4.8775055631746715 peak=9.103219712
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm      65536
+----------------------
+     dense     35.28 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      65536
+----------------------
+     dense      4.88 
+
+=== peak VRAM (GB) ===
+       arm      65536
+----------------------
+     dense      9.10 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.

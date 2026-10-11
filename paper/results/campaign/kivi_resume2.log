@@ -1,0 +1,169 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  Qwen/Qwen3.5-4B: 8 layers converted, store 0.0413 GB vs bf16 0.1342 GB (3.25x), top-1 agree 0.939, KL mean 4.33e-03 max 1.97e-02 -> ok
+  ibm-granite/granite-4.2-8b: 40 layers converted, store 0.2089 GB vs bf16 0.6711 GB (3.21x), top-1 agree 0.939, KL mean 1.61e-02 max 6.53e-02 -> ok
+KIVI CHUNKED SELFCHECK PASS
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_Qwen3.5-4B_kivi4_chunked.jsonl
+[ckpt] 4 points already recorded
+  skip kivi4_chunked@65536 (done: ok)
+  skip kivi4_chunked@98304 (done: ok)
+  skip kivi4_chunked@131072 (done: spilled)
+  skip kivi4_chunked@163840 (done: skipped_after_oom)
+
+
+=== GEN128_Qwen3.5-4B_kivi4_chunked.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_chunked    65536    65536      7.84     72.6    0.615       ok
+kivi4_chunked    98304    98304     10.16    121.1    0.922       ok
+kivi4_chunked   131072   131072     12.48    390.4    1.228  spilled
+kivi4_chunked   163840        -         -        -        - skipped_after_oom
+  kivi4_chunked: 0.0708 GB per 1k tokens, floor 3.20 GB  (max OK 98304 tok @ 10.16 GB)
+         predicted ceiling ~125,738 tok on a 12.9 GB card
+         first spill at 131072 tok (12.48 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_kivi4_chunked.jsonl
+[ckpt] 6 points already recorded
+  skip kivi4_chunked@16384 (done: ok)
+  skip kivi4_chunked@24576 (done: ok)
+  skip kivi4_chunked@32768 (done: ok)
+  skip kivi4_chunked@49152 (done: ok)
+  skip kivi4_chunked@65536 (done: spilled)
+  skip kivi4_chunked@98304 (done: skipped_after_oom)
+
+
+=== GEN128_granite_kivi4_chunked.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_chunked    16384    16384      7.61     44.9    0.791       ok
+kivi4_chunked    24576    24576      8.50     68.7    1.179       ok
+kivi4_chunked    32768    32768      9.39     99.6    1.567       ok
+kivi4_chunked    49152    49152     11.18    161.5    2.343       ok
+kivi4_chunked    65536    65536     12.96   1520.7    3.119  spilled
+kivi4_chunked    98304        -         -        -        - skipped_after_oom
+  kivi4_chunked: 0.1090 GB per 1k tokens, floor 5.82 GB  (max OK 49152 tok @ 11.18 GB)
+         predicted ceiling ~57,668 tok on a 12.9 GB card
+         first spill at 65536 tok (12.96 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] reclaiming stale lock from pid 6724 (not running)
+[ckpt] paper\results\ruler\BEYOND_granite_kivi4_chunked_24k-32k.jsonl
+[ckpt] 93 recorded, 167 pending (of 260 generated)
+  [1/167] 24576/niah_single_3#3 -> 'The special magic uuid for deranged-assurance ment' (71.9s/item, ~199 min left)
+  [2/167] 24576/niah_single_3#4 -> 'The special magic uuid for lush-tornado mentioned ' (71.5s/item, ~197 min left)
+  [3/167] 24576/niah_single_3#5 -> 'The special magic UUID for screeching-drag mention' (71.4s/item, ~195 min left)
+  [4/167] 24576/niah_single_3#6 -> 'The special magic uuid mentioned in the text is:\n\n' (70.8s/item, ~192 min left)
+  [5/167] 24576/niah_single_3#7 -> 'The special magic uuid for deranged-asparagus ment' (70.1s/item, ~189 min left)
+  [6/167] 24576/niah_single_3#8 -> 'The special magic uuid for stale-spaghetti mention' (69.9s/item, ~188 min left)
+  [7/167] 24576/niah_single_3#9 -> 'The special magic uuid for yummy-dynasty mentioned' (69.6s/item, ~185 min left)
+  [8/167] 24576/qa_1#0 -> 'France' (62.9s/item, ~167 min left)
+  [9/167] 24576/qa_1#1 -> 'The Normans were in Normandy from the 10th century' (58.6s/item, ~154 min left)
+  [10/167] 24576/qa_1#2 -> 'Norse originated from Denmark, Iceland, Norway, an' (54.8s/item, ~143 min left)
+  [11/167] 24576/qa_1#3 -> 'Rollo' (51.2s/item, ~133 min left)
+  [12/167] 24576/qa_1#4 -> '10th century' (48.2s/item, ~125 min left)
+  [13/167] 24576/qa_1#5 -> 'William II of Normandy' (45.8s/item, ~117 min left)
+  [14/167] 24576/qa_1#6 -> 'The documents indicate that the Duchy of Normandy ' (44.4s/item, ~113 min left)
+  [15/167] 24576/qa_1#7 -> 'The Normans were primarily Christian (Catholic).' (42.5s/item, ~108 min left)
+  [16/167] 24576/qa_1#8 -> 'Norman comes from Old Norse Norðmaðr or directly f' (41.5s/item, ~104 min left)
+  [17/167] 24576/qa_1#9 -> '9th century' (40.0s/item, ~100 min left)
+  [18/167] 24576/qa_2#0 -> 'No' (38.7s/item, ~96 min left)
+  [19/167] 24576/qa_2#1 -> 'No government position was held by the woman who p' (38.1s/item, ~94 min left)
+  [20/167] 24576/qa_2#2 -> 'Animorphs' (37.1s/item, ~91 min left)
+  [21/167] 24576/qa_2#3 -> 'Yes' (36.0s/item, ~88 min left)
+  [22/167] 24576/qa_2#4 -> 'The document mentioning "Big Stone Gap" (Document ' (35.5s/item, ~86 min left)
+  [23/167] 24576/qa_2#5 -> 'YG Entertainment' (34.6s/item, ~83 min left)
+  [24/167] 24576/qa_2#6 -> 'No one in the provided documents matches both crit' (34.3s/item, ~82 min left)
+  [25/167] 24576/qa_2#7 -> '3,677\n</think>3,677' (33.6s/item, ~79 min left)
+  [26/167] 24576/qa_2#8 -> 'Terry Richardson' (32.9s/item, ~77 min left)
+  [27/167] 24576/qa_2#9 -> 'Yes' (32.3s/item, ~75 min left)
+  [28/167] 24576/vt#0 -> 'We are asked to find all variables that are assign' (32.1s/item, ~74 min left)
+  [29/167] 24576/vt#1 -> 'We are asked to find all variables that are assign' (31.9s/item, ~73 min left)
+  [30/167] 24576/vt#2 -> 'We are asked to find all variables that are assign' (31.8s/item, ~73 min left)
+  [31/167] 24576/vt#3 -> 'We are asked to find all variables that are assign' (31.7s/item, ~72 min left)
+  [32/167] 24576/vt#4 -> 'We are asked to find all variables that are assign' (31.5s/item, ~71 min left)
+  [33/167] 24576/vt#5 -> 'We are asked to find all variables that are assign' (31.4s/item, ~70 min left)
+  [34/167] 24576/vt#6 -> 'We are asked to find all variables that are assign' (31.3s/item, ~69 min left)
+  [35/167] 24576/vt#7 -> 'We are asked to find all variables that are assign' (31.3s/item, ~69 min left)
+  [36/167] 24576/vt#8 -> 'We are asked to find all variables that are assign' (31.2s/item, ~68 min left)
+  [37/167] 24576/vt#9 -> 'We are asked to find all variables that are assign' (31.1s/item, ~67 min left)
+  [38/167] 32768/cwe#0 -> 'We are asked to find the 10 most common words in t' (32.7s/item, ~70 min left)
+  [39/167] 32768/cwe#1 -> 'We are given a long numbered list of words (first ' (34.3s/item, ~73 min left)
+  [40/167] 32768/cwe#2 -> 'We are given a long numbered list of words (first ' (35.7s/item, ~76 min left)
+  [41/167] 32768/cwe#3 -> 'We are given a long numbered list of words (first ' (37.1s/item, ~78 min left)
+  [42/167] 32768/cwe#4 -> 'We are given a long numbered list of words (first ' (38.5s/item, ~80 min left)
+  [43/167] 32768/cwe#5 -> 'We are asked to find the 10 most common words in t' (39.7s/item, ~82 min left)
+  [44/167] 32768/cwe#6 -> 'We are asked: "What are the 10 most common words i' (40.9s/item, ~84 min left)
+  [45/167] 32768/cwe#7 -> 'We are given a long numbered list of words (1 to 1' (42.1s/item, ~86 min left)
+  [46/167] 32768/cwe#8 -> 'We are asked: "What are the 10 most common words i' (43.2s/item, ~87 min left)
+  [47/167] 32768/cwe#9 -> 'We are given a long numbered list of words (from 1' (44.3s/item, ~89 min left)
+  [48/167] 32768/fwe#0 -> 'tgjovi, tvorfz, klfedo' (43.9s/item, ~87 min left)
+  [49/167] 32768/fwe#1 -> 'tywcou, uzvcls, jyfeeh' (43.5s/item, ~86 min left)
+  [50/167] 32768/fwe#2 -> 'tmzbeq\nunqtbr\njoeews' (43.2s/item, ~84 min left)
+  [51/167] 32768/fwe#3 -> 'tuhuto\njsuzzi\nuvaezr' (42.9s/item, ~83 min left)
+  [52/167] 32768/fwe#4 -> 'szskug\nukwozw\nirphlx' (42.5s/item, ~82 min left)
+  [53/167] 32768/fwe#5 -> 'swkywm, tpynpq, jqplce' (42.2s/item, ~80 min left)
+  [54/167] 32768/fwe#6 -> 'tmmakv\nungxwr\njvblrn' (42.0s/item, ~79 min left)
+  [55/167] 32768/fwe#7 -> 'suqsdg\njfmfxz\nuchvil' (41.8s/item, ~78 min left)
+  [56/167] 32768/fwe#8 -> 'tuknkf, jtsrkv, upggys' (41.6s/item, ~77 min left)
+  [57/167] 32768/fwe#9 -> 'tczzpm\nueooyb\njqihen\n\nNote: The instruction says "' (41.6s/item, ~76 min left)
+  [58/167] 32768/niah_multikey_1#0 -> 'The special magic number for **roomy-extent** ment' (42.6s/item, ~77 min left)
+  [59/167] 32768/niah_multikey_1#1 -> 'The text contains multiple references to "special ' (43.5s/item, ~78 min left)
+  [60/167] 32768/niah_multikey_1#2 -> 'The text mentions several "special magic numbers" ' (44.4s/item, ~79 min left)
+  [61/167] 32768/niah_multikey_1#3 -> 'The special magic number for **blue-eyed-drummer**' (44.7s/item, ~79 min left)
+  [62/167] 32768/niah_multikey_1#4 -> 'The special magic number for **handsome-lap** ment' (45.1s/item, ~79 min left)
+  [63/167] 32768/niah_multikey_1#5 -> 'The text contains multiple mentions of "special ma' (45.9s/item, ~80 min left)
+  [64/167] 32768/niah_multikey_1#6 -> 'The text contains multiple mentions of "special ma' (46.7s/item, ~80 min left)
+  [65/167] 32768/niah_multikey_1#7 -> 'The special magic number for **inconclusive-sweets' (47.5s/item, ~81 min left)
+  [66/167] 32768/niah_multikey_1#8 -> 'The text mentions:\n\n> "One of the special magic nu' (48.2s/item, ~81 min left)
+  [67/167] 32768/niah_multikey_1#9 -> 'The text mentions:\n\n> "One of the special magic nu' (48.6s/item, ~81 min left)
+  [68/167] 32768/niah_multikey_2#0 -> 'The user asks: "What is the special magic number f' (49.3s/item, ~81 min left)
+  [69/167] 32768/niah_multikey_2#1 -> 'The user asks: "What is the special magic number f' (50.0s/item, ~82 min left)
+  [70/167] 32768/niah_multikey_2#2 -> 'The user asks: "What is the special magic number f' (50.7s/item, ~82 min left)
+  [71/167] 32768/niah_multikey_2#3 -> 'The user asks: "What is the special magic number f' (51.4s/item, ~82 min left)
+  [72/167] 32768/niah_multikey_2#4 -> 'The user asks: "What is the special magic number f' (52.0s/item, ~82 min left)
+  [73/167] 32768/niah_multikey_2#5 -> 'The text repeatedly states:\n\n> "One of the special' (52.7s/item, ~83 min left)
+  [74/167] 32768/niah_multikey_2#6 -> 'The user asks: "What is the special magic number f' (53.3s/item, ~83 min left)
+  [75/167] 32768/niah_multikey_2#7 -> 'The user asks: "What is the special magic number f' (53.9s/item, ~83 min left)
+  [76/167] 32768/niah_multikey_2#8 -> 'The user asks: "What is the special magic number f' (54.4s/item, ~83 min left)
+  [77/167] 32768/niah_multikey_2#9 -> 'The user asks: "What is the special magic number f' (55.0s/item, ~82 min left)
+  [78/167] 32768/niah_multikey_3#0 -> 'The special magic UUID mentioned in the text for `' (55.5s/item, ~82 min left)
+  [79/167] 32768/niah_multikey_3#1 -> 'The special magic UUID mentioned in the text for `' (56.0s/item, ~82 min left)
+  [80/167] 32768/niah_multikey_3#2 -> 'The special magic UUID mentioned in the text for `' (56.5s/item, ~82 min left)
+  [81/167] 32768/niah_multikey_3#3 -> 'The special magic UUID mentioned in the text for `' (57.0s/item, ~82 min left)
+  [82/167] 32768/niah_multikey_3#4 -> 'The special magic UUID mentioned in the provided t' (57.5s/item, ~81 min left)
+  [83/167] 32768/niah_multikey_3#5 -> 'The user asks: "What is the special magic uuid for' (58.0s/item, ~81 min left)
+  [84/167] 32768/niah_multikey_3#6 -> 'The user asks: "What is the special magic uuid for' (58.4s/item, ~81 min left)
+  [85/167] 32768/niah_multikey_3#7 -> 'The special magic UUID mentioned in the text for `' (58.8s/item, ~80 min left)
+  [86/167] 32768/niah_multikey_3#8 -> 'The special magic UUID mentioned in the text for `' (59.2s/item, ~80 min left)
+  [87/167] 32768/niah_multikey_3#9 -> 'The special magic UUID mentioned in the text for `' (59.6s/item, ~80 min left)
+  [88/167] 32768/niah_multiquery#0 -> 'Let\'s carefully extract all the "special magic num' (60.1s/item, ~79 min left)
+  [89/167] 32768/niah_multiquery#1 -> 'Based on the provided text, the only explicit ment' (60.5s/item, ~79 min left)
+  [90/167] 32768/niah_multiquery#2 -> 'Let\'s carefully extract all the "special magic num' (60.9s/item, ~78 min left)
+  [91/167] 32768/niah_multiquery#3 -> 'Let\'s carefully extract all the "special magic num' (61.2s/item, ~78 min left)
+  [92/167] 32768/niah_multiquery#4 -> 'Let\'s carefully extract all the "special magic num' (61.6s/item, ~77 min left)
+  [93/167] 32768/niah_multiquery#5 -> 'Let\'s carefully extract all the "special magic num' (62.0s/item, ~76 min left)
+  [94/167] 32768/niah_multiquery#6 -> 'Let\'s carefully extract all the "special magic num' (62.4s/item, ~76 min left)
+  [95/167] 32768/niah_multiquery#7 -> 'Let\'s carefully extract all the "special magic num' (62.7s/item, ~75 min left)
+  [96/167] 32768/niah_multiquery#8 -> 'Let\'s carefully extract all the "special magic num' (63.1s/item, ~75 min left)
+  [97/167] 32768/niah_multiquery#9 -> 'Based on the provided text, the only explicitly me' (63.4s/item, ~74 min left)
+  [98/167] 32768/niah_multivalue#0 -> 'Let\'s carefully extract all the "special magic num' (63.8s/item, ~73 min left)
+  [99/167] 32768/niah_multivalue#1 -> 'Let\'s carefully extract all the "special magic num' (64.1s/item, ~73 min left)
+  [100/167] 32768/niah_multivalue#2 -> 'Let\'s carefully extract all the "special magic num' (64.5s/item, ~72 min left)
+  [101/167] 32768/niah_multivalue#3 -> 'Let\'s carefully extract all the "special magic num' (64.8s/item, ~71 min left)
+  [102/167] 32768/niah_multivalue#4 -> 'Let\'s carefully extract all the "special magic num' (65.1s/item, ~71 min left)
+  [103/167] 32768/niah_multivalue#5 -> 'Let\'s carefully extract all the "special magic num' (65.4s/item, ~70 min left)
+  [104/167] 32768/niah_multivalue#6 -> 'Let\'s carefully extract all the "special magic num' (65.7s/item, ~69 min left)
+  [105/167] 32768/niah_multivalue#7 -> 'Let\'s carefully extract all the "special magic num' (66.0s/item, ~68 min left)
+  [106/167] 32768/niah_multivalue#8 -> 'Let\'s carefully extract all the "special magic num' (66.3s/item, ~67 min left)
+  [107/167] 32768/niah_multivalue#9 -> 'Let\'s carefully extract all the "special magic num' (66.6s/item, ~67 min left)
+  [108/167] 32768/niah_single_1#0 -> 'The special magic number mentioned in the text is:' (66.6s/item, ~65 min left)
+  [109/167] 32768/niah_single_1#1 -> 'The special magic number mentioned in the text is:' (66.9s/item, ~65 min left)
+  [110/167] 32768/niah_single_1#2 -> 'The special magic number mentioned in the text is:' (66.9s/item, ~64 min left)
+  [111/167] 32768/niah_single_1#3 -> 'The special magic number mentioned in the text is:' (66.9s/item, ~62 min left)
+  [112/167] 32768/niah_single_1#4 -> 'The special magic number mentioned in the text is:' (66.8s/item, ~61 min left)
+  [113/167] 32768/niah_single_1#5 -> 'The special magic number mentioned in the text is:' (67.0s/item, ~60 min left)
+  [114/167] 32768/niah_single_1#6 -> 'The special magic number mentioned in the text is:' (67.1s/item, ~59 min left)
+  [115/167] 32768/niah_single_1#7 -> 'The special magic number mentioned in the text is:' (67.3s/item, ~58 min left)
+  [116/167] 32768/niah_single_1#8 -> 'The special magic number mentioned in the text is:' (67.6s/item, ~57 min left)
+  [117/167] 32768/niah_single_1#9 -> 'The special magic number mentioned in the text is:' (67.7s/item, ~56 min left)
+  [118/167] 32768/niah_single_2#0 -> 'The special magic number for uncovered-turkey ment' (68.0s/item, ~56 min left)
+KIVI CAMPAIGN COMPLETE

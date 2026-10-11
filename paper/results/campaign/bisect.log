@@ -1,0 +1,6 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\BISECT_Qwen3.5-4B_dense_static.jsonl
+[ckpt] 0 points already recorded
+  running dense@106496 ...
+    dense@106496: ok peak=8.428646912 (137s)
+  running dense@114688 ...

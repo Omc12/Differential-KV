@@ -1,0 +1,258 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  Qwen/Qwen3.5-4B: 8 layers converted, store 0.0413 GB vs bf16 0.1342 GB (3.25x), top-1 agree 0.939, KL mean 4.33e-03 max 1.97e-02 -> ok
+  ibm-granite/granite-4.2-8b: 40 layers converted, store 0.2089 GB vs bf16 0.6711 GB (3.21x), top-1 agree 0.939, KL mean 1.61e-02 max 6.53e-02 -> ok
+KIVI CHUNKED SELFCHECK PASS
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_Qwen3.5-4B_kivi4_chunked.jsonl
+[ckpt] 4 points already recorded
+  skip kivi4_chunked@65536 (done: ok)
+  skip kivi4_chunked@98304 (done: ok)
+  skip kivi4_chunked@131072 (done: spilled)
+  skip kivi4_chunked@163840 (done: skipped_after_oom)
+
+
+=== GEN128_Qwen3.5-4B_kivi4_chunked.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_chunked    65536    65536      7.84     72.6    0.615       ok
+kivi4_chunked    98304    98304     10.16    121.1    0.922       ok
+kivi4_chunked   131072   131072     12.48    390.4    1.228  spilled
+kivi4_chunked   163840        -         -        -        - skipped_after_oom
+  kivi4_chunked: 0.0708 GB per 1k tokens, floor 3.20 GB  (max OK 98304 tok @ 10.16 GB)
+         predicted ceiling ~125,738 tok on a 12.9 GB card
+         first spill at 131072 tok (12.48 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_kivi4_chunked.jsonl
+[ckpt] 6 points already recorded
+  skip kivi4_chunked@16384 (done: ok)
+  skip kivi4_chunked@24576 (done: ok)
+  skip kivi4_chunked@32768 (done: ok)
+  skip kivi4_chunked@49152 (done: ok)
+  skip kivi4_chunked@65536 (done: spilled)
+  skip kivi4_chunked@98304 (done: skipped_after_oom)
+
+
+=== GEN128_granite_kivi4_chunked.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_chunked    16384    16384      7.61     44.9    0.791       ok
+kivi4_chunked    24576    24576      8.50     68.7    1.179       ok
+kivi4_chunked    32768    32768      9.39     99.6    1.567       ok
+kivi4_chunked    49152    49152     11.18    161.5    2.343       ok
+kivi4_chunked    65536    65536     12.96   1520.7    3.119  spilled
+kivi4_chunked    98304        -         -        -        - skipped_after_oom
+  kivi4_chunked: 0.1090 GB per 1k tokens, floor 5.82 GB  (max OK 49152 tok @ 11.18 GB)
+         predicted ceiling ~57,668 tok on a 12.9 GB card
+         first spill at 65536 tok (12.96 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] reclaiming stale lock from pid 45096 (not running)
+[ckpt] paper\results\ruler\BEYOND_granite_kivi4_chunked_24k-32k.jsonl
+[ckpt] 211 recorded, 49 pending (of 260 generated)
+  [1/49] 32768/niah_single_2#1 -> 'The special magic number for roasted-poetry mentio' (97.5s/item, ~78 min left)
+  [2/49] 32768/niah_single_2#2 -> 'The special magic number mentioned in the text is:' (99.8s/item, ~78 min left)
+  [3/49] 32768/niah_single_2#3 -> 'The special magic number mentioned in the text is:' (89.7s/item, ~69 min left)
+  [4/49] 32768/niah_single_2#4 -> 'The text mentions the phrase:\n\n> "One of the speci' (91.3s/item, ~69 min left)
+  [5/49] 32768/niah_single_2#5 -> 'The text mentions a "special magic number for fair' (90.9s/item, ~67 min left)
+  [6/49] 32768/niah_single_2#6 -> 'The special magic number mentioned in the text is:' (87.7s/item, ~63 min left)
+  [7/49] 32768/niah_single_2#7 -> 'The special magic number for solid-sanction mentio' (87.7s/item, ~61 min left)
+  [8/49] 32768/niah_single_2#8 -> 'The text mentions:\n\n> "One of the special magic nu' (89.2s/item, ~61 min left)
+  [9/49] 32768/niah_single_2#9 -> 'The special magic number for annoying-doorbell men' (90.3s/item, ~60 min left)
+  [10/49] 32768/niah_single_3#0 -> 'The special magic UUID mentioned in the text is:\n\n' (91.0s/item, ~59 min left)
+  [11/49] 32768/niah_single_3#1 -> 'The special magic uuid for deranged-assurance ment' (91.6s/item, ~58 min left)
+  [12/49] 32768/niah_single_3#2 -> 'The special magic UUID for screeching-drag mention' (92.1s/item, ~57 min left)
+  [13/49] 32768/niah_single_3#3 -> 'The special magic UUID mentioned in the text is:\n\n' (92.1s/item, ~55 min left)
+  [14/49] 32768/niah_single_3#4 -> 'The special magic UUID mentioned in the text is:\n\n' (92.3s/item, ~54 min left)
+  [15/49] 32768/niah_single_3#5 -> 'The special magic uuid for stale-spaghetti mention' (92.7s/item, ~53 min left)
+  [16/49] 32768/niah_single_3#6 -> 'The special magic uuid for yummy-dynasty mentioned' (92.9s/item, ~51 min left)
+  [17/49] 32768/niah_single_3#7 -> 'The special magic UUID mentioned in the text is:\n\n' (93.1s/item, ~50 min left)
+  [18/49] 32768/niah_single_3#8 -> 'The special magic UUID for raspy-common mentioned ' (93.2s/item, ~48 min left)
+  [19/49] 32768/niah_single_3#9 -> 'The special magic UUID for bizarre-skirt mentioned' (93.4s/item, ~47 min left)
+  [20/49] 32768/qa_1#0 -> 'France' (89.9s/item, ~43 min left)
+  [21/49] 32768/qa_1#1 -> 'The Normans were in Normandy from the 10th century' (87.6s/item, ~41 min left)
+  [22/49] 32768/qa_1#2 -> 'Norse originated from Scandinavia (Denmark, Icelan' (85.1s/item, ~38 min left)
+  [23/49] 32768/qa_1#3 -> 'Rollo' (82.5s/item, ~36 min left)
+  [24/49] 32768/qa_1#4 -> '10th century' (80.1s/item, ~33 min left)
+  [25/49] 32768/qa_1#5 -> 'Duke William II of Normandy' (77.9s/item, ~31 min left)
+  [26/49] 32768/qa_1#6 -> 'The duchy of Normandy was formed by the treaty of ' (76.5s/item, ~29 min left)
+  [27/49] 32768/qa_1#7 -> 'The Normans were primarily Christian (Catholic), a' (75.2s/item, ~28 min left)
+  [28/49] 32768/qa_1#8 -> 'Norman comes from the French words Normans/Normanz' (74.0s/item, ~26 min left)
+  [29/49] 32768/qa_1#9 -> '9th century' (72.2s/item, ~24 min left)
+  [30/49] 32768/qa_2#0 -> 'No' (70.6s/item, ~22 min left)
+  [31/49] 32768/qa_2#1 -> 'No woman portrayed Corliss Archer in the film Kiss' (69.7s/item, ~21 min left)
+  [32/49] 32768/qa_2#2 -> 'Animorphs' (68.3s/item, ~19 min left)
+  [33/49] 32768/qa_2#3 -> 'Yes' (67.0s/item, ~18 min left)
+  [34/49] 32768/qa_2#4 -> 'Adriana Trigiani' (65.8s/item, ~16 min left)
+  [35/49] 32768/qa_2#5 -> 'YG Entertainment' (64.7s/item, ~15 min left)
+  [36/49] 32768/qa_2#6 -> 'Eenasul Fateh' (63.6s/item, ~14 min left)
+  [37/49] 32768/qa_2#7 -> 'The arena where the Lewiston Maineiacs played thei' (62.9s/item, ~13 min left)
+  [38/49] 32768/qa_2#8 -> 'Terry Richardson' (61.9s/item, ~11 min left)
+  [39/49] 32768/qa_2#9 -> 'Yes' (60.9s/item, ~10 min left)
+  [40/49] 32768/vt#0 -> 'We are asked to find all variables that are assign' (60.4s/item, ~9 min left)
+  [41/49] 32768/vt#1 -> 'We are asked to find all variables that are assign' (59.9s/item, ~8 min left)
+  [42/49] 32768/vt#2 -> 'We are asked to find all variables that are assign' (59.5s/item, ~7 min left)
+  [43/49] 32768/vt#3 -> 'We are asked to find all variables that are assign' (59.1s/item, ~6 min left)
+  [44/49] 32768/vt#4 -> 'We are asked to find all variables that are assign' (58.7s/item, ~5 min left)
+  [45/49] 32768/vt#5 -> 'We are asked to find all variables that are assign' (58.3s/item, ~4 min left)
+  [46/49] 32768/vt#6 -> 'We are asked to find all variables that are assign' (57.9s/item, ~3 min left)
+  [47/49] 32768/vt#7 -> 'We are asked to find all variables that are assign' (57.6s/item, ~2 min left)
+  [48/49] 32768/vt#8 -> 'We are asked to **find all variables that are assi' (57.2s/item, ~1 min left)
+  [49/49] 32768/vt#9 -> 'We are asked to **find all variables that are assi' (56.9s/item, ~0 min left)
+
+
+=== BEYOND_granite_kivi4_chunked_24k-32k.jsonl ===
+ibm-granite/granite-4.2-8b arm=kivi4_chunked preset=None quant=nf4
+              task    24576    32768
+     niah_single_1    100.0    100.0
+     niah_single_2    100.0    100.0
+     niah_single_3    100.0    100.0
+   niah_multikey_1    100.0     80.0
+   niah_multikey_2     80.0     80.0
+   niah_multikey_3    100.0     90.0
+   niah_multivalue     17.5     12.5
+   niah_multiquery      5.0     37.5
+                vt      0.0      0.0
+               cwe      2.0      1.0
+               fwe     73.3     90.0
+              qa_1     50.0     50.0
+              qa_2     40.0     50.0
+         RULER avg     59.1     60.8
+  ttft 31.19s | decode 1.7 tok/s | peak 10.22 GB | KV 1.347 GB (3.4x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] reclaiming stale lock from pid 3856 (not running)
+[ckpt] paper\results\longbench\granite-4.2-8b_kivi4_chunked_len12000.jsonl
+[ckpt] 0 items already recorded
+[ckpt] 120 items pending
+  [1/120] qasper#0 4104 tok -> 'The ground truth for fake news in the study is established b' (6.1s/item, ~12 min left)
+  [2/120] qasper#1 3412 tok -> 'GhostVLAD adds ghost clusters alongside normal clusters in t' (5.2s/item, ~10 min left)
+  [3/120] qasper#2 4474 tok -> '68.8% to 71.8%' (4.4s/item, ~9 min left)
+  [4/120] qasper#3 3084 tok -> 'The article proposes using context tweets (text sequences of' (5.2s/item, ~10 min left)
+  [5/120] qasper#4 4547 tok -> 'FoxNews, CNN, ESPN, New York Times, Time magazine, Huffingto' (5.4s/item, ~10 min left)
+  [6/120] qasper#5 5554 tok -> 'Yes' (4.9s/item, ~9 min left)
+  [7/120] qasper#6 5783 tok -> 'The article proposes a baseline evaluation protocol with a s' (5.0s/item, ~9 min left)
+  [8/120] qasper#7 6688 tok -> 'CNN/DailyMail, New York Times Annotated Corpus (NYT), and XS' (5.0s/item, ~9 min left)
+  [9/120] qasper#8 3593 tok -> 'The article does not directly compare the proposed approach ' (5.3s/item, ~10 min left)
+  [10/120] qasper#9 5477 tok -> 'The ensemble is formed by greedily adding the best performin' (5.3s/item, ~10 min left)
+  [11/120] qasper#10 4734 tok -> 'The Friends dataset comes from scripts of the Friends TV sit' (5.2s/item, ~9 min left)
+  [12/120] qasper#11 3347 tok -> 'English' (4.9s/item, ~9 min left)
+  [13/120] qasper#12 3430 tok -> 'IMDb dataset of movie reviews' (4.7s/item, ~8 min left)
+  [14/120] qasper#13 8927 tok -> 'The article does not provide a specific accuracy value (e.g.' (5.2s/item, ~9 min left)
+  [15/120] qasper#14 4880 tok -> 'Yes' (5.0s/item, ~9 min left)
+  [16/120] qasper#15 12015 tok -> 'The article mentions using a set of 246,945 documents (184,0' (6.1s/item, ~11 min left)
+  [17/120] qasper#16 12015 tok -> 'unanswerable' (6.2s/item, ~11 min left)
+  [18/120] qasper#17 5269 tok -> 'Transformer-NMT and RNN-based NMT models' (6.0s/item, ~10 min left)
+  [19/120] qasper#18 5270 tok -> 'The three regularization terms are: (1) neutral features wit' (6.0s/item, ~10 min left)
+  [20/120] qasper#19 6072 tok -> 'SVM with unigram, bigram, and trigram features; SVM with ave' (6.2s/item, ~10 min left)
+  [21/120] narrativeqa#0 12015 tok -> 'Saltram stays with the Mulvilles all winter.' (6.3s/item, ~10 min left)
+  [22/120] narrativeqa#1 12016 tok -> "Mary does not return Ann's feelings because Ann's heart was " (6.5s/item, ~11 min left)
+  [23/120] narrativeqa#2 8512 tok -> "On Atlas' mountain in a cavern by a secret fountain." (6.5s/item, ~11 min left)
+  [24/120] narrativeqa#3 9371 tok -> 'To persuade Socrates to escape imprisonment.' (6.5s/item, ~10 min left)
+  [25/120] narrativeqa#4 12015 tok -> 'Because Otto was the Baron’s son and cutting his hand was pa' (6.6s/item, ~11 min left)
+  [26/120] narrativeqa#5 12015 tok -> 'At least six hours' (6.6s/item, ~10 min left)
+  [27/120] narrativeqa#6 12016 tok -> 'The story does not mention an "entertainers\' manager" or any' (7.6s/item, ~12 min left)
+  [28/120] narrativeqa#7 12016 tok -> 'Dana Barrett' (7.6s/item, ~12 min left)
+  [29/120] narrativeqa#8 12015 tok -> 'American' (7.5s/item, ~11 min left)
+  [30/120] narrativeqa#9 8518 tok -> 'The Witch did not explicitly name a specific individual who ' (8.1s/item, ~12 min left)
+  [31/120] narrativeqa#10 12015 tok -> 'Because Anthony Rogers possesses unique 20th‑century scienti' (8.2s/item, ~12 min left)
+  [32/120] narrativeqa#11 12015 tok -> 'Soames describes a future world of uniformed, ghostly figure' (8.3s/item, ~12 min left)
+  [33/120] narrativeqa#12 11726 tok -> 'Fifty years from the day of her death.' (8.2s/item, ~12 min left)
+  [34/120] narrativeqa#13 11961 tok -> 'The Vervelle couple believe Grassou is the perfect match for' (8.3s/item, ~12 min left)
+  [35/120] narrativeqa#14 11956 tok -> 'Pierre Grassou' (8.2s/item, ~12 min left)
+  [36/120] narrativeqa#15 12014 tok -> "The slime enters Dana's apartment through the baby's glowing" (8.3s/item, ~12 min left)
+  [37/120] narrativeqa#16 12015 tok -> 'Elder Childers does not argue in the provided text.' (8.3s/item, ~11 min left)
+  [38/120] narrativeqa#17 12015 tok -> 'Because Anthony Rogers possesses unique 20th‑century scienti' (8.4s/item, ~11 min left)
+  [39/120] narrativeqa#18 12015 tok -> 'The question asks: "What does Reiko see in the photograph th' (9.0s/item, ~12 min left)
+  [40/120] narrativeqa#19 9370 tok -> 'Several ethical arguments' (8.9s/item, ~12 min left)
+  [41/120] hotpotqa#0 11634 tok -> 'Gates v. Collier' (8.8s/item, ~12 min left)
+  [42/120] hotpotqa#1 12015 tok -> 'Charles L. Clifford' (8.8s/item, ~11 min left)
+  [43/120] hotpotqa#2 12015 tok -> 'Flint' (8.7s/item, ~11 min left)
+  [44/120] hotpotqa#3 12015 tok -> 'Mars' (8.7s/item, ~11 min left)
+  [45/120] hotpotqa#4 12015 tok -> 'on film' (8.6s/item, ~11 min left)
+  [46/120] hotpotqa#5 12015 tok -> 'One' (8.6s/item, ~11 min left)
+  [47/120] hotpotqa#6 12015 tok -> 'Mayiladuthurai' (8.5s/item, ~10 min left)
+  [48/120] hotpotqa#7 2357 tok -> 'Pleiospilos' (8.4s/item, ~10 min left)
+  [49/120] hotpotqa#8 12015 tok -> '2013' (8.3s/item, ~10 min left)
+  [50/120] hotpotqa#9 8990 tok -> 'Fitz and the Tantrums' (8.3s/item, ~10 min left)
+  [51/120] hotpotqa#10 12015 tok -> '1980' (8.2s/item, ~9 min left)
+  [52/120] hotpotqa#11 12015 tok -> 'The Greatest Event in Television History aired on the channe' (8.3s/item, ~9 min left)
+  [53/120] hotpotqa#12 12015 tok -> 'Bette Davis' (8.2s/item, ~9 min left)
+  [54/120] hotpotqa#13 10630 tok -> 'number five' (8.2s/item, ~9 min left)
+  [55/120] hotpotqa#14 12015 tok -> 'The forests of Mara and Mondrem included red, fallow and roe' (8.3s/item, ~9 min left)
+  [56/120] hotpotqa#15 12015 tok -> '2000 Summer Olympics' (8.2s/item, ~9 min left)
+  [57/120] hotpotqa#16 6391 tok -> 'Claudio López' (8.1s/item, ~9 min left)
+  [58/120] hotpotqa#17 12015 tok -> 'Ronald Reagan' (8.1s/item, ~8 min left)
+  [59/120] hotpotqa#18 12015 tok -> 'Honey to the B' (8.1s/item, ~8 min left)
+  [60/120] hotpotqa#19 12015 tok -> 'Roy Orbison\n\nNote: The question asks for a member of the Bri' (8.2s/item, ~8 min left)
+  [61/120] multifieldqa_en#0 1622 tok -> 'South West Ultras' (8.1s/item, ~8 min left)
+  [62/120] multifieldqa_en#1 11329 tok -> 'No.' (8.0s/item, ~8 min left)
+  [63/120] multifieldqa_en#2 8517 tok -> 'Low-temperature scanning tunneling microscopy and spectrosco' (8.0s/item, ~8 min left)
+  [64/120] multifieldqa_en#3 12015 tok -> 'An ICD (implantable cardioverter-defibrillator) is a surgica' (8.2s/item, ~8 min left)
+  [65/120] multifieldqa_en#4 7682 tok -> 'It is important for the sides of the fuselage to be sloped (' (8.2s/item, ~8 min left)
+  [66/120] multifieldqa_en#5 11554 tok -> 'The proximity of superconductivity induces non-local pairing' (8.4s/item, ~8 min left)
+  [67/120] multifieldqa_en#6 8124 tok -> 'Electricity is used in everyday life for lighting, heating, ' (8.5s/item, ~7 min left)
+  [68/120] multifieldqa_en#7 3135 tok -> 'Vice Admiral' (8.4s/item, ~7 min left)
+  [69/120] multifieldqa_en#8 1978 tok -> '15–3' (8.3s/item, ~7 min left)
+  [70/120] multifieldqa_en#9 12015 tok -> 'Vitamin K3 (menadione), Vitamin K4, and Vitamin K5.' (8.3s/item, ~7 min left)
+  [71/120] multifieldqa_en#10 9567 tok -> 'Yes' (8.2s/item, ~7 min left)
+  [72/120] multifieldqa_en#11 10050 tok -> '3-D printing and software development' (8.2s/item, ~7 min left)
+  [73/120] multifieldqa_en#12 12015 tok -> 'Adult women: 90 μg; adult men: 120 μg\n\n(Note: The answer is ' (8.3s/item, ~7 min left)
+  [74/120] multifieldqa_en#13 8124 tok -> 'watt' (8.3s/item, ~6 min left)
+  [75/120] multifieldqa_en#14 9763 tok -> 'The main advantage of a horizontal business model for mobile' (8.3s/item, ~6 min left)
+  [76/120] multifieldqa_en#15 2895 tok -> 'Jacob C. Landau' (8.2s/item, ~6 min left)
+  [77/120] multifieldqa_en#16 8252 tok -> 'The research uses a compositional emergent communication fra' (8.2s/item, ~6 min left)
+  [78/120] multifieldqa_en#17 9318 tok -> 'The function $\\beta(r)$ is determined by solving the differe' (8.3s/item, ~6 min left)
+  [79/120] multifieldqa_en#18 10049 tok -> '70-75 metres\n</think>70-75 metres' (8.3s/item, ~6 min left)
+  [80/120] multifieldqa_en#19 3917 tok -> 'The vaccines were trialed against other vaccines (i.e., toxi' (8.2s/item, ~5 min left)
+  [81/120] gov_report#0 10804 tok -> '**Summary of Report: Multiyear Procurement (MYP) and Block B' (9.6s/item, ~6 min left)
+  [82/120] gov_report#1 12015 tok -> '**Summary of Government Report on Air Force and Navy Fixed-W' (11.0s/item, ~7 min left)
+  [83/120] gov_report#2 9741 tok -> '**Summary of Report: Use of Financial Rewards by U.S. Fish a' (12.1s/item, ~7 min left)
+  [84/120] gov_report#3 8830 tok -> '**Summary of the Report: Cross-Border Data Flows, Privacy, a' (13.2s/item, ~8 min left)
+  [85/120] gov_report#4 12015 tok -> '**Summary of the Federal Government’s Support for Airport In' (14.5s/item, ~8 min left)
+  [86/120] gov_report#5 7903 tok -> '**Summary of GAO Report on DOD Military Construction (MILCON' (15.4s/item, ~9 min left)
+  [87/120] gov_report#6 4246 tok -> '**Summary of Government Report on Federal Student Aid School' (16.1s/item, ~9 min left)
+  [88/120] gov_report#7 12015 tok -> '**Summary of Government Cybersecurity Report (GAO Report)**\n' (17.3s/item, ~9 min left)
+  [89/120] gov_report#8 4002 tok -> '**Summary of USAID Assistance to the West Bank and Gaza (FY ' (18.0s/item, ~9 min left)
+  [90/120] gov_report#9 12015 tok -> '**Summary of the Report on the Small Business Lending Fund (' (19.1s/item, ~10 min left)
+  [91/120] gov_report#10 12015 tok -> '**Summary of the Report: Navy Force Structure and Shipbuildi' (20.3s/item, ~10 min left)
+  [92/120] gov_report#11 10594 tok -> '**Summary of GAO Report on SBA 7(a) Loan Program Oversight a' (21.3s/item, ~10 min left)
+  [93/120] gov_report#12 11057 tok -> '**Summary of Report: "Managing for Results: Agencies’ Trends' (22.3s/item, ~10 min left)
+  [94/120] gov_report#13 8882 tok -> '**Summary of Report: Implementing Telework and Space Efficie' (23.2s/item, ~10 min left)
+  [95/120] gov_report#14 12015 tok -> '**Summary of Government Report on Federal Cybersecurity and ' (24.2s/item, ~10 min left)
+  [96/120] gov_report#15 7720 tok -> '**Summary of Government Report on the Office of the Under Se' (25.0s/item, ~10 min left)
+  [97/120] gov_report#16 5331 tok -> '**Summary of the GAO Report on FEMA’s Individual Assistance ' (25.6s/item, ~10 min left)
+  [98/120] gov_report#17 10617 tok -> '**Summary of GAO Report on Forest Service Internal Controls ' (26.5s/item, ~10 min left)
+  [99/120] gov_report#18 6638 tok -> '**Summary of the Senate Confirmation Process for Presidentia' (27.1s/item, ~9 min left)
+  [100/120] gov_report#19 4251 tok -> "**Summary of the Longshore and Harbor Workers' Compensation " (27.6s/item, ~9 min left)
+  [101/120] passage_retrieval_en#0 11339 tok -> 'Paragraph 15' (27.4s/item, ~9 min left)
+  [102/120] passage_retrieval_en#1 11753 tok -> 'Paragraph 8' (27.2s/item, ~8 min left)
+  [103/120] passage_retrieval_en#2 12014 tok -> 'Paragraph 1\n\nHowever, upon careful review, the abstract desc' (27.0s/item, ~8 min left)
+  [104/120] passage_retrieval_en#3 12015 tok -> 'Paragraph 15' (26.8s/item, ~7 min left)
+  [105/120] passage_retrieval_en#4 12015 tok -> 'Paragraph 14' (26.6s/item, ~7 min left)
+  [106/120] passage_retrieval_en#5 12015 tok -> 'Paragraph 3' (26.4s/item, ~6 min left)
+  [107/120] passage_retrieval_en#6 11920 tok -> 'Paragraph 24' (26.3s/item, ~6 min left)
+  [108/120] passage_retrieval_en#7 12015 tok -> 'Paragraph 27' (26.1s/item, ~5 min left)
+  [109/120] passage_retrieval_en#8 10692 tok -> 'Paragraph 30' (25.9s/item, ~5 min left)
+  [110/120] passage_retrieval_en#9 12015 tok -> 'Paragraph 12' (25.7s/item, ~4 min left)
+  [111/120] passage_retrieval_en#10 12015 tok -> 'Paragraph 22' (25.5s/item, ~4 min left)
+  [112/120] passage_retrieval_en#11 12015 tok -> 'Paragraph 30' (25.4s/item, ~3 min left)
+  [113/120] passage_retrieval_en#12 12015 tok -> 'Paragraph 24' (25.2s/item, ~3 min left)
+  [114/120] passage_retrieval_en#13 12015 tok -> 'None of the provided paragraphs match the abstract.\n\nThe abs' (25.1s/item, ~3 min left)
+  [115/120] passage_retrieval_en#14 12015 tok -> 'Paragraph 3' (24.9s/item, ~2 min left)
+  [116/120] passage_retrieval_en#15 12015 tok -> 'Paragraph 8' (24.8s/item, ~2 min left)
+  [117/120] passage_retrieval_en#16 12015 tok -> 'Paragraph 3' (24.6s/item, ~1 min left)
+  [118/120] passage_retrieval_en#17 12015 tok -> 'Paragraph 17' (24.5s/item, ~1 min left)
+  [119/120] passage_retrieval_en#18 12015 tok -> 'Paragraph 4' (24.3s/item, ~0 min left)
+  [120/120] passage_retrieval_en#19 12015 tok -> 'Paragraph 3' (24.2s/item, ~0 min left)
+
+
+=== granite-4.2-8b_kivi4_chunked_len12000.jsonl ===
+ibm-granite/granite-4.2-8b arm=kivi4_chunked preset=None quant=nf4 maxlen=12000
+                  task    n    score
+            gov_report   20    31.12
+              hotpotqa   20    33.34
+       multifieldqa_en   20    41.57
+           narrativeqa   20    20.14
+  passage_retrieval_en   20    85.00
+                qasper   20    45.18
+    MACRO(all samples)  120    42.73
+  ttft 4.49s | decode 6.3 tok/s | peak 6.86 GB | KV 0.468 GB (3.3x) | ctx 9526 tok
+KIVI CAMPAIGN COMPLETE

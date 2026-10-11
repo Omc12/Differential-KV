@@ -1,0 +1,18 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] reclaiming stale lock from pid 10752 (not running)
+[ckpt] paper/results/ladder/Qwen3.5-4B_mid_nf4_snapkv_prefillpeak.jsonl
+[ckpt] 2 points already recorded
+  skip snapkv@32768 (done: ok)
+  skip snapkv@49152 (done: ok)
+  running snapkv@65536 ...
+    snapkv@65536: spilled peak=3.287858688 (150s)
+
+
+=== Qwen3.5-4B_mid_nf4_snapkv_prefillpeak.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+snapkv    32768    32768      3.29     17.8    0.035       ok
+snapkv    49152    49152      3.29     26.5    0.035       ok
+snapkv    65536    65536      3.29    101.5    0.035  spilled
+  snapkv: 0.0000 GB per 1k tokens, floor 3.29 GB  (max OK 49152 tok @ 3.29 GB)
+         first spill at 65536 tok (3.29 GB) -- timings at and above this length are host-memory bound, not compute

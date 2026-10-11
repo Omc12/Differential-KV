@@ -1,0 +1,362 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\merge_check\qwen16k_off.jsonl
+[ckpt] 0 recorded, 26 pending (of 26 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1129 MB → 1129 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1542 MB → 1542 MB (saved 0 MB)
+[Pool] Lazy-allocated 136 slots for ~16118 tokens = 58.0 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) is running on layer 3.
+  [1/26] 16384/cwe#0 -> 'Based on a detailed analysis of the provided list ' (19.1s/item, ~8 min left)
+  [2/26] 16384/cwe#1 -> 'Based on a detailed analysis of the provided list ' (18.4s/item, ~7 min left)
+  [3/26] 16384/fwe#0 -> 'motqci, nueokj, lfltqg' (14.9s/item, ~6 min left)
+  [4/26] 16384/fwe#1 -> 'mqcnep, ngnugl, ljfsrz' (13.1s/item, ~5 min left)
+  [5/26] 16384/niah_multikey_1#0 -> 'The special magic number for worried-purse mention' (12.2s/item, ~4 min left)
+  [6/26] 16384/niah_multikey_1#1 -> 'The special magic number for painful-pigpen mentio' (11.6s/item, ~4 min left)
+  [7/26] 16384/niah_multikey_2#0 -> 'The special magic number for rotten-raffle is **62' (11.1s/item, ~4 min left)
+  [8/26] 16384/niah_multikey_2#1 -> 'The special magic number for clean-dilapidation is' (10.8s/item, ~3 min left)
+  [9/26] 16384/niah_multikey_3#0 -> 'The special magic uuid for `d0290d6b-ebe5-4cc4-88d' (11.7s/item, ~3 min left)
+  [10/26] 16384/niah_multikey_3#1 -> 'The special magic uuid for `03748864-9981-428f-a09' (12.5s/item, ~3 min left)
+  [11/26] 16384/niah_multiquery#0 -> 'Based on the text provided, here are the special m' (12.7s/item, ~3 min left)
+  [12/26] 16384/niah_multiquery#1 -> 'Based on the text provided, here are the special m' (12.8s/item, ~3 min left)
+  [13/26] 16384/niah_multivalue#0 -> 'Based on the text provided, here are the special m' (12.8s/item, ~3 min left)
+  [14/26] 16384/niah_multivalue#1 -> 'Based on the text provided, here are the special m' (12.8s/item, ~3 min left)
+  [15/26] 16384/niah_single_1#0 -> 'The special magic number for scintillating-slipper' (12.6s/item, ~2 min left)
+  [16/26] 16384/niah_single_1#1 -> 'The special magic number for smoggy-caliber mentio' (12.3s/item, ~2 min left)
+  [17/26] 16384/niah_single_2#0 -> 'The special magic number for discreet-commodity me' (12.3s/item, ~2 min left)
+  [18/26] 16384/niah_single_2#1 -> 'The special magic number for uncovered-turkey ment' (12.1s/item, ~2 min left)
+  [19/26] 16384/niah_single_3#0 -> 'The special magic uuid for silky-mapping mentioned' (12.0s/item, ~1 min left)
+  [20/26] 16384/niah_single_3#1 -> 'The special magic uuid for sordid-bath mentioned i' (12.0s/item, ~1 min left)
+  [21/26] 16384/qa_1#0 -> 'France' (11.8s/item, ~1 min left)
+  [22/26] 16384/qa_1#1 -> 'The Normans were in Normandy from the 10th century' (11.7s/item, ~1 min left)
+  [23/26] 16384/qa_2#0 -> 'No' (11.5s/item, ~1 min left)
+  [24/26] 16384/qa_2#1 -> 'Meet Corliss Archer (TV series)' (11.3s/item, ~0 min left)
+  [25/26] 16384/vt#0 -> 'Based on the text provided, here is the tracking o' (11.2s/item, ~0 min left)
+  [26/26] 16384/vt#1 -> 'Based on the text provided, here is the tracking o' (11.1s/item, ~0 min left)
+
+
+=== qwen16k_off.jsonl ===
+Qwen/Qwen3.5-4B arm=dkv preset=mid quant=nf4
+              task    16384
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2      0.0
+   niah_multikey_3      0.0
+   niah_multivalue    100.0
+   niah_multiquery    100.0
+                vt      0.0
+               cwe     70.0
+               fwe    100.0
+              qa_1     50.0
+              qa_2      0.0
+         RULER avg     63.1
+  ttft nans | decode nan tok/s | peak 4.40 GB | KV 0.623 GB (3.4x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\merge_check\granite8k_off.jsonl
+[ckpt] 0 recorded, 26 pending (of 26 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model ibm-granite/granite-4.2-8b...
+[DKV] Loading model weights on demand: ibm-granite/granite-4.2-8b (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 998 MB → 998 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 4807.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (154/layer x 40 layers ~= 157,696 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 5.2 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=32, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1414 MB → 1414 MB (saved 0 MB)
+[Pool] Lazy-allocated 360 slots for ~7979 tokens = 153.5 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) is running on layer 0.
+  [1/26] 8192/cwe#0 -> 'We are given a long list of numbered words (from 1' (21.1s/item, ~9 min left)
+  [2/26] 8192/cwe#1 -> 'We are given a long list of words (numbered 1 to 1' (20.6s/item, ~8 min left)
+  [3/26] 8192/fwe#0 -> 'mqupjb\nqaxoqh\nguklre' (15.9s/item, ~6 min left)
+  [4/26] 8192/fwe#1 -> 'okmnxy\nqgpshy\ngjuekj' (13.5s/item, ~5 min left)
+  [5/26] 8192/niah_multikey_1#0 -> 'The special magic number for **abject-tenant** men' (15.0s/item, ~5 min left)
+  [6/26] 8192/niah_multikey_1#1 -> 'The special magic number for **worried-purse** men' (15.8s/item, ~5 min left)
+  [7/26] 8192/niah_multikey_2#0 -> 'The special magic number for **combative-cattle** ' (15.5s/item, ~5 min left)
+  [8/26] 8192/niah_multikey_2#1 -> 'The special magic number for **minor-pain** mentio' (16.2s/item, ~5 min left)
+  [9/26] 8192/niah_multikey_3#0 -> 'The special magic uuid for `565c1e3f-6d1c-41d6-b3e' (16.8s/item, ~5 min left)
+  [10/26] 8192/niah_multikey_3#1 -> 'The special magic uuid for `3f91c419-e846-49df-b37' (17.2s/item, ~5 min left)
+  [11/26] 8192/niah_multiquery#0 -> 'Let\'s carefully extract all the "special magic num' (17.5s/item, ~4 min left)
+  [12/26] 8192/niah_multiquery#1 -> 'Let\'s carefully extract all the "special magic num' (17.9s/item, ~4 min left)
+  [13/26] 8192/niah_multivalue#0 -> 'Let\'s carefully extract all the "special magic num' (18.1s/item, ~4 min left)
+  [14/26] 8192/niah_multivalue#1 -> 'Let\'s carefully extract all the "special magic num' (18.3s/item, ~4 min left)
+  [15/26] 8192/niah_single_1#0 -> 'The special magic number mentioned in the text is:' (18.4s/item, ~3 min left)
+  [16/26] 8192/niah_single_1#1 -> 'The special magic number mentioned in the text is:' (18.5s/item, ~3 min left)
+  [17/26] 8192/niah_single_2#0 -> 'The special magic number for loving-cockroach ment' (18.6s/item, ~3 min left)
+  [18/26] 8192/niah_single_2#1 -> 'The special magic number for discreet-commodity me' (18.7s/item, ~2 min left)
+  [19/26] 8192/niah_single_3#0 -> 'The special magic UUID for silky-mapping mentioned' (18.8s/item, ~2 min left)
+  [20/26] 8192/niah_single_3#1 -> 'The special magic UUID for **sordid-bath** mention' (18.9s/item, ~2 min left)
+  [21/26] 8192/qa_1#0 -> 'France' (18.3s/item, ~2 min left)
+  [22/26] 8192/qa_1#1 -> 'The Normans were in Normandy from the 10th century' (17.8s/item, ~1 min left)
+  [23/26] 8192/qa_2#0 -> 'No' (17.3s/item, ~1 min left)
+  [24/26] 8192/qa_2#1 -> 'There is no information in the provided documents ' (16.9s/item, ~1 min left)
+  [25/26] 8192/vt#0 -> 'We are asked to find all variables that are assign' (16.6s/item, ~0 min left)
+  [26/26] 8192/vt#1 -> 'We are asked to find all variables that are assign' (16.3s/item, ~0 min left)
+
+
+=== granite8k_off.jsonl ===
+ibm-granite/granite-4.2-8b arm=dkv preset=mid quant=nf4
+              task     8192
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2     50.0
+   niah_multikey_3      0.0
+   niah_multivalue     12.5
+   niah_multiquery     25.0
+                vt      0.0
+               cwe     10.0
+               fwe    100.0
+              qa_1     50.0
+              qa_2      0.0
+         RULER avg     49.8
+  ttft nans | decode nan tok/s | peak 8.73 GB | KV 0.464 GB (2.9x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\merge_check\granite_ladder16k_off.jsonl
+[ckpt] 0 points already recorded
+  running dkv@16384 ...
+    dkv@16384: ok peak=11.299137024 (54s)
+
+
+=== granite_ladder16k_off.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    16384    16384     11.30     25.2    0.653       ok
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\merge_check\qwen_ladder64k_off.jsonl
+[ckpt] 0 points already recorded
+  running dkv@65536 ...
+    dkv@65536: ok peak=8.535798784 (83s)
+
+
+=== qwen_ladder64k_off.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    65536    65536      8.54     43.8    1.686       ok
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\merge_check\qwen16k_on.jsonl
+[ckpt] 0 recorded, 26 pending (of 26 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1129 MB → 1129 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1544 MB → 1544 MB (saved 0 MB)
+[Pool] Lazy-allocated 136 slots for ~16118 tokens = 58.0 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) is running on layer 3.
+  [1/26] 16384/cwe#0 -> 'Based on a detailed analysis of the provided list ' (18.9s/item, ~8 min left)
+  [2/26] 16384/cwe#1 -> 'Based on a detailed analysis of the provided list ' (18.3s/item, ~7 min left)
+  [3/26] 16384/fwe#0 -> 'motqci, nueokj, lfltqg' (14.8s/item, ~6 min left)
+  [4/26] 16384/fwe#1 -> 'mqcnep, ngnugl, ljfsrz' (13.1s/item, ~5 min left)
+  [5/26] 16384/niah_multikey_1#0 -> 'The special magic number for worried-purse mention' (12.2s/item, ~4 min left)
+  [6/26] 16384/niah_multikey_1#1 -> 'The special magic number for painful-pigpen mentio' (11.7s/item, ~4 min left)
+  [7/26] 16384/niah_multikey_2#0 -> 'The special magic number for rotten-raffle is **62' (11.2s/item, ~4 min left)
+  [8/26] 16384/niah_multikey_2#1 -> 'The special magic number for clean-dilapidation is' (10.8s/item, ~3 min left)
+  [9/26] 16384/niah_multikey_3#0 -> 'The special magic uuid for `d0290d6b-ebe5-4cc4-88d' (11.7s/item, ~3 min left)
+  [10/26] 16384/niah_multikey_3#1 -> 'The special magic uuid for `03748864-9981-428f-a09' (12.4s/item, ~3 min left)
+  [11/26] 16384/niah_multiquery#0 -> 'Based on the text provided, here are the special m' (12.6s/item, ~3 min left)
+  [12/26] 16384/niah_multiquery#1 -> 'Based on the text provided, here are the special m' (12.7s/item, ~3 min left)
+  [13/26] 16384/niah_multivalue#0 -> 'Based on the text provided, here are the special m' (12.7s/item, ~3 min left)
+  [14/26] 16384/niah_multivalue#1 -> 'Based on the text provided, here are the special m' (12.8s/item, ~3 min left)
+  [15/26] 16384/niah_single_1#0 -> 'The special magic number for scintillating-slipper' (12.5s/item, ~2 min left)
+  [16/26] 16384/niah_single_1#1 -> 'The special magic number for smoggy-caliber mentio' (12.3s/item, ~2 min left)
+  [17/26] 16384/niah_single_2#0 -> 'The special magic number for discreet-commodity me' (12.3s/item, ~2 min left)
+  [18/26] 16384/niah_single_2#1 -> 'The special magic number for uncovered-turkey ment' (12.1s/item, ~2 min left)
+  [19/26] 16384/niah_single_3#0 -> 'The special magic uuid for silky-mapping mentioned' (12.0s/item, ~1 min left)
+  [20/26] 16384/niah_single_3#1 -> 'The special magic uuid for sordid-bath mentioned i' (12.0s/item, ~1 min left)
+  [21/26] 16384/qa_1#0 -> 'France' (11.8s/item, ~1 min left)
+  [22/26] 16384/qa_1#1 -> 'The Normans were in Normandy from the 10th century' (11.7s/item, ~1 min left)
+  [23/26] 16384/qa_2#0 -> 'No' (11.5s/item, ~1 min left)
+  [24/26] 16384/qa_2#1 -> 'Meet Corliss Archer (TV series)' (11.3s/item, ~0 min left)
+  [25/26] 16384/vt#0 -> 'Based on the text provided, here is the tracking o' (11.3s/item, ~0 min left)
+  [26/26] 16384/vt#1 -> 'Based on the text provided, here is the tracking o' (11.2s/item, ~0 min left)
+
+
+=== qwen16k_on.jsonl ===
+Qwen/Qwen3.5-4B arm=dkv preset=mid quant=nf4
+              task    16384
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2      0.0
+   niah_multikey_3      0.0
+   niah_multivalue    100.0
+   niah_multiquery    100.0
+                vt      0.0
+               cwe     70.0
+               fwe    100.0
+              qa_1     50.0
+              qa_2      0.0
+         RULER avg     63.1
+  ttft nans | decode nan tok/s | peak 4.40 GB | KV 0.623 GB (3.4x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\merge_check\granite8k_on.jsonl
+[ckpt] 0 recorded, 26 pending (of 26 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model ibm-granite/granite-4.2-8b...
+[DKV] Loading model weights on demand: ibm-granite/granite-4.2-8b (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 999 MB → 999 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 4807.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (154/layer x 40 layers ~= 157,696 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 5.2 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=32, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1415 MB → 1415 MB (saved 0 MB)
+[Pool] Lazy-allocated 360 slots for ~7979 tokens = 153.5 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) is running on layer 0.
+  [1/26] 8192/cwe#0 -> 'We are given a long list of numbered words (from 1' (21.5s/item, ~9 min left)
+  [2/26] 8192/cwe#1 -> 'We are given a long list of words (numbered 1 to 1' (20.7s/item, ~8 min left)
+  [3/26] 8192/fwe#0 -> 'mqupjb\nqaxoqh\nguklre' (16.0s/item, ~6 min left)
+  [4/26] 8192/fwe#1 -> 'okmnxy\nqgpshy\ngjuekj' (13.5s/item, ~5 min left)
+  [5/26] 8192/niah_multikey_1#0 -> 'The special magic number for **abject-tenant** men' (15.2s/item, ~5 min left)
+  [6/26] 8192/niah_multikey_1#1 -> 'The special magic number for **worried-purse** men' (16.0s/item, ~5 min left)
+  [7/26] 8192/niah_multikey_2#0 -> 'The special magic number for **combative-cattle** ' (15.8s/item, ~5 min left)
+  [8/26] 8192/niah_multikey_2#1 -> 'The special magic number for **minor-pain** mentio' (16.5s/item, ~5 min left)
+  [9/26] 8192/niah_multikey_3#0 -> 'The special magic uuid for `565c1e3f-6d1c-41d6-b3e' (16.9s/item, ~5 min left)
+  [10/26] 8192/niah_multikey_3#1 -> 'The special magic uuid for `3f91c419-e846-49df-b37' (17.3s/item, ~5 min left)
+  [11/26] 8192/niah_multiquery#0 -> 'Let\'s carefully extract all the "special magic num' (17.7s/item, ~4 min left)
+  [12/26] 8192/niah_multiquery#1 -> 'Let\'s carefully extract all the "special magic num' (18.0s/item, ~4 min left)
+  [13/26] 8192/niah_multivalue#0 -> 'Let\'s carefully extract all the "special magic num' (18.2s/item, ~4 min left)
+  [14/26] 8192/niah_multivalue#1 -> 'Let\'s carefully extract all the "special magic num' (18.4s/item, ~4 min left)
+  [15/26] 8192/niah_single_1#0 -> 'The special magic number mentioned in the text is:' (18.5s/item, ~3 min left)
+  [16/26] 8192/niah_single_1#1 -> 'The special magic number mentioned in the text is:' (18.5s/item, ~3 min left)
+  [17/26] 8192/niah_single_2#0 -> 'The special magic number for loving-cockroach ment' (18.8s/item, ~3 min left)
+  [18/26] 8192/niah_single_2#1 -> 'The special magic number for discreet-commodity me' (18.8s/item, ~3 min left)
+  [19/26] 8192/niah_single_3#0 -> 'The special magic UUID for silky-mapping mentioned' (19.0s/item, ~2 min left)
+  [20/26] 8192/niah_single_3#1 -> 'The special magic UUID for **sordid-bath** mention' (19.1s/item, ~2 min left)
+  [21/26] 8192/qa_1#0 -> 'France' (18.4s/item, ~2 min left)
+  [22/26] 8192/qa_1#1 -> 'The Normans were in Normandy from the 10th century' (18.0s/item, ~1 min left)
+  [23/26] 8192/qa_2#0 -> 'No' (17.4s/item, ~1 min left)
+  [24/26] 8192/qa_2#1 -> 'There is no information in the provided documents ' (17.1s/item, ~1 min left)
+  [25/26] 8192/vt#0 -> 'We are asked to find all variables that are assign' (16.8s/item, ~0 min left)
+  [26/26] 8192/vt#1 -> 'We are asked to find all variables that are assign' (16.5s/item, ~0 min left)
+
+
+=== granite8k_on.jsonl ===
+ibm-granite/granite-4.2-8b arm=dkv preset=mid quant=nf4
+              task     8192
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2     50.0
+   niah_multikey_3      0.0
+   niah_multivalue     12.5
+   niah_multiquery     25.0
+                vt      0.0
+               cwe     10.0
+               fwe    100.0
+              qa_1     50.0
+              qa_2      0.0
+         RULER avg     49.8
+  ttft nans | decode nan tok/s | peak 8.73 GB | KV 0.464 GB (2.9x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\merge_check\granite_ladder16k_on.jsonl
+[ckpt] 0 points already recorded
+  running dkv@16384 ...
+    dkv@16384: ok peak=11.299137024 (55s)
+
+
+=== granite_ladder16k_on.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    16384    16384     11.30     26.2    0.653       ok
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\merge_check\qwen_ladder64k_on.jsonl
+[ckpt] 0 points already recorded
+  running dkv@65536 ...
+    dkv@65536: ok peak=8.535798784 (73s)
+
+
+=== qwen_ladder64k_on.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    65536    65536      8.54     42.5    1.686       ok
+qwen16k: 26 shared items, 0 with different text
+granite8k: 26 shared items, 0 with different text
+granite_ladder16k off: status ok peak 11.299137 reserved 11.855200 GB, wall 25.2s
+granite_ladder16k on: status ok peak 11.299137 reserved 11.855200 GB, wall 26.2s
+qwen_ladder64k off: status ok peak 8.535799 reserved 9.420407 GB, wall 43.8s
+qwen_ladder64k on: status ok peak 8.535799 reserved 9.420407 GB, wall 42.5s
+MERGE CHECK PASS (identical text)
+MERGE CHECK COMPLETE

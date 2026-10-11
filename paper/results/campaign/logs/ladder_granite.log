@@ -1,0 +1,67 @@
+
+===== 2026-09-28 20:10:34  C:\Users\USER\AppData\Local\Programs\Python\Python313\python.exe C:\Users\USER\Desktop\Differential KV\benchmarks\context_ladder.py --model ibm-granite/granite-4.2-8b --arms streamingllm_chunked h2o_chunked --contexts 4096 8192 16384 24576 32768 49152 65536 98304 131072 --out C:\Users\USER\Desktop\Differential KV\paper\results\ladder\granite-4.2-8b_mid_nf4_chunked.jsonl
+[msvc] developer environment imported (10 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] C:\Users\USER\Desktop\Differential KV\paper\results\ladder\granite-4.2-8b_mid_nf4_chunked.jsonl
+[ckpt] 0 points already recorded
+  running streamingllm_chunked@4096 ...
+    streamingllm_chunked@4096: ok peak=6.244783104 (31s)
+  running streamingllm_chunked@8192 ...
+    streamingllm_chunked@8192: ok peak=6.244783104 (23s)
+  running streamingllm_chunked@16384 ...
+    streamingllm_chunked@16384: ok peak=6.244783104 (25s)
+  running streamingllm_chunked@24576 ...
+    streamingllm_chunked@24576: ok peak=6.244783104 (28s)
+  running streamingllm_chunked@32768 ...
+    streamingllm_chunked@32768: ok peak=6.244783104 (31s)
+  running streamingllm_chunked@49152 ...
+    streamingllm_chunked@49152: ok peak=6.244783104 (37s)
+  running streamingllm_chunked@65536 ...
+    streamingllm_chunked@65536: ok peak=6.244783104 (43s)
+  running streamingllm_chunked@98304 ...
+    streamingllm_chunked@98304: ok peak=6.244783104 (55s)
+  running streamingllm_chunked@131072 ...
+    streamingllm_chunked@131072: ok peak=6.244783104 (68s)
+  running h2o_chunked@4096 ...
+    h2o_chunked@4096: ok peak=6.249181696 (22s)
+  running h2o_chunked@8192 ...
+    h2o_chunked@8192: ok peak=6.248106496 (32s)
+  running h2o_chunked@16384 ...
+    h2o_chunked@16384: ok peak=6.250213888 (43s)
+  running h2o_chunked@24576 ...
+    h2o_chunked@24576: ok peak=6.250205696 (48s)
+  running h2o_chunked@32768 ...
+    h2o_chunked@32768: ok peak=6.247105024 (55s)
+  running h2o_chunked@49152 ...
+    h2o_chunked@49152: ok peak=6.249165312 (71s)
+  running h2o_chunked@65536 ...
+    h2o_chunked@65536: ok peak=6.250740224 (100s)
+  running h2o_chunked@98304 ...
+    h2o_chunked@98304: ok peak=6.249691648 (105s)
+  running h2o_chunked@131072 ...
+    h2o_chunked@131072: ok peak=6.255446528 (131s)
+
+
+=== granite-4.2-8b_mid_nf4_chunked.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+h2o_chunked     4096     4096      6.25      3.8    0.336       ok
+h2o_chunked     8192     8192      6.25      8.5    0.336       ok
+h2o_chunked    16384    16384      6.25     14.4    0.336       ok
+h2o_chunked    24576    24576      6.25     20.6    0.336       ok
+h2o_chunked    32768    32768      6.25     26.7    0.336       ok
+h2o_chunked    49152    49152      6.25     44.2    0.336       ok
+h2o_chunked    65536    65536      6.25     52.0    0.336       ok
+h2o_chunked    98304    98304      6.25     77.4    0.336       ok
+h2o_chunked   131072   131072      6.26    103.0    0.336       ok
+streamingllm_chunked     4096     4096      6.24      2.6    0.336       ok
+streamingllm_chunked     8192     8192      6.24      4.0    0.336       ok
+streamingllm_chunked    16384    16384      6.24      6.9    0.336       ok
+streamingllm_chunked    24576    24576      6.24      9.8    0.336       ok
+streamingllm_chunked    32768    32768      6.24     12.6    0.336       ok
+streamingllm_chunked    49152    49152      6.24     18.7    0.336       ok
+streamingllm_chunked    65536    65536      6.24     24.6    0.336       ok
+streamingllm_chunked    98304    98304      6.24     36.4    0.336       ok
+streamingllm_chunked   131072   131072      6.24     48.3    0.336       ok
+  h2o_chunked: 0.0002 GB per 1k tokens, floor 6.23 GB  (max OK 131072 tok @ 6.26 GB)
+         predicted ceiling ~33,440,421 tok on a 12.9 GB card
+  streamingllm_chunked: 0.0000 GB per 1k tokens, floor 6.24 GB  (max OK 131072 tok @ 6.24 GB)

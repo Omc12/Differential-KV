@@ -1,0 +1,123 @@
+run Qwen/Qwen3.5-4B|dkv|32768
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1366.67it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:01<07:46,  1.10s/it]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   2%|▏         | 9/426 [00:01<00:41,  9.98it/s]Loading weights:   3%|▎         | 14/426 [00:01<00:27, 14.75it/s]Loading weights:   6%|▌         | 26/426 [00:01<00:13, 30.76it/s]Loading weights:   8%|▊         | 36/426 [00:01<00:09, 41.97it/s]Loading weights:  10%|█         | 44/426 [00:01<00:08, 43.97it/s]Loading weights:  12%|█▏        | 51/426 [00:01<00:08, 44.39it/s]Loading weights:  15%|█▍        | 62/426 [00:01<00:06, 57.97it/s]Loading weights:  16%|█▋        | 70/426 [00:02<00:06, 57.29it/s]Loading weights:  19%|█▊        | 79/426 [00:02<00:05, 62.30it/s]Loading weights:  21%|██        | 89/426 [00:02<00:04, 67.98it/s]Loading weights:  23%|██▎       | 97/426 [00:02<00:05, 61.33it/s]Loading weights:  24%|██▍       | 104/426 [00:02<00:05, 56.31it/s]Loading weights:  27%|██▋       | 115/426 [00:02<00:04, 67.48it/s]Loading weights:  29%|██▉       | 123/426 [00:02<00:04, 61.75it/s]Loading weights:  31%|███       | 132/426 [00:03<00:04, 60.97it/s]Loading weights:  33%|███▎      | 139/426 [00:03<00:04, 61.13it/s]Loading weights:  34%|███▍      | 146/426 [00:03<00:05, 55.52it/s]Loading weights:  36%|███▌      | 152/426 [00:03<00:06, 44.90it/s]Loading weights:  37%|███▋      | 159/426 [00:03<00:05, 46.92it/s]Loading weights:  40%|███▉      | 170/426 [00:03<00:04, 60.02it/s]Loading weights:  42%|████▏     | 177/426 [00:03<00:04, 54.01it/s]Loading weights:  43%|████▎     | 185/426 [00:04<00:04, 54.12it/s]Loading weights:  45%|████▍     | 191/426 [00:04<00:04, 54.23it/s]Loading weights:  47%|████▋     | 199/426 [00:04<00:04, 53.76it/s]Loading weights:  48%|████▊     | 205/426 [00:04<00:05, 43.56it/s]Loading weights:  50%|████▉     | 212/426 [00:04<00:04, 45.67it/s]Loading weights:  52%|█████▏    | 223/426 [00:04<00:03, 58.88it/s]Loading weights:  54%|█████▍    | 230/426 [00:05<00:03, 53.74it/s]Loading weights:  56%|█████▌    | 237/426 [00:05<00:03, 57.25it/s]Loading weights:  57%|█████▋    | 244/426 [00:05<00:03, 51.44it/s]Loading weights:  59%|█████▉    | 252/426 [00:05<00:03, 51.83it/s]Loading weights:  61%|██████    | 258/426 [00:05<00:03, 43.00it/s]Loading weights:  62%|██████▏   | 265/426 [00:05<00:03, 45.45it/s]Loading weights:  65%|██████▌   | 277/426 [00:05<00:02, 58.89it/s]Loading weights:  67%|██████▋   | 287/426 [00:06<00:02, 65.89it/s]Loading weights:  69%|██████▉   | 295/426 [00:06<00:02, 61.56it/s]Loading weights:  72%|███████▏  | 305/426 [00:06<00:01, 68.62it/s]Loading weights:  73%|███████▎  | 313/426 [00:06<00:02, 55.82it/s]Loading weights:  77%|███████▋  | 326/426 [00:06<00:01, 71.27it/s]Loading weights:  79%|███████▊  | 335/426 [00:06<00:01, 65.73it/s]Loading weights:  81%|████████  | 344/426 [00:06<00:01, 68.22it/s]Loading weights:  83%|████████▎ | 354/426 [00:07<00:01, 71.20it/s]Loading weights:  85%|████████▍ | 362/426 [00:07<00:01, 63.18it/s]Loading weights:  87%|████████▋ | 369/426 [00:07<00:00, 58.14it/s]Loading weights:  90%|████████▉ | 382/426 [00:07<00:00, 71.35it/s]Loading weights:  92%|█████████▏| 390/426 [00:07<00:00, 68.85it/s]Loading weights:  93%|█████████▎| 398/426 [00:07<00:00, 61.91it/s]Loading weights:  96%|█████████▌| 408/426 [00:07<00:00, 69.14it/s]Loading weights:  98%|█████████▊| 416/426 [00:08<00:00, 58.32it/s]Loading weights:  99%|█████████▉| 423/426 [00:08<00:00, 59.49it/s]Loading weights: 100%|██████████| 426/426 [00:08<00:00, 51.89it/s]
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV] Heap trimmed. RSS: 1124 MB → 1124 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=3 session=diag candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=diag candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=diag candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=diag candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=diag candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=diag candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=diag candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=diag candidates=29 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1596 MB → 1596 MB (saved 0 MB)
+[Pool] Lazy-allocated 64 slots for ~1024 tokens = 27.3 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] Triton fused-decode COMBINED path ACTIVE (CUDA). N_sparse=16, L_dense=4096
+  ok peak=5.070371328 complete=False
+run Qwen/Qwen3.5-4B|dkv|65536
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1371.58it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:24,  2.95it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   3%|▎         | 14/426 [00:00<00:10, 40.35it/s]Loading weights:   9%|▉         | 40/426 [00:00<00:03, 104.89it/s]Loading weights:  15%|█▍        | 62/426 [00:00<00:02, 136.67it/s]Loading weights:  19%|█▉        | 81/426 [00:00<00:02, 147.95it/s]Loading weights:  23%|██▎       | 100/426 [00:00<00:02, 156.31it/s]Loading weights:  30%|███       | 128/426 [00:00<00:01, 189.95it/s]Loading weights:  35%|███▍      | 149/426 [00:01<00:01, 185.56it/s]Loading weights:  40%|████      | 171/426 [00:01<00:01, 195.02it/s]Loading weights:  46%|████▌     | 195/426 [00:01<00:01, 204.93it/s]Loading weights:  51%|█████     | 217/426 [00:01<00:01, 202.14it/s]Loading weights:  56%|█████▌    | 238/426 [00:01<00:00, 203.17it/s]Loading weights:  61%|██████    | 259/426 [00:01<00:00, 187.98it/s]Loading weights:  68%|██████▊   | 288/426 [00:01<00:00, 213.16it/s]Loading weights:  73%|███████▎  | 310/426 [00:01<00:00, 203.60it/s]Loading weights:  78%|███████▊  | 331/426 [00:01<00:00, 204.47it/s]Loading weights:  84%|████████▍ | 357/426 [00:02<00:00, 217.61it/s]Loading weights:  89%|████████▉ | 380/426 [00:02<00:00, 211.50it/s]Loading weights:  94%|█████████▍| 402/426 [00:02<00:00, 208.52it/s]Loading weights:  99%|█████████▉| 423/426 [00:02<00:00, 202.00it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 175.80it/s]
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV] Heap trimmed. RSS: 1124 MB → 1124 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+W1002 17:31:39.857000 23980 site-packages\torch\_inductor\utils.py:1731] [2/4] Not enough SMs to use max_autotune_gemm mode
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\_inductor\lowering.py:7836: UserWarning: 
+Online softmax is disabled on the fly since Inductor decides to
+split the reduction. Cut an issue to PyTorch if this is an
+important use case and you want to speed it up with online
+softmax.
+
+  warnings.warn(
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\_inductor\lowering.py:7836: UserWarning: 
+Online softmax is disabled on the fly since Inductor decides to
+split the reduction. Cut an issue to PyTorch if this is an
+important use case and you want to speed it up with online
+softmax.
+
+  warnings.warn(

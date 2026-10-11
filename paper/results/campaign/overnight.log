@@ -1,0 +1,105 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] reclaiming stale lock from pid 22272 (from before the last boot)
+[ckpt] paper\results\ladder\TILED_granite_dkv_auto.jsonl
+[ckpt] 2 points already recorded
+  skip dkv@45056 (done: ok)
+  skip dkv@49152 (done: ok)
+  running dkv@57344 ...
+    dkv@57344: ok peak=9.344310272 (324s)
+  running dkv@65536 ...
+    dkv@65536: ok peak=9.360129536 (381s)
+  running dkv@81920 ...
+    dkv@81920: ok peak=9.88206592 (551s)
+  running dkv@98304 ...
+    dkv@98304: ok peak=10.189031424 (760s)
+  running dkv@131072 ...
+    dkv@131072: ok peak=11.003426816 (1262s)
+
+
+=== TILED_granite_dkv_auto.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    45056    45056      9.07    210.6    1.434       ok
+   dkv    49152    49152      9.08    217.0    1.545       ok
+   dkv    57344    57344      9.34    285.0    1.767       ok
+   dkv    65536    65536      9.36    354.2    1.988       ok
+   dkv    81920    81920      9.88    523.1    2.431       ok
+   dkv    98304    98304     10.19    729.0    2.873       ok
+   dkv   131072   131072     11.00   1226.3    3.753       ok
+  dkv: 0.0249 GB per 1k tokens, floor 7.75 GB  (max OK 131072 tok @ 11.00 GB)
+         predicted ceiling ~175,411 tok on a 12.9 GB card
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  Qwen/Qwen3.5-4B: 8 layers converted, store 0.0413 GB vs bf16 0.1342 GB (3.25x), top-1 agree 0.939, KL mean 4.33e-03 max 1.97e-02 -> ok
+  ibm-granite/granite-4.2-8b: 40 layers converted, store 0.2089 GB vs bf16 0.6711 GB (3.21x), top-1 agree 0.939, KL mean 1.61e-02 max 6.53e-02 -> ok
+KIVI CHUNKED SELFCHECK PASS
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_Qwen3.5-4B_kivi4_chunked.jsonl
+[ckpt] 4 points already recorded
+  skip kivi4_chunked@65536 (done: ok)
+  skip kivi4_chunked@98304 (done: ok)
+  skip kivi4_chunked@131072 (done: spilled)
+  skip kivi4_chunked@163840 (done: skipped_after_oom)
+
+
+=== GEN128_Qwen3.5-4B_kivi4_chunked.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_chunked    65536    65536      7.84     72.6    0.615       ok
+kivi4_chunked    98304    98304     10.16    121.1    0.922       ok
+kivi4_chunked   131072   131072     12.48    390.4    1.228  spilled
+kivi4_chunked   163840        -         -        -        - skipped_after_oom
+  kivi4_chunked: 0.0708 GB per 1k tokens, floor 3.20 GB  (max OK 98304 tok @ 10.16 GB)
+         predicted ceiling ~125,738 tok on a 12.9 GB card
+         first spill at 131072 tok (12.48 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_kivi4_chunked.jsonl
+[ckpt] 6 points already recorded
+  skip kivi4_chunked@16384 (done: ok)
+  skip kivi4_chunked@24576 (done: ok)
+  skip kivi4_chunked@32768 (done: ok)
+  skip kivi4_chunked@49152 (done: ok)
+  skip kivi4_chunked@65536 (done: spilled)
+  skip kivi4_chunked@98304 (done: skipped_after_oom)
+
+
+=== GEN128_granite_kivi4_chunked.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_chunked    16384    16384      7.61     44.9    0.791       ok
+kivi4_chunked    24576    24576      8.50     68.7    1.179       ok
+kivi4_chunked    32768    32768      9.39     99.6    1.567       ok
+kivi4_chunked    49152    49152     11.18    161.5    2.343       ok
+kivi4_chunked    65536    65536     12.96   1520.7    3.119  spilled
+kivi4_chunked    98304        -         -        -        - skipped_after_oom
+  kivi4_chunked: 0.1090 GB per 1k tokens, floor 5.82 GB  (max OK 49152 tok @ 11.18 GB)
+         predicted ceiling ~57,668 tok on a 12.9 GB card
+         first spill at 65536 tok (12.96 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] reclaiming stale lock from pid 12516 (from before the last boot)
+[ckpt] paper\results\ruler\BEYOND_granite_kivi4_chunked_24k-32k.jsonl
+[ckpt] 33 recorded, 227 pending (of 260 generated)
+  [1/227] 24576/niah_multikey_2#3 -> 'The user asks: "What is the special magic number f' (68.4s/item, ~258 min left)
+  [2/227] 24576/niah_multikey_2#4 -> 'The user asks: "What is the special magic number f' (67.2s/item, ~252 min left)
+  [3/227] 24576/niah_multikey_2#5 -> 'The user asks: "What is the special magic number f' (67.3s/item, ~251 min left)
+  [4/227] 24576/niah_multikey_2#6 -> 'The user asks: "What is the special magic number f' (98.0s/item, ~364 min left)
+  [5/227] 24576/niah_multikey_2#7 -> 'The user asks: "What is the special magic number f' (91.7s/item, ~339 min left)
+  [6/227] 24576/niah_multikey_2#8 -> 'The user asks: "What is the special magic number f' (87.5s/item, ~322 min left)
+  [7/227] 24576/niah_multikey_2#9 -> 'The user asks: "What is the special magic number f' (163.5s/item, ~600 min left)
+  [8/227] 24576/niah_multikey_3#0 -> 'The special magic UUID mentioned in the provided t' (151.5s/item, ~553 min left)
+  [9/227] 24576/niah_multikey_3#1 -> 'The special magic UUID mentioned in the provided t' (238.9s/item, ~868 min left)
+  [10/227] 24576/niah_multikey_3#2 -> 'The special magic UUID mentioned in the provided t' (282.1s/item, ~1020 min left)
+  [11/227] 24576/niah_multikey_3#3 -> 'The special magic UUID mentioned in the text for `' (344.8s/item, ~1241 min left)
+  [12/227] 24576/niah_multikey_3#4 -> 'The special magic UUID mentioned in the text for `' (392.0s/item, ~1405 min left)
+  [13/227] 24576/niah_multikey_3#5 -> 'The special magic UUID mentioned in the provided t' (371.3s/item, ~1324 min left)
+  [14/227] 24576/niah_multikey_3#6 -> 'The special magic UUID for `25b83368-3e6a-4edb-962' (348.4s/item, ~1237 min left)
+  [15/227] 24576/niah_multikey_3#7 -> 'The special magic UUID mentioned in the provided t' (329.7s/item, ~1165 min left)
+  [16/227] 24576/niah_multikey_3#8 -> 'The special magic UUID mentioned in the text for `' (313.3s/item, ~1102 min left)
+  [17/227] 24576/niah_multikey_3#9 -> 'The special magic UUID mentioned in the provided t' (305.9s/item, ~1071 min left)
+  [18/227] 24576/niah_multiquery#0 -> 'Let\'s carefully extract all the "special magic num' (334.9s/item, ~1167 min left)
+  [19/227] 24576/niah_multiquery#1 -> 'Let\'s carefully extract all the "special magic num' (321.0s/item, ~1113 min left)
+  [20/227] 24576/niah_multiquery#2 -> 'Let\'s carefully extract all the "special magic num' (330.0s/item, ~1139 min left)
+  [21/227] 24576/niah_multiquery#3 -> 'Let\'s carefully extract all the "special magic num' (317.5s/item, ~1090 min left)
+  [22/227] 24576/niah_multiquery#4 -> 'Let\'s carefully extract all the "special magic num' (307.0s/item, ~1049 min left)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+KIVI CAMPAIGN COMPLETE
+OVERNIGHT COMPLETE

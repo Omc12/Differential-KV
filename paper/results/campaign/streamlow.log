@@ -1,0 +1,164 @@
+[msvc] developer environment imported (10 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\granite-4.2-8b_mid_nf4_dkv_streamlow.jsonl
+[ckpt] 0 points already recorded
+  running dkv@16384 ...
+    dkv@16384: ok peak=8.579344384 (65s)
+  running dkv@24576 ...
+    dkv@24576: oom peak=- (84s)
+  dkv: stopping, ceiling found below 32768
+  dkv: stopping, ceiling found below 49152
+  dkv: stopping, ceiling found below 65536
+  dkv: stopping, ceiling found below 98304
+  dkv: stopping, ceiling found below 131072
+
+
+=== granite-4.2-8b_mid_nf4_dkv_streamlow.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    16384    16384      8.58     39.8    0.653       ok
+   dkv    24576    24576         -        -        -      oom
+   dkv    32768        -         -        -        - skipped_after_oom
+   dkv    49152        -         -        -        - skipped_after_oom
+   dkv    65536        -         -        -        - skipped_after_oom
+   dkv    98304        -         -        -        - skipped_after_oom
+   dkv   131072        -         -        -        - skipped_after_oom
+[msvc] developer environment imported (10 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\Qwen3.5-4B_mid_nf4_dkv_streamlow.jsonl
+[ckpt] 0 points already recorded
+  running dkv@32768 ...
+    dkv@32768: oom peak=- (90s)
+  dkv: stopping, ceiling found below 65536
+  dkv: stopping, ceiling found below 98304
+  dkv: stopping, ceiling found below 131072
+  dkv: stopping, ceiling found below 196608
+
+
+=== Qwen3.5-4B_mid_nf4_dkv_streamlow.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    32768    32768         -        -        -      oom
+   dkv    65536        -         -        -        - skipped_after_oom
+   dkv    98304        -         -        -        - skipped_after_oom
+   dkv   131072        -         -        -        - skipped_after_oom
+   dkv   196608        -         -        -        - skipped_after_oom
+[msvc] developer environment imported (10 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\longbench\granite-4.2-8b_dkv_mid_streamlow_len12000.jsonl
+[ckpt] 0 items already recorded
+[ckpt] 120 items pending
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model ibm-granite/granite-4.2-8b...
+[DKV] Loading model weights on demand: ibm-granite/granite-4.2-8b (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1006 MB → 1006 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 4807.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (154/layer x 40 layers ~= 157,696 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 5.2 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=32, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1422 MB → 1422 MB (saved 0 MB)
+[Pool] Lazy-allocated 80 slots for ~1024 tokens = 34.1 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] WARNING: Triton sparse kernel failed: unsupported operand type(s) for /: 'WindowsPath' and 'NoneType'. Falling back to PyTorch vectorized decoder. Set DKV_TRITON_STRICT=1 to surface the full error.
+[DKV] WARNING: Triton fallback has now occurred 10 times (last error: unsupported operand type(s) for /: 'WindowsPath' and 'NoneType'). Check kernel compilation and CUDA version.
+[DKV] ERROR: Triton fallback count reached 100. The Triton sparse kernel appears persistently broken — all decode steps are running the slow PyTorch fallback. Investigate immediately.
+  [1/120] qasper#0 4104 tok -> 'The ground truth for fake news in the study is not perfect d' (47.2s/item, ~94 min left)
+  [2/120] qasper#1 3412 tok -> 'GhostVLAD is an extension of NetVLAD that adds ghost cluster' (25.6s/item, ~50 min left)
+  [3/120] qasper#2 4474 tok -> '71.8%' (19.4s/item, ~38 min left)
+  [4/120] qasper#3 3084 tok -> 'The article proposes using context tweets (text sequences of' (15.9s/item, ~31 min left)
+  [5/120] qasper#4 4547 tok -> 'Fox News, CNN, ESPN, New York Times, Guardian, Disney, Time,' (27.6s/item, ~53 min left)
+  [6/120] qasper#5 5554 tok -> 'Yes' (24.8s/item, ~47 min left)
+  [7/120] qasper#6 5783 tok -> 'The article does not propose a specific evaluation type for ' (26.1s/item, ~49 min left)
+  [8/120] qasper#7 6688 tok -> 'CNN/DailyMail, NYT, and XSum datasets' (25.0s/item, ~47 min left)
+  [9/120] qasper#8 3593 tok -> 'The article does not directly compare the proposed approach ' (22.8s/item, ~42 min left)
+  [10/120] qasper#9 5477 tok -> 'The ensemble method selects models greedily by adding the be' (22.7s/item, ~42 min left)
+  [11/120] qasper#10 4734 tok -> 'The datasets are sourced from the Friends TV sitcom dialogue' (22.7s/item, ~41 min left)
+  [12/120] qasper#11 3347 tok -> 'English' (21.0s/item, ~38 min left)
+  [13/120] qasper#12 3430 tok -> 'IMDb dataset of movie reviews' (19.6s/item, ~35 min left)
+  [14/120] qasper#13 8927 tok -> 'The article does not provide a specific accuracy value (e.g.' (21.3s/item, ~38 min left)
+  [15/120] qasper#14 4880 tok -> 'Yes' (20.2s/item, ~35 min left)
+  [16/120] qasper#15 12015 tok -> 'The article mentions using a corpus of documents including t' (23.4s/item, ~41 min left)
+  [17/120] qasper#16 12015 tok -> 'unanswerable' (23.1s/item, ~40 min left)
+  [18/120] qasper#17 5269 tok -> 'RNN-based NMT and Transformer NMT models' (22.4s/item, ~38 min left)
+  [19/120] qasper#18 5270 tok -> 'The three regularization terms are: (1) neutral features (us' (22.7s/item, ~38 min left)
+  [20/120] qasper#19 6072 tok -> 'SVM with n-gram features, SVM with average word embeddings, ' (23.0s/item, ~38 min left)
+  [21/120] narrativeqa#0 12015 tok -> 'He lives with his wife and children in modest comfort, suppo' (23.2s/item, ~38 min left)
+  [22/120] narrativeqa#1 12016 tok -> "The story does not mention Ann or her returning Mary's feeli" (23.2s/item, ~38 min left)
+  [23/120] narrativeqa#2 8512 tok -> "Atlas' mountain" (22.8s/item, ~37 min left)
+  [24/120] narrativeqa#3 9371 tok -> 'To persuade Socrates to escape execution.' (22.5s/item, ~36 min left)
+  [25/120] narrativeqa#4 12015 tok -> 'The text does not explain why Baron Henry cut off Otto’s han' (23.7s/item, ~38 min left)
+  [26/120] narrativeqa#5 12015 tok -> "The story does not specify how long Mortimer Trefinnis' sist" (24.0s/item, ~38 min left)
+  [27/120] narrativeqa#6 12016 tok -> 'The question asks about "the entertainers\' manager" and an a' (26.5s/item, ~41 min left)
+  [28/120] narrativeqa#7 12016 tok -> 'Dana Barrett' (26.1s/item, ~40 min left)
+  [29/120] narrativeqa#8 12015 tok -> 'Unknown' (25.8s/item, ~39 min left)
+  [30/120] narrativeqa#9 8518 tok -> 'The priests' (25.3s/item, ~38 min left)
+  [31/120] narrativeqa#10 12015 tok -> ' renewed. Minor spelling and\n    typographical errors have b' (25.4s/item, ~38 min left)
+  [32/120] narrativeqa#11 12015 tok -> 'No description — Soames does not return or provide a future-' (25.4s/item, ~37 min left)
+  [33/120] narrativeqa#12 11726 tok -> 'The story does not specify when Madame de Merret dies or whe' (27.5s/item, ~40 min left)
+  [34/120] narrativeqa#13 11961 tok -> 'The Vervelle couple believe Grassou is the perfect match for' (27.5s/item, ~39 min left)
+  [35/120] narrativeqa#14 11956 tok -> 'Pierre Grassou' (27.2s/item, ~39 min left)
+  [36/120] narrativeqa#15 12014 tok -> "The slime does not get into Dana's apartment." (27.0s/item, ~38 min left)
+  [37/120] narrativeqa#16 12015 tok -> 'Elder Childers does not argue in the provided text.' (26.9s/item, ~37 min left)
+  [38/120] narrativeqa#17 12015 tok -> ' renewed. Minor spelling and\n    typographical errors have b' (27.0s/item, ~37 min left)
+  [39/120] narrativeqa#18 12015 tok -> 'The story does not mention Reiko, an ex-husband, or any phot' (27.1s/item, ~37 min left)
+  [40/120] narrativeqa#19 9370 tok -> 'None' (26.7s/item, ~36 min left)
+  [41/120] hotpotqa#0 11634 tok -> 'Gates v. Collier' (26.5s/item, ~35 min left)
+  [42/120] hotpotqa#1 12015 tok -> 'Steve Prefontaine' (26.2s/item, ~34 min left)
+  [43/120] hotpotqa#2 12015 tok -> 'The question asks: "Prior to playing for Michigan State, Kei' (26.4s/item, ~34 min left)
+  [44/120] hotpotqa#3 12015 tok -> 'The passages provided do not mention Gary L. Bennett at all.' (26.6s/item, ~34 min left)
+  [45/120] hotpotqa#4 12015 tok -> 'The passages do not mention "Atom Egoyan" or provide informa' (26.8s/item, ~33 min left)
+  [46/120] hotpotqa#5 12015 tok -> 'Member of Parliament' (26.6s/item, ~33 min left)
+  [47/120] hotpotqa#6 12015 tok -> 'Thirukkalacherry is a village in the town of Mayiladuthurai.' (26.6s/item, ~32 min left)
+  [48/120] hotpotqa#7 2357 tok -> 'Pleiospilos' (26.1s/item, ~31 min left)
+  [49/120] hotpotqa#8 12015 tok -> 'The passages do not mention Russell D. Moore or his service ' (26.3s/item, ~31 min left)
+  [50/120] hotpotqa#9 8990 tok -> 'Fitz and the Tantrums' (26.0s/item, ~30 min left)
+  [51/120] hotpotqa#10 12015 tok -> 'October 13, 1980' (25.9s/item, ~30 min left)
+  [52/120] hotpotqa#11 12015 tok -> 'The question asks: "The Greatest Event in Television History' (26.1s/item, ~30 min left)
+  [53/120] hotpotqa#12 12015 tok -> 'Olivia de Havilland' (25.9s/item, ~29 min left)
+  [54/120] hotpotqa#13 10630 tok -> 'January 1' (25.8s/item, ~28 min left)
+  [55/120] hotpotqa#14 12015 tok -> 'The forests of Mara and Mondrem historically contained red, ' (26.0s/item, ~28 min left)
+  [56/120] hotpotqa#15 12015 tok -> 'Sara Symington competed in the 2000 Summer Olympics.' (25.9s/item, ~28 min left)
+  [57/120] hotpotqa#16 6391 tok -> 'Claudio López' (25.6s/item, ~27 min left)
+  [58/120] hotpotqa#17 12015 tok -> 'There is no passage indicating that Richard Darman worked wi' (25.7s/item, ~27 min left)
+  [59/120] hotpotqa#18 12015 tok -> 'The song that came out ahead of The Wanted\'s "Lightning" on ' (25.9s/item, ~26 min left)
+  [60/120] hotpotqa#19 12015 tok -> 'Tom Petty' (25.7s/item, ~26 min left)
+  [61/120] multifieldqa_en#0 1622 tok -> 'South West Ultras' (25.4s/item, ~25 min left)
+  [62/120] multifieldqa_en#1 11329 tok -> 'No. The ISR is neither necessary nor sufficient for transgen' (25.8s/item, ~25 min left)
+  [63/120] multifieldqa_en#2 8517 tok -> 'Low-temperature scanning tunneling microscopy (STM) and scan' (25.8s/item, ~24 min left)
+  [64/120] multifieldqa_en#3 12015 tok -> 'An ICD (implantable cardioverter-defibrillator) is a device ' (26.2s/item, ~24 min left)
+  [65/120] multifieldqa_en#4 7682 tok -> 'It is important for the sides of the fuselage to be sloped (' (26.5s/item, ~24 min left)
+  [66/120] multifieldqa_en#5 11554 tok -> 'The proximity of superconductivity induces a CAR (cooperand-' (26.9s/item, ~24 min left)
+  [67/120] multifieldqa_en#6 8124 tok -> 'Electricity is used in everyday life for lighting, heating, ' (27.2s/item, ~24 min left)
+  [68/120] multifieldqa_en#7 3135 tok -> 'Vice Admiral' (26.8s/item, ~23 min left)
+  [69/120] multifieldqa_en#8 1978 tok -> '15–3' (26.4s/item, ~22 min left)
+  [70/120] multifieldqa_en#9 12015 tok -> 'The text mentions that vitamin K includes natural forms such' (26.8s/item, ~22 min left)
+  [71/120] multifieldqa_en#10 9567 tok -> 'Yes' (26.6s/item, ~22 min left)
+  [72/120] multifieldqa_en#11 10050 tok -> 'Danny works in 3-D printing.' (26.5s/item, ~21 min left)
+  [73/120] multifieldqa_en#12 12015 tok -> 'For adult women: 90 micrograms (μg) per day; for adult men: ' (26.6s/item, ~21 min left)
+  [74/120] multifieldqa_en#13 8124 tok -> 'watt' (26.3s/item, ~20 min left)
+  [75/120] multifieldqa_en#14 9763 tok -> 'flexibility and the ability to offer a wide range of devices' (26.3s/item, ~20 min left)
+  [76/120] multifieldqa_en#15 2895 tok -> 'Jacob C. Landau' (26.0s/item, ~19 min left)
+  [77/120] multifieldqa_en#16 8252 tok -> 'The main methodology used in the research is a framework cal' (26.3s/item, ~19 min left)
+  [78/120] multifieldqa_en#17 9318 tok -> 'The function $\\beta(r)$ is determined by solving the differe' (26.5s/item, ~19 min left)
+  [79/120] multifieldqa_en#18 10049 tok -> '70-75 meters' (26.4s/item, ~18 min left)
+  [80/120] multifieldqa_en#19 3917 tok -> 'The vaccines were trialed against other toxic products, rath' (26.1s/item, ~17 min left)
+  [81/120] gov_report#0 10804 tok -> '**Summary of the CRS Report on Multiyear Procurement (MYP) a' (29.7s/item, ~19 min left)
+  [82/120] gov_report#1 12015 tok -> '**Summary of the Report: Fixed-Wing Aircraft Sustainment in ' (33.2s/item, ~21 min left)
+  [83/120] gov_report#2 9741 tok -> '**Summary of GAO Report on Financial Rewards for Wildlife Tr' (36.5s/item, ~23 min left)
+  [84/120] gov_report#3 8830 tok -> '**Summary of the Report: Cross-Border Data Flows, Privacy, a' (39.7s/item, ~24 min left)
+  [85/120] gov_report#4 12015 tok -> '**Summary of the Federal Airport Development and Funding Fra' (43.0s/item, ~25 min left)
+  [86/120] gov_report#5 7903 tok -> '**Summary of GAO Report on DOD MILCON Cost Estimating Practi' (46.0s/item, ~26 min left)
+  [87/120] gov_report#6 4246 tok -> '**Summary of the GAO Report on Federal Student Aid Certifica' (48.8s/item, ~27 min left)

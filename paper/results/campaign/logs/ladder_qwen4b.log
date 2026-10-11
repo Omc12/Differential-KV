@@ -1,0 +1,54 @@
+
+===== 2026-09-28 19:57:16  C:\Users\USER\AppData\Local\Programs\Python\Python313\python.exe C:\Users\USER\Desktop\Differential KV\benchmarks\context_ladder.py --model Qwen/Qwen3.5-4B --arms streamingllm_chunked h2o_chunked --contexts 8192 16384 32768 49152 65536 98304 131072 --out C:\Users\USER\Desktop\Differential KV\paper\results\ladder\Qwen3.5-4B_mid_nf4_chunked.jsonl
+[msvc] developer environment imported (10 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] C:\Users\USER\Desktop\Differential KV\paper\results\ladder\Qwen3.5-4B_mid_nf4_chunked.jsonl
+[ckpt] 0 points already recorded
+  running streamingllm_chunked@8192 ...
+    streamingllm_chunked@8192: ok peak=3.375824384 (26s)
+  running streamingllm_chunked@16384 ...
+    streamingllm_chunked@16384: ok peak=3.375824384 (23s)
+  running streamingllm_chunked@32768 ...
+    streamingllm_chunked@32768: ok peak=3.375824384 (28s)
+  running streamingllm_chunked@49152 ...
+    streamingllm_chunked@49152: ok peak=3.375824384 (33s)
+  running streamingllm_chunked@65536 ...
+    streamingllm_chunked@65536: ok peak=3.375824384 (39s)
+  running streamingllm_chunked@98304 ...
+    streamingllm_chunked@98304: ok peak=3.375824384 (50s)
+  running streamingllm_chunked@131072 ...
+    streamingllm_chunked@131072: ok peak=3.375824384 (61s)
+  running h2o_chunked@8192 ...
+    h2o_chunked@8192: ok peak=3.368173056 (25s)
+  running h2o_chunked@16384 ...
+    h2o_chunked@16384: ok peak=3.370154496 (33s)
+  running h2o_chunked@32768 ...
+    h2o_chunked@32768: ok peak=3.370189312 (52s)
+  running h2o_chunked@49152 ...
+    h2o_chunked@49152: ok peak=3.370970624 (65s)
+  running h2o_chunked@65536 ...
+    h2o_chunked@65536: ok peak=3.368154624 (80s)
+  running h2o_chunked@98304 ...
+    h2o_chunked@98304: ok peak=3.370699264 (122s)
+  running h2o_chunked@131072 ...
+    h2o_chunked@131072: ok peak=3.36808192 (159s)
+
+
+=== Qwen3.5-4B_mid_nf4_chunked.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+h2o_chunked     8192     8192      3.37      8.6    0.067       ok
+h2o_chunked    16384    16384      3.37     16.0    0.067       ok
+h2o_chunked    32768    32768      3.37     34.3    0.067       ok
+h2o_chunked    49152    49152      3.37     48.0    0.067       ok
+h2o_chunked    65536    65536      3.37     62.3    0.067       ok
+h2o_chunked    98304    98304      3.37    104.7    0.067       ok
+h2o_chunked   131072   131072      3.37    141.1    0.067       ok
+streamingllm_chunked     8192     8192      3.38      3.7    0.067       ok
+streamingllm_chunked    16384    16384      3.38      6.2    0.067       ok
+streamingllm_chunked    32768    32768      3.38     11.4    0.067       ok
+streamingllm_chunked    49152    49152      3.38     16.7    0.067       ok
+streamingllm_chunked    65536    65536      3.38     21.9    0.067       ok
+streamingllm_chunked    98304    98304      3.38     32.8    0.067       ok
+streamingllm_chunked   131072   131072      3.38     43.8    0.067       ok
+  h2o_chunked: -0.0001 GB per 1k tokens, floor 3.38 GB  (max OK 131072 tok @ 3.37 GB)
+  streamingllm_chunked: 0.0000 GB per 1k tokens, floor 3.38 GB  (max OK 131072 tok @ 3.38 GB)

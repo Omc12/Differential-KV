@@ -1,0 +1,18 @@
+
+===== 2026-09-28 19:32:32  C:\Users\USER\AppData\Local\Programs\Python\Python313\python.exe C:\Users\USER\Desktop\Differential KV\benchmarks\selfcheck_chunked_eviction.py --store
+[ckpt] cut a torn final record (16 bytes) from C:\Users\USER\AppData\Local\Temp\ckpt-selftest-qn_uq4md\torn.jsonl; kept in .torn
+[ckpt] terminated an unterminated final record in C:\Users\USER\AppData\Local\Temp\ckpt-selftest-qn_uq4md\nonl.jsonl
+[ckpt] reclaiming stale lock from pid 2156 (from before the last boot)
+{
+  "when": "2026-09-28 19:32:32",
+  "store": {
+    "torn_fragment_cut": true,
+    "unterminated_record_kept": true,
+    "prior_boot_lock_reclaimed": true,
+    "live_lock_honoured": true,
+    "boot_time_stable": true
+  },
+  "pass": true
+}
+
+PASS  -> C:\Users\USER\Desktop\Differential KV\paper\results\selfcheck\chunked_eviction_store.json

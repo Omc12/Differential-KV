@@ -1,0 +1,84 @@
+
+===== 2026-09-28 19:32:32  C:\Users\USER\AppData\Local\Programs\Python\Python313\python.exe C:\Users\USER\Desktop\Differential KV\benchmarks\selfcheck_chunked_eviction.py --model Qwen/Qwen3.5-4B
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1275.25it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:18,  3.06it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   5%|▌         | 22/426 [00:00<00:06, 65.09it/s]Loading weights:  10%|▉         | 42/426 [00:00<00:03, 104.25it/s]Loading weights:  15%|█▌        | 66/426 [00:00<00:02, 142.74it/s]Loading weights:  22%|██▏       | 93/426 [00:00<00:01, 175.76it/s]Loading weights:  27%|██▋       | 117/426 [00:00<00:01, 191.85it/s]Loading weights:  33%|███▎      | 142/426 [00:00<00:01, 203.79it/s]Loading weights:  38%|███▊      | 164/426 [00:01<00:01, 206.68it/s]Loading weights:  44%|████▎     | 186/426 [00:01<00:01, 206.04it/s]Loading weights:  49%|████▉     | 208/426 [00:01<00:01, 204.61it/s]Loading weights:  56%|█████▌    | 237/426 [00:01<00:00, 227.49it/s]Loading weights:  61%|██████▏   | 261/426 [00:01<00:00, 210.61it/s]Loading weights:  68%|██████▊   | 290/426 [00:01<00:00, 229.34it/s]Loading weights:  74%|███████▎  | 314/426 [00:01<00:00, 212.89it/s]Loading weights:  81%|████████  | 343/426 [00:01<00:00, 232.51it/s]Loading weights:  86%|████████▌ | 367/426 [00:01<00:00, 214.31it/s]Loading weights:  93%|█████████▎| 396/426 [00:02<00:00, 231.26it/s]Loading weights:  99%|█████████▊| 420/426 [00:02<00:00, 211.81it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 188.91it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+{
+  "when": "2026-09-28 19:32:32",
+  "model": {
+    "model": "Qwen/Qwen3.5-4B",
+    "quant": "nf4",
+    "probe": {
+      "decoder_layers": 32,
+      "kv_layers": [
+        3,
+        7,
+        11,
+        15,
+        19,
+        23,
+        27,
+        31
+      ],
+      "attentions_len": 8,
+      "attentions_nonnull": 8,
+      "old_indexing_evicted_layers": [
+        3,
+        7
+      ],
+      "old_indexing_correct": false,
+      "new_mapping_aligned": true,
+      "new_mapping_error": null
+    },
+    "h2o_unbounded_kl_vs_dense": 0.0007164974231272936,
+    "streamingllm_chunked": {
+      "peak_8k": 3.82342656,
+      "peak_16k": 3.824475136,
+      "max_cache_8k": 3072,
+      "max_cache_16k": 3072,
+      "kv_gb_16k": 0.067108864,
+      "prefill_s_16k": 5.298208899999736,
+      "text_16k": "2(kx) \\psi(x,",
+      "gen_tokens_16k": 8
+    },
+    "h2o_chunked": {
+      "peak_8k": 3.709795328,
+      "peak_16k": 3.710843904,
+      "max_cache_8k": 2304,
+      "max_cache_16k": 2304,
+      "kv_gb_16k": 0.067108864,
+      "prefill_s_16k": 14.98617749999994,
+      "text_16k": "2(K x) \\psi(x,",
+      "gen_tokens_16k": 8
+    },
+    "snapkv_8k": {
+      "kv_gb": 0.067108864,
+      "dense_equiv_gb": 0.268435456,
+      "stored_fraction": 0.25,
+      "expected_fraction": 0.25
+    },
+    "dense": {
+      "peak_8k": 4.487230464,
+      "peak_16k": 4.75566592
+    },
+    "dense_growth_8k_to_16k_gb": 0.2684354560000006,
+    "checks": {
+      "streaming_exact_when_unbounded": true,
+      "h2o_matches_dense_when_unbounded": true,
+      "streamingllm_chunked_bounded": true,
+      "streamingllm_chunked_decodes": true,
+      "h2o_chunked_bounded": true,
+      "h2o_chunked_decodes": true,
+      "snapkv_evicts_every_kv_layer": true,
+      "streamingllm_chunked_peak_flat": true,
+      "h2o_chunked_peak_flat": true
+    }
+  },
+  "pass": true
+}
+
+PASS  -> C:\Users\USER\Desktop\Differential KV\paper\results\selfcheck\chunked_eviction_Qwen3.5-4B.json

@@ -1,0 +1,272 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  Qwen/Qwen3.5-4B: 33 steps, top-1 agree 0.970, KL mean 7.07e-04 max 3.12e-03 -> ok
+  ibm-granite/granite-4.2-8b: 33 steps, top-1 agree 1.000, KL mean 6.19e-04 max 2.61e-03 -> ok
+STATIC DENSE SELFCHECK PASS
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_Qwen3.5-4B_dense_static.jsonl
+[ckpt] 4 points already recorded
+  skip dense@49152 (done: ok)
+  skip dense@65536 (done: ok)
+  skip dense@98304 (done: ok)
+  skip dense@131072 (done: spilled)
+
+
+=== GEN128_Qwen3.5-4B_dense_static.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense    49152    49152      5.61     41.6    1.611       ok
+ dense    65536    65536      6.42     58.5    2.147       ok
+ dense    98304    98304      8.03    103.0    3.221       ok
+ dense   131072   131072      9.64    572.9    4.295  spilled
+  dense: 0.0492 GB per 1k tokens, floor 3.19 GB  (max OK 98304 tok @ 8.03 GB)
+         predicted ceiling ~181,292 tok on a 12.9 GB card
+         first spill at 131072 tok (9.64 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_dense_static.jsonl
+[ckpt] 4 points already recorded
+  skip dense@16384 (done: ok)
+  skip dense@24576 (done: spilled)
+  skip dense@32768 (done: skipped_after_oom)
+  skip dense@49152 (done: skipped_after_oom)
+
+
+=== GEN128_granite_dense_static.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense    16384    16384      8.77     22.3    2.684       ok
+ dense    24576    24576     10.24    397.4    4.027  spilled
+ dense    32768        -         -        -        - skipped_after_oom
+ dense    49152        -         -        -        - skipped_after_oom
+         first spill at 24576 tok (10.24 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_Qwen3.5-4B_dense_defrag.jsonl
+[ckpt] 3 points already recorded
+  skip dense@49152 (done: ok)
+  skip dense@65536 (done: ok)
+  skip dense@98304 (done: spilled)
+
+
+=== GEN128_Qwen3.5-4B_dense_defrag.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense    49152    49152      7.63     44.9    1.611       ok
+ dense    65536    65536      9.11     62.8    2.147       ok
+ dense    98304    98304     12.06    409.8    3.221  spilled
+  dense: 0.0902 GB per 1k tokens, floor 3.20 GB  (max OK 65536 tok @ 9.11 GB)
+         predicted ceiling ~98,751 tok on a 12.9 GB card
+         first spill at 98304 tok (12.06 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_dense_defrag.jsonl
+[ckpt] 2 points already recorded
+  skip dense@16384 (done: ok)
+  skip dense@24576 (done: spilled)
+
+
+=== GEN128_granite_dense_defrag.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense    16384    16384      9.44     36.4    2.684       ok
+ dense    24576    24576     11.26    659.1    4.027  spilled
+         first spill at 24576 tok (11.26 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_Qwen3.5-4B_dkv_auto.jsonl
+[ckpt] 2 points already recorded
+  skip dkv@98304 (done: ok)
+  skip dkv@131072 (done: ok)
+  running dkv@163840 ...
+    dkv@163840: spilled peak=11.013168128 (971s)
+
+
+=== GEN128_Qwen3.5-4B_dkv_auto.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    98304    98304      9.89     91.4    2.395       ok
+   dkv   131072   131072      9.42    291.7    3.104       ok
+   dkv   163840   163840     11.01    925.9    3.813  spilled
+  dkv: -0.0145 GB per 1k tokens, floor 11.32 GB  (max OK 131072 tok @ 9.42 GB)
+         first spill at 163840 tok (11.01 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_dkv_auto.jsonl
+[ckpt] 2 points already recorded
+  skip dkv@16384 (done: ok)
+  skip dkv@32768 (done: ok)
+  running dkv@49152 ...
+    dkv@49152: spilled peak=10.08919808 (272s)
+
+
+=== GEN128_granite_dkv_auto.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    16384    16384     11.49     38.2    0.659       ok
+   dkv    32768    32768      8.90    126.7    1.102       ok
+   dkv    49152    49152     10.09    233.8    1.545  spilled
+  dkv: -0.1580 GB per 1k tokens, floor 14.08 GB  (max OK 32768 tok @ 8.90 GB)
+         first spill at 49152 tok (10.09 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+skip dkv
+                   dkv  ctx 16384  sessions clean    14  ~0.510 GB resident/session  status spilled
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+skip dkv
+                   dkv  ctx 16384  sessions clean    14  ~0.524 GB resident/session  status spilled
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  skip dense@32768
+  skip dense@65536
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm      32768      65536
+---------------------------------
+     dense     16.61      43.65 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      32768      65536
+---------------------------------
+     dense     15.98       9.30 
+
+=== peak VRAM (GB) ===
+       arm      32768      65536
+---------------------------------
+     dense      4.80       6.41 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\granite-4.2-8b_mid_nf4_snapkv_aligned.jsonl
+[ckpt] 3 points already recorded
+  skip snapkv@16384 (done: ok)
+  skip snapkv@24576 (done: spilled)
+  skip snapkv@32768 (done: skipped_after_oom)
+
+
+=== granite-4.2-8b_mid_nf4_snapkv_aligned.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+snapkv    16384    16384      6.04      9.7    0.173       ok
+snapkv    24576    24576      6.04     16.6    0.173  spilled
+snapkv    32768        -         -        -        - skipped_after_oom
+         first spill at 24576 tok (6.04 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_snapkv_aligned.jsonl
+[ckpt] 0 points already recorded
+  running snapkv@16384 ...
+    snapkv@16384: ok peak=6.053900288 (40s)
+  running snapkv@24576 ...
+    snapkv@24576: spilled peak=6.05389824 (46s)
+  snapkv: stopping, ceiling found below 32768
+
+
+=== GEN128_granite_snapkv_aligned.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+snapkv    16384    16384      6.05     17.2    0.173       ok
+snapkv    24576    24576      6.05     25.2    0.173  spilled
+snapkv    32768        -         -        -        - skipped_after_oom
+         first spill at 24576 tok (6.05 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  skip snapkv@16384
+  skip snapkv@24576
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm      16384      24576
+---------------------------------
+    snapkv      8.29     140.29 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      16384      24576
+---------------------------------
+    snapkv     19.09      17.69 
+
+=== peak VRAM (GB) ===
+       arm      16384      24576
+---------------------------------
+    snapkv      6.25       6.25 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  skip dkv@32768
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm      32768
+----------------------
+       dkv     24.96 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      32768
+----------------------
+       dkv      6.24 
+
+=== peak VRAM (GB) ===
+       arm      32768
+----------------------
+       dkv      4.79 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  skip dkv@16384
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm      16384
+----------------------
+       dkv     25.70 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      16384
+----------------------
+       dkv      4.99 
+
+=== peak VRAM (GB) ===
+       arm      16384
+----------------------
+       dkv      8.11 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\Qwen3.5-4B_high_nf4_dkv_auto.jsonl
+[ckpt] 0 points already recorded
+  running dkv@131072 ...
+    dkv@131072: spilled peak=10.839791616 (1156s)
+
+
+=== Qwen3.5-4B_high_nf4_dkv_auto.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=high
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv   131072   131072     10.84   1122.2    8.607  spilled
+         first spill at 131072 tok (10.84 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\BEYOND_Qwen3.5-4B_dkv_high_auto_131k.jsonl
+[ckpt] 0 recorded, 65 pending (of 65 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] high preset: Context-Aware Decoding on (alpha=0.5, max_steps=32) — MLX parity
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1176 MB → 1176 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: high (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (128/layer x 32 layers ~= 131,072 tokens max context), rank=192 (pool_rank=192), max_residual=256, 1989 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 8.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 64-192  (ceiling rank=192, respected)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] Quantized model detected — skipping torch.compile to avoid graph-break errors. (Set DKV_FORCE_COMPILE_QUANTIZED=1 to override.)
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [64, 96, 192] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1591 MB → 1591 MB (saved 0 MB)
+[DKV] auto-stream: session ruler-131072-cwe-0 STREAMING -- 130933 prompt tokens vs exact limit 65536
+MIDNIGHT CAMPAIGN COMPLETE

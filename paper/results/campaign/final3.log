@@ -1,0 +1,1136 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\BEYOND_granite_streamingllm_chunked_24k-32k.jsonl
+[ckpt] 260 recorded, 0 pending (of 260 generated)
+
+=== BEYOND_granite_streamingllm_chunked_24k-32k.jsonl ===
+ibm-granite/granite-4.2-8b arm=streamingllm_chunked preset=None quant=nf4
+              task    24576    32768
+     niah_single_1     10.0      0.0
+     niah_single_2     10.0     10.0
+     niah_single_3      0.0      0.0
+   niah_multikey_1     10.0     10.0
+   niah_multikey_2     10.0      0.0
+   niah_multikey_3      0.0     10.0
+   niah_multivalue      5.0      2.5
+   niah_multiquery      7.5      5.0
+                vt      0.0      0.0
+               cwe      2.0      0.0
+               fwe     46.7     73.3
+              qa_1     30.0     30.0
+              qa_2     40.0     30.0
+         RULER avg     13.2     13.1
+  ttft 10.37s | decode 17.6 tok/s | peak 6.26 GB | KV 0.336 GB (13.7x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\BEYOND_granite_h2o_chunked_24k-32k.jsonl
+[ckpt] 260 recorded, 0 pending (of 260 generated)
+
+=== BEYOND_granite_h2o_chunked_24k-32k.jsonl ===
+ibm-granite/granite-4.2-8b arm=h2o_chunked preset=None quant=nf4
+              task    24576    32768
+     niah_single_1     10.0     10.0
+     niah_single_2     10.0      0.0
+     niah_single_3      0.0      0.0
+   niah_multikey_1     10.0     10.0
+   niah_multikey_2      0.0     10.0
+   niah_multikey_3      0.0      0.0
+   niah_multivalue      0.0      0.0
+   niah_multiquery      5.0      2.5
+                vt      0.0      0.0
+               cwe      3.0      1.0
+               fwe     73.3     96.7
+              qa_1     30.0     50.0
+              qa_2     20.0     20.0
+         RULER avg     12.4     15.4
+  ttft 21.45s | decode 17.7 tok/s | peak 6.27 GB | KV 0.336 GB (13.7x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] reclaiming stale lock from pid 6356 (from before the last boot)
+[ckpt] paper\results\ruler\BEYOND_granite_dkv_mid_auto_24k-32k.jsonl
+[ckpt] 128 recorded, 132 pending (of 260 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model ibm-granite/granite-4.2-8b...
+[DKV] Loading model weights on demand: ibm-granite/granite-4.2-8b (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1044 MB → 1044 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 4807.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (154/layer x 40 layers ~= 157,696 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 5.2 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=32, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1461 MB → 1461 MB (saved 0 MB)
+[DKV] auto-stream: session ruler-24576-vt-8 STREAMING -- 24514 prompt tokens vs exact limit 16384
+[Pool] Lazy-allocated 80 slots for ~1024 tokens = 34.1 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] Triton fused-decode path ACTIVE (CUDA).
+  [1/132] 24576/vt#8 -> 'We are asked to find all variables that are assign' (69.0s/item, ~151 min left)
+[DKV] auto-stream: session ruler-24576-vt-9 STREAMING -- 24511 prompt tokens vs exact limit 16384
+  [2/132] 24576/vt#9 -> 'We are asked to find all variables that are assign' (65.1s/item, ~141 min left)
+[DKV] auto-stream: session ruler-32768-cwe-0 STREAMING -- 32541 prompt tokens vs exact limit 16384
+  [3/132] 32768/cwe#0 -> 'We are asked: "What are the 10 most common words i' (83.0s/item, ~178 min left)
+[DKV] auto-stream: session ruler-32768-cwe-1 STREAMING -- 32549 prompt tokens vs exact limit 16384
+  [4/132] 32768/cwe#1 -> 'We are given a long list of words (from item 1 to ' (92.2s/item, ~197 min left)
+[DKV] auto-stream: session ruler-32768-cwe-2 STREAMING -- 32583 prompt tokens vs exact limit 16384
+  [5/132] 32768/cwe#2 -> 'We are given a long list of words (numbered 1 to 1' (97.8s/item, ~207 min left)
+[DKV] auto-stream: session ruler-32768-cwe-3 STREAMING -- 32309 prompt tokens vs exact limit 16384
+  [6/132] 32768/cwe#3 -> 'We are asked: "What are the 10 most common words i' (101.3s/item, ~213 min left)
+[DKV] auto-stream: session ruler-32768-cwe-4 STREAMING -- 32577 prompt tokens vs exact limit 16384
+  [7/132] 32768/cwe#4 -> 'We are given a long list of words (from item 1 to ' (104.1s/item, ~217 min left)
+[DKV] auto-stream: session ruler-32768-cwe-5 STREAMING -- 32556 prompt tokens vs exact limit 16384
+  [8/132] 32768/cwe#5 -> 'We are asked: "What are the 10 most common words i' (105.9s/item, ~219 min left)
+[DKV] auto-stream: session ruler-32768-cwe-6 STREAMING -- 32444 prompt tokens vs exact limit 16384
+  [9/132] 32768/cwe#6 -> 'We are given a long list of words (numbered 1 to 1' (107.1s/item, ~220 min left)
+[DKV] auto-stream: session ruler-32768-cwe-7 STREAMING -- 32589 prompt tokens vs exact limit 16384
+  [10/132] 32768/cwe#7 -> 'We are given a long list of words (numbered 1 to 1' (108.1s/item, ~220 min left)
+[DKV] auto-stream: session ruler-32768-cwe-8 STREAMING -- 32437 prompt tokens vs exact limit 16384
+  [11/132] 32768/cwe#8 -> 'We are asked: "What are the 10 most common words i' (108.8s/item, ~219 min left)
+[DKV] auto-stream: session ruler-32768-cwe-9 STREAMING -- 32617 prompt tokens vs exact limit 16384
+  [12/132] 32768/cwe#9 -> 'We are asked: "What are the 10 most common words i' (109.5s/item, ~219 min left)
+[DKV] auto-stream: session ruler-32768-fwe-0 STREAMING -- 29334 prompt tokens vs exact limit 16384
+  [13/132] 32768/fwe#0 -> 'tgjovi, tvorfz, klfedo' (107.1s/item, ~212 min left)
+[DKV] auto-stream: session ruler-32768-fwe-1 STREAMING -- 29369 prompt tokens vs exact limit 16384
+  [14/132] 32768/fwe#1 -> 'tywcou, uzvcls, jyfeeh' (104.9s/item, ~206 min left)
+[DKV] auto-stream: session ruler-32768-fwe-2 STREAMING -- 30037 prompt tokens vs exact limit 16384
+  [15/132] 32768/fwe#2 -> 'tmzbeq, joeews, unqtbr' (103.1s/item, ~201 min left)
+[DKV] auto-stream: session ruler-32768-fwe-3 STREAMING -- 29512 prompt tokens vs exact limit 16384
+  [16/132] 32768/fwe#3 -> 'tuhuto, uvaezr, jvixbl' (101.6s/item, ~196 min left)
+[DKV] auto-stream: session ruler-32768-fwe-4 STREAMING -- 28337 prompt tokens vs exact limit 16384
+  [17/132] 32768/fwe#4 -> 'szskug, irphlx, dvaotz' (99.8s/item, ~191 min left)
+[DKV] auto-stream: session ruler-32768-fwe-5 STREAMING -- 28130 prompt tokens vs exact limit 16384
+  [18/132] 32768/fwe#5 -> 'swkywm, tpynpq, frqxyj' (98.2s/item, ~187 min left)
+[DKV] auto-stream: session ruler-32768-fwe-6 STREAMING -- 32075 prompt tokens vs exact limit 16384
+  [19/132] 32768/fwe#6 -> 'tmmakv, ungxwr, jvblrn' (97.7s/item, ~184 min left)
+[DKV] auto-stream: session ruler-32768-fwe-7 STREAMING -- 31582 prompt tokens vs exact limit 16384
+  [20/132] 32768/fwe#7 -> 'suqsdg\njfmfxz\nuchvil' (97.1s/item, ~181 min left)
+[DKV] auto-stream: session ruler-32768-fwe-8 STREAMING -- 32441 prompt tokens vs exact limit 16384
+  [21/132] 32768/fwe#8 -> 'tuknkf, jtsrkv, upggys' (96.8s/item, ~179 min left)
+[DKV] auto-stream: session ruler-32768-fwe-9 STREAMING -- 29618 prompt tokens vs exact limit 16384
+  [22/132] 32768/fwe#9 -> 'tczzpm\nueooyb\njzbckl\n\nNote: The instruction says t' (96.3s/item, ~177 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_1-0 STREAMING -- 32036 prompt tokens vs exact limit 16384
+  [23/132] 32768/niah_multikey_1#0 -> 'The special magic number for "roomy-extent" mentio' (97.2s/item, ~177 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_1-1 STREAMING -- 32038 prompt tokens vs exact limit 16384
+  [24/132] 32768/niah_multikey_1#1 -> 'The text mentions several "special magic numbers" ' (98.0s/item, ~176 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_1-2 STREAMING -- 32032 prompt tokens vs exact limit 16384
+  [25/132] 32768/niah_multikey_1#2 -> 'The text mentions several "special magic numbers,"' (98.8s/item, ~176 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_1-3 STREAMING -- 32038 prompt tokens vs exact limit 16384
+  [26/132] 32768/niah_multikey_1#3 -> 'The special magic number for blue-eyed-drummer men' (99.4s/item, ~176 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_1-4 STREAMING -- 32640 prompt tokens vs exact limit 16384
+  [27/132] 32768/niah_multikey_1#4 -> 'The special magic number for "handsome-lap" mentio' (100.1s/item, ~175 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_1-5 STREAMING -- 32641 prompt tokens vs exact limit 16384
+  [28/132] 32768/niah_multikey_1#5 -> 'The text mentions several "special magic numbers" ' (100.7s/item, ~175 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_1-6 STREAMING -- 32029 prompt tokens vs exact limit 16384
+  [29/132] 32768/niah_multikey_1#6 -> 'The text mentions the phrase:\n\n> "the current reco' (101.3s/item, ~174 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_1-7 STREAMING -- 32036 prompt tokens vs exact limit 16384
+  [30/132] 32768/niah_multikey_1#7 -> 'The text mentions several "special numbers" in var' (101.7s/item, ~173 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_1-8 STREAMING -- 32041 prompt tokens vs exact limit 16384
+  [31/132] 32768/niah_multikey_1#8 -> 'The text mentions several "magic numbers," but non' (102.2s/item, ~172 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_1-9 STREAMING -- 32033 prompt tokens vs exact limit 16384
+  [32/132] 32768/niah_multikey_1#9 -> 'The "special magic number for smiling-coil" mentio' (102.6s/item, ~171 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_2-0 STREAMING -- 32554 prompt tokens vs exact limit 16384
+  [33/132] 32768/niah_multikey_2#0 -> 'There is **no mention** of a "special magic number' (103.1s/item, ~170 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_2-1 STREAMING -- 32585 prompt tokens vs exact limit 16384
+  [34/132] 32768/niah_multikey_2#1 -> 'There is **no mention** of a "reflective-silkworm"' (103.5s/item, ~169 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_2-2 STREAMING -- 32529 prompt tokens vs exact limit 16384
+  [35/132] 32768/niah_multikey_2#2 -> 'The question asks: "What is the special magic numb' (103.9s/item, ~168 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_2-3 STREAMING -- 32606 prompt tokens vs exact limit 16384
+  [36/132] 32768/niah_multikey_2#3 -> 'The user asks: "What is the special magic number f' (104.4s/item, ~167 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_2-4 STREAMING -- 32525 prompt tokens vs exact limit 16384
+  [37/132] 32768/niah_multikey_2#4 -> 'The user asks: "What is the special magic number f' (104.7s/item, ~166 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_2-5 STREAMING -- 32596 prompt tokens vs exact limit 16384
+  [38/132] 32768/niah_multikey_2#5 -> 'The user asks: "What is the special magic number f' (105.1s/item, ~165 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_2-6 STREAMING -- 32564 prompt tokens vs exact limit 16384
+  [39/132] 32768/niah_multikey_2#6 -> 'The user asks: "What is the special magic number f' (105.5s/item, ~163 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_2-7 STREAMING -- 32551 prompt tokens vs exact limit 16384
+  [40/132] 32768/niah_multikey_2#7 -> 'The user asks: "What is the special magic number f' (105.8s/item, ~162 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_2-8 STREAMING -- 32065 prompt tokens vs exact limit 16384
+  [41/132] 32768/niah_multikey_2#8 -> 'The user asks: "What is the special magic number f' (106.1s/item, ~161 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_2-9 STREAMING -- 32579 prompt tokens vs exact limit 16384
+  [42/132] 32768/niah_multikey_2#9 -> 'The user asks: "What is the special magic number f' (106.4s/item, ~160 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_3-0 STREAMING -- 32535 prompt tokens vs exact limit 16384
+  [43/132] 32768/niah_multikey_3#0 -> 'I cannot provide the "special magic uuid" for `b29' (106.7s/item, ~158 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_3-1 STREAMING -- 32604 prompt tokens vs exact limit 16384
+  [44/132] 32768/niah_multikey_3#1 -> 'The user asks: "What is the special magic uuid for' (106.9s/item, ~157 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_3-2 STREAMING -- 32438 prompt tokens vs exact limit 16384
+  [45/132] 32768/niah_multikey_3#2 -> 'The user asks: "What is the special magic uuid for' (107.2s/item, ~155 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_3-3 STREAMING -- 32514 prompt tokens vs exact limit 16384
+  [46/132] 32768/niah_multikey_3#3 -> 'There is **no mention** of a UUID `93f73f1a-2855-4' (107.4s/item, ~154 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_3-4 STREAMING -- 32522 prompt tokens vs exact limit 16384
+  [47/132] 32768/niah_multikey_3#4 -> 'The user asks: "What is the special magic uuid for' (107.7s/item, ~153 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_3-5 STREAMING -- 32555 prompt tokens vs exact limit 16384
+  [48/132] 32768/niah_multikey_3#5 -> 'The provided text lists many "One of the magic uui' (107.9s/item, ~151 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_3-6 STREAMING -- 32508 prompt tokens vs exact limit 16384
+  [49/132] 32768/niah_multikey_3#6 -> 'The user asks: "What is the special magic uuid for' (108.1s/item, ~150 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_3-7 STREAMING -- 31060 prompt tokens vs exact limit 16384
+  [50/132] 32768/niah_multikey_3#7 -> 'The user asks: "What is the special magic uuid for' (108.2s/item, ~148 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_3-8 STREAMING -- 32568 prompt tokens vs exact limit 16384
+  [51/132] 32768/niah_multikey_3#8 -> 'The user asks: "What is the special magic uuid for' (108.4s/item, ~146 min left)
+[DKV] auto-stream: session ruler-32768-niah_multikey_3-9 STREAMING -- 32546 prompt tokens vs exact limit 16384
+  [52/132] 32768/niah_multikey_3#9 -> 'The special magic UUID for `b16ad616-5ea9-4db3-8f9' (108.6s/item, ~145 min left)
+[DKV] auto-stream: session ruler-32768-niah_multiquery-0 STREAMING -- 32017 prompt tokens vs exact limit 16384
+  [53/132] 32768/niah_multiquery#0 -> 'Let\'s carefully extract all the "special magic num' (108.7s/item, ~143 min left)
+[DKV] auto-stream: session ruler-32768-niah_multiquery-1 STREAMING -- 32011 prompt tokens vs exact limit 16384
+  [54/132] 32768/niah_multiquery#1 -> 'The text mentions several "special magic numbers" ' (108.8s/item, ~141 min left)
+[DKV] auto-stream: session ruler-32768-niah_multiquery-2 STREAMING -- 32007 prompt tokens vs exact limit 16384
+  [55/132] 32768/niah_multiquery#2 -> 'Let\'s carefully extract all the "special magic num' (108.9s/item, ~140 min left)
+[DKV] auto-stream: session ruler-32768-niah_multiquery-3 STREAMING -- 32015 prompt tokens vs exact limit 16384
+  [56/132] 32768/niah_multiquery#3 -> 'Let\'s carefully extract all the "special magic num' (109.0s/item, ~138 min left)
+[DKV] auto-stream: session ruler-32768-niah_multiquery-4 STREAMING -- 32013 prompt tokens vs exact limit 16384
+  [57/132] 32768/niah_multiquery#4 -> 'Let\'s carefully extract all the "special magic num' (109.1s/item, ~136 min left)
+[DKV] auto-stream: session ruler-32768-niah_multiquery-5 STREAMING -- 32620 prompt tokens vs exact limit 16384
+  [58/132] 32768/niah_multiquery#5 -> 'The text mentions several "special magic numbers" ' (109.3s/item, ~135 min left)
+[DKV] auto-stream: session ruler-32768-niah_multiquery-6 STREAMING -- 32019 prompt tokens vs exact limit 16384
+  [59/132] 32768/niah_multiquery#6 -> 'The text mentions several "special magic numbers" ' (109.3s/item, ~133 min left)
+[DKV] auto-stream: session ruler-32768-niah_multiquery-7 STREAMING -- 32622 prompt tokens vs exact limit 16384
+  [60/132] 32768/niah_multiquery#7 -> 'The text mentions several "special magic numbers" ' (109.5s/item, ~131 min left)
+[DKV] auto-stream: session ruler-32768-niah_multiquery-8 STREAMING -- 32621 prompt tokens vs exact limit 16384
+  [61/132] 32768/niah_multiquery#8 -> 'Let\'s carefully extract all the "special magic num' (109.6s/item, ~130 min left)
+[DKV] auto-stream: session ruler-32768-niah_multiquery-9 STREAMING -- 32015 prompt tokens vs exact limit 16384
+  [62/132] 32768/niah_multiquery#9 -> 'The text mentions four "special magic numbers" ass' (109.7s/item, ~128 min left)
+[DKV] auto-stream: session ruler-32768-niah_multivalue-0 STREAMING -- 32632 prompt tokens vs exact limit 16384
+  [63/132] 32768/niah_multivalue#0 -> 'The text mentions several instances of the phrase ' (109.8s/item, ~126 min left)
+[DKV] auto-stream: session ruler-32768-niah_multivalue-1 STREAMING -- 32632 prompt tokens vs exact limit 16384
+  [64/132] 32768/niah_multivalue#1 -> 'The text mentions **two** "special magic numbers" ' (109.9s/item, ~125 min left)
+[DKV] auto-stream: session ruler-32768-niah_multivalue-2 STREAMING -- 32022 prompt tokens vs exact limit 16384
+  [65/132] 32768/niah_multivalue#2 -> "Let's carefully extract all the numbers mentioned " (110.0s/item, ~123 min left)
+[DKV] auto-stream: session ruler-32768-niah_multivalue-3 STREAMING -- 32637 prompt tokens vs exact limit 16384
+  [66/132] 32768/niah_multivalue#3 -> 'The text mentions several "special magic numbers f' (110.1s/item, ~121 min left)
+[DKV] auto-stream: session ruler-32768-niah_multivalue-4 STREAMING -- 32627 prompt tokens vs exact limit 16384
+  [67/132] 32768/niah_multivalue#4 -> 'The text contains several references to "magic num' (110.2s/item, ~119 min left)
+[DKV] auto-stream: session ruler-32768-niah_multivalue-5 STREAMING -- 32632 prompt tokens vs exact limit 16384
+  [68/132] 32768/niah_multivalue#5 -> 'The text contains several mentions of "special mag' (110.4s/item, ~118 min left)
+[DKV] auto-stream: session ruler-32768-niah_multivalue-6 STREAMING -- 32017 prompt tokens vs exact limit 16384
+  [69/132] 32768/niah_multivalue#6 -> 'The text mentions several "special magic numbers f' (110.4s/item, ~116 min left)
+[DKV] auto-stream: session ruler-32768-niah_multivalue-7 STREAMING -- 32627 prompt tokens vs exact limit 16384
+  [70/132] 32768/niah_multivalue#7 -> 'The text mentions several numbers that are labeled' (110.5s/item, ~114 min left)
+[DKV] auto-stream: session ruler-32768-niah_multivalue-8 STREAMING -- 32632 prompt tokens vs exact limit 16384
+  [71/132] 32768/niah_multivalue#8 -> 'The text contains several references to "special m' (110.6s/item, ~112 min left)
+[DKV] auto-stream: session ruler-32768-niah_multivalue-9 STREAMING -- 32632 prompt tokens vs exact limit 16384
+  [72/132] 32768/niah_multivalue#9 -> 'The text mentions several "special magic numbers f' (110.7s/item, ~111 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_1-0 STREAMING -- 32008 prompt tokens vs exact limit 16384
+  [73/132] 32768/niah_single_1#0 -> 'The special magic number mentioned in the text is:' (110.5s/item, ~109 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_1-1 STREAMING -- 32629 prompt tokens vs exact limit 16384
+  [74/132] 32768/niah_single_1#1 -> 'The special magic number mentioned in the text is:' (110.3s/item, ~107 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_1-2 STREAMING -- 32633 prompt tokens vs exact limit 16384
+  [75/132] 32768/niah_single_1#2 -> 'The special magic number mentioned in the text is:' (110.1s/item, ~105 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_1-3 STREAMING -- 32631 prompt tokens vs exact limit 16384
+  [76/132] 32768/niah_single_1#3 -> 'The special magic number mentioned in the text is:' (109.9s/item, ~103 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_1-4 STREAMING -- 32629 prompt tokens vs exact limit 16384
+  [77/132] 32768/niah_single_1#4 -> 'The special magic number mentioned in the text is:' (109.7s/item, ~101 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_1-5 STREAMING -- 32627 prompt tokens vs exact limit 16384
+  [78/132] 32768/niah_single_1#5 -> 'The special magic number mentioned in the text is:' (109.6s/item, ~99 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_1-6 STREAMING -- 32629 prompt tokens vs exact limit 16384
+  [79/132] 32768/niah_single_1#6 -> 'The special magic number mentioned in the text is:' (109.4s/item, ~97 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_1-7 STREAMING -- 32627 prompt tokens vs exact limit 16384
+  [80/132] 32768/niah_single_1#7 -> 'The special magic number mentioned in the text is:' (109.3s/item, ~95 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_1-8 STREAMING -- 32633 prompt tokens vs exact limit 16384
+  [81/132] 32768/niah_single_1#8 -> 'The special magic number mentioned in the text is:' (109.1s/item, ~93 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_1-9 STREAMING -- 32631 prompt tokens vs exact limit 16384
+  [82/132] 32768/niah_single_1#9 -> 'The special magic number mentioned in the text is:' (109.0s/item, ~91 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_2-0 STREAMING -- 32640 prompt tokens vs exact limit 16384
+  [83/132] 32768/niah_single_2#0 -> 'The special magic number for uncovered-turkey ment' (109.1s/item, ~89 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_2-1 STREAMING -- 32640 prompt tokens vs exact limit 16384
+  [84/132] 32768/niah_single_2#1 -> 'The special magic number for roasted-poetry mentio' (109.2s/item, ~87 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_2-2 STREAMING -- 32638 prompt tokens vs exact limit 16384
+  [85/132] 32768/niah_single_2#2 -> 'The "special magic number for lovely-filter" menti' (109.3s/item, ~86 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_2-3 STREAMING -- 32640 prompt tokens vs exact limit 16384
+  [86/132] 32768/niah_single_2#3 -> 'The special magic number for vague-shear mentioned' (109.4s/item, ~84 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_2-4 STREAMING -- 32640 prompt tokens vs exact limit 16384
+  [87/132] 32768/niah_single_2#4 -> 'The text mentions a number in the context of "aggr' (109.5s/item, ~82 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_2-5 STREAMING -- 32029 prompt tokens vs exact limit 16384
+  [88/132] 32768/niah_single_2#5 -> 'The "special magic number for fair-yogurt" mention' (109.5s/item, ~80 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_2-6 STREAMING -- 32029 prompt tokens vs exact limit 16384
+  [89/132] 32768/niah_single_2#6 -> 'The text mentions a number: **"5408072"** in the c' (109.6s/item, ~79 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_2-7 STREAMING -- 32640 prompt tokens vs exact limit 16384
+  [90/132] 32768/niah_single_2#7 -> 'The text mentions a "special magic number for soli' (109.7s/item, ~77 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_2-8 STREAMING -- 32640 prompt tokens vs exact limit 16384
+  [91/132] 32768/niah_single_2#8 -> 'The "special magic number for dark-boyhood" mentio' (109.8s/item, ~75 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_2-9 STREAMING -- 32640 prompt tokens vs exact limit 16384
+  [92/132] 32768/niah_single_2#9 -> 'The special magic number for the annoying-doorbell' (109.9s/item, ~73 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_3-0 STREAMING -- 32033 prompt tokens vs exact limit 16384
+  [93/132] 32768/niah_single_3#0 -> 'The text mentions a UUID in the following line:\n\n>' (110.0s/item, ~71 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_3-1 STREAMING -- 32027 prompt tokens vs exact limit 16384
+  [94/132] 32768/niah_single_3#1 -> 'The special magic UUID for deranged-assurance ment' (110.0s/item, ~70 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_3-2 STREAMING -- 32026 prompt tokens vs exact limit 16384
+  [95/132] 32768/niah_single_3#2 -> 'The "special magic uuid for screeching-drag" menti' (110.1s/item, ~68 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_3-3 STREAMING -- 32032 prompt tokens vs exact limit 16384
+  [96/132] 32768/niah_single_3#3 -> 'The special magic UUID for "abashed-aftershave" me' (110.2s/item, ~66 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_3-4 STREAMING -- 32028 prompt tokens vs exact limit 16384
+  [97/132] 32768/niah_single_3#4 -> 'The "special magic uuid for deranged-asparagus" me' (110.2s/item, ~64 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_3-5 STREAMING -- 32640 prompt tokens vs exact limit 16384
+  [98/132] 32768/niah_single_3#5 -> 'The special magic UUID for stale-spaghetti mention' (110.3s/item, ~62 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_3-6 STREAMING -- 32026 prompt tokens vs exact limit 16384
+  [99/132] 32768/niah_single_3#6 -> 'The special magic UUID for yummy-dynasty mentioned' (110.3s/item, ~61 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_3-7 STREAMING -- 32029 prompt tokens vs exact limit 16384
+  [100/132] 32768/niah_single_3#7 -> 'The special magic UUID for "resolute-politician" m' (110.4s/item, ~59 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_3-8 STREAMING -- 32027 prompt tokens vs exact limit 16384
+  [101/132] 32768/niah_single_3#8 -> 'The special magic UUID for raspy-common mentioned ' (110.4s/item, ~57 min left)
+[DKV] auto-stream: session ruler-32768-niah_single_3-9 STREAMING -- 32030 prompt tokens vs exact limit 16384
+  [102/132] 32768/niah_single_3#9 -> 'The special magic UUID for bizarre-skirt mentioned' (110.5s/item, ~55 min left)
+[DKV] auto-stream: session ruler-32768-qa_1-0 STREAMING -- 32366 prompt tokens vs exact limit 16384
+  [103/132] 32768/qa_1#0 -> 'France' (110.2s/item, ~53 min left)
+[DKV] auto-stream: session ruler-32768-qa_1-1 STREAMING -- 31336 prompt tokens vs exact limit 16384
+  [104/132] 32768/qa_1#1 -> 'The question asks: "When were the Normans in Norma' (110.0s/item, ~51 min left)
+[DKV] auto-stream: session ruler-32768-qa_1-2 STREAMING -- 32357 prompt tokens vs exact limit 16384
+  [105/132] 32768/qa_1#2 -> 'The Norse originated from Scandinavia, specificall' (109.9s/item, ~49 min left)
+[DKV] auto-stream: session ruler-32768-qa_1-3 STREAMING -- 32565 prompt tokens vs exact limit 16384
+  [106/132] 32768/qa_1#3 -> 'The documents do not specify a single Norse leader' (109.7s/item, ~48 min left)
+[DKV] auto-stream: session ruler-32768-qa_1-4 STREAMING -- 31385 prompt tokens vs exact limit 16384
+  [107/132] 32768/qa_1#4 -> 'The documents mention that the Normans emerged as ' (109.6s/item, ~46 min left)
+[DKV] auto-stream: session ruler-32768-qa_1-5 STREAMING -- 30058 prompt tokens vs exact limit 16384
+  [108/132] 32768/qa_1#5 -> 'The documents do not mention a "duke in the battle' (109.3s/item, ~44 min left)
+[DKV] auto-stream: session ruler-32768-qa_1-6 STREAMING -- 31941 prompt tokens vs exact limit 16384
+  [109/132] 32768/qa_1#6 -> 'The documents do not specify who ruled the duchy o' (109.2s/item, ~42 min left)
+[DKV] auto-stream: session ruler-32768-qa_1-7 STREAMING -- 31839 prompt tokens vs exact limit 16384
+  [110/132] 32768/qa_1#7 -> 'The Normans were primarily Christian.' (109.0s/item, ~40 min left)
+[DKV] auto-stream: session ruler-32768-qa_1-8 STREAMING -- 31982 prompt tokens vs exact limit 16384
+  [111/132] 32768/qa_1#8 -> 'Norman refers to a person from Normandy, historica' (108.8s/item, ~38 min left)
+[DKV] auto-stream: session ruler-32768-qa_1-9 STREAMING -- 30572 prompt tokens vs exact limit 16384
+  [112/132] 32768/qa_1#9 -> 'The documents do not provide information about whe' (108.6s/item, ~36 min left)
+[DKV] auto-stream: session ruler-32768-qa_2-0 STREAMING -- 31525 prompt tokens vs exact limit 16384
+  [113/132] 32768/qa_2#0 -> 'No' (108.4s/item, ~34 min left)
+[DKV] auto-stream: session ruler-32768-qa_2-1 STREAMING -- 32562 prompt tokens vs exact limit 16384
+  [114/132] 32768/qa_2#1 -> 'The question asks: "What government position was h' (108.3s/item, ~32 min left)
+[DKV] auto-stream: session ruler-32768-qa_2-2 STREAMING -- 32337 prompt tokens vs exact limit 16384
+  [115/132] 32768/qa_2#2 -> "Animals? No. Let's parse the question carefully.\n\n" (108.2s/item, ~31 min left)
+[DKV] auto-stream: session ruler-32768-qa_2-3 STREAMING -- 32702 prompt tokens vs exact limit 16384
+  [116/132] 32768/qa_2#3 -> 'No.' (108.0s/item, ~29 min left)
+[DKV] auto-stream: session ruler-32768-qa_2-4 STREAMING -- 32057 prompt tokens vs exact limit 16384
+  [117/132] 32768/qa_2#4 -> 'The documents do not provide information about the' (107.9s/item, ~27 min left)
+[DKV] auto-stream: session ruler-32768-qa_2-5 STREAMING -- 31935 prompt tokens vs exact limit 16384
+  [118/132] 32768/qa_2#5 -> 'WINNER' (107.7s/item, ~25 min left)
+[DKV] auto-stream: session ruler-32768-qa_2-6 STREAMING -- 31273 prompt tokens vs exact limit 16384
+  [119/132] 32768/qa_2#6 -> 'There is no document in the provided list that men' (107.6s/item, ~23 min left)
+[DKV] auto-stream: session ruler-32768-qa_2-7 STREAMING -- 30988 prompt tokens vs exact limit 16384
+  [120/132] 32768/qa_2#7 -> 'The arena where the Lewiston Maineiacs played thei' (107.4s/item, ~21 min left)
+[DKV] auto-stream: session ruler-32768-qa_2-8 STREAMING -- 30223 prompt tokens vs exact limit 16384
+  [121/132] 32768/qa_2#8 -> 'The documents do not mention Annie Morton or Terry' (107.2s/item, ~20 min left)
+[DKV] auto-stream: session ruler-32768-qa_2-9 STREAMING -- 30555 prompt tokens vs exact limit 16384
+  [122/132] 32768/qa_2#9 -> 'Yes' (107.0s/item, ~18 min left)
+[DKV] auto-stream: session ruler-32768-vt-0 STREAMING -- 32714 prompt tokens vs exact limit 16384
+  [123/132] 32768/vt#0 -> 'We are asked to find all variables that are assign' (106.9s/item, ~16 min left)
+[DKV] auto-stream: session ruler-32768-vt-1 STREAMING -- 32710 prompt tokens vs exact limit 16384
+  [124/132] 32768/vt#1 -> 'We are asked to find all variables that are assign' (106.8s/item, ~14 min left)
+[DKV] auto-stream: session ruler-32768-vt-2 STREAMING -- 32709 prompt tokens vs exact limit 16384
+  [125/132] 32768/vt#2 -> 'We are asked to find all variables that are assign' (106.7s/item, ~12 min left)
+[DKV] auto-stream: session ruler-32768-vt-3 STREAMING -- 32713 prompt tokens vs exact limit 16384
+  [126/132] 32768/vt#3 -> 'We are asked to find all variables that are assign' (106.6s/item, ~11 min left)
+[DKV] auto-stream: session ruler-32768-vt-4 STREAMING -- 32706 prompt tokens vs exact limit 16384
+  [127/132] 32768/vt#4 -> 'We are asked to find all variables that are assign' (106.5s/item, ~9 min left)
+[DKV] auto-stream: session ruler-32768-vt-5 STREAMING -- 32707 prompt tokens vs exact limit 16384
+  [128/132] 32768/vt#5 -> 'We are asked to find all variables that are assign' (106.4s/item, ~7 min left)
+[DKV] auto-stream: session ruler-32768-vt-6 STREAMING -- 32716 prompt tokens vs exact limit 16384
+  [129/132] 32768/vt#6 -> 'We are asked to find all variables that are assign' (106.3s/item, ~5 min left)
+[DKV] auto-stream: session ruler-32768-vt-7 STREAMING -- 32720 prompt tokens vs exact limit 16384
+  [130/132] 32768/vt#7 -> 'We are asked to find all variables that are assign' (106.2s/item, ~4 min left)
+[DKV] auto-stream: session ruler-32768-vt-8 STREAMING -- 32707 prompt tokens vs exact limit 16384
+  [131/132] 32768/vt#8 -> 'We are asked to **find all variables that are assi' (106.2s/item, ~2 min left)
+[DKV] auto-stream: session ruler-32768-vt-9 STREAMING -- 32711 prompt tokens vs exact limit 16384
+  [132/132] 32768/vt#9 -> 'We are asked to find all variables that are assign' (106.1s/item, ~0 min left)
+
+
+=== BEYOND_granite_dkv_mid_auto_24k-32k.jsonl ===
+ibm-granite/granite-4.2-8b arm=dkv preset=mid quant=nf4
+              task    24576    32768
+     niah_single_1    100.0    100.0
+     niah_single_2    100.0    100.0
+     niah_single_3     90.0    100.0
+   niah_multikey_1    100.0     80.0
+   niah_multikey_2     10.0      0.0
+   niah_multikey_3      0.0     10.0
+   niah_multivalue     30.0     22.5
+   niah_multiquery     40.0     20.0
+                vt      0.0      0.0
+               cwe      0.0      0.0
+               fwe     50.0     90.0
+              qa_1     30.0     30.0
+              qa_2     50.0     30.0
+         RULER avg     46.2     44.8
+  ttft nans | decode nan tok/s | peak 8.26 GB | KV 1.020 GB (4.6x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\BEYOND_Qwen3.5-4B_streamingllm_chunked_131k.jsonl
+[ckpt] 0 recorded, 65 pending (of 65 generated)
+  [1/65] 131072/cwe#0 -> 'Based on a frequency analysis of the provided list' (53.2s/item, ~57 min left)
+  [2/65] 131072/cwe#1 -> 'Based on a frequency analysis of the provided list' (52.3s/item, ~55 min left)
+  [3/65] 131072/cwe#2 -> 'Based on a frequency analysis of the provided list' (52.5s/item, ~54 min left)
+  [4/65] 131072/cwe#3 -> 'Based on a frequency analysis of the provided list' (52.4s/item, ~53 min left)
+  [5/65] 131072/cwe#4 -> 'Based on a frequency analysis of the provided list' (52.6s/item, ~53 min left)
+  [6/65] 131072/fwe#0 -> 'pmqys zhtlig yxrkxt' (51.0s/item, ~50 min left)
+  [7/65] 131072/fwe#1 -> 'pnesyg zitagf bvpnes' (50.0s/item, ~48 min left)
+  [8/65] 131072/fwe#2 -> 'pnvgbi bsyqzp zkcezm' (49.3s/item, ~47 min left)
+  [9/65] 131072/fwe#3 -> 'polfxt ziiyjl bpnuky' (48.6s/item, ~45 min left)
+  [10/65] 131072/fwe#4 -> 'pvnctf bmgpbw zkukak' (48.2s/item, ~44 min left)
+  [11/65] 131072/niah_multikey_1#0 -> 'Based on the text provided, there is **no mention*' (48.7s/item, ~44 min left)
+  [12/65] 131072/niah_multikey_1#1 -> 'Based on the text provided, there is no mention of' (48.7s/item, ~43 min left)
+  [13/65] 131072/niah_multikey_1#2 -> 'Based on the text provided, the special magic numb' (48.6s/item, ~42 min left)
+  [14/65] 131072/niah_multikey_1#3 -> 'Based on the text provided, there is **no mention*' (48.8s/item, ~41 min left)
+  [15/65] 131072/niah_multikey_1#4 -> 'Based on the text provided, there is **no mention*' (48.9s/item, ~41 min left)
+  [16/65] 131072/niah_multikey_2#0 -> 'Based on the text provided, there is no mention of' (49.1s/item, ~40 min left)
+  [17/65] 131072/niah_multikey_2#1 -> 'Based on the text provided, there is no mention of' (49.5s/item, ~40 min left)
+  [18/65] 131072/niah_multikey_2#2 -> 'Based on the text provided, there is no mention of' (49.6s/item, ~39 min left)
+  [19/65] 131072/niah_multikey_2#3 -> 'Based on the text provided, there is no mention of' (49.7s/item, ~38 min left)
+  [20/65] 131072/niah_multikey_2#4 -> 'Based on the text provided, there is **no mention*' (49.9s/item, ~37 min left)
+  [21/65] 131072/niah_multikey_3#0 -> 'Based on the text provided, there is no mention of' (50.1s/item, ~37 min left)
+  [22/65] 131072/niah_multikey_3#1 -> 'Based on the text provided, the special magic UUID' (50.1s/item, ~36 min left)
+  [23/65] 131072/niah_multikey_3#2 -> 'Based on the text provided, the special magic UUID' (50.2s/item, ~35 min left)
+  [24/65] 131072/niah_multikey_3#3 -> 'Based on the text provided, there is no mention of' (50.3s/item, ~34 min left)
+  [25/65] 131072/niah_multikey_3#4 -> 'Based on the text provided, the special magic UUID' (50.4s/item, ~34 min left)
+  [26/65] 131072/niah_multiquery#0 -> 'Based on the text provided, there are **no special' (50.5s/item, ~33 min left)
+  [27/65] 131072/niah_multiquery#1 -> 'Based on the text provided, there are **no special' (50.5s/item, ~32 min left)
+  [28/65] 131072/niah_multiquery#2 -> 'Based on the text provided, there are **no special' (50.5s/item, ~31 min left)
+  [29/65] 131072/niah_multiquery#3 -> 'Based on the text provided, there are **no special' (50.6s/item, ~30 min left)
+  [30/65] 131072/niah_multiquery#4 -> 'Based on the text provided, there is **no mention*' (50.6s/item, ~30 min left)
+  [31/65] 131072/niah_multivalue#0 -> 'Based on the text provided, there are **no special' (50.8s/item, ~29 min left)
+  [32/65] 131072/niah_multivalue#1 -> 'Based on the text provided, there are **no special' (50.8s/item, ~28 min left)
+  [33/65] 131072/niah_multivalue#2 -> 'Based on the text provided, there are **no special' (50.8s/item, ~27 min left)
+  [34/65] 131072/niah_multivalue#3 -> 'Based on the text provided, there are **no special' (50.9s/item, ~26 min left)
+  [35/65] 131072/niah_multivalue#4 -> 'Based on the text provided, there are **no special' (50.9s/item, ~25 min left)
+  [36/65] 131072/niah_single_1#0 -> 'Based on the text you provided, there is **no ment' (51.0s/item, ~25 min left)
+  [37/65] 131072/niah_single_1#1 -> 'Based on the text provided, there is **no mention*' (51.0s/item, ~24 min left)
+  [38/65] 131072/niah_single_1#2 -> 'Based on the text provided, there is **no mention*' (50.9s/item, ~23 min left)
+  [39/65] 131072/niah_single_1#3 -> 'Based on the text you provided, there is **no ment' (51.0s/item, ~22 min left)
+  [40/65] 131072/niah_single_1#4 -> 'Based on the text you provided, there is **no ment' (51.1s/item, ~21 min left)
+  [41/65] 131072/niah_single_2#0 -> 'Based on the text provided, there is **no mention*' (51.1s/item, ~20 min left)
+  [42/65] 131072/niah_single_2#1 -> 'Based on the text provided, there is **no mention*' (51.0s/item, ~20 min left)
+  [43/65] 131072/niah_single_2#2 -> 'Based on the text provided, there is **no mention*' (51.1s/item, ~19 min left)
+  [44/65] 131072/niah_single_2#3 -> 'Based on the text provided, there is **no mention*' (51.1s/item, ~18 min left)
+  [45/65] 131072/niah_single_2#4 -> 'Based on the text provided, there is **no mention*' (51.1s/item, ~17 min left)
+  [46/65] 131072/niah_single_3#0 -> 'Based on the text provided, there is **no mention*' (51.1s/item, ~16 min left)
+  [47/65] 131072/niah_single_3#1 -> 'Based on the text provided, there is **no mention*' (51.1s/item, ~15 min left)
+  [48/65] 131072/niah_single_3#2 -> 'Based on the text provided, there is **no mention*' (51.1s/item, ~14 min left)
+  [49/65] 131072/niah_single_3#3 -> 'Based on the text provided, there is **no mention*' (51.1s/item, ~14 min left)
+  [50/65] 131072/niah_single_3#4 -> 'Based on the text provided, there is no mention of' (51.1s/item, ~13 min left)
+  [51/65] 131072/qa_1#0 -> 'Normandy is located in France.' (51.0s/item, ~12 min left)
+  [52/65] 131072/qa_1#1 -> 'Between the 11th and 13th centuries.' (50.9s/item, ~11 min left)
+  [53/65] 131072/qa_1#2 -> 'The provided documents do not contain information ' (50.8s/item, ~10 min left)
+  [54/65] 131072/qa_1#3 -> 'None' (50.7s/item, ~9 min left)
+  [55/65] 131072/qa_1#4 -> '11th' (50.6s/item, ~8 min left)
+  [56/65] 131072/qa_2#0 -> 'No' (50.5s/item, ~8 min left)
+  [57/65] 131072/qa_2#1 -> 'Secretary of State' (50.4s/item, ~7 min left)
+  [58/65] 131072/qa_2#2 -> 'The Expanse' (50.3s/item, ~6 min left)
+  [59/65] 131072/qa_2#3 -> 'No' (50.1s/item, ~5 min left)
+  [60/65] 131072/qa_2#4 -> 'New York City' (50.1s/item, ~4 min left)
+  [61/65] 131072/vt#0 -> 'Based on the text provided, there are **no variabl' (50.1s/item, ~3 min left)
+  [62/65] 131072/vt#1 -> 'Based on the text provided, there are **no variabl' (50.0s/item, ~2 min left)
+  [63/65] 131072/vt#2 -> 'Based on the text provided, there are **no variabl' (50.0s/item, ~2 min left)
+  [64/65] 131072/vt#3 -> 'Based on the text provided, there are **no variabl' (49.9s/item, ~1 min left)
+  [65/65] 131072/vt#4 -> 'Based on the text provided, there are **no variabl' (49.8s/item, ~0 min left)
+
+
+=== BEYOND_Qwen3.5-4B_streamingllm_chunked_131k.jsonl ===
+Qwen/Qwen3.5-4B arm=streamingllm_chunked preset=None quant=nf4
+              task   131072
+     niah_single_1      0.0
+     niah_single_2      0.0
+     niah_single_3      0.0
+   niah_multikey_1     20.0
+   niah_multikey_2      0.0
+   niah_multikey_3      0.0
+   niah_multivalue      0.0
+   niah_multiquery      5.0
+                vt      0.0
+               cwe     12.0
+               fwe     86.7
+              qa_1     20.0
+              qa_2     20.0
+         RULER avg     12.6
+  ttft 44.61s | decode 15.5 tok/s | peak 3.38 GB | KV 0.067 GB (63.5x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\BEYOND_Qwen3.5-4B_h2o_chunked_131k.jsonl
+[ckpt] 0 recorded, 65 pending (of 65 generated)
+  [1/65] 131072/cwe#0 -> 'Based on the analysis of the provided list of word' (136.8s/item, ~146 min left)
+  [2/65] 131072/cwe#1 -> 'Based on the analysis of the provided word lists, ' (137.1s/item, ~144 min left)
+  [3/65] 131072/cwe#2 -> 'Based on the analysis of the provided list of word' (135.5s/item, ~140 min left)
+  [4/65] 131072/cwe#3 -> 'Based on the analysis of the provided word lists, ' (136.2s/item, ~138 min left)
+  [5/65] 131072/cwe#4 -> 'Based on the analysis of the provided list of word' (136.1s/item, ~136 min left)
+  [6/65] 131072/fwe#0 -> 'pmqysy, zhtlig, blpxps' (133.3s/item, ~131 min left)
+  [7/65] 131072/fwe#1 -> 'pnesyg, zitagf, bvpnes' (132.1s/item, ~128 min left)
+  [8/65] 131072/fwe#2 -> 'pnvgbi, zkcezm, bsyqzp' (131.0s/item, ~124 min left)
+  [9/65] 131072/fwe#3 -> 'polfxt, ziiyjl, bpnuky' (130.2s/item, ~122 min left)
+  [10/65] 131072/fwe#4 -> 'pvnctf, zkukak, bmgpbw' (130.2s/item, ~119 min left)
+  [11/65] 131072/niah_multikey_1#0 -> 'Based on the text provided, there is no mention of' (130.4s/item, ~117 min left)
+  [12/65] 131072/niah_multikey_1#1 -> 'Based on the text provided, there is no mention of' (130.8s/item, ~116 min left)
+  [13/65] 131072/niah_multikey_1#2 -> 'Based on the text provided, the special magic numb' (131.4s/item, ~114 min left)
+  [14/65] 131072/niah_multikey_1#3 -> 'Based on the text provided, there is no mention of' (131.6s/item, ~112 min left)
+  [15/65] 131072/niah_multikey_1#4 -> 'Based on the text provided, there is no mention of' (132.1s/item, ~110 min left)
+  [16/65] 131072/niah_multikey_2#0 -> 'Based on the text provided, there is no mention of' (132.0s/item, ~108 min left)
+  [17/65] 131072/niah_multikey_2#1 -> 'The special magic number for **loutish-honor** is ' (131.8s/item, ~105 min left)
+  [18/65] 131072/niah_multikey_2#2 -> 'The special magic number for **scandalous-tow-truc' (132.0s/item, ~103 min left)
+  [19/65] 131072/niah_multikey_2#3 -> 'The special magic number for **plausible-tab** is ' (131.7s/item, ~101 min left)
+  [20/65] 131072/niah_multikey_2#4 -> 'The special magic number for wealthy-frequency is ' (131.5s/item, ~99 min left)
+  [21/65] 131072/niah_multikey_3#0 -> 'The special magic uuid for **48ae3ff6-b546-4718-ba' (131.7s/item, ~97 min left)
+  [22/65] 131072/niah_multikey_3#1 -> 'The special magic uuid for **a4eb9dba-59f4-45d4-91' (131.5s/item, ~94 min left)
+  [23/65] 131072/niah_multikey_3#2 -> 'The special magic uuid for `f14ba25a-e36b-4636-ba2' (131.6s/item, ~92 min left)
+  [24/65] 131072/niah_multikey_3#3 -> 'The special magic uuid for **df80846e-d9ad-4a5f-a3' (131.9s/item, ~90 min left)
+  [25/65] 131072/niah_multikey_3#4 -> 'The special magic uuid for **545d740a-d63e-4059-86' (131.7s/item, ~88 min left)
+  [26/65] 131072/niah_multiquery#0 -> 'Based on the text provided, there are **no special' (132.2s/item, ~86 min left)
+  [27/65] 131072/niah_multiquery#1 -> 'Based on the text provided, here are the special m' (132.2s/item, ~84 min left)
+  [28/65] 131072/niah_multiquery#2 -> 'Based on the text provided, here are the special m' (132.5s/item, ~82 min left)
+  [29/65] 131072/niah_multiquery#3 -> 'Based on the text provided, there are **no special' (132.6s/item, ~80 min left)
+  [30/65] 131072/niah_multiquery#4 -> 'Based on the text provided, here are the special m' (132.6s/item, ~77 min left)
+  [31/65] 131072/niah_multivalue#0 -> 'Based on the text provided, there are **no special' (132.8s/item, ~75 min left)
+  [32/65] 131072/niah_multivalue#1 -> 'Based on the text provided, there are **no special' (132.8s/item, ~73 min left)
+  [33/65] 131072/niah_multivalue#2 -> 'Based on the text provided, there are **no special' (132.8s/item, ~71 min left)
+  [34/65] 131072/niah_multivalue#3 -> 'Based on the text provided, here are the special m' (133.1s/item, ~69 min left)
+  [35/65] 131072/niah_multivalue#4 -> 'Based on the text provided, there is **no mention*' (133.2s/item, ~67 min left)
+  [36/65] 131072/niah_single_1#0 -> 'The special magic number for weak-jeweller mention' (133.2s/item, ~64 min left)
+  [37/65] 131072/niah_single_1#1 -> 'Based on the text provided, the special magic numb' (133.3s/item, ~62 min left)
+  [38/65] 131072/niah_single_1#2 -> 'The special magic number hidden in the text is **5' (133.3s/item, ~60 min left)
+  [39/65] 131072/niah_single_1#3 -> 'The special magic number hidden in the text is **7' (133.3s/item, ~58 min left)
+  [40/65] 131072/niah_single_1#4 -> 'The special magic number hidden in the text is **5' (133.4s/item, ~56 min left)
+  [41/65] 131072/niah_single_2#0 -> 'Based on the text provided, the special magic numb' (133.4s/item, ~53 min left)
+  [42/65] 131072/niah_single_2#1 -> 'Based on the text provided, there is no mention of' (133.6s/item, ~51 min left)
+  [43/65] 131072/niah_single_2#2 -> 'Based on the text provided, there is no mention of' (133.6s/item, ~49 min left)
+  [44/65] 131072/niah_single_2#3 -> 'Based on the text provided, there is no mention of' (133.7s/item, ~47 min left)
+  [45/65] 131072/niah_single_2#4 -> 'Based on the text provided, there is no mention of' (133.8s/item, ~45 min left)
+  [46/65] 131072/niah_single_3#0 -> 'Based on the text provided, there is no mention of' (133.7s/item, ~42 min left)
+  [47/65] 131072/niah_single_3#1 -> 'Based on the text provided, there is no mention of' (133.8s/item, ~40 min left)
+  [48/65] 131072/niah_single_3#2 -> 'Based on the text provided, there is no mention of' (133.8s/item, ~38 min left)
+  [49/65] 131072/niah_single_3#3 -> 'Based on the text provided, there is no mention of' (133.8s/item, ~36 min left)
+  [50/65] 131072/niah_single_3#4 -> 'Based on the text provided, there is no mention of' (133.9s/item, ~33 min left)
+  [51/65] 131072/qa_1#0 -> 'France' (133.8s/item, ~31 min left)
+  [52/65] 131072/qa_1#1 -> 'In the early 11th century.' (133.6s/item, ~29 min left)
+  [53/65] 131072/qa_1#2 -> 'Norway' (133.5s/item, ~27 min left)
+  [54/65] 131072/qa_1#3 -> 'Hervarar' (133.4s/item, ~24 min left)
+  [55/65] 131072/qa_1#4 -> 'The 11th' (133.2s/item, ~22 min left)
+  [56/65] 131072/qa_2#0 -> 'No' (133.2s/item, ~20 min left)
+  [57/65] 131072/qa_2#1 -> 'The provided documents do not contain information ' (133.0s/item, ~18 min left)
+  [58/65] 131072/qa_2#2 -> 'The X-Files' (132.8s/item, ~15 min left)
+  [59/65] 131072/qa_2#3 -> 'No' (132.7s/item, ~13 min left)
+  [60/65] 131072/qa_2#4 -> 'The provided documents do not contain information ' (132.6s/item, ~11 min left)
+  [61/65] 131072/vt#0 -> 'Based on the text provided, there are **no variabl' (132.6s/item, ~9 min left)
+  [62/65] 131072/vt#1 -> 'Based on the text provided, here is the tracking o' (132.6s/item, ~7 min left)
+  [63/65] 131072/vt#2 -> 'Based on the text provided, there are **no variabl' (132.5s/item, ~4 min left)
+  [64/65] 131072/vt#3 -> 'Based on the text provided, there are **no variabl' (132.5s/item, ~2 min left)
+  [65/65] 131072/vt#4 -> 'Based on the text provided, here is the tracking o' (132.4s/item, ~0 min left)
+
+
+=== BEYOND_Qwen3.5-4B_h2o_chunked_131k.jsonl ===
+Qwen/Qwen3.5-4B arm=h2o_chunked preset=None quant=nf4
+              task   131072
+     niah_single_1      0.0
+     niah_single_2      0.0
+     niah_single_3      0.0
+   niah_multikey_1     20.0
+   niah_multikey_2      0.0
+   niah_multikey_3      0.0
+   niah_multivalue      0.0
+   niah_multiquery      5.0
+                vt      4.0
+               cwe      0.0
+               fwe    100.0
+              qa_1     20.0
+              qa_2     20.0
+         RULER avg     13.0
+  ttft 127.07s | decode 15.5 tok/s | peak 3.37 GB | KV 0.067 GB (63.5x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\BEYOND_Qwen3.5-4B_dkv_mid_auto_131k.jsonl
+[ckpt] 0 recorded, 65 pending (of 65 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1176 MB → 1176 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1591 MB → 1591 MB (saved 0 MB)
+[DKV] auto-stream: session ruler-131072-cwe-0 STREAMING -- 130933 prompt tokens vs exact limit 98304
+[Pool] Lazy-allocated 64 slots for ~1024 tokens = 27.3 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] Triton fused-decode path ACTIVE (CUDA).
+  [1/65] 131072/cwe#0 -> 'Based on an analysis of the provided list, here ar' (296.6s/item, ~316 min left)
+[DKV] auto-stream: session ruler-131072-cwe-1 STREAMING -- 130883 prompt tokens vs exact limit 98304
+  [2/65] 131072/cwe#1 -> 'Based on a frequency analysis of the provided list' (292.4s/item, ~307 min left)
+[DKV] auto-stream: session ruler-131072-cwe-2 STREAMING -- 130843 prompt tokens vs exact limit 98304
+  [3/65] 131072/cwe#2 -> 'Based on a frequency analysis of the provided list' (291.9s/item, ~302 min left)
+[DKV] auto-stream: session ruler-131072-cwe-3 STREAMING -- 130599 prompt tokens vs exact limit 98304
+  [4/65] 131072/cwe#3 -> 'Based on an analysis of the provided numbered list' (289.9s/item, ~295 min left)
+[DKV] auto-stream: session ruler-131072-cwe-4 STREAMING -- 130936 prompt tokens vs exact limit 98304
+  [5/65] 131072/cwe#4 -> 'Based on a comprehensive count of the words provid' (289.8s/item, ~290 min left)
+[DKV] auto-stream: session ruler-131072-fwe-0 STREAMING -- 123794 prompt tokens vs exact limit 98304
+  [6/65] 131072/fwe#0 -> 'zhtlig, pmqysy, blpxps' (281.9s/item, ~277 min left)
+[DKV] auto-stream: session ruler-131072-fwe-1 STREAMING -- 122205 prompt tokens vs exact limit 98304
+  [7/65] 131072/fwe#1 -> 'pnesyg, zitagf, bvpnes' (276.6s/item, ~267 min left)
+[DKV] auto-stream: session ruler-131072-fwe-2 STREAMING -- 126757 prompt tokens vs exact limit 98304
+  [8/65] 131072/fwe#2 -> 'pnvgbi, zkcezm, bsyqzp' (273.6s/item, ~260 min left)
+[DKV] auto-stream: session ruler-131072-fwe-3 STREAMING -- 127643 prompt tokens vs exact limit 98304
+  [9/65] 131072/fwe#3 -> 'polfxt\nziiyjl\nyuoorf' (271.6s/item, ~254 min left)
+[DKV] auto-stream: session ruler-131072-fwe-4 STREAMING -- 125873 prompt tokens vs exact limit 98304
+  [10/65] 131072/fwe#4 -> 'pvnctf, zkukak, ywhjnl' (269.7s/item, ~247 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_1-0 STREAMING -- 130338 prompt tokens vs exact limit 98304
+  [11/65] 131072/niah_multikey_1#0 -> 'The special magic number for abaft-placode mention' (270.2s/item, ~243 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_1-1 STREAMING -- 130941 prompt tokens vs exact limit 98304
+  [12/65] 131072/niah_multikey_1#1 -> 'The special magic number for hurried-tensor mentio' (270.7s/item, ~239 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_1-2 STREAMING -- 130940 prompt tokens vs exact limit 98304
+  [13/65] 131072/niah_multikey_1#2 -> 'The special magic number for big-river mentioned i' (271.2s/item, ~235 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_1-3 STREAMING -- 130941 prompt tokens vs exact limit 98304
+  [14/65] 131072/niah_multikey_1#3 -> 'The special magic number for **hypnotic-escape** (' (272.5s/item, ~232 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_1-4 STREAMING -- 130334 prompt tokens vs exact limit 98304
+  [15/65] 131072/niah_multikey_1#4 -> 'The special magic number for **handsome-lap** ment' (273.1s/item, ~228 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_2-0 STREAMING -- 130833 prompt tokens vs exact limit 98304
+  [16/65] 131072/niah_multikey_2#0 -> 'The special magic number for tasty-constant is **3' (273.2s/item, ~223 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_2-1 STREAMING -- 130907 prompt tokens vs exact limit 98304
+  [17/65] 131072/niah_multikey_2#1 -> 'The special magic number for loutish-honor is **66' (273.2s/item, ~219 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_2-2 STREAMING -- 130809 prompt tokens vs exact limit 98304
+  [18/65] 131072/niah_multikey_2#2 -> 'The special magic number for scandalous-tow-truck ' (273.3s/item, ~214 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_2-3 STREAMING -- 130754 prompt tokens vs exact limit 98304
+  [19/65] 131072/niah_multikey_2#3 -> 'The special magic number for plausible-tab is **32' (273.3s/item, ~210 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_2-4 STREAMING -- 130822 prompt tokens vs exact limit 98304
+  [20/65] 131072/niah_multikey_2#4 -> 'The special magic number for wealthy-frequency is ' (273.2s/item, ~205 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_3-0 STREAMING -- 129015 prompt tokens vs exact limit 98304
+  [21/65] 131072/niah_multikey_3#0 -> 'The special magic uuid for `48ae3ff6-b546-4718-ba4' (273.6s/item, ~201 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_3-1 STREAMING -- 128906 prompt tokens vs exact limit 98304
+  [22/65] 131072/niah_multikey_3#1 -> 'The special magic uuid for **a4eb9dba-59f4-45d4-91' (274.0s/item, ~196 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_3-2 STREAMING -- 129065 prompt tokens vs exact limit 98304
+  [23/65] 131072/niah_multikey_3#2 -> 'The special magic uuid for **f14ba25a-e36b-4636-ba' (274.0s/item, ~192 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_3-3 STREAMING -- 130752 prompt tokens vs exact limit 98304
+  [24/65] 131072/niah_multikey_3#3 -> 'The special magic uuid for `df80846e-d9ad-4a5f-a38' (274.5s/item, ~188 min left)
+[DKV] auto-stream: session ruler-131072-niah_multikey_3-4 STREAMING -- 128944 prompt tokens vs exact limit 98304
+  [25/65] 131072/niah_multikey_3#4 -> 'The special magic uuid for `545d740a-d63e-4059-864' (275.0s/item, ~183 min left)
+[DKV] auto-stream: session ruler-131072-niah_multiquery-0 STREAMING -- 130316 prompt tokens vs exact limit 98304
+  [26/65] 131072/niah_multiquery#0 -> 'Based on the text provided, here are the special m' (275.3s/item, ~179 min left)
+[DKV] auto-stream: session ruler-131072-niah_multiquery-1 STREAMING -- 130312 prompt tokens vs exact limit 98304
+  [27/65] 131072/niah_multiquery#1 -> 'Based on the text provided, here are the special m' (275.7s/item, ~175 min left)
+[DKV] auto-stream: session ruler-131072-niah_multiquery-2 STREAMING -- 130318 prompt tokens vs exact limit 98304
+  [28/65] 131072/niah_multiquery#2 -> 'Based on the text provided, here are the special m' (276.0s/item, ~170 min left)
+[DKV] auto-stream: session ruler-131072-niah_multiquery-3 STREAMING -- 130318 prompt tokens vs exact limit 98304
+  [29/65] 131072/niah_multiquery#3 -> 'Based on the text provided, here are the special m' (276.2s/item, ~166 min left)
+[DKV] auto-stream: session ruler-131072-niah_multiquery-4 STREAMING -- 130922 prompt tokens vs exact limit 98304
+  [30/65] 131072/niah_multiquery#4 -> 'Based on the text provided, here are the special m' (276.8s/item, ~161 min left)
+[DKV] auto-stream: session ruler-131072-niah_multivalue-0 STREAMING -- 130334 prompt tokens vs exact limit 98304
+  [31/65] 131072/niah_multivalue#0 -> 'Based on the text provided, here are the special m' (277.2s/item, ~157 min left)
+[DKV] auto-stream: session ruler-131072-niah_multivalue-1 STREAMING -- 130334 prompt tokens vs exact limit 98304
+  [32/65] 131072/niah_multivalue#1 -> 'Based on the text provided, here are the special m' (277.6s/item, ~153 min left)
+[DKV] auto-stream: session ruler-131072-niah_multivalue-2 STREAMING -- 130941 prompt tokens vs exact limit 98304
+  [33/65] 131072/niah_multivalue#2 -> 'Based on the text provided, here are the special m' (278.1s/item, ~148 min left)
+[DKV] auto-stream: session ruler-131072-niah_multivalue-3 STREAMING -- 130329 prompt tokens vs exact limit 98304
+  [34/65] 131072/niah_multivalue#3 -> 'Based on the text provided, here are the special m' (278.5s/item, ~144 min left)
+[DKV] auto-stream: session ruler-131072-niah_multivalue-4 STREAMING -- 130941 prompt tokens vs exact limit 98304
+  [35/65] 131072/niah_multivalue#4 -> 'Based on the text provided, here are the special m' (278.9s/item, ~139 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_1-0 STREAMING -- 130930 prompt tokens vs exact limit 98304
+  [36/65] 131072/niah_single_1#0 -> 'The special magic number for weak-jeweller mention' (278.1s/item, ~134 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_1-1 STREAMING -- 130930 prompt tokens vs exact limit 98304
+  [37/65] 131072/niah_single_1#1 -> 'The special magic number for harmonious-uniform me' (277.3s/item, ~129 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_1-2 STREAMING -- 130930 prompt tokens vs exact limit 98304
+  [38/65] 131072/niah_single_1#2 -> 'The special magic number for loving-cockroach ment' (276.6s/item, ~124 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_1-3 STREAMING -- 130928 prompt tokens vs exact limit 98304
+  [39/65] 131072/niah_single_1#3 -> 'The special magic number for discreet-commodity me' (276.0s/item, ~120 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_1-4 STREAMING -- 130930 prompt tokens vs exact limit 98304
+  [40/65] 131072/niah_single_1#4 -> 'The special magic number for uncovered-turkey ment' (275.4s/item, ~115 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_2-0 STREAMING -- 130941 prompt tokens vs exact limit 98304
+  [41/65] 131072/niah_single_2#0 -> 'The special magic number for vague-shear mentioned' (275.3s/item, ~110 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_2-1 STREAMING -- 130340 prompt tokens vs exact limit 98304
+  [42/65] 131072/niah_single_2#1 -> 'The special magic number for berserk-suitcase ment' (275.3s/item, ~106 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_2-2 STREAMING -- 130338 prompt tokens vs exact limit 98304
+  [43/65] 131072/niah_single_2#2 -> 'The special magic number for deafening-radish ment' (275.4s/item, ~101 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_2-3 STREAMING -- 130336 prompt tokens vs exact limit 98304
+  [44/65] 131072/niah_single_2#3 -> 'The special magic number for solid-sanction mentio' (275.4s/item, ~96 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_2-4 STREAMING -- 130941 prompt tokens vs exact limit 98304
+  [45/65] 131072/niah_single_2#4 -> 'The special magic number for dark-boyhood mentione' (275.6s/item, ~92 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_3-0 STREAMING -- 130940 prompt tokens vs exact limit 98304
+  [46/65] 131072/niah_single_3#0 -> 'The special magic uuid for dark-boyhood mentioned ' (275.7s/item, ~87 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_3-1 STREAMING -- 130342 prompt tokens vs exact limit 98304
+  [47/65] 131072/niah_single_3#1 -> 'The special magic uuid for lush-tornado mentioned ' (275.7s/item, ~83 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_3-2 STREAMING -- 130340 prompt tokens vs exact limit 98304
+  [48/65] 131072/niah_single_3#2 -> 'The special magic uuid for tested-shout mentioned ' (275.8s/item, ~78 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_3-3 STREAMING -- 130336 prompt tokens vs exact limit 98304
+  [49/65] 131072/niah_single_3#3 -> 'The special magic uuid for quick-vane mentioned in' (275.8s/item, ~74 min left)
+[DKV] auto-stream: session ruler-131072-niah_single_3-4 STREAMING -- 130342 prompt tokens vs exact limit 98304
+  [50/65] 131072/niah_single_3#4 -> 'The special magic uuid for stale-spaghetti mention' (275.8s/item, ~69 min left)
+[DKV] auto-stream: session ruler-131072-qa_1-0 STREAMING -- 130707 prompt tokens vs exact limit 98304
+  [51/65] 131072/qa_1#0 -> 'Normandy is located in France.' (275.7s/item, ~64 min left)
+[DKV] auto-stream: session ruler-131072-qa_1-1 STREAMING -- 131022 prompt tokens vs exact limit 98304
+  [52/65] 131072/qa_1#1 -> 'The Normans were in Normandy between the 10th and ' (275.7s/item, ~60 min left)
+[DKV] auto-stream: session ruler-131072-qa_1-2 STREAMING -- 129614 prompt tokens vs exact limit 98304
+  [53/65] 131072/qa_1#2 -> 'Based on the provided documents, there is no infor' (275.7s/item, ~55 min left)
+[DKV] auto-stream: session ruler-131072-qa_1-3 STREAMING -- 130161 prompt tokens vs exact limit 98304
+  [54/65] 131072/qa_1#3 -> 'None of the provided documents mention a Norse lea' (275.6s/item, ~51 min left)
+[DKV] auto-stream: session ruler-131072-qa_1-4 STREAMING -- 130529 prompt tokens vs exact limit 98304
+  [55/65] 131072/qa_1#4 -> 'The 10th century.' (275.5s/item, ~46 min left)
+[DKV] auto-stream: session ruler-131072-qa_2-0 STREAMING -- 129222 prompt tokens vs exact limit 98304
+  [56/65] 131072/qa_2#0 -> 'No. Scott Derrickson is American, while Ed Wood wa' (275.4s/item, ~41 min left)
+[DKV] auto-stream: session ruler-131072-qa_2-1 STREAMING -- 126998 prompt tokens vs exact limit 98304
+  [57/65] 131072/qa_2#1 -> 'The woman who portrayed Corliss Archer in the film' (275.2s/item, ~37 min left)
+[DKV] auto-stream: session ruler-131072-qa_2-2 STREAMING -- 127860 prompt tokens vs exact limit 98304
+  [58/65] 131072/qa_2#2 -> 'The X-Files' (274.9s/item, ~32 min left)
+[DKV] auto-stream: session ruler-131072-qa_2-3 STREAMING -- 126351 prompt tokens vs exact limit 98304
+  [59/65] 131072/qa_2#3 -> 'No' (274.6s/item, ~27 min left)
+[DKV] auto-stream: session ruler-131072-qa_2-4 STREAMING -- 129369 prompt tokens vs exact limit 98304
+  [60/65] 131072/qa_2#4 -> 'New York City' (274.5s/item, ~23 min left)
+[DKV] auto-stream: session ruler-131072-vt-0 STREAMING -- 131009 prompt tokens vs exact limit 98304
+  [61/65] 131072/vt#0 -> 'Based on the text provided, here is the chain of v' (274.2s/item, ~18 min left)
+[DKV] auto-stream: session ruler-131072-vt-1 STREAMING -- 131003 prompt tokens vs exact limit 98304
+  [62/65] 131072/vt#1 -> 'Based on the text provided, here is the chain of v' (273.8s/item, ~14 min left)
+[DKV] auto-stream: session ruler-131072-vt-2 STREAMING -- 131011 prompt tokens vs exact limit 98304
+  [63/65] 131072/vt#2 -> 'Based on the text provided, here is the chain of v' (273.5s/item, ~9 min left)
+[DKV] auto-stream: session ruler-131072-vt-3 STREAMING -- 131006 prompt tokens vs exact limit 98304
+  [64/65] 131072/vt#3 -> 'Based on the chain of variable assignments in the ' (273.1s/item, ~5 min left)
+[DKV] auto-stream: session ruler-131072-vt-4 STREAMING -- 131006 prompt tokens vs exact limit 98304
+  [65/65] 131072/vt#4 -> 'Based on the text provided, here is the chain of v' (272.8s/item, ~0 min left)
+
+
+=== BEYOND_Qwen3.5-4B_dkv_mid_auto_131k.jsonl ===
+Qwen/Qwen3.5-4B arm=dkv preset=mid quant=nf4
+              task   131072
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1     80.0
+   niah_multikey_2      0.0
+   niah_multikey_3      0.0
+   niah_multivalue     85.0
+   niah_multiquery     90.0
+                vt      0.0
+               cwe     42.0
+               fwe     86.7
+              qa_1     40.0
+              qa_2     20.0
+         RULER avg     57.2
+  ttft nans | decode nan tok/s | peak 8.70 GB | KV 3.104 GB (5.5x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\Qwen3.5-4B_dense_defrag_max65536.jsonl
+[ckpt] 0 recorded, 260 pending (of 260 generated)
+  [1/260] 65536/cwe#0 -> 'Based on a frequency analysis of the provided list' (256.9s/item, ~1109 min left)
+  [2/260] 65536/cwe#1 -> 'Based on a comprehensive count of the words provid' (233.1s/item, ~1002 min left)
+  [3/260] 65536/cwe#2 -> 'Based on an analysis of the provided list of words' (271.2s/item, ~1162 min left)
+  [4/260] 65536/cwe#3 -> 'Based on a frequency analysis of the provided list' (232.6s/item, ~992 min left)
+  [5/260] 65536/cwe#4 -> 'Based on an analysis of the provided list of words' (277.8s/item, ~1181 min left)
+  [6/260] 65536/cwe#5 -> 'Based on an analysis of the frequency of words in ' (308.8s/item, ~1307 min left)
+  [7/260] 65536/cwe#6 -> 'Based on a comprehensive count of the words provid' (284.2s/item, ~1198 min left)
+  [8/260] 65536/cwe#7 -> 'Based on an analysis of the provided list of 8,787' (302.3s/item, ~1270 min left)
+  [9/260] 65536/cwe#8 -> 'Based on a frequency analysis of the provided list' (281.3s/item, ~1177 min left)
+  [10/260] 65536/cwe#9 -> 'Based on an analysis of the frequency of words in ' (293.6s/item, ~1223 min left)
+  [11/260] 65536/cwe#10 -> 'Based on a frequency analysis of the provided list' (281.4s/item, ~1168 min left)
+  [12/260] 65536/cwe#11 -> 'Based on a frequency analysis of the provided list' (279.6s/item, ~1156 min left)
+  [13/260] 65536/cwe#12 -> 'Based on a frequency analysis of the provided list' (275.4s/item, ~1134 min left)
+  [14/260] 65536/cwe#13 -> 'Based on a frequency analysis of the provided list' (264.8s/item, ~1086 min left)
+  [15/260] 65536/cwe#14 -> 'Based on an analysis of the provided list of 8,817' (251.1s/item, ~1025 min left)
+  [16/260] 65536/cwe#15 -> 'Based on a frequency analysis of the provided list' (251.4s/item, ~1022 min left)
+  [17/260] 65536/cwe#16 -> 'Based on a frequency analysis of the provided list' (250.8s/item, ~1016 min left)
+  [18/260] 65536/cwe#17 -> 'Based on a frequency analysis of the provided list' (244.0s/item, ~984 min left)
+  [19/260] 65536/cwe#18 -> 'Based on a frequency analysis of the provided list' (251.4s/item, ~1010 min left)
+  [20/260] 65536/cwe#19 -> 'Based on a frequency analysis of the provided list' (245.5s/item, ~982 min left)
+  [21/260] 65536/fwe#0 -> 'Based on the frequency analysis of the coded words' (240.3s/item, ~957 min left)
+  [22/260] 65536/fwe#1 -> 'ujgtvi, pndssf, yeibyu' (230.9s/item, ~916 min left)
+  [23/260] 65536/fwe#2 -> 'tuwwzu, pscvjh, xvomqg' (222.4s/item, ~878 min left)
+  [24/260] 65536/fwe#3 -> 'udflll, plydea, ybpmnp' (214.5s/item, ~844 min left)
+  [25/260] 65536/fwe#4 -> 'uimsjk, puzrih, xxrwuk' (207.3s/item, ~812 min left)
+  [26/260] 65536/fwe#5 -> 'tqisyf, pciuyr, xuxpeg' (200.6s/item, ~782 min left)
+  [27/260] 65536/fwe#6 -> 'qcggho, uczuhi, yemxip' (194.3s/item, ~755 min left)
+  [28/260] 65536/fwe#7 -> 'tzufir, ppnuvf, yaoyfd' (188.6s/item, ~729 min left)
+  [29/260] 65536/fwe#8 -> 'tyqtuv, ptdhcl, yemfbu' (183.3s/item, ~706 min left)
+  [30/260] 65536/fwe#9 -> 'uzinzq, qgssbb, yjhlyt' (178.5s/item, ~684 min left)
+  [31/260] 65536/fwe#10 -> 'puccla\nuiyjsk\nxtvnjd' (174.0s/item, ~664 min left)
+  [32/260] 65536/fwe#11 -> 'umwuco, qipqnl, yallgd' (169.7s/item, ~645 min left)
+  [33/260] 65536/fwe#12 -> 'udome, pghzeh, yfzhxc' (165.5s/item, ~626 min left)
+  [34/260] 65536/fwe#13 -> 'uhxucf, qizemh, buweas' (161.7s/item, ~609 min left)
+  [35/260] 65536/fwe#14 -> 'utgple, qmflqf, ykdbpm' (158.9s/item, ~596 min left)
+  [36/260] 65536/fwe#15 -> 'ugkkyg, qneyhe, xvyjrs' (155.4s/item, ~580 min left)
+  [37/260] 65536/fwe#16 -> 'ucbkxc, qfkvsi, yadaig' (152.2s/item, ~566 min left)
+  [38/260] 65536/fwe#17 -> 'Based on the analysis of the provided text, ignori' (149.2s/item, ~552 min left)
+  [39/260] 65536/fwe#18 -> 'uevhnw, qawxfs, yezfcz' (146.3s/item, ~539 min left)
+  [40/260] 65536/fwe#19 -> 'ycbkka, uiyafp, pyogqo' (143.6s/item, ~526 min left)
+  [41/260] 65536/niah_multikey_1#0 -> 'The special magic number for plucky-prefix is **90' (141.0s/item, ~515 min left)
+  [42/260] 65536/niah_multikey_1#1 -> 'The special magic number for hurried-tensor is **1' (138.5s/item, ~503 min left)
+  [43/260] 65536/niah_multikey_1#2 -> 'The special magic number for big-river is **214019' (136.9s/item, ~495 min left)
+  [44/260] 65536/niah_multikey_1#3 -> 'The special magic number for excellent-pence is **' (135.4s/item, ~487 min left)
+  [45/260] 65536/niah_multikey_1#4 -> 'The special magic number for handsome-lap is **364' (133.3s/item, ~477 min left)
+  [46/260] 65536/niah_multikey_1#5 -> 'The special magic number for stimulating-brown men' (132.2s/item, ~471 min left)
+  [47/260] 65536/niah_multikey_1#6 -> 'The special magic number for abashed-girlfriend is' (131.1s/item, ~465 min left)
+  [48/260] 65536/niah_multikey_1#7 -> 'The special magic number for salty-spiritual is **' (129.8s/item, ~459 min left)
+  [49/260] 65536/niah_multikey_1#8 -> 'The special magic number for hot-dramaturge is **7' (128.8s/item, ~453 min left)
+  [50/260] 65536/niah_multikey_1#9 -> 'The special magic number for inconclusive-sweets i' (127.7s/item, ~447 min left)
+  [51/260] 65536/niah_multikey_1#10 -> 'The special magic number for outrageous-filth is *' (126.8s/item, ~442 min left)
+  [52/260] 65536/niah_multikey_1#11 -> 'The special magic number for jolly-mortise mention' (125.1s/item, ~434 min left)
+  [53/260] 65536/niah_multikey_1#12 -> 'The special magic number for smiling-coil is **418' (124.1s/item, ~428 min left)
+  [54/260] 65536/niah_multikey_1#13 -> 'The special magic number for wonderful-diary is **' (123.1s/item, ~423 min left)
+  [55/260] 65536/niah_multikey_1#14 -> 'The special magic number for snobbish-gauge is **6' (121.6s/item, ~415 min left)
+  [56/260] 65536/niah_multikey_1#15 -> 'The special magic number for perfect-prison is **2' (120.1s/item, ~408 min left)
+  [57/260] 65536/niah_multikey_1#16 -> 'The special magic number for tranquil-investment i' (119.2s/item, ~403 min left)
+  [58/260] 65536/niah_multikey_1#17 -> 'The special magic number for functional-sitar is *' (117.8s/item, ~397 min left)
+  [59/260] 65536/niah_multikey_1#18 -> 'The special magic number for flawless-aside is **7' (117.1s/item, ~392 min left)
+  [60/260] 65536/niah_multikey_1#19 -> 'The special magic number for exotic-speaker is **8' (116.2s/item, ~387 min left)
+  [61/260] 65536/niah_multikey_2#0 -> 'The special magic number for elite-meme is **64897' (114.9s/item, ~381 min left)
+  [62/260] 65536/niah_multikey_2#1 -> 'The special magic number for rough-shoe is **58167' (113.7s/item, ~375 min left)
+  [63/260] 65536/niah_multikey_2#2 -> 'The special magic number for dizzy-donor is 909745' (112.5s/item, ~369 min left)
+  [64/260] 65536/niah_multikey_2#3 -> 'The special magic number for neighborly-note is **' (111.3s/item, ~364 min left)
+  [65/260] 65536/niah_multikey_2#4 -> 'The special magic number for husky-persimmon is **' (110.2s/item, ~358 min left)
+  [66/260] 65536/niah_multikey_2#5 -> 'The special magic number for madly-brownie is **63' (109.1s/item, ~353 min left)
+  [67/260] 65536/niah_multikey_2#6 -> 'The special magic number for ignorant-boysenberry ' (108.1s/item, ~348 min left)
+  [68/260] 65536/niah_multikey_2#7 -> 'The special magic number for earthy-bathtub is **2' (107.5s/item, ~344 min left)
+  [69/260] 65536/niah_multikey_2#8 -> 'The special magic number for volatile-vegetation i' (106.5s/item, ~339 min left)
+  [70/260] 65536/niah_multikey_2#9 -> 'The special magic number for annoying-inhibition i' (105.5s/item, ~334 min left)
+  [71/260] 65536/niah_multikey_2#10 -> 'The special magic number for thundering-follower i' (104.6s/item, ~329 min left)
+  [72/260] 65536/niah_multikey_2#11 -> 'The special magic number for flipped-out-verb is *' (103.7s/item, ~325 min left)
+  [73/260] 65536/niah_multikey_2#12 -> 'The special magic number for godly-measure is **27' (102.7s/item, ~320 min left)
+  [74/260] 65536/niah_multikey_2#13 -> 'The special magic number for aromatic-daffodil is ' (101.9s/item, ~316 min left)
+  [75/260] 65536/niah_multikey_2#14 -> 'The special magic number for taboo-sin is **188103' (101.0s/item, ~311 min left)
+  [76/260] 65536/niah_multikey_2#15 -> 'The special magic number for amused-sari is **5950' (100.2s/item, ~307 min left)
+  [77/260] 65536/niah_multikey_2#16 -> 'The special magic number for early-hamburger is 62' (99.3s/item, ~303 min left)
+  [78/260] 65536/niah_multikey_2#17 -> 'The special magic number for gruesome-bookcase is ' (98.6s/item, ~299 min left)
+  [79/260] 65536/niah_multikey_2#18 -> 'The special magic number for abject-zen is **28277' (97.8s/item, ~295 min left)
+  [80/260] 65536/niah_multikey_2#19 -> 'The special magic number for lean-ink is **3782313' (97.0s/item, ~291 min left)
+  [81/260] 65536/niah_multikey_3#0 -> 'The special magic uuid for `7eb212b7-e283-4ffc-a31' (96.4s/item, ~288 min left)
+  [82/260] 65536/niah_multikey_3#1 -> 'The special magic uuid for `dc492177-b5f0-46ae-b6b' (96.9s/item, ~288 min left)
+  [83/260] 65536/niah_multikey_3#2 -> 'The special magic uuid for `9a89864a-c83d-459a-979' (96.4s/item, ~284 min left)
+  [84/260] 65536/niah_multikey_3#3 -> 'The special magic uuid for `d8765f5f-6a73-4cdd-97b' (96.2s/item, ~282 min left)
+  [85/260] 65536/niah_multikey_3#4 -> 'The special magic uuid for `9505412d-bb5f-4118-993' (96.7s/item, ~282 min left)
+  [86/260] 65536/niah_multikey_3#5 -> 'The special magic uuid for `4396d1b0-da78-47e5-a73' (96.1s/item, ~279 min left)
+  [87/260] 65536/niah_multikey_3#6 -> 'The special magic uuid for `a6330928-4a44-4c7b-92b' (96.5s/item, ~278 min left)
+  [88/260] 65536/niah_multikey_3#7 -> 'The special magic uuid for `5f2fea66-ac89-4a12-811' (95.9s/item, ~275 min left)
+  [89/260] 65536/niah_multikey_3#8 -> 'The special magic uuid for `d133d163-4111-463e-a06' (95.7s/item, ~273 min left)
+  [90/260] 65536/niah_multikey_3#9 -> 'The special magic uuid for `5587ca9d-7535-4879-ba2' (95.2s/item, ~270 min left)
+  [91/260] 65536/niah_multikey_3#10 -> 'The special magic uuid for `bc4a2e41-3261-47f3-b61' (94.8s/item, ~267 min left)
+  [92/260] 65536/niah_multikey_3#11 -> 'The special magic uuid for `96e648c4-3274-4945-8e7' (95.3s/item, ~267 min left)
+  [93/260] 65536/niah_multikey_3#12 -> 'The special magic uuid for `b541387c-0e80-4b28-84b' (94.8s/item, ~264 min left)
+  [94/260] 65536/niah_multikey_3#13 -> 'The special magic uuid for `e46a03a7-d94f-4ee1-959' (94.3s/item, ~261 min left)
+  [95/260] 65536/niah_multikey_3#14 -> 'The special magic uuid for `ec8a0c0c-6301-4a47-be6' (93.8s/item, ~258 min left)
+  [96/260] 65536/niah_multikey_3#15 -> 'The special magic uuid for `69bf9584-d380-4509-88f' (94.4s/item, ~258 min left)
+  [97/260] 65536/niah_multikey_3#16 -> 'The special magic uuid for `ed6014b6-5383-4cc1-bc3' (95.0s/item, ~258 min left)
+  [98/260] 65536/niah_multikey_3#17 -> 'The special magic uuid for `c6826741-7330-4be7-8d3' (94.7s/item, ~256 min left)
+  [99/260] 65536/niah_multikey_3#18 -> 'The special magic uuid for `6d0e2ff0-072e-431b-a92' (95.0s/item, ~255 min left)
+  [100/260] 65536/niah_multikey_3#19 -> 'The special magic uuid for `e4a5a9e6-54ce-4e86-a2d' (94.6s/item, ~252 min left)
+  [101/260] 65536/niah_multiquery#0 -> 'Based on the text provided, here are the special m' (94.2s/item, ~250 min left)
+  [102/260] 65536/niah_multiquery#1 -> 'Based on the text provided, here are the special m' (93.7s/item, ~247 min left)
+  [103/260] 65536/niah_multiquery#2 -> 'Based on the text provided, here are the special m' (93.3s/item, ~244 min left)
+  [104/260] 65536/niah_multiquery#3 -> 'Based on the text provided, here are the special m' (92.9s/item, ~242 min left)
+  [105/260] 65536/niah_multiquery#4 -> 'Based on the text provided, here are the special m' (92.5s/item, ~239 min left)
+  [106/260] 65536/niah_multiquery#5 -> 'Based on the text provided, here are the special m' (93.8s/item, ~241 min left)
+  [107/260] 65536/niah_multiquery#6 -> 'Based on the text provided, here are the special m' (93.4s/item, ~238 min left)
+  [108/260] 65536/niah_multiquery#7 -> 'Based on the text provided, here are the special m' (94.7s/item, ~240 min left)
+  [109/260] 65536/niah_multiquery#8 -> 'Based on the text provided, here are the special m' (96.0s/item, ~242 min left)
+  [110/260] 65536/niah_multiquery#9 -> 'Based on the text provided, here are the special m' (95.6s/item, ~239 min left)
+  [111/260] 65536/niah_multiquery#10 -> 'Based on the text provided, here are the special m' (96.9s/item, ~241 min left)
+  [112/260] 65536/niah_multiquery#11 -> 'Based on the text provided, here are the special m' (96.5s/item, ~238 min left)
+  [113/260] 65536/niah_multiquery#12 -> 'Based on the text provided, here are the special m' (96.1s/item, ~235 min left)
+  [114/260] 65536/niah_multiquery#13 -> 'Based on the text provided, here are the special m' (95.7s/item, ~233 min left)
+  [115/260] 65536/niah_multiquery#14 -> 'Based on the text provided, here are the special m' (95.3s/item, ~230 min left)
+  [116/260] 65536/niah_multiquery#15 -> 'Based on the text provided, here are the special m' (94.9s/item, ~228 min left)
+  [117/260] 65536/niah_multiquery#16 -> 'Based on the text provided, here are the special m' (94.6s/item, ~225 min left)
+  [118/260] 65536/niah_multiquery#17 -> 'Based on the text provided, here are the special m' (95.8s/item, ~227 min left)
+  [119/260] 65536/niah_multiquery#18 -> 'Based on the text provided, here are the special m' (95.4s/item, ~224 min left)
+  [120/260] 65536/niah_multiquery#19 -> 'Based on the text provided, here are the special m' (95.1s/item, ~222 min left)
+  [121/260] 65536/niah_multivalue#0 -> 'Based on the text provided, here are the special m' (95.9s/item, ~222 min left)
+  [122/260] 65536/niah_multivalue#1 -> 'Based on the text provided, here are the special m' (95.5s/item, ~220 min left)
+  [123/260] 65536/niah_multivalue#2 -> 'Based on the text provided, here are the special m' (95.1s/item, ~217 min left)
+  [124/260] 65536/niah_multivalue#3 -> 'Based on the text provided, here are the special m' (96.0s/item, ~218 min left)
+  [125/260] 65536/niah_multivalue#4 -> 'Based on the text provided, here are the special m' (95.7s/item, ~215 min left)
+  [126/260] 65536/niah_multivalue#5 -> 'Based on the text provided, here are the special m' (96.5s/item, ~216 min left)
+  [127/260] 65536/niah_multivalue#6 -> 'Based on the text provided, here are the special m' (97.3s/item, ~216 min left)
+  [128/260] 65536/niah_multivalue#7 -> 'Based on the text provided, here are the special m' (98.2s/item, ~216 min left)
+  [129/260] 65536/niah_multivalue#8 -> 'Based on the text provided, here are the special m' (99.0s/item, ~216 min left)
+  [130/260] 65536/niah_multivalue#9 -> 'Based on the text provided, here are the special m' (98.6s/item, ~214 min left)
+  [131/260] 65536/niah_multivalue#10 -> 'Based on the text provided, here are the special m' (99.5s/item, ~214 min left)
+  [132/260] 65536/niah_multivalue#11 -> 'Based on the text provided, here are the special m' (99.1s/item, ~211 min left)
+  [133/260] 65536/niah_multivalue#12 -> 'Based on the text provided, here are the special m' (100.0s/item, ~212 min left)
+  [134/260] 65536/niah_multivalue#13 -> 'Based on the text provided, here are the special m' (100.7s/item, ~211 min left)
+  [135/260] 65536/niah_multivalue#14 -> 'Based on the text provided, here are the special m' (101.4s/item, ~211 min left)
+  [136/260] 65536/niah_multivalue#15 -> 'Based on the text provided, here are the special m' (102.2s/item, ~211 min left)
+  [137/260] 65536/niah_multivalue#16 -> 'Based on the text provided, here are the special m' (103.0s/item, ~211 min left)
+  [138/260] 65536/niah_multivalue#17 -> 'Based on the text provided, here are the special m' (103.8s/item, ~211 min left)
+  [139/260] 65536/niah_multivalue#18 -> 'Based on the text provided, here are the special m' (104.6s/item, ~211 min left)
+  [140/260] 65536/niah_multivalue#19 -> 'Based on the text provided, here are the special m' (105.4s/item, ~211 min left)
+  [141/260] 65536/niah_single_1#0 -> 'The special magic number for typical-toilet mentio' (104.9s/item, ~208 min left)
+  [142/260] 65536/niah_single_1#1 -> 'The special magic number for flippant-twine mentio' (104.5s/item, ~205 min left)
+  [143/260] 65536/niah_single_1#2 -> 'The special magic number for old-snowplow mentione' (104.0s/item, ~203 min left)
+  [144/260] 65536/niah_single_1#3 -> 'The special magic number for knowledgeable-hometow' (103.5s/item, ~200 min left)
+  [145/260] 65536/niah_single_1#4 -> 'The special magic number for strong-hive mentioned' (103.1s/item, ~198 min left)
+  [146/260] 65536/niah_single_1#5 -> 'The special magic number for disgusted-buckle ment' (102.7s/item, ~195 min left)
+  [147/260] 65536/niah_single_1#6 -> 'The special magic number for terrible-online menti' (102.2s/item, ~192 min left)
+  [148/260] 65536/niah_single_1#7 -> 'The special magic number for flaky-endoderm mentio' (101.8s/item, ~190 min left)
+  [149/260] 65536/niah_single_1#8 -> 'The special magic number for grandiose-clave menti' (101.4s/item, ~188 min left)
+  [150/260] 65536/niah_single_1#9 -> 'The special magic number for fair-yogurt mentioned' (100.9s/item, ~185 min left)
+  [151/260] 65536/niah_single_1#10 -> 'The special magic number for deafening-radish ment' (100.5s/item, ~183 min left)
+  [152/260] 65536/niah_single_1#11 -> 'The special magic number for shiny-fleece mentione' (100.1s/item, ~180 min left)
+  [153/260] 65536/niah_single_1#12 -> 'The special magic number for solid-sanction mentio' (99.7s/item, ~178 min left)
+  [154/260] 65536/niah_single_1#13 -> 'The special magic number for dark-boyhood mentione' (99.3s/item, ~175 min left)
+  [155/260] 65536/niah_single_1#14 -> 'The special magic number for annoying-doorbell men' (98.9s/item, ~173 min left)
+  [156/260] 65536/niah_single_1#15 -> 'The special magic number for used-postfix mentione' (98.5s/item, ~171 min left)
+  [157/260] 65536/niah_single_1#16 -> 'The special magic number for lush-tornado mentione' (98.1s/item, ~168 min left)
+  [158/260] 65536/niah_single_1#17 -> 'The special magic number for rhetorical-industry m' (97.8s/item, ~166 min left)
+  [159/260] 65536/niah_single_1#18 -> 'The special magic number for used-hound mentioned ' (97.4s/item, ~164 min left)
+  [160/260] 65536/niah_single_1#19 -> 'The special magic number for tested-shout mentione' (97.0s/item, ~162 min left)
+  [161/260] 65536/niah_single_2#0 -> 'The special magic number for lovely-filter mention' (96.9s/item, ~160 min left)
+  [162/260] 65536/niah_single_2#1 -> 'The special magic number for vague-shear mentioned' (96.9s/item, ~158 min left)
+  [163/260] 65536/niah_single_2#2 -> 'The special magic number for berserk-suitcase ment' (96.5s/item, ~156 min left)
+  [164/260] 65536/niah_single_2#3 -> 'The special magic number for deafening-radish ment' (96.2s/item, ~154 min left)
+  [165/260] 65536/niah_single_2#4 -> 'The special magic number for solid-sanction mentio' (95.8s/item, ~152 min left)
+  [166/260] 65536/niah_single_2#5 -> 'The special magic number for dark-boyhood mentione' (95.8s/item, ~150 min left)
+  [167/260] 65536/niah_single_2#6 -> 'The special magic number for annoying-doorbell men' (95.8s/item, ~148 min left)
+  [168/260] 65536/niah_single_2#7 -> 'The special magic number for used-postfix mentione' (95.7s/item, ~147 min left)
+  [169/260] 65536/niah_single_2#8 -> 'The special magic number for lush-tornado mentione' (95.8s/item, ~145 min left)
+  [170/260] 65536/niah_single_2#9 -> 'The special magic number for rhetorical-industry m' (95.8s/item, ~144 min left)
+  [171/260] 65536/niah_single_2#10 -> 'The special magic number for used-hound mentioned ' (95.8s/item, ~142 min left)
+  [172/260] 65536/niah_single_2#11 -> 'The special magic number for tested-shout mentione' (96.6s/item, ~142 min left)
+  [173/260] 65536/niah_single_2#12 -> 'The special magic number for workable-chateau ment' (96.2s/item, ~140 min left)
+  [174/260] 65536/niah_single_2#13 -> 'The special magic number for quick-vane mentioned ' (96.2s/item, ~138 min left)
+  [175/260] 65536/niah_single_2#14 -> 'The special magic number for stale-spaghetti menti' (95.9s/item, ~136 min left)
+  [176/260] 65536/niah_single_2#15 -> 'The special magic number for colossal-friend menti' (96.6s/item, ~135 min left)
+  [177/260] 65536/niah_single_2#16 -> 'The special magic number for bright-urgency mentio' (96.4s/item, ~133 min left)
+  [178/260] 65536/niah_single_2#17 -> 'The special magic number for cultured-silly mentio' (96.4s/item, ~132 min left)
+  [179/260] 65536/niah_single_2#18 -> 'The special magic number for faint-water mentioned' (96.0s/item, ~130 min left)
+  [180/260] 65536/niah_single_2#19 -> 'The special magic number for undesirable-signature' (96.0s/item, ~128 min left)
+  [181/260] 65536/niah_single_3#0 -> 'The special magic uuid for dark-boyhood mentioned ' (95.7s/item, ~126 min left)
+  [182/260] 65536/niah_single_3#1 -> 'The special magic uuid for lush-tornado mentioned ' (95.4s/item, ~124 min left)
+  [183/260] 65536/niah_single_3#2 -> 'The special magic uuid for tested-shout mentioned ' (95.2s/item, ~122 min left)
+  [184/260] 65536/niah_single_3#3 -> 'The special magic uuid for quick-vane mentioned in' (94.9s/item, ~120 min left)
+  [185/260] 65536/niah_single_3#4 -> 'The special magic uuid for stale-spaghetti mention' (94.6s/item, ~118 min left)
+  [186/260] 65536/niah_single_3#5 -> 'The special magic uuid for fortunate-coevolution m' (95.0s/item, ~117 min left)
+  [187/260] 65536/niah_single_3#6 -> 'The special magic uuid for cultured-silly mentione' (94.8s/item, ~115 min left)
+  [188/260] 65536/niah_single_3#7 -> 'The special magic uuid for wide-spume mentioned in' (94.5s/item, ~113 min left)
+  [189/260] 65536/niah_single_3#8 -> 'The special magic uuid for accidental-airfield men' (94.2s/item, ~112 min left)
+  [190/260] 65536/niah_single_3#9 -> 'The special magic uuid for bizarre-skirt mentioned' (94.8s/item, ~111 min left)
+  [191/260] 65536/niah_single_3#10 -> 'The special magic uuid for round-webinar mentioned' (94.5s/item, ~109 min left)
+  [192/260] 65536/niah_single_3#11 -> 'The special magic uuid for freezing-milk mentioned' (95.1s/item, ~108 min left)
+  [193/260] 65536/niah_single_3#12 -> 'The special magic uuid for changeable-temp mention' (95.6s/item, ~107 min left)
+  [194/260] 65536/niah_single_3#13 -> 'The special magic uuid for yellow-sequel mentioned' (96.1s/item, ~106 min left)
+  [195/260] 65536/niah_single_3#14 -> 'The special magic uuid for eminent-weight mentione' (95.8s/item, ~104 min left)
+  [196/260] 65536/niah_single_3#15 -> 'The special magic uuid for guiltless-machinery men' (96.3s/item, ~103 min left)
+  [197/260] 65536/niah_single_3#16 -> 'The special magic uuid for scattered-prize mention' (96.8s/item, ~102 min left)
+  [198/260] 65536/niah_single_3#17 -> 'The special magic uuid for plucky-prefix mentioned' (96.5s/item, ~100 min left)
+  [199/260] 65536/niah_single_3#18 -> 'The special magic uuid for nasty-course mentioned ' (96.3s/item, ~98 min left)
+  [200/260] 65536/niah_single_3#19 -> 'The special magic uuid for detailed-insulation men' (96.8s/item, ~97 min left)
+  [201/260] 65536/qa_1#0 -> 'France' (96.5s/item, ~95 min left)
+  [202/260] 65536/qa_1#1 -> 'In the 10th and 11th centuries.' (96.2s/item, ~93 min left)
+  [203/260] 65536/qa_1#2 -> 'Denmark, Iceland, and Norway' (95.9s/item, ~91 min left)
+  [204/260] 65536/qa_1#3 -> 'Rollo' (95.5s/item, ~89 min left)
+  [205/260] 65536/qa_1#4 -> '10th century' (95.2s/item, ~87 min left)
+  [206/260] 65536/qa_1#5 -> 'Duke William II of Normandy' (95.0s/item, ~85 min left)
+  [207/260] 65536/qa_1#6 -> 'Rollo' (94.7s/item, ~84 min left)
+  [208/260] 65536/qa_1#7 -> 'Catholic' (94.4s/item, ~82 min left)
+  [209/260] 65536/qa_1#8 -> 'The original meaning of the word Norman is "Norsem' (94.2s/item, ~80 min left)
+  [210/260] 65536/qa_1#9 -> '9th century' (93.9s/item, ~78 min left)
+  [211/260] 65536/qa_1#10 -> '911' (93.6s/item, ~76 min left)
+  [212/260] 65536/qa_1#11 -> 'King Charles III of West Francia' (93.3s/item, ~75 min left)
+  [213/260] 65536/qa_1#12 -> 'The river Epte' (93.0s/item, ~73 min left)
+  [214/260] 65536/qa_1#13 -> 'Rollo' (92.7s/item, ~71 min left)
+  [215/260] 65536/qa_1#14 -> 'Catholicism' (92.5s/item, ~69 min left)
+  [216/260] 65536/qa_1#15 -> 'The Normans were located in the north of France.' (92.2s/item, ~68 min left)
+  [217/260] 65536/qa_1#16 -> 'fighting horsemen' (91.9s/item, ~66 min left)
+  [218/260] 65536/qa_1#17 -> 'The Pechenegs, the Bulgars, and especially the Sel' (91.7s/item, ~64 min left)
+  [219/260] 65536/qa_1#18 -> 'In the 1050s.' (91.4s/item, ~62 min left)
+  [220/260] 65536/qa_1#19 -> 'In the 1060s' (91.2s/item, ~61 min left)
+  [221/260] 65536/qa_2#0 -> 'No' (90.9s/item, ~59 min left)
+  [222/260] 65536/qa_2#1 -> 'United States ambassador to Ghana and Czechoslovak' (90.7s/item, ~57 min left)
+  [223/260] 65536/qa_2#2 -> 'Animorphs' (90.4s/item, ~56 min left)
+  [224/260] 65536/qa_2#3 -> 'No' (90.1s/item, ~54 min left)
+  [225/260] 65536/qa_2#4 -> 'Greenwich Village' (89.9s/item, ~52 min left)
+  [226/260] 65536/qa_2#5 -> 'YG Entertainment' (89.6s/item, ~51 min left)
+  [227/260] 65536/qa_2#6 -> 'Eenasul Fateh' (89.4s/item, ~49 min left)
+  [228/260] 65536/qa_2#7 -> '4,000' (89.1s/item, ~48 min left)
+  [229/260] 65536/qa_2#8 -> 'Terry Richardson is older. Annie Morton was born o' (88.9s/item, ~46 min left)
+  [230/260] 65536/qa_2#9 -> 'Yes, both bands are from the United States. Local ' (88.7s/item, ~44 min left)
+  [231/260] 65536/qa_2#10 -> 'Kansas Song' (88.5s/item, ~43 min left)
+  [232/260] 65536/qa_2#11 -> 'David Weissman' (88.3s/item, ~41 min left)
+  [233/260] 65536/qa_2#12 -> '1999' (88.0s/item, ~40 min left)
+  [234/260] 65536/qa_2#13 -> 'Yes, both buildings are used for real estate. The ' (87.9s/item, ~38 min left)
+  [235/260] 65536/qa_2#14 -> '1945 to 1969' (87.6s/item, ~37 min left)
+  [236/260] 65536/qa_2#15 -> '9,984' (87.4s/item, ~35 min left)
+  [237/260] 65536/qa_2#16 -> 'North Atlantic Conference' (87.2s/item, ~33 min left)
+  [238/260] 65536/qa_2#17 -> 'Yes' (86.9s/item, ~32 min left)
+  [239/260] 65536/qa_2#18 -> 'Richard Nixon (1969–1974)' (86.8s/item, ~30 min left)
+  [240/260] 65536/qa_2#19 -> 'Robert Erskine Childers' (86.6s/item, ~29 min left)
+  [241/260] 65536/vt#0 -> 'Based on the chain of variable assignments hidden ' (86.4s/item, ~27 min left)
+  [242/260] 65536/vt#1 -> 'Based on the chain of variable assignments hidden ' (86.2s/item, ~26 min left)
+  [243/260] 65536/vt#2 -> 'Based on the chain of variable assignments hidden ' (86.0s/item, ~24 min left)
+  [244/260] 65536/vt#3 -> 'Based on the chain of variable assignments hidden ' (85.8s/item, ~23 min left)
+  [245/260] 65536/vt#4 -> 'Based on the chain of variable assignments hidden ' (85.6s/item, ~21 min left)
+  [246/260] 65536/vt#5 -> 'Based on the chain of variable assignments in the ' (85.4s/item, ~20 min left)
+  [247/260] 65536/vt#6 -> 'Based on the chain of variable assignments hidden ' (85.3s/item, ~18 min left)
+  [248/260] 65536/vt#7 -> 'Based on the chain of variable assignments hidden ' (85.1s/item, ~17 min left)
+  [249/260] 65536/vt#8 -> 'Based on the chain of variable assignments hidden ' (84.9s/item, ~16 min left)
+  [250/260] 65536/vt#9 -> 'Based on the chain of variable assignments hidden ' (84.7s/item, ~14 min left)
+  [251/260] 65536/vt#10 -> 'Based on the chain of variable assignments hidden ' (84.5s/item, ~13 min left)
+  [252/260] 65536/vt#11 -> 'Based on the chain of variable assignments hidden ' (84.4s/item, ~11 min left)
+  [253/260] 65536/vt#12 -> 'Based on the chain of variable assignments hidden ' (84.2s/item, ~10 min left)
+  [254/260] 65536/vt#13 -> 'Based on the chain of variable assignments hidden ' (84.0s/item, ~8 min left)
+  [255/260] 65536/vt#14 -> 'Based on the chain of variable assignments hidden ' (83.8s/item, ~7 min left)
+  [256/260] 65536/vt#15 -> 'Based on the chain of variable assignments hidden ' (83.7s/item, ~6 min left)
+  [257/260] 65536/vt#16 -> 'Based on the chain of variable assignments hidden ' (83.5s/item, ~4 min left)
+  [258/260] 65536/vt#17 -> 'Based on the chain of variable assignments hidden ' (83.3s/item, ~3 min left)
+  [259/260] 65536/vt#18 -> 'Based on the chain of variable assignments hidden ' (83.2s/item, ~1 min left)
+  [260/260] 65536/vt#19 -> 'Based on the chain of variable assignments hidden ' (83.0s/item, ~0 min left)
+
+
+=== Qwen3.5-4B_dense_defrag_max65536.jsonl ===
+Qwen/Qwen3.5-4B arm=dense preset=None quant=nf4
+              task    65536
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2    100.0
+   niah_multikey_3    100.0
+   niah_multivalue    100.0
+   niah_multiquery    100.0
+                vt      0.0
+               cwe     53.5
+               fwe     93.3
+              qa_1     85.0
+              qa_2     60.0
+         RULER avg     84.0
+  ttft 33.41s | decode 3.3 tok/s | peak 9.04 GB | KV 2.124 GB (1.0x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running snapkv@8192 ...
+    snapkv@8192: ttft=3.330203799996525 tps=16.32999073730749 peak=3.371769344
+  running snapkv@16384 ...
+    snapkv@16384: ttft=6.419978799996898 tps=14.046041167140968 peak=3.371767296
+  running snapkv@32768 ...
+    snapkv@32768: ttft=14.071833300011349 tps=14.967877998305347 peak=3.371769344
+  running snapkv@49152 ...
+    snapkv@49152: ttft=22.969298199997866 tps=18.00467975380824 peak=3.371769344
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm       8192      16384      32768      49152
+-------------------------------------------------------
+    snapkv      3.33       6.42      14.07      22.97 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       8192      16384      32768      49152
+-------------------------------------------------------
+    snapkv     16.33      14.05      14.97      18.00 
+
+=== peak VRAM (GB) ===
+       arm       8192      16384      32768      49152
+-------------------------------------------------------
+    snapkv      3.37       3.37       3.37       3.37 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running snapkv@16384 ...
+    snapkv@16384: first=7.615698499997961 marginal=7.250514999992447 answered=8/8
+  running snapkv@32768 ...
+    snapkv@32768: first=15.562202300003264 marginal=15.110344000000623 answered=8/8
+
+################ Qwen/Qwen3.5-4B — pattern: append ################
+(multi-turn: each prompt extends the last. DKV appends to a resident compressed cache; SnapKV must re-evict against its new observation window every turn.)
+
+=== first query (s) — includes compressing the context ===
+       arm      16384      32768
+---------------------------------
+    snapkv      7.62      15.56 
+
+=== MARGINAL per query (s) — what a warm server pays ===
+       arm      16384      32768
+---------------------------------
+    snapkv      7.25      15.11 
+
+=== total for N queries (s) ===
+       arm      16384      32768
+---------------------------------
+    snapkv     59.26     121.15 
+
+=== peak VRAM (GB) ===
+       arm      16384      32768
+---------------------------------
+    snapkv      3.37       3.37 
+
+* = spilled to host memory; that timing is bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running snapkv@16384 ...
+    snapkv@16384: first=7.72635569999693 marginal=7.310527300011017 answered=8/8
+  running snapkv@32768 ...
+    snapkv@32768: first=15.254205300007015 marginal=14.81483569998818 answered=8/8
+
+################ Qwen/Qwen3.5-4B — pattern: independent ################
+(one context, a DIFFERENT query each time. DKV cannot reuse here -- it has no rollback to a shared prefix -- and neither can SnapKV, whose selection depends on the query.)
+
+=== first query (s) — includes compressing the context ===
+       arm      16384      32768
+---------------------------------
+    snapkv      7.73      15.25 
+
+=== MARGINAL per query (s) — what a warm server pays ===
+       arm      16384      32768
+---------------------------------
+    snapkv      7.31      14.81 
+
+=== total for N queries (s) ===
+       arm      16384      32768
+---------------------------------
+    snapkv     58.65     118.78 
+
+=== peak VRAM (GB) ===
+       arm      16384      32768
+---------------------------------
+    snapkv      3.37       3.37 
+
+* = spilled to host memory; that timing is bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dkv@131072 ...
+    dkv@131072: ttft=268.3349370999931 tps=5.575679790797058 peak=8.74683392
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm     131072
+----------------------
+       dkv    268.33 
+
+=== decode throughput (tok/s, higher better) ===
+       arm     131072
+----------------------
+       dkv      5.58 
+
+=== peak VRAM (GB) ===
+       arm     131072
+----------------------
+       dkv      8.75 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dkv@24576 ...
+    dkv@24576: ttft=59.833301999999094 tps=2.5938121466241384 peak=7.939124224
+  running dkv@32768 ...
+    dkv@32768: ttft=100.21125699998811 tps=2.9461339637845647 peak=8.616587264
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm      24576      32768
+---------------------------------
+       dkv     59.83     100.21 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      24576      32768
+---------------------------------
+       dkv      2.59       2.95 
+
+=== peak VRAM (GB) ===
+       arm      24576      32768
+---------------------------------
+       dkv      7.94       8.62 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+FINAL CAMPAIGN COMPLETE

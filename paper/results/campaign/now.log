@@ -1,0 +1,272 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\Qwen3.5-4B_dkv_mid_forcedstream_tiled_32k.jsonl
+[ckpt] 0 recorded, 130 pending (of 130 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1152 MB → 1152 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1567 MB → 1567 MB (saved 0 MB)
+[Pool] Lazy-allocated 64 slots for ~1024 tokens = 27.3 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] Triton fused-decode path ACTIVE (CUDA).
+  [1/130] 32768/cwe#0 -> 'Based on an analysis of the frequency of each word' (54.2s/item, ~117 min left)
+  [2/130] 32768/cwe#1 -> 'Based on an analysis of the frequency of each word' (45.8s/item, ~98 min left)
+  [3/130] 32768/cwe#2 -> 'Based on an analysis of the provided list of 4,353' (42.9s/item, ~91 min left)
+  [4/130] 32768/cwe#3 -> 'Based on an analysis of the frequency of each word' (41.5s/item, ~87 min left)
+  [5/130] 32768/cwe#4 -> 'Based on an analysis of the provided list of 4,353' (40.8s/item, ~85 min left)
+  [6/130] 32768/cwe#5 -> 'Based on a frequency analysis of the provided list' (40.1s/item, ~83 min left)
+  [7/130] 32768/cwe#6 -> 'Based on an analysis of the provided list of 4,383' (39.4s/item, ~81 min left)
+  [8/130] 32768/cwe#7 -> 'Based on a frequency analysis of the provided list' (39.0s/item, ~79 min left)
+  [9/130] 32768/cwe#8 -> 'Based on a detailed analysis of the provided list ' (38.8s/item, ~78 min left)
+  [10/130] 32768/cwe#9 -> 'Based on an analysis of the frequency of each word' (38.5s/item, ~77 min left)
+  [11/130] 32768/fwe#0 -> 'tgjovi, ksxqrl, tvorfz' (36.9s/item, ~73 min left)
+  [12/130] 32768/fwe#1 -> 'tywcou, jyfeeh, uzvcls' (35.5s/item, ~70 min left)
+  [13/130] 32768/fwe#2 -> 'tmzbeq, joeews, unqtbr' (35.0s/item, ~68 min left)
+  [14/130] 32768/fwe#3 -> 'tuhuto, jvixbl, uvaezr' (33.9s/item, ~66 min left)
+  [15/130] 32768/fwe#4 -> 'szskug, irphlx, ukwozw' (33.1s/item, ~63 min left)
+  [16/130] 32768/fwe#5 -> 'swkywm, jqplce, tpynpq' (32.3s/item, ~61 min left)
+  [17/130] 32768/fwe#6 -> 'tmmakv, jvblrn, ungxwr' (31.8s/item, ~60 min left)
+  [18/130] 32768/fwe#7 -> 'suqsdg, jfmfxz, izxrag' (31.4s/item, ~59 min left)
+  [19/130] 32768/fwe#8 -> 'upggys, jtsrkv, tuknkf' (31.0s/item, ~57 min left)
+  [20/130] 32768/fwe#9 -> 'tczzpm, jzbckl, ueooyb' (30.5s/item, ~56 min left)
+  [21/130] 32768/niah_multikey_1#0 -> 'The special magic number for **painful-pigpen** me' (30.7s/item, ~56 min left)
+  [22/130] 32768/niah_multikey_1#1 -> 'The special magic number for plucky-prefix mention' (30.5s/item, ~55 min left)
+  [23/130] 32768/niah_multikey_1#2 -> 'Based on the text provided, the special magic numb' (30.8s/item, ~55 min left)
+  [24/130] 32768/niah_multikey_1#3 -> 'The special magic number for big-river mentioned i' (30.7s/item, ~54 min left)
+  [25/130] 32768/niah_multikey_1#4 -> 'Based on the text provided, the special magic numb' (30.7s/item, ~54 min left)
+  [26/130] 32768/niah_multikey_1#5 -> 'Based on the text provided, there is no mention of' (30.9s/item, ~54 min left)
+  [27/130] 32768/niah_multikey_1#6 -> 'Based on the text provided, there is no mention of' (31.2s/item, ~53 min left)
+  [28/130] 32768/niah_multikey_1#7 -> 'Based on the text provided, there is no mention of' (31.3s/item, ~53 min left)
+  [29/130] 32768/niah_multikey_1#8 -> 'Based on the text provided, the special magic numb' (31.5s/item, ~53 min left)
+  [30/130] 32768/niah_multikey_1#9 -> 'The special magic number for **inconclusive-sweets' (31.5s/item, ~52 min left)
+  [31/130] 32768/niah_multikey_2#0 -> 'The special magic number for painful-weasel is **5' (31.3s/item, ~52 min left)
+  [32/130] 32768/niah_multikey_2#1 -> 'The special magic number for rough-hatred is **672' (31.1s/item, ~51 min left)
+  [33/130] 32768/niah_multikey_2#2 -> 'The special magic number for bewildered-rider is *' (30.9s/item, ~50 min left)
+  [34/130] 32768/niah_multikey_2#3 -> 'The special magic number for rainy-fisting is **13' (30.8s/item, ~49 min left)
+  [35/130] 32768/niah_multikey_2#4 -> 'The special magic number for black-broad is **4773' (30.6s/item, ~48 min left)
+  [36/130] 32768/niah_multikey_2#5 -> 'The special magic number for stormy-patrolling is ' (30.5s/item, ~48 min left)
+  [37/130] 32768/niah_multikey_2#6 -> 'The special magic number for silky-chowder is **61' (30.3s/item, ~47 min left)
+  [38/130] 32768/niah_multikey_2#7 -> 'The special magic number for phobic-railing is **5' (30.2s/item, ~46 min left)
+  [39/130] 32768/niah_multikey_2#8 -> 'The special magic number for domineering-lapdog is' (30.1s/item, ~46 min left)
+  [40/130] 32768/niah_multikey_2#9 -> 'The special magic number for **sincere-leash** is ' (29.9s/item, ~45 min left)
+  [41/130] 32768/niah_multikey_3#0 -> 'Based on the text provided, there is **no entry** ' (30.0s/item, ~45 min left)
+  [42/130] 32768/niah_multikey_3#1 -> 'The special magic uuid for `cf237be0-ecb3-474d-8da' (30.0s/item, ~44 min left)
+  [43/130] 32768/niah_multikey_3#2 -> 'The special magic uuid for `78936d2d-8647-43c7-9d6' (30.0s/item, ~44 min left)
+  [44/130] 32768/niah_multikey_3#3 -> 'The special magic uuid for `db9a437a-6049-4fed-86a' (30.0s/item, ~43 min left)
+  [45/130] 32768/niah_multikey_3#4 -> 'Based on the text provided, there is **no mention*' (30.1s/item, ~43 min left)
+  [46/130] 32768/niah_multikey_3#5 -> 'The special magic uuid for `0c1d7fd5-2216-446c-8da' (30.1s/item, ~42 min left)
+  [47/130] 32768/niah_multikey_3#6 -> 'Based on the text provided, there is **no entry** ' (30.3s/item, ~42 min left)
+  [48/130] 32768/niah_multikey_3#7 -> 'The special magic uuid for `0dfd7bf6-5d65-498b-988' (30.4s/item, ~42 min left)
+  [49/130] 32768/niah_multikey_3#8 -> 'Based on the text provided, there is **no mention*' (30.5s/item, ~41 min left)
+  [50/130] 32768/niah_multikey_3#9 -> 'Based on the text provided, there is **no entry** ' (30.6s/item, ~41 min left)
+  [51/130] 32768/niah_multiquery#0 -> 'Based on the text provided, here are the special m' (30.7s/item, ~40 min left)
+  [52/130] 32768/niah_multiquery#1 -> 'Based on the text provided, here are the special m' (30.8s/item, ~40 min left)
+  [53/130] 32768/niah_multiquery#2 -> 'Based on the text provided, here are the special m' (30.9s/item, ~40 min left)
+  [54/130] 32768/niah_multiquery#3 -> 'Based on the text provided, here are the special m' (30.9s/item, ~39 min left)
+  [55/130] 32768/niah_multiquery#4 -> 'Based on the text provided, here are the special m' (31.0s/item, ~39 min left)
+  [56/130] 32768/niah_multiquery#5 -> 'Based on the text provided, here are the special m' (31.1s/item, ~38 min left)
+  [57/130] 32768/niah_multiquery#6 -> 'Based on the text provided, here are the special m' (31.2s/item, ~38 min left)
+  [58/130] 32768/niah_multiquery#7 -> 'Based on the text provided, here are the special m' (31.2s/item, ~37 min left)
+  [59/130] 32768/niah_multiquery#8 -> 'Based on the text provided, here are the special m' (31.3s/item, ~37 min left)
+  [60/130] 32768/niah_multiquery#9 -> 'Based on the text provided, here are the special m' (31.3s/item, ~37 min left)
+  [61/130] 32768/niah_multivalue#0 -> 'Based on the text provided, here are the special m' (31.4s/item, ~36 min left)
+  [62/130] 32768/niah_multivalue#1 -> 'Based on the text provided, there are **no** speci' (31.5s/item, ~36 min left)
+  [63/130] 32768/niah_multivalue#2 -> 'Based on the text provided, here are the special m' (31.6s/item, ~35 min left)
+  [64/130] 32768/niah_multivalue#3 -> 'Based on the text provided, here are the special m' (31.6s/item, ~35 min left)
+  [65/130] 32768/niah_multivalue#4 -> 'Based on the text provided, here are the special m' (31.7s/item, ~34 min left)
+  [66/130] 32768/niah_multivalue#5 -> 'Based on the text provided, here are the special m' (31.7s/item, ~34 min left)
+  [67/130] 32768/niah_multivalue#6 -> 'Based on the text provided, here are the special m' (31.8s/item, ~33 min left)
+  [68/130] 32768/niah_multivalue#7 -> 'Based on the text provided, here are the special m' (31.9s/item, ~33 min left)
+  [69/130] 32768/niah_multivalue#8 -> 'Based on the text provided, here are the special m' (31.9s/item, ~32 min left)
+  [70/130] 32768/niah_multivalue#9 -> 'Based on the text provided, here are the special m' (31.9s/item, ~32 min left)
+  [71/130] 32768/niah_single_1#0 -> 'The special magic number for smoggy-caliber mentio' (31.8s/item, ~31 min left)
+  [72/130] 32768/niah_single_1#1 -> 'The special magic number for typical-toilet mentio' (31.7s/item, ~31 min left)
+  [73/130] 32768/niah_single_1#2 -> 'The special magic number for flippant-twine mentio' (31.6s/item, ~30 min left)
+  [74/130] 32768/niah_single_1#3 -> 'The special magic number for old-snowplow mentione' (31.5s/item, ~29 min left)
+  [75/130] 32768/niah_single_1#4 -> 'The special magic number for knowledgeable-hometow' (31.4s/item, ~29 min left)
+  [76/130] 32768/niah_single_1#5 -> 'The special magic number for strong-hive mentioned' (31.4s/item, ~28 min left)
+  [77/130] 32768/niah_single_1#6 -> 'The special magic number for disgusted-buckle ment' (31.3s/item, ~28 min left)
+  [78/130] 32768/niah_single_1#7 -> 'The special magic number for terrible-online menti' (31.2s/item, ~27 min left)
+  [79/130] 32768/niah_single_1#8 -> 'The special magic number for flaky-endoderm mentio' (31.1s/item, ~26 min left)
+  [80/130] 32768/niah_single_1#9 -> 'The special magic number for grandiose-clave menti' (31.1s/item, ~26 min left)
+  [81/130] 32768/niah_single_2#0 -> 'The special magic number for roasted-poetry mentio' (31.0s/item, ~25 min left)
+  [82/130] 32768/niah_single_2#1 -> 'Based on the text provided, the special magic numb' (31.1s/item, ~25 min left)
+  [83/130] 32768/niah_single_2#2 -> 'Based on the text provided, there is **no mention*' (31.2s/item, ~24 min left)
+  [84/130] 32768/niah_single_2#3 -> 'The special magic number for fair-yogurt mentioned' (31.3s/item, ~24 min left)
+  [85/130] 32768/niah_single_2#4 -> 'The special magic number for shiny-fleece mentione' (31.2s/item, ~23 min left)
+  [86/130] 32768/niah_single_2#5 -> 'The special magic number for dark-boyhood mentione' (31.2s/item, ~23 min left)
+  [87/130] 32768/niah_single_2#6 -> 'The special magic number for used-postfix mentione' (31.1s/item, ~22 min left)
+  [88/130] 32768/niah_single_2#7 -> 'The special magic number for rhetorical-industry m' (31.2s/item, ~22 min left)
+  [89/130] 32768/niah_single_2#8 -> 'Based on the text provided, the special magic numb' (31.2s/item, ~21 min left)
+  [90/130] 32768/niah_single_2#9 -> 'Based on the text provided, the special magic numb' (31.2s/item, ~21 min left)
+  [91/130] 32768/niah_single_3#0 -> 'The special magic uuid for sordid-bath mentioned i' (31.2s/item, ~20 min left)
+  [92/130] 32768/niah_single_3#1 -> 'The special magic uuid for dark-boyhood mentioned ' (31.1s/item, ~20 min left)
+  [93/130] 32768/niah_single_3#2 -> 'The special magic uuid for deranged-assurance ment' (31.1s/item, ~19 min left)
+  [94/130] 32768/niah_single_3#3 -> 'Based on the text provided, the special magic uuid' (31.2s/item, ~19 min left)
+  [95/130] 32768/niah_single_3#4 -> 'The special magic uuid for tested-shout mentioned ' (31.2s/item, ~18 min left)
+  [96/130] 32768/niah_single_3#5 -> 'The special magic uuid for quick-vane mentioned in' (31.2s/item, ~18 min left)
+  [97/130] 32768/niah_single_3#6 -> 'The special magic UUID for stale-spaghetti mention' (31.1s/item, ~17 min left)
+  [98/130] 32768/niah_single_3#7 -> 'The special magic UUID mentioned in the text is:\n\n' (31.1s/item, ~17 min left)
+  [99/130] 32768/niah_single_3#8 -> 'The special magic UUID mentioned in the text is:\n\n' (31.1s/item, ~16 min left)
+  [100/130] 32768/niah_single_3#9 -> 'The special magic UUID for wide-spume mentioned in' (31.1s/item, ~16 min left)
+  [101/130] 32768/qa_1#0 -> 'France' (31.0s/item, ~15 min left)
+  [102/130] 32768/qa_1#1 -> 'The Normans in Normandy emerged in the 9th century' (31.0s/item, ~14 min left)
+  [103/130] 32768/qa_1#2 -> 'Based on the provided documents, the Norse (referr' (31.0s/item, ~14 min left)
+  [104/130] 32768/qa_1#3 -> 'None' (30.9s/item, ~13 min left)
+  [105/130] 32768/qa_1#4 -> 'The 10th century.' (30.8s/item, ~13 min left)
+  [106/130] 32768/qa_1#5 -> 'William II' (30.7s/item, ~12 min left)
+  [107/130] 32768/qa_1#6 -> 'King Charles III of West Francia, Roger II, and He' (30.7s/item, ~12 min left)
+  [108/130] 32768/qa_1#7 -> 'Christian' (30.6s/item, ~11 min left)
+  [109/130] 32768/qa_1#8 -> 'The original meaning of the word Norman is "Norsem' (30.6s/item, ~11 min left)
+  [110/130] 32768/qa_1#9 -> '9th century' (30.5s/item, ~10 min left)
+  [111/130] 32768/qa_2#0 -> 'No' (30.5s/item, ~10 min left)
+  [112/130] 32768/qa_2#1 -> 'Village accountant' (30.4s/item, ~9 min left)
+  [113/130] 32768/qa_2#2 -> 'Animorphs' (30.4s/item, ~9 min left)
+  [114/130] 32768/qa_2#3 -> 'No' (30.3s/item, ~8 min left)
+  [115/130] 32768/qa_2#4 -> 'New York City' (30.2s/item, ~8 min left)
+  [116/130] 32768/qa_2#5 -> 'YG Entertainment' (30.2s/item, ~7 min left)
+  [117/130] 32768/qa_2#6 -> 'No one is known by the stage name Aladin and helpe' (30.1s/item, ~7 min left)
+  [118/130] 32768/qa_2#7 -> 'The arena where the Lewiston Maineiacs played thei' (30.1s/item, ~6 min left)
+  [119/130] 32768/qa_2#8 -> 'Terry Richardson' (30.1s/item, ~6 min left)
+  [120/130] 32768/qa_2#9 -> 'Yes' (30.0s/item, ~5 min left)
+  [121/130] 32768/vt#0 -> 'Based on the text provided, here is the tracking o' (30.0s/item, ~4 min left)
+  [122/130] 32768/vt#1 -> 'Based on the text provided, here is the chain of v' (30.0s/item, ~4 min left)
+  [123/130] 32768/vt#2 -> 'Based on the text provided, here is the tracking o' (29.9s/item, ~3 min left)
+  [124/130] 32768/vt#3 -> 'Based on the text provided, here is the tracking o' (29.9s/item, ~3 min left)
+  [125/130] 32768/vt#4 -> 'Based on the text provided, here is the tracking o' (29.9s/item, ~2 min left)
+  [126/130] 32768/vt#5 -> 'Based on the text provided, here is the tracking o' (29.9s/item, ~2 min left)
+  [127/130] 32768/vt#6 -> 'Based on the text provided, here is the chain of v' (29.8s/item, ~1 min left)
+  [128/130] 32768/vt#7 -> 'Based on the text provided, here is the chain of v' (29.8s/item, ~1 min left)
+  [129/130] 32768/vt#8 -> 'Based on the text provided, here is the chain of v' (29.8s/item, ~0 min left)
+  [130/130] 32768/vt#9 -> 'Based on the text provided, here is the tracking o' (29.8s/item, ~0 min left)
+
+
+=== Qwen3.5-4B_dkv_mid_forcedstream_tiled_32k.jsonl ===
+Qwen/Qwen3.5-4B arm=dkv preset=mid quant=nf4
+              task    32768
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1     70.0
+   niah_multikey_2     20.0
+   niah_multikey_3     20.0
+   niah_multivalue     80.0
+   niah_multiquery     90.0
+                vt      0.0
+               cwe     54.0
+               fwe     96.7
+              qa_1     30.0
+              qa_2     50.0
+         RULER avg     62.4
+  ttft nans | decode nan tok/s | peak 4.34 GB | KV 0.977 GB (4.4x)
+run Qwen/Qwen3.5-4B|dkv|32768
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1124 MB → 1124 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV] Heap trimmed. RSS: 1594 MB → 1594 MB (saved 0 MB)
+[Pool] Lazy-allocated 64 slots for ~1024 tokens = 27.3 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] Triton fused-decode COMBINED path ACTIVE (CUDA). N_sparse=16, L_dense=4096
+  ok peak=4.69888512 complete=True
+run Qwen/Qwen3.5-4B|dkv|65536
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1124 MB → 1124 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV] Heap trimmed. RSS: 1595 MB → 1595 MB (saved 0 MB)
+[Pool] Lazy-allocated 64 slots for ~1024 tokens = 27.3 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] Triton fused-decode COMBINED path ACTIVE (CUDA). N_sparse=16, L_dense=4096
+  ok peak=6.093249024 complete=True
+
+=== Qwen3.5-4B  dkv ===
+  ctx 32768: peak 4.70 GB  baseline 3.12  traced 1.57  complete=True
+  ctx 65536: peak 6.09 GB  baseline 3.12  traced 2.96  complete=True
+  growth per 1k tokens, largest first (total 0.0426 GB/1k):
+    +0.0082 GB/1k  triton_fused_decode.py:1421 _prefill_fused_history_attend_compiled <- triton_fused_decode.py:1567 _run <- dkv_attention.py:3258 _hist_qsliced
+    +0.0082 GB/1k  triton_fused_decode.py:1415 _prefill_fused_history_attend_compiled <- triton_fused_decode.py:1567 _run <- dkv_attention.py:3258 _hist_qsliced
+    +0.0082 GB/1k  triton_fused_decode.py:1410 _prefill_fused_history_attend_compiled <- triton_fused_decode.py:1567 _run <- dkv_attention.py:3258 _hist_qsliced
+    +0.0082 GB/1k  triton_fused_decode.py:1409 _prefill_fused_history_attend_compiled <- triton_fused_decode.py:1567 _run <- dkv_attention.py:3258 _hist_qsliced
+    +0.0041 GB/1k  triton_fused_decode.py:1422 _prefill_fused_history_attend_compiled <- triton_fused_decode.py:1567 _run <- dkv_attention.py:3258 _hist_qsliced
+    +0.0041 GB/1k  triton_fused_decode.py:1405 _prefill_fused_history_attend_compiled <- triton_fused_decode.py:1567 _run <- dkv_attention.py:3258 _hist_qsliced
+    +0.0041 GB/1k  triton_fused_decode.py:1402 _prefill_fused_history_attend_compiled <- triton_fused_decode.py:1567 _run <- dkv_attention.py:3258 _hist_qsliced
+    +0.0041 GB/1k  triton_fused_decode.py:1378 _prefill_fused_history_attend_compiled <- triton_fused_decode.py:1567 _run <- dkv_attention.py:3258 _hist_qsliced
+    +0.0041 GB/1k  triton_fused_decode.py:1376 _prefill_fused_history_attend_compiled <- triton_fused_decode.py:1567 _run <- dkv_attention.py:3258 _hist_qsliced
+    +0.0041 GB/1k  triton_fused_decode.py:1375 _prefill_fused_history_attend_compiled <- triton_fused_decode.py:1567 _run <- dkv_attention.py:3258 _hist_qsliced
+    +0.0011 GB/1k  triton_fused_decode.py:1466 _prefill_fused_history_attend_compiled <- triton_fused_decode.py:1567 _run <- dkv_attention.py:3258 _hist_qsliced
+    +0.0010 GB/1k  triton_fused_decode.py:1463 _prefill_fused_history_attend_compiled <- triton_fused_decode.py:1567 _run <- dkv_attention.py:3258 _hist_qsliced
+NOW COMPLETE

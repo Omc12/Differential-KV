@@ -1,0 +1,78 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  Qwen/Qwen3.5-4B: 8 layers converted, store 0.0413 GB vs bf16 0.1342 GB (3.25x), top-1 agree 0.939, KL mean 4.33e-03 max 1.97e-02 -> ok
+  ibm-granite/granite-4.2-8b: 40 layers converted, store 0.2089 GB vs bf16 0.6711 GB (3.21x), top-1 agree 0.939, KL mean 1.61e-02 max 6.53e-02 -> ok
+KIVI CHUNKED SELFCHECK PASS
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_Qwen3.5-4B_kivi4_chunked.jsonl
+[ckpt] 4 points already recorded
+  skip kivi4_chunked@65536 (done: ok)
+  skip kivi4_chunked@98304 (done: ok)
+  skip kivi4_chunked@131072 (done: spilled)
+  skip kivi4_chunked@163840 (done: skipped_after_oom)
+
+
+=== GEN128_Qwen3.5-4B_kivi4_chunked.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_chunked    65536    65536      7.84     72.6    0.615       ok
+kivi4_chunked    98304    98304     10.16    121.1    0.922       ok
+kivi4_chunked   131072   131072     12.48    390.4    1.228  spilled
+kivi4_chunked   163840        -         -        -        - skipped_after_oom
+  kivi4_chunked: 0.0708 GB per 1k tokens, floor 3.20 GB  (max OK 98304 tok @ 10.16 GB)
+         predicted ceiling ~125,738 tok on a 12.9 GB card
+         first spill at 131072 tok (12.48 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_kivi4_chunked.jsonl
+[ckpt] 4 points already recorded
+  skip kivi4_chunked@16384 (done: ok)
+  skip kivi4_chunked@24576 (done: ok)
+  skip kivi4_chunked@32768 (done: ok)
+  skip kivi4_chunked@49152 (done: ok)
+  running kivi4_chunked@65536 ...
+    kivi4_chunked@65536: spilled peak=12.960874496 (1545s)
+  kivi4_chunked: stopping, ceiling found below 98304
+
+
+=== GEN128_granite_kivi4_chunked.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_chunked    16384    16384      7.61     44.9    0.791       ok
+kivi4_chunked    24576    24576      8.50     68.7    1.179       ok
+kivi4_chunked    32768    32768      9.39     99.6    1.567       ok
+kivi4_chunked    49152    49152     11.18    161.5    2.343       ok
+kivi4_chunked    65536    65536     12.96   1520.7    3.119  spilled
+kivi4_chunked    98304        -         -        -        - skipped_after_oom
+  kivi4_chunked: 0.1090 GB per 1k tokens, floor 5.82 GB  (max OK 49152 tok @ 11.18 GB)
+         predicted ceiling ~57,668 tok on a 12.9 GB card
+         first spill at 65536 tok (12.96 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] reclaiming stale lock from pid 32864 (from before the last boot)
+[ckpt] paper\results\ruler\BEYOND_granite_kivi4_chunked_24k-32k.jsonl
+[ckpt] 6 recorded, 254 pending (of 260 generated)
+  [1/254] 24576/cwe#6 -> 'We are asked to find the 10 most common words in t' (67.2s/item, ~284 min left)
+  [2/254] 24576/cwe#7 -> 'We are asked to find the 10 most common words in t' (66.3s/item, ~279 min left)
+  [3/254] 24576/cwe#8 -> 'We are asked to find the 10 most common words in t' (66.0s/item, ~276 min left)
+  [4/254] 24576/cwe#9 -> 'We are asked to find the 10 most common words in t' (69.0s/item, ~287 min left)
+  [5/254] 24576/fwe#0 -> 'uojcxm  \nqicczu  \nwdeqgc' (59.6s/item, ~247 min left)
+  [6/254] 24576/fwe#1 -> 'timnmj\nvquhcu\nemrvyg' (53.0s/item, ~219 min left)
+  [7/254] 24576/fwe#2 -> 'uoyyhz\nwlaenw\nlmpsbr' (50.7s/item, ~209 min left)
+  [8/254] 24576/fwe#3 -> 'twupzi\nwlgwkl\nvukvmz' (50.2s/item, ~206 min left)
+  [9/254] 24576/fwe#4 -> 'eyxfke\nushktd\nwukrrm' (46.9s/item, ~191 min left)
+  [10/254] 24576/fwe#5 -> 'tdxujv\nvmwtds\noxmrjd' (44.3s/item, ~180 min left)
+  [11/254] 24576/fwe#6 -> 'uctvav, wqnwdq, klnvvw' (42.3s/item, ~171 min left)
+  [12/254] 24576/fwe#7 -> 'vcvlrc, voxdrs, kxmpgu' (40.5s/item, ~163 min left)
+  [13/254] 24576/fwe#8 -> 'tigysh\nvuocuc\nuzmsbx' (43.1s/item, ~173 min left)
+  [14/254] 24576/fwe#9 -> 'wgqfre\nulgwwu\nvobgph' (47.5s/item, ~190 min left)
+  [15/254] 24576/niah_multikey_1#0 -> 'The special magic number for **painful-pigpen** me' (48.0s/item, ~191 min left)
+  [16/254] 24576/niah_multikey_1#1 -> 'The text mentions several "special magic numbers" ' (49.2s/item, ~195 min left)
+  [17/254] 24576/niah_multikey_1#2 -> 'The special magic number for **hurried-tensor** me' (50.3s/item, ~199 min left)
+  [18/254] 24576/niah_multikey_1#3 -> 'The special magic number for **big-river** mention' (51.1s/item, ~201 min left)
+  [19/254] 24576/niah_multikey_1#4 -> 'The special magic number for **blue-eyed-drummer**' (51.9s/item, ~203 min left)
+  [20/254] 24576/niah_multikey_1#5 -> 'The special magic number for **handsome-lap** ment' (62.6s/item, ~244 min left)
+  [21/254] 24576/niah_multikey_1#6 -> 'The special magic number for **stimulating-brown**' (114.8s/item, ~446 min left)
+  [22/254] 24576/niah_multikey_1#7 -> 'The special magic number for **salty-spiritual** m' (113.2s/item, ~438 min left)
+  [23/254] 24576/niah_multikey_1#8 -> 'The special magic number for **inconclusive-sweets' (148.5s/item, ~572 min left)
+  [24/254] 24576/niah_multikey_1#9 -> 'The special magic number for outrageous-filth ment' (149.9s/item, ~575 min left)
+  [25/254] 24576/niah_multikey_2#0 -> 'The user asks: "What is the special magic number f' (172.2s/item, ~657 min left)
+  [26/254] 24576/niah_multikey_2#1 -> 'The user asks: "What is the special magic number f' (176.4s/item, ~670 min left)
+  [27/254] 24576/niah_multikey_2#2 -> 'The user asks: "What is the special magic number f' (186.0s/item, ~704 min left)

@@ -1,0 +1,59 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  Qwen/Qwen3.5-4B: 8 layers converted, store 0.0413 GB vs bf16 0.1342 GB (3.25x), top-1 agree 0.939, KL mean 4.33e-03 max 1.97e-02 -> ok
+  ibm-granite/granite-4.2-8b: 40 layers converted, store 0.2089 GB vs bf16 0.6711 GB (3.21x), top-1 agree 0.939, KL mean 1.61e-02 max 6.53e-02 -> ok
+KIVI CHUNKED SELFCHECK PASS
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_Qwen3.5-4B_kivi4_chunked.jsonl
+[ckpt] 0 points already recorded
+  running kivi4_chunked@65536 ...
+    kivi4_chunked@65536: ok peak=7.842147328 (98s)
+  running kivi4_chunked@98304 ...
+    kivi4_chunked@98304: ok peak=10.162654208 (141s)
+  running kivi4_chunked@131072 ...
+    kivi4_chunked@131072: spilled peak=12.484201472 (412s)
+  kivi4_chunked: stopping, ceiling found below 163840
+
+
+=== GEN128_Qwen3.5-4B_kivi4_chunked.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_chunked    65536    65536      7.84     72.6    0.615       ok
+kivi4_chunked    98304    98304     10.16    121.1    0.922       ok
+kivi4_chunked   131072   131072     12.48    390.4    1.228  spilled
+kivi4_chunked   163840        -         -        -        - skipped_after_oom
+  kivi4_chunked: 0.0708 GB per 1k tokens, floor 3.20 GB  (max OK 98304 tok @ 10.16 GB)
+         predicted ceiling ~125,738 tok on a 12.9 GB card
+         first spill at 131072 tok (12.48 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_kivi4_chunked.jsonl
+[ckpt] 0 points already recorded
+  running kivi4_chunked@16384 ...
+    kivi4_chunked@16384: ok peak=7.60684544 (75s)
+  running kivi4_chunked@24576 ...
+    kivi4_chunked@24576: ok peak=8.499955712 (91s)
+  running kivi4_chunked@32768 ...
+    kivi4_chunked@32768: ok peak=9.391521792 (123s)
+  running kivi4_chunked@49152 ...
+    kivi4_chunked@49152: ok peak=11.177230336 (185s)
+
+
+=== GEN128_granite_kivi4_chunked.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_chunked    16384    16384      7.61     44.9    0.791       ok
+kivi4_chunked    24576    24576      8.50     68.7    1.179       ok
+kivi4_chunked    32768    32768      9.39     99.6    1.567       ok
+kivi4_chunked    49152    49152     11.18    161.5    2.343       ok
+  kivi4_chunked: 0.1090 GB per 1k tokens, floor 5.82 GB  (max OK 49152 tok @ 11.18 GB)
+         predicted ceiling ~57,668 tok on a 12.9 GB card
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\BEYOND_granite_kivi4_chunked_24k-32k.jsonl
+[ckpt] 0 recorded, 260 pending (of 260 generated)
+  [1/260] 24576/cwe#0 -> 'We are given a long numbered list of words (from 1' (64.7s/item, ~279 min left)
+  [2/260] 24576/cwe#1 -> 'We are asked to find the 10 most common words in t' (64.3s/item, ~277 min left)
+  [3/260] 24576/cwe#2 -> 'We are asked to find the 10 most common words in t' (64.2s/item, ~275 min left)
+  [4/260] 24576/cwe#3 -> 'We are asked to find the 10 most common words in t' (96.9s/item, ~413 min left)
+  [5/260] 24576/cwe#4 -> 'We are asked to find the 10 most common words in t' (90.3s/item, ~384 min left)
+  [6/260] 24576/cwe#5 -> 'We are given a long numbered list of words (from 1' (86.0s/item, ~364 min left)
+
+=== RESTART after power cut ===

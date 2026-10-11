@@ -1,0 +1,4 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\TILED_granite_dkv_auto.jsonl
+[ckpt] 7 points already recorded
+  running dkv@24576 ...

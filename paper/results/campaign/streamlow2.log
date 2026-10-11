@@ -1,0 +1,41 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\granite-4.2-8b_mid_nf4_dkv_streamlow.jsonl
+[ckpt] 0 points already recorded
+  running dkv@16384 ...
+    dkv@16384: ok peak=8.579344384 (72s)
+  running dkv@24576 ...
+    dkv@24576: ok peak=9.375977472 (86s)
+  running dkv@32768 ...
+    dkv@32768: ok peak=10.143826432 (123s)
+  running dkv@49152 ...
+    dkv@49152: spilled peak=10.929088 (221s)
+  dkv: stopping, ceiling found below 65536
+  dkv: stopping, ceiling found below 98304
+  dkv: stopping, ceiling found below 131072
+
+
+=== granite-4.2-8b_mid_nf4_dkv_streamlow.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    16384    16384      8.58     34.7    0.653       ok
+   dkv    24576    24576      9.38     59.5    0.874       ok
+   dkv    32768    32768     10.14     95.4    1.096       ok
+   dkv    49152    49152     10.93    195.0    1.539  spilled
+   dkv    65536        -         -        -        - skipped_after_oom
+   dkv    98304        -         -        -        - skipped_after_oom
+   dkv   131072        -         -        -        - skipped_after_oom
+  dkv: 0.0937 GB per 1k tokens, floor 7.07 GB  (max OK 32768 tok @ 10.14 GB)
+         predicted ceiling ~53,696 tok on a 12.9 GB card
+         first spill at 49152 tok (10.93 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\Qwen3.5-4B_mid_nf4_dkv_streamlow.jsonl
+[ckpt] 0 points already recorded
+  running dkv@32768 ...
+    dkv@32768: ok peak=5.070293504 (68s)
+  running dkv@65536 ...
+    dkv@65536: ok peak=6.44829952 (108s)
+  running dkv@98304 ...
+    dkv@98304: ok peak=8.046866944 (194s)
+  running dkv@131072 ...
+    dkv@131072: ok peak=9.415341568 (295s)
+  running dkv@196608 ...

@@ -1,0 +1,310 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\longbench\RESID_granite_dkv_high_streamlow.jsonl
+[ckpt] 0 items already recorded
+[ckpt] 40 items pending
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model ibm-granite/granite-4.2-8b...
+[DKV] Loading model weights on demand: ibm-granite/granite-4.2-8b (device=cuda, dtype=torch.float16)...
+[DKV] high preset: Context-Aware Decoding on (alpha=0.5, max_steps=32) — MLX parity
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 999 MB → 999 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] WARNING: Capping SVD rank to 64
+[DKV] Model parameter count: 4807.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: high (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (102/layer x 40 layers ~= 104,448 tokens max context), rank=64 (pool_rank=32), max_residual=256, 1189 KB/slot, budget=4.0 GB (ceiling: 50% of 5.2 GB free VRAM), worst-case 5.0 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 21-32  (ceiling rank=64; schedule wanted 21-64, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Quantized model detected — skipping torch.compile to avoid graph-break errors. (Set DKV_FORCE_COMPILE_QUANTIZED=1 to override.)
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [64, 96, 192] (H=32, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1415 MB → 1415 MB (saved 0 MB)
+[Pool] Lazy-allocated 160 slots for ~2049 tokens = 110.8 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] Triton fused-decode path ACTIVE (CUDA).
+  [1/40] narrativeqa#0 12015 tok -> 'He lives with his wife and children, supported by the Coxon ' (39.2s/item, ~25 min left)
+  [2/40] narrativeqa#1 12016 tok -> 'The story does not provide a reason why Ann does not return ' (28.8s/item, ~18 min left)
+  [3/40] narrativeqa#2 8512 tok -> "Atlas' mountain" (22.6s/item, ~14 min left)
+  [4/40] narrativeqa#3 9371 tok -> 'To persuade Socrates to escape imprisonment.' (20.0s/item, ~12 min left)
+  [5/40] narrativeqa#4 12015 tok -> 'Because Otto was the baron’s son and heir.' (19.4s/item, ~11 min left)
+  [6/40] narrativeqa#5 12015 tok -> 'The question asks: "How long had Mortimer Trefinnis\' sister ' (23.0s/item, ~13 min left)
+  [7/40] narrativeqa#6 12016 tok -> 'The question asks: "With whom does the entertainers\' manager' (25.5s/item, ~14 min left)
+  [8/40] narrativeqa#7 12016 tok -> 'Dana Barrett' (24.2s/item, ~13 min left)
+  [9/40] narrativeqa#8 12015 tok -> 'British' (23.1s/item, ~12 min left)
+  [10/40] narrativeqa#9 8518 tok -> 'The Witch did not explicitly name anyone who she wanted to r' (22.9s/item, ~11 min left)
+  [11/40] narrativeqa#10 12015 tok -> ' renewed. Minor spelling and\n    typographical errors have b' (22.5s/item, ~11 min left)
+  [12/40] narrativeqa#11 12015 tok -> 'No description — Soames provides none upon his return.' (22.0s/item, ~10 min left)
+  [13/40] narrativeqa#12 11726 tok -> 'The story does not specify when people are allowed to enter ' (23.5s/item, ~11 min left)
+  [14/40] narrativeqa#13 11961 tok -> 'Pierre Grassou' (22.9s/item, ~10 min left)
+  [15/40] narrativeqa#14 11956 tok -> 'Pierre Grassou' (22.4s/item, ~9 min left)
+  [16/40] narrativeqa#15 12014 tok -> "The baby's buggy wheels unlock and roll on their own." (22.1s/item, ~9 min left)
+  [17/40] narrativeqa#16 12015 tok -> 'Elder Childers argues for the community’s moral authority.' (21.8s/item, ~8 min left)
+  [18/40] narrativeqa#17 12015 tok -> ' renewed. Minor spelling and\n    typographical errors have b' (21.6s/item, ~8 min left)
+  [19/40] narrativeqa#18 12015 tok -> 'The story does not mention Reiko, an ex-husband, or any phot' (21.5s/item, ~8 min left)
+  [20/40] narrativeqa#19 9370 tok -> 'multiple ethical arguments' (21.0s/item, ~7 min left)
+  [21/40] hotpotqa#0 11634 tok -> 'Gates v. Collier' (20.7s/item, ~7 min left)
+  [22/40] hotpotqa#1 12015 tok -> 'Gary Cooper' (20.4s/item, ~6 min left)
+  [23/40] hotpotqa#2 12015 tok -> 'The question asks: "Prior to playing for Michigan State, Kei' (20.5s/item, ~6 min left)
+  [24/40] hotpotqa#3 12015 tok -> 'Mars' (20.2s/item, ~5 min left)
+  [25/40] hotpotqa#4 12015 tok -> 'The passages do not mention "Atom Egoyan" or provide any inf' (20.3s/item, ~5 min left)
+  [26/40] hotpotqa#5 12015 tok -> 'English writer and former Conservative Member of Parliament' (20.1s/item, ~5 min left)
+  [27/40] hotpotqa#6 12015 tok -> 'Thirukkalachery is a village in the Taluk of Thiruvannamalai' (20.2s/item, ~4 min left)
+  [28/40] hotpotqa#7 2357 tok -> 'Pleiospilos' (19.5s/item, ~4 min left)
+  [29/40] hotpotqa#8 12015 tok -> '2013' (19.4s/item, ~4 min left)
+  [30/40] hotpotqa#9 8990 tok -> 'Fitz and the Tantrums' (19.1s/item, ~3 min left)
+  [31/40] hotpotqa#10 12015 tok -> 'October 13, 1980' (19.0s/item, ~3 min left)
+  [32/40] hotpotqa#11 12015 tok -> 'The question asks: "The Greatest Event in Television History' (19.0s/item, ~3 min left)
+  [33/40] hotpotqa#12 12015 tok -> 'Olivia de Havilland' (18.9s/item, ~2 min left)
+  [34/40] hotpotqa#13 10630 tok -> 'January 1992' (18.8s/item, ~2 min left)
+  [35/40] hotpotqa#14 12015 tok -> 'The passage about the forests of Mara and Mondrem mentions t' (18.9s/item, ~2 min left)
+  [36/40] hotpotqa#15 12015 tok -> 'Sara Symington competed in the 2000 Summer Olympics.' (18.8s/item, ~1 min left)
+  [37/40] hotpotqa#16 6391 tok -> 'Claudio López' (18.6s/item, ~1 min left)
+  [38/40] hotpotqa#17 12015 tok -> 'Ronald Reagan' (18.6s/item, ~1 min left)
+  [39/40] hotpotqa#18 12015 tok -> 'The song that came out ahead of The Wanted\'s "Lightning" on ' (18.6s/item, ~0 min left)
+  [40/40] hotpotqa#19 12015 tok -> 'Tom Petty' (18.5s/item, ~0 min left)
+
+
+=== RESID_granite_dkv_high_streamlow.jsonl ===
+ibm-granite/granite-4.2-8b arm=dkv preset=high quant=nf4 maxlen=12000
+                  task    n    score
+              hotpotqa   20    24.74
+           narrativeqa   20    10.70
+    MACRO(all samples)   40    17.72
+  ttft nans | decode nan tok/s | peak 7.84 GB | KV 0.802 GB (2.3x) | ctx 11196 tok
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\longbench\RESID_granite_dkv_high_resid512_streamlow.jsonl
+[ckpt] 0 items already recorded
+[ckpt] 40 items pending
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model ibm-granite/granite-4.2-8b...
+[DKV] Loading model weights on demand: ibm-granite/granite-4.2-8b (device=cuda, dtype=torch.float16)...
+[DKV] high preset: Context-Aware Decoding on (alpha=0.5, max_steps=32) — MLX parity
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1000 MB → 1000 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] WARNING: Capping SVD rank to 64
+[DKV] Model parameter count: 4807.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: high (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (102/layer x 40 layers ~= 104,448 tokens max context), rank=64 (pool_rank=32), max_residual=512, 2214 KB/slot, budget=4.0 GB (ceiling: 50% of 5.2 GB free VRAM), worst-case 9.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 21-32  (ceiling rank=64; schedule wanted 21-64, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Quantized model detected — skipping torch.compile to avoid graph-break errors. (Set DKV_FORCE_COMPILE_QUANTIZED=1 to override.)
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [64, 96, 192] (H=32, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1414 MB → 1414 MB (saved 0 MB)
+[Pool] Lazy-allocated 160 slots for ~2049 tokens = 196.0 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] Triton fused-decode path ACTIVE (CUDA).
+  [1/40] narrativeqa#0 12015 tok -> 'He lives with the Mulvilles.' (26.7s/item, ~17 min left)
+  [2/40] narrativeqa#1 12016 tok -> "Mary does not return Ann's feelings because she is focused o" (23.8s/item, ~15 min left)
+  [3/40] narrativeqa#2 8512 tok -> "On Atlas' mountain in a cavern." (19.7s/item, ~12 min left)
+  [4/40] narrativeqa#3 9371 tok -> 'To persuade Socrates to escape imprisonment.' (18.0s/item, ~11 min left)
+  [5/40] narrativeqa#4 12015 tok -> 'Because Otto was the son of the baron and had not yet come o' (18.3s/item, ~11 min left)
+  [6/40] narrativeqa#5 12015 tok -> 'At least six hours' (18.0s/item, ~10 min left)
+  [7/40] narrativeqa#6 12016 tok -> 'The question asks: "With whom does the entertainers\' manager' (22.2s/item, ~12 min left)
+  [8/40] narrativeqa#7 12016 tok -> 'Dana Barrett' (21.5s/item, ~11 min left)
+  [9/40] narrativeqa#8 12015 tok -> 'American' (20.8s/item, ~11 min left)
+  [10/40] narrativeqa#9 8518 tok -> 'The Witch' (19.6s/item, ~10 min left)
+  [11/40] narrativeqa#10 12015 tok -> '.\n    copyright on this publication was renewed. Minor spell' (19.6s/item, ~9 min left)
+  [12/40] narrativeqa#11 12015 tok -> 'No description—he never returns.' (19.4s/item, ~9 min left)
+  [13/40] narrativeqa#12 11726 tok -> 'Fifty years from her death\n\nNote: The phrase "inter manor" a' (21.6s/item, ~10 min left)
+  [14/40] narrativeqa#13 11961 tok -> 'Pierre Grassou' (21.2s/item, ~9 min left)
+  [15/40] narrativeqa#14 11956 tok -> 'Pierre Grassou' (20.9s/item, ~9 min left)
+  [16/40] narrativeqa#15 12014 tok -> 'The baby Oscar vibrates the buggy, causing it to roll away a' (20.9s/item, ~8 min left)
+  [17/40] narrativeqa#16 12015 tok -> 'Elder Childers argues for the rights of the people.' (20.8s/item, ~8 min left)
+  [18/40] narrativeqa#17 12015 tok -> ' was renewed. Minor spelling and\n    typographical errors ha' (20.8s/item, ~8 min left)
+  [19/40] narrativeqa#18 12015 tok -> 'The story does not mention Reiko, an ex-husband, or a photog' (20.8s/item, ~7 min left)
+  [20/40] narrativeqa#19 9370 tok -> 'multiple ethical arguments' (20.3s/item, ~7 min left)
+  [21/40] hotpotqa#0 11634 tok -> 'Gates v. Collier' (20.1s/item, ~6 min left)
+  [22/40] hotpotqa#1 12015 tok -> 'Charles L. Clifford' (19.9s/item, ~6 min left)
+  [23/40] hotpotqa#2 12015 tok -> 'The question asks: "Prior to playing for Michigan State, Kei' (20.1s/item, ~6 min left)
+  [24/40] hotpotqa#3 12015 tok -> 'Mars' (19.9s/item, ~5 min left)
+  [25/40] hotpotqa#4 12015 tok -> 'The passages do not mention "Atom Egoyan" or "Atom Egoyans b' (20.1s/item, ~5 min left)
+  [26/40] hotpotqa#5 12015 tok -> 'English writer and former Conservative Member of Parliament' (20.0s/item, ~5 min left)
+  [27/40] hotpotqa#6 12015 tok -> 'Thiruvaduthurai' (19.8s/item, ~4 min left)
+  [28/40] hotpotqa#7 2357 tok -> 'Pleiospilos' (19.2s/item, ~4 min left)
+  [29/40] hotpotqa#8 12015 tok -> '2013' (19.1s/item, ~4 min left)
+  [30/40] hotpotqa#9 8990 tok -> 'Fitz and the Tantrums' (18.8s/item, ~3 min left)
+  [31/40] hotpotqa#10 12015 tok -> 'October 13, 1980' (18.8s/item, ~3 min left)
+  [32/40] hotpotqa#11 12015 tok -> 'None of the passages mention "The Greatest Event in Televisi' (18.9s/item, ~3 min left)
+  [33/40] hotpotqa#12 12015 tok -> 'Olivia de Havilland' (18.9s/item, ~2 min left)
+  [34/40] hotpotqa#13 10630 tok -> '5' (18.7s/item, ~2 min left)
+  [35/40] hotpotqa#14 12015 tok -> 'The passage about the forests of Mara and Mondrem mentions t' (18.9s/item, ~2 min left)
+  [36/40] hotpotqa#15 12015 tok -> '2000 Summer Olympics' (18.8s/item, ~1 min left)
+  [37/40] hotpotqa#16 6391 tok -> 'Mario Kempes' (18.5s/item, ~1 min left)
+  [38/40] hotpotqa#17 12015 tok -> 'Ronald Reagan' (18.5s/item, ~1 min left)
+  [39/40] hotpotqa#18 12015 tok -> 'Rihanna\'s "We Found Love"' (18.4s/item, ~0 min left)
+  [40/40] hotpotqa#19 12015 tok -> 'Tom Petty' (18.4s/item, ~0 min left)
+
+
+=== RESID_granite_dkv_high_resid512_streamlow.jsonl ===
+ibm-granite/granite-4.2-8b arm=dkv preset=high quant=nf4 maxlen=12000
+                  task    n    score
+              hotpotqa   20    26.37
+           narrativeqa   20    17.59
+    MACRO(all samples)   40    21.98
+  ttft nans | decode nan tok/s | peak 8.22 GB | KV 1.272 GB (1.4x) | ctx 11196 tok
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\longbench\RESID_granite_dkv_high_resid512_int4_streamlow.jsonl
+[ckpt] 0 items already recorded
+[ckpt] 40 items pending
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model ibm-granite/granite-4.2-8b...
+[DKV] Loading model weights on demand: ibm-granite/granite-4.2-8b (device=cuda, dtype=torch.float16)...
+[DKV] high preset: Context-Aware Decoding on (alpha=0.5, max_steps=32) — MLX parity
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1000 MB → 1000 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] WARNING: Capping SVD rank to 64
+[DKV] Model parameter count: 4807.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: high (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (102/layer x 40 layers ~= 104,448 tokens max context), rank=64 (pool_rank=32), max_residual=512, 2214 KB/slot, budget=4.0 GB (ceiling: 50% of 5.2 GB free VRAM), worst-case 9.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 21-32  (ceiling rank=64; schedule wanted 21-64, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Quantized model detected — skipping torch.compile to avoid graph-break errors. (Set DKV_FORCE_COMPILE_QUANTIZED=1 to override.)
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [64, 96, 192] (H=32, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1415 MB → 1415 MB (saved 0 MB)
+[Pool] Lazy-allocated 160 slots for ~2049 tokens = 116.0 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] Triton fused-decode path ACTIVE (CUDA).
+  [1/40] narrativeqa#0 12015 tok -> 'He stays with the Mulvilles.' (21.4s/item, ~14 min left)
+  [2/40] narrativeqa#1 12016 tok -> "Mary does not return Ann's feelings because Ann's affection " (34.6s/item, ~22 min left)
+  [3/40] narrativeqa#2 8512 tok -> "On Atlas' mountain in a cavern." (26.5s/item, ~16 min left)
+  [4/40] narrativeqa#3 9371 tok -> 'To persuade Socrates to escape imprisonment.' (22.9s/item, ~14 min left)
+  [5/40] narrativeqa#4 12015 tok -> 'Because Otto was the Baron’s son and heir.' (21.8s/item, ~13 min left)
+  [6/40] narrativeqa#5 12015 tok -> 'At least six hours' (20.9s/item, ~12 min left)
+  [7/40] narrativeqa#6 12016 tok -> 'The question asks: "With whom does the entertainers\' manager' (24.8s/item, ~14 min left)
+  [8/40] narrativeqa#7 12016 tok -> 'Dana Barrett' (23.7s/item, ~13 min left)
+  [9/40] narrativeqa#8 12015 tok -> 'American' (22.8s/item, ~12 min left)
+  [10/40] narrativeqa#9 8518 tok -> 'The witch' (21.5s/item, ~11 min left)
+  [11/40] narrativeqa#10 12015 tok -> '.\n    copyright on this publication was renewed. Minor spell' (21.2s/item, ~10 min left)
+  [12/40] narrativeqa#11 12015 tok -> 'No description—he never returns.' (20.9s/item, ~10 min left)
+  [13/40] narrativeqa#12 11726 tok -> 'Fifty years from her death\n\nNote: The phrase "inter manor" a' (22.9s/item, ~10 min left)
+  [14/40] narrativeqa#13 11961 tok -> 'Pierre Grassou' (22.5s/item, ~10 min left)
+  [15/40] narrativeqa#14 11956 tok -> 'Pierre Grassou' (22.0s/item, ~9 min left)
+  [16/40] narrativeqa#15 12014 tok -> "The slime enters Dana's apartment via the baby buggy's super" (21.8s/item, ~9 min left)
+  [17/40] narrativeqa#16 12015 tok -> 'Elder Childers argues for the rights of the people.' (21.6s/item, ~8 min left)
+  [18/40] narrativeqa#17 12015 tok -> '.\n    copyright on this publication was renewed. Minor spell' (21.5s/item, ~8 min left)
+  [19/40] narrativeqa#18 12015 tok -> 'The photograph shows Sadako emerging from the well.' (21.3s/item, ~7 min left)
+  [20/40] narrativeqa#19 9370 tok -> 'multiple ethical arguments' (20.7s/item, ~7 min left)
+  [21/40] hotpotqa#0 11634 tok -> 'Gates v. Collier' (20.5s/item, ~6 min left)
+  [22/40] hotpotqa#1 12015 tok -> 'David Niven' (20.3s/item, ~6 min left)
+  [23/40] hotpotqa#2 12015 tok -> 'The question asks: "Prior to playing for Michigan State, Kei' (20.4s/item, ~6 min left)
+  [24/40] hotpotqa#3 12015 tok -> 'Mars' (20.2s/item, ~5 min left)
+  [25/40] hotpotqa#4 12015 tok -> 'The passages do not mention "Atom Egoyan" or "Atom Egoyans b' (20.4s/item, ~5 min left)
+  [26/40] hotpotqa#5 12015 tok -> 'English writer and former Conservative Member of Parliament' (20.3s/item, ~5 min left)
+  [27/40] hotpotqa#6 12015 tok -> 'Thiruvaduthurai' (20.1s/item, ~4 min left)
+  [28/40] hotpotqa#7 2357 tok -> 'Pleiospilos' (19.5s/item, ~4 min left)
+  [29/40] hotpotqa#8 12015 tok -> '2013' (19.3s/item, ~4 min left)
+  [30/40] hotpotqa#9 8990 tok -> 'Fitz and the Tantrums' (19.1s/item, ~3 min left)
+  [31/40] hotpotqa#10 12015 tok -> 'October 13, 1980' (19.0s/item, ~3 min left)
+  [32/40] hotpotqa#11 12015 tok -> 'None of the passages mention "The Greatest Event in Televisi' (19.2s/item, ~3 min left)
+  [33/40] hotpotqa#12 12015 tok -> 'Olivia de Havilland' (19.1s/item, ~2 min left)
+  [34/40] hotpotqa#13 10630 tok -> '5' (18.9s/item, ~2 min left)
+  [35/40] hotpotqa#14 12015 tok -> 'The question asks: "What are some other areas that share a c' (19.0s/item, ~2 min left)
+  [36/40] hotpotqa#15 12015 tok -> '2000 Summer Olympics' (19.0s/item, ~1 min left)
+  [37/40] hotpotqa#16 6391 tok -> 'Mario Kempes' (18.7s/item, ~1 min left)
+  [38/40] hotpotqa#17 12015 tok -> 'Ronald Reagan' (18.6s/item, ~1 min left)
+  [39/40] hotpotqa#18 12015 tok -> 'Rihanna\'s "We Found Love"' (18.5s/item, ~0 min left)
+  [40/40] hotpotqa#19 12015 tok -> 'Roy Orbison' (18.5s/item, ~0 min left)
+
+
+=== RESID_granite_dkv_high_resid512_int4_streamlow.jsonl ===
+ibm-granite/granite-4.2-8b arm=dkv preset=high quant=nf4 maxlen=12000
+                  task    n    score
+              hotpotqa   20    21.38
+           narrativeqa   20    18.52
+    MACRO(all samples)   40    19.95
+  ttft nans | decode nan tok/s | peak 7.87 GB | KV 1.272 GB (1.4x) | ctx 11196 tok
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\RESID_granite_high_streamlow.jsonl
+[ckpt] 0 points already recorded
+  running dkv@16384 ...
+    dkv@16384: ok peak=8.58535936 (59s)
+  running dkv@24576 ...
+    dkv@24576: ok peak=11.062480384 (86s)
+  running dkv@32768 ...
+    dkv@32768: spilled peak=12.518621184 (125s)
+  dkv: stopping, ceiling found below 49152
+
+
+=== RESID_granite_high_streamlow.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=high
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    16384    16384      8.59     33.0    0.946       ok
+   dkv    24576    24576     11.06     60.8    1.335       ok
+   dkv    32768    32768     12.52     98.6    1.725  spilled
+   dkv    49152        -         -        -        - skipped_after_oom
+  dkv: 0.3024 GB per 1k tokens, floor 3.63 GB  (max OK 24576 tok @ 11.06 GB)
+         predicted ceiling ~28,025 tok on a 12.9 GB card
+         first spill at 32768 tok (12.52 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\RESID_granite_high_resid512_streamlow.jsonl
+[ckpt] 0 points already recorded
+  running dkv@16384 ...
+    dkv@16384: ok peak=8.991391744 (63s)
+  running dkv@24576 ...
+    dkv@24576: spilled peak=14.205839872 (117s)
+  dkv: stopping, ceiling found below 32768
+  dkv: stopping, ceiling found below 49152
+
+
+=== RESID_granite_high_resid512_streamlow.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=high
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    16384    16384      8.99     35.0    1.534       ok
+   dkv    24576    24576     14.21     89.1    2.258  spilled
+   dkv    32768        -         -        -        - skipped_after_oom
+   dkv    49152        -         -        -        - skipped_after_oom
+         first spill at 24576 tok (14.21 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\RESID_granite_high_resid512_int4_streamlow.jsonl
+[ckpt] 0 points already recorded
+  running dkv@16384 ...
+    dkv@16384: ok peak=8.635414528 (65s)
+  running dkv@24576 ...
+    dkv@24576: spilled peak=13.5830144 (107s)
+  dkv: stopping, ceiling found below 32768
+  dkv: stopping, ceiling found below 49152
+
+
+=== RESID_granite_high_resid512_int4_streamlow.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=high
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    16384    16384      8.64     34.8    1.534       ok
+   dkv    24576    24576     13.58     79.1    2.258  spilled
+   dkv    32768        -         -        -        - skipped_after_oom
+   dkv    49152        -         -        -        - skipped_after_oom
+         first spill at 24576 tok (13.58 GB) -- timings at and above this length are host-memory bound, not compute
+RESIDUAL TEST COMPLETE

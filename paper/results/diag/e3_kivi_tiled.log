@@ -1,0 +1,99 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\diag\TEST_granite_kivi4_tiled_ladder.jsonl
+[ckpt] 0 points already recorded
+  running kivi4_tiled@65536 ...
+    kivi4_tiled@65536: ok peak=9.106059776 (176s)
+  running kivi4_tiled@98304 ...
+    kivi4_tiled@98304: ok peak=10.65690368 (275s)
+
+
+=== TEST_granite_kivi4_tiled_ladder.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_tiled    65536    65536      9.11    155.3    3.238       ok
+kivi4_tiled    98304    98304     10.66    254.5    4.790       ok
+  kivi4_tiled: 0.0473 GB per 1k tokens, floor 6.00 GB  (max OK 98304 tok @ 10.66 GB)
+         predicted ceiling ~128,910 tok on a 12.9 GB card
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\diag\TEST_granite_kivi4_tiled_ruler24k.jsonl
+[ckpt] 0 recorded, 13 pending (of 13 generated)
+Loading weights:   0%|          | 0/363 [00:00<?, ?it/s]Loading weights:   0%|          | 1/363 [00:00<01:41,  3.58it/s]Loading weights:   1%|          | 2/363 [00:00<01:23,  4.34it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   2%|▏         | 6/363 [00:00<00:27, 13.17it/s]Loading weights:   4%|▍         | 15/363 [00:00<00:10, 33.16it/s]Loading weights:   7%|▋         | 24/363 [00:00<00:07, 48.03it/s]Loading weights:  10%|▉         | 35/363 [00:00<00:05, 65.07it/s]Loading weights:  12%|█▏        | 43/363 [00:01<00:04, 68.57it/s]Loading weights:  14%|█▍        | 51/363 [00:01<00:04, 70.31it/s]Loading weights:  17%|█▋        | 60/363 [00:01<00:04, 75.07it/s]Loading weights:  19%|█▉        | 69/363 [00:01<00:03, 78.93it/s]Loading weights:  21%|██▏       | 78/363 [00:01<00:03, 81.53it/s]Loading weights:  24%|██▍       | 87/363 [00:01<00:03, 83.52it/s]Loading weights:  26%|██▋       | 96/363 [00:01<00:03, 84.95it/s]Loading weights:  29%|██▉       | 105/363 [00:01<00:03, 85.30it/s]Loading weights:  31%|███▏      | 114/363 [00:01<00:02, 86.44it/s]Loading weights:  34%|███▍      | 125/363 [00:01<00:02, 92.85it/s]Loading weights:  37%|███▋      | 135/363 [00:02<00:02, 92.77it/s]Loading weights:  40%|███▉      | 145/363 [00:02<00:02, 92.09it/s]Loading weights:  43%|████▎     | 155/363 [00:02<00:02, 93.28it/s]Loading weights:  46%|████▌     | 166/363 [00:02<00:02, 91.52it/s]Loading weights:  48%|████▊     | 176/363 [00:02<00:02, 87.05it/s]Loading weights:  51%|█████     | 185/363 [00:02<00:02, 87.31it/s]Loading weights:  53%|█████▎    | 194/363 [00:02<00:01, 86.85it/s]Loading weights:  56%|█████▌    | 203/363 [00:02<00:01, 87.26it/s]Loading weights:  58%|█████▊    | 212/363 [00:02<00:01, 87.14it/s]Loading weights:  61%|██████    | 221/363 [00:03<00:01, 86.23it/s]Loading weights:  63%|██████▎   | 230/363 [00:03<00:01, 85.67it/s]Loading weights:  66%|██████▌   | 239/363 [00:03<00:01, 85.23it/s]Loading weights:  68%|██████▊   | 248/363 [00:03<00:01, 84.33it/s]Loading weights:  71%|███████   | 257/363 [00:03<00:01, 85.51it/s]Loading weights:  73%|███████▎  | 266/363 [00:03<00:01, 86.38it/s]Loading weights:  76%|███████▌  | 276/363 [00:03<00:01, 84.47it/s]Loading weights:  79%|███████▉  | 288/363 [00:03<00:00, 92.80it/s]Loading weights:  82%|████████▏ | 298/363 [00:03<00:00, 92.65it/s]Loading weights:  85%|████████▍ | 308/363 [00:04<00:00, 93.09it/s]Loading weights:  88%|████████▊ | 318/363 [00:04<00:00, 93.78it/s]Loading weights:  90%|█████████ | 328/363 [00:04<00:00, 88.78it/s]Loading weights:  93%|█████████▎| 337/363 [00:04<00:00, 88.67it/s]Loading weights:  95%|█████████▌| 346/363 [00:04<00:00, 88.05it/s]Loading weights:  98%|█████████▊| 355/363 [00:04<00:00, 85.94it/s]Loading weights: 100%|██████████| 363/363 [00:04<00:00, 78.41it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/13] 24576/cwe#0 -> 'We are given a long list of numbered words (from 1' (50.9s/item, ~10 min left)
+  [2/13] 24576/fwe#0 -> 'uojcxm  \nqicczu  \nwdeqgc' (36.8s/item, ~7 min left)
+  [3/13] 24576/niah_multikey_1#0 -> 'The special magic number for **painful-pigpen** me' (39.9s/item, ~7 min left)
+  [4/13] 24576/niah_multikey_2#0 -> 'The user asks: "What is the special magic number f' (43.5s/item, ~7 min left)
+  [5/13] 24576/niah_multikey_3#0 -> 'The special magic UUID mentioned in the provided t' (45.3s/item, ~6 min left)
+  [6/13] 24576/niah_multiquery#0 -> 'Let\'s carefully extract all the "special magic num' (46.8s/item, ~5 min left)
+  [7/13] 24576/niah_multivalue#0 -> 'Let\'s carefully extract all the "special magic num' (47.6s/item, ~5 min left)
+  [8/13] 24576/niah_single_1#0 -> 'The special magic number mentioned in the text is:' (46.9s/item, ~4 min left)
+  [9/13] 24576/niah_single_2#0 -> 'The special magic number for "uncovered-turkey" me' (46.3s/item, ~3 min left)
+  [10/13] 24576/niah_single_3#0 -> 'The special magic uuid for silky-mapping mentioned' (47.4s/item, ~2 min left)
+  [11/13] 24576/qa_1#0 -> 'France' (44.8s/item, ~1 min left)
+  [12/13] 24576/qa_2#0 -> 'No' (42.6s/item, ~1 min left)
+  [13/13] 24576/vt#0 -> 'We are asked to find all variables that are assign' (41.3s/item, ~0 min left)
+
+
+=== TEST_granite_kivi4_tiled_ruler24k.jsonl ===
+ibm-granite/granite-4.2-8b arm=kivi4_tiled preset=None quant=nf4
+              task    24576
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2    100.0
+   niah_multikey_3    100.0
+   niah_multivalue     50.0
+   niah_multiquery      0.0
+                vt      0.0
+               cwe      0.0
+               fwe     66.7
+              qa_1    100.0
+              qa_2      0.0
+         RULER avg     62.8
+  ttft 18.14s | decode 3.5 tok/s | peak 7.15 GB | KV 1.254 GB (3.2x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\diag\TEST_granite_kivi4_chunked_ruler24k.jsonl
+[ckpt] 0 recorded, 13 pending (of 13 generated)
+Loading weights:   0%|          | 0/363 [00:00<?, ?it/s]Loading weights:   0%|          | 1/363 [00:00<01:38,  3.67it/s]Loading weights:   1%|          | 2/363 [00:00<01:19,  4.55it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   2%|▏         | 6/363 [00:00<00:25, 13.79it/s]Loading weights:   4%|▍         | 15/363 [00:00<00:10, 34.62it/s]Loading weights:   7%|▋         | 24/363 [00:00<00:06, 50.07it/s]Loading weights:  10%|▉         | 36/363 [00:00<00:04, 68.54it/s]Loading weights:  12%|█▏        | 45/363 [00:00<00:04, 74.14it/s]Loading weights:  15%|█▍        | 54/363 [00:01<00:03, 77.92it/s]Loading weights:  17%|█▋        | 63/363 [00:01<00:03, 80.07it/s]Loading weights:  20%|█▉        | 72/363 [00:01<00:03, 81.24it/s]Loading weights:  22%|██▏       | 81/363 [00:01<00:03, 83.18it/s]Loading weights:  25%|██▍       | 90/363 [00:01<00:03, 84.69it/s]Loading weights:  27%|██▋       | 99/363 [00:01<00:03, 86.12it/s]Loading weights:  30%|██▉       | 108/363 [00:01<00:02, 87.01it/s]Loading weights:  32%|███▏      | 117/363 [00:01<00:02, 87.20it/s]Loading weights:  35%|███▍      | 127/363 [00:01<00:02, 88.67it/s]Loading weights:  38%|███▊      | 137/363 [00:02<00:02, 91.53it/s]Loading weights:  40%|████      | 147/363 [00:02<00:02, 93.94it/s]Loading weights:  43%|████▎     | 157/363 [00:02<00:02, 87.45it/s]Loading weights:  46%|████▌     | 167/363 [00:02<00:02, 84.93it/s]Loading weights:  49%|████▉     | 177/363 [00:02<00:02, 83.01it/s]Loading weights:  51%|█████     | 186/363 [00:02<00:02, 84.06it/s]Loading weights:  54%|█████▎    | 195/363 [00:02<00:02, 83.96it/s]Loading weights:  56%|█████▌    | 204/363 [00:02<00:01, 85.06it/s]Loading weights:  59%|█████▊    | 213/363 [00:02<00:01, 85.34it/s]Loading weights:  61%|██████    | 222/363 [00:03<00:01, 85.23it/s]Loading weights:  64%|██████▎   | 231/363 [00:03<00:01, 85.30it/s]Loading weights:  66%|██████▌   | 240/363 [00:03<00:01, 84.75it/s]Loading weights:  69%|██████▊   | 249/363 [00:03<00:01, 84.96it/s]Loading weights:  72%|███████▏  | 260/363 [00:03<00:01, 91.61it/s]Loading weights:  74%|███████▍  | 270/363 [00:03<00:01, 92.09it/s]Loading weights:  77%|███████▋  | 280/363 [00:03<00:00, 93.53it/s]Loading weights:  80%|████████  | 292/363 [00:03<00:00, 94.67it/s]Loading weights:  83%|████████▎ | 302/363 [00:03<00:00, 88.78it/s]Loading weights:  86%|████████▌ | 311/363 [00:04<00:00, 88.14it/s]Loading weights:  88%|████████▊ | 320/363 [00:04<00:00, 88.49it/s]Loading weights:  91%|█████████ | 329/363 [00:04<00:00, 87.56it/s]Loading weights:  93%|█████████▎| 338/363 [00:04<00:00, 87.20it/s]Loading weights:  96%|█████████▌| 347/363 [00:04<00:00, 86.46it/s]Loading weights:  98%|█████████▊| 356/363 [00:04<00:00, 85.15it/s]Loading weights: 100%|██████████| 363/363 [00:04<00:00, 79.03it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/13] 24576/cwe#0 -> 'We are given a long numbered list of words (from 1' (65.0s/item, ~13 min left)
+  [2/13] 24576/fwe#0 -> 'uojcxm  \nqicczu  \nwdeqgc' (43.5s/item, ~8 min left)
+  [3/13] 24576/niah_multikey_1#0 -> 'The special magic number for **painful-pigpen** me' (46.6s/item, ~8 min left)
+  [4/13] 24576/niah_multikey_2#0 -> 'The user asks: "What is the special magic number f' (51.5s/item, ~8 min left)
+  [5/13] 24576/niah_multikey_3#0 -> 'The special magic UUID mentioned in the provided t' (54.7s/item, ~7 min left)
+  [6/13] 24576/niah_multiquery#0 -> 'Let\'s carefully extract all the "special magic num' (56.8s/item, ~7 min left)
+  [7/13] 24576/niah_multivalue#0 -> 'Let\'s carefully extract all the "special magic num' (58.3s/item, ~6 min left)
+  [8/13] 24576/niah_single_1#0 -> 'The special magic number mentioned in the text is:' (58.4s/item, ~5 min left)
+  [9/13] 24576/niah_single_2#0 -> 'The special magic number for "uncovered-turkey" me' (59.3s/item, ~4 min left)
+  [10/13] 24576/niah_single_3#0 -> 'The special magic uuid for silky-mapping mentioned' (60.1s/item, ~3 min left)
+  [11/13] 24576/qa_1#0 -> 'France' (56.1s/item, ~2 min left)
+  [12/13] 24576/qa_2#0 -> 'No' (52.8s/item, ~1 min left)
+  [13/13] 24576/vt#0 -> 'We are asked to find all variables that are assign' (50.8s/item, ~0 min left)
+
+
+=== TEST_granite_kivi4_chunked_ruler24k.jsonl ===
+ibm-granite/granite-4.2-8b arm=kivi4_chunked preset=None quant=nf4
+              task    24576
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2    100.0
+   niah_multikey_3    100.0
+   niah_multivalue      0.0
+   niah_multiquery      0.0
+                vt      0.0
+               cwe      0.0
+               fwe     66.7
+              qa_1    100.0
+              qa_2      0.0
+         RULER avg     59.0
+  ttft 15.47s | decode 2.5 tok/s | peak 8.47 GB | KV 1.168 GB (3.4x)
+E3 COMPLETE

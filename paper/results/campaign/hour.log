@@ -1,0 +1,313 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_Qwen3.5-4B_dense_static.jsonl
+[ckpt] 0 points already recorded
+  running dense@49152 ...
+    dense@49152: ok peak=5.609787904 (67s)
+  running dense@65536 ...
+    dense@65536: ok peak=6.415176192 (78s)
+  running dense@98304 ...
+    dense@98304: ok peak=8.025952768 (121s)
+  running dense@131072 ...
+    dense@131072: spilled peak=9.636729344 (594s)
+
+
+=== GEN128_Qwen3.5-4B_dense_static.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense    49152    49152      5.61     41.6    1.611       ok
+ dense    65536    65536      6.42     58.5    2.147       ok
+ dense    98304    98304      8.03    103.0    3.221       ok
+ dense   131072   131072      9.64    572.9    4.295  spilled
+  dense: 0.0492 GB per 1k tokens, floor 3.19 GB  (max OK 98304 tok @ 8.03 GB)
+         predicted ceiling ~181,292 tok on a 12.9 GB card
+         first spill at 131072 tok (9.64 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_dense_static.jsonl
+[ckpt] 0 points already recorded
+  running dense@16384 ...
+    dense@16384: ok peak=8.766916096 (54s)
+  running dense@24576 ...
+    dense@24576: spilled peak=10.243352064 (417s)
+  dense: stopping, ceiling found below 32768
+  dense: stopping, ceiling found below 49152
+
+
+=== GEN128_granite_dense_static.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense    16384    16384      8.77     22.3    2.684       ok
+ dense    24576    24576     10.24    397.4    4.027  spilled
+ dense    32768        -         -        -        - skipped_after_oom
+ dense    49152        -         -        -        - skipped_after_oom
+         first spill at 24576 tok (10.24 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_Qwen3.5-4B_dense_defrag.jsonl
+[ckpt] 0 points already recorded
+  running dense@49152 ...
+    dense@49152: ok peak=7.631977472 (70s)
+  running dense@65536 ...
+    dense@65536: ok peak=9.1096832 (82s)
+  running dense@98304 ...
+    dense@98304: spilled peak=12.063529984 (429s)
+
+
+=== GEN128_Qwen3.5-4B_dense_defrag.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense    49152    49152      7.63     44.9    1.611       ok
+ dense    65536    65536      9.11     62.8    2.147       ok
+ dense    98304    98304     12.06    409.8    3.221  spilled
+  dense: 0.0902 GB per 1k tokens, floor 3.20 GB  (max OK 65536 tok @ 9.11 GB)
+         predicted ceiling ~98,751 tok on a 12.9 GB card
+         first spill at 98304 tok (12.06 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_dense_defrag.jsonl
+[ckpt] 0 points already recorded
+  running dense@16384 ...
+    dense@16384: ok peak=9.444069376 (81s)
+  running dense@24576 ...
+    dense@24576: spilled peak=11.257565184 (679s)
+
+
+=== GEN128_granite_dense_defrag.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense    16384    16384      9.44     36.4    2.684       ok
+ dense    24576    24576     11.26    659.1    4.027  spilled
+         first spill at 24576 tok (11.26 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_Qwen3.5-4B_dkv_auto.jsonl
+[ckpt] 0 points already recorded
+  running dkv@98304 ...
+    dkv@98304: ok peak=9.890739712 (131s)
+  running dkv@131072 ...
+    dkv@131072: ok peak=9.415341568 (317s)
+
+
+=== GEN128_Qwen3.5-4B_dkv_auto.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    98304    98304      9.89     91.4    2.395       ok
+   dkv   131072   131072      9.42    291.7    3.104       ok
+  dkv: -0.0145 GB per 1k tokens, floor 11.32 GB  (max OK 131072 tok @ 9.42 GB)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_dkv_auto.jsonl
+[ckpt] 0 points already recorded
+  running dkv@16384 ...
+    dkv@16384: ok peak=11.48840192 (74s)
+  running dkv@32768 ...
+    dkv@32768: ok peak=8.899277312 (153s)
+
+
+=== GEN128_granite_dkv_auto.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    16384    16384     11.49     38.2    0.659       ok
+   dkv    32768    32768      8.90    126.7    1.102       ok
+  dkv: -0.1580 GB per 1k tokens, floor 14.08 GB  (max OK 32768 tok @ 8.90 GB)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+run dkv
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1126 MB → 1126 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=8937 (279/layer x 32 layers ~= 285,696 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=5.8 GB (ceiling: DKV_POOL_BUDGET_GB=9.0), worst-case 6.2 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1538 MB → 1538 MB (saved 0 MB)
+[Pool] Lazy-allocated 136 slots for ~16383 tokens = 58.0 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] Triton fused-decode COMBINED path ACTIVE (CUDA). N_sparse=13, L_dense=4096
+{"i": 0, "wall_s": 9.58, "resident_gb": 3.636740608, "peak_gb": 4.410241536, "peak_reserved_gb": 5.039456256}
+{"i": 1, "wall_s": 7.03, "resident_gb": 4.314478592, "peak_gb": 5.090891776, "peak_reserved_gb": 5.509218304}
+{"i": 2, "wall_s": 7.24, "resident_gb": 4.757366272, "peak_gb": 5.534050816, "peak_reserved_gb": 5.865734144}
+{"i": 3, "wall_s": 7.62, "resident_gb": 5.199638016, "peak_gb": 5.977470976, "peak_reserved_gb": 6.526337024}
+{"i": 4, "wall_s": 7.94, "resident_gb": 5.643505152, "peak_gb": 6.419756544, "peak_reserved_gb": 6.895435776}
+{"i": 5, "wall_s": 7.75, "resident_gb": 6.316619264, "peak_gb": 7.093157376, "peak_reserved_gb": 7.662993408}
+{"i": 6, "wall_s": 7.31, "resident_gb": 6.75904, "peak_gb": 7.535635968, "peak_reserved_gb": 8.13694976}
+{"i": 7, "wall_s": 7.33, "resident_gb": 7.201942528, "peak_gb": 7.97984768, "peak_reserved_gb": 8.501854208}
+{"i": 8, "wall_s": 7.23, "resident_gb": 7.644271616, "peak_gb": 8.422474752, "peak_reserved_gb": 8.998879232}
+{"i": 9, "wall_s": 8.83, "resident_gb": 8.317755904, "peak_gb": 9.09677056, "peak_reserved_gb": 9.693036544}
+{"i": 10, "wall_s": 9.83, "resident_gb": 8.76018432, "peak_gb": 9.538194432, "peak_reserved_gb": 10.166992896}
+{"i": 11, "wall_s": 9.78, "resident_gb": 9.203067392, "peak_gb": 9.982947328, "peak_reserved_gb": 10.575937536}
+{"i": 12, "wall_s": 9.5, "resident_gb": 9.647491072, "peak_gb": 10.422363648, "peak_reserved_gb": 11.022630912}
+{"i": 13, "wall_s": 9.55, "resident_gb": 10.31980544, "peak_gb": 11.091711488, "peak_reserved_gb": 11.746148352}
+{"i": 14, "wall_s": 15.13, "resident_gb": 10.761629696, "peak_gb": 11.538107392, "peak_reserved_gb": 12.197036032}
+  dkv: spilled clean=14
+                   dkv  ctx 16384  sessions clean    14  ~0.510 GB resident/session  status spilled
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+run dkv
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] Heap trimmed. RSS: 1126 MB → 1126 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=8937 (279/layer x 32 layers ~= 285,696 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=5.8 GB (ceiling: DKV_POOL_BUDGET_GB=9.0), worst-case 6.2 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1539 MB → 1539 MB (saved 0 MB)
+[Pool] Lazy-allocated 64 slots for ~1024 tokens = 27.3 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] Triton fused-decode COMBINED path ACTIVE (CUDA). N_sparse=13, L_dense=4096
+{"i": 0, "wall_s": 18.19, "resident_gb": 3.847168512, "peak_gb": 4.386729472, "peak_reserved_gb": 4.745854976}
+{"i": 1, "wall_s": 9.95, "resident_gb": 4.30538752, "peak_gb": 4.630247424, "peak_reserved_gb": 5.0331648}
+{"i": 2, "wall_s": 10.11, "resident_gb": 4.763249152, "peak_gb": 5.087407104, "peak_reserved_gb": 5.674893312}
+{"i": 3, "wall_s": 9.97, "resident_gb": 5.22625536, "peak_gb": 5.547503104, "peak_reserved_gb": 6.167724032}
+{"i": 4, "wall_s": 9.87, "resident_gb": 5.914261504, "peak_gb": 6.239110144, "peak_reserved_gb": 6.855589888}
+{"i": 5, "wall_s": 10.03, "resident_gb": 6.37489152, "peak_gb": 6.702629888, "peak_reserved_gb": 7.373586432}
+{"i": 6, "wall_s": 9.47, "resident_gb": 6.834174976, "peak_gb": 7.15995392, "peak_reserved_gb": 7.847542784}
+{"i": 7, "wall_s": 9.44, "resident_gb": 7.299782144, "peak_gb": 7.622424064, "peak_reserved_gb": 8.308916224}
+{"i": 8, "wall_s": 10.11, "resident_gb": 7.987578368, "peak_gb": 8.312484864, "peak_reserved_gb": 9.019850752}
+{"i": 9, "wall_s": 12.53, "resident_gb": 8.448742912, "peak_gb": 8.77496064, "peak_reserved_gb": 9.514778624}
+{"i": 10, "wall_s": 13.38, "resident_gb": 8.907110912, "peak_gb": 9.232591872, "peak_reserved_gb": 10.005512192}
+{"i": 11, "wall_s": 13.29, "resident_gb": 9.36566528, "peak_gb": 9.694708224, "peak_reserved_gb": 10.452205568}
+{"i": 12, "wall_s": 12.95, "resident_gb": 10.0529152, "peak_gb": 10.583882752, "peak_reserved_gb": 11.179917312}
+{"i": 13, "wall_s": 12.93, "resident_gb": 10.515286528, "peak_gb": 10.84105216, "peak_reserved_gb": 11.645485056}
+{"i": 14, "wall_s": 22.85, "resident_gb": 10.976998912, "peak_gb": 11.302639616, "peak_reserved_gb": 12.123635712}
+  dkv: spilled clean=14
+                   dkv  ctx 16384  sessions clean    14  ~0.524 GB resident/session  status spilled
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dense@32768 ...
+    dense@32768: ttft=16.614622599998256 tps=15.980016988676217 peak=4.798697984
+  running dense@65536 ...
+    dense@65536: ttft=43.64754819999507 tps=9.30154765832661 peak=6.40947456
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm      32768      65536
+---------------------------------
+     dense     16.61      43.65 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      32768      65536
+---------------------------------
+     dense     15.98       9.30 
+
+=== peak VRAM (GB) ===
+       arm      32768      65536
+---------------------------------
+     dense      4.80       6.41 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dkv@32768 ...
+    dkv@32768: ttft=24.95947729999898 tps=6.236584278923142 peak=4.791673856
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm      32768
+----------------------
+       dkv     24.96 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      32768
+----------------------
+       dkv      6.24 
+
+=== peak VRAM (GB) ===
+       arm      32768
+----------------------
+       dkv      4.79 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dkv@16384 ...
+    dkv@16384: ttft=25.697585399990203 tps=4.9885066366076085 peak=8.10841088
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm      16384
+----------------------
+       dkv     25.70 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      16384
+----------------------
+       dkv      4.99 
+
+=== peak VRAM (GB) ===
+       arm      16384
+----------------------
+       dkv      8.11 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\granite-4.2-8b_mid_nf4_snapkv_aligned.jsonl
+[ckpt] 0 points already recorded
+  running snapkv@16384 ...
+    snapkv@16384: ok peak=6.038889472 (29s)
+  running snapkv@24576 ...
+    snapkv@24576: spilled peak=6.038889472 (36s)
+  snapkv: stopping, ceiling found below 32768
+
+
+=== granite-4.2-8b_mid_nf4_snapkv_aligned.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+snapkv    16384    16384      6.04      9.7    0.173       ok
+snapkv    24576    24576      6.04     16.6    0.173  spilled
+snapkv    32768        -         -        -        - skipped_after_oom
+         first spill at 24576 tok (6.04 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running snapkv@16384 ...
+    snapkv@16384: ttft=8.293948399994406 tps=19.08851050037004 peak=6.250316288
+  running snapkv@24576 ...
+    snapkv@24576: ttft=140.2926742999989 tps=17.693621996663772 peak=6.250316288
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm      16384      24576
+---------------------------------
+    snapkv      8.29     140.29 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      16384      24576
+---------------------------------
+    snapkv     19.09      17.69 
+
+=== peak VRAM (GB) ===
+       arm      16384      24576
+---------------------------------
+    snapkv      6.25       6.25 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+HOUR CAMPAIGN COMPLETE

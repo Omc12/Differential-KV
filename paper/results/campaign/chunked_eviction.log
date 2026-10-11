@@ -1,0 +1,64 @@
+[2026-09-28 19:32:32] campaign start (pid 21764)
+[2026-09-28 19:32:32] run  selfcheck_store (attempt 1)
+[2026-09-28 19:32:32] end  selfcheck_store: done 
+[2026-09-28 19:32:32] run  selfcheck_qwen4b (attempt 1)
+[2026-09-28 19:33:52] end  selfcheck_qwen4b: done 
+[2026-09-28 19:33:52] run  selfcheck_granite (attempt 1)
+[2026-09-28 19:57:16] end  selfcheck_granite: done 
+[2026-09-28 19:57:16] run  ladder_qwen4b (attempt 1)
+[2026-09-28 20:10:34] end  ladder_qwen4b: done {'records': 14, 'errors': 0, 'error_keys': [], 'status': {'ok': 14}}
+[2026-09-28 20:10:34] run  ladder_granite (attempt 1)
+[2026-09-28 20:26:25] end  ladder_granite: done {'records': 18, 'errors': 0, 'error_keys': [], 'status': {'ok': 18}}
+[2026-09-28 20:26:25] run  ladder_qwen4b_snapkv_aligned (attempt 1)
+[2026-09-28 20:30:37] end  ladder_qwen4b_snapkv_aligned: done {'records': 3, 'errors': 0, 'error_keys': [], 'status': {'ok': 2, 'spilled': 1}}
+[2026-09-28 20:30:37] run  longbench_streamingllm_chunked (attempt 1)
+[2026-09-28 21:05:13] end  longbench_streamingllm_chunked: done {'records': 120, 'errors': 0, 'error_keys': []}
+[2026-09-28 21:05:13] run  longbench_h2o_chunked (attempt 1)
+[2026-09-28 21:45:27] end  longbench_h2o_chunked: done {'records': 120, 'errors': 0, 'error_keys': []}
+[2026-09-28 21:45:27] run  ruler32k_snapkv_aligned (attempt 1)
+[2026-09-29 08:38:10] campaign start (pid 26460)
+[2026-09-29 08:38:10] skip selfcheck_store (done)
+[2026-09-29 08:38:10] skip selfcheck_qwen4b (done)
+[2026-09-29 08:38:10] skip selfcheck_granite (done)
+[2026-09-29 08:38:10] skip ladder_qwen4b (done)
+[2026-09-29 08:38:10] skip ladder_granite (done)
+[2026-09-29 08:38:10] skip ladder_qwen4b_snapkv_aligned (done)
+[2026-09-29 08:38:10] skip longbench_streamingllm_chunked (done)
+[2026-09-29 08:38:10] skip longbench_h2o_chunked (done)
+[2026-09-29 08:38:10] run  ruler32k_snapkv_aligned (attempt 1)
+[2026-09-29 09:09:49] campaign start (pid 6216)
+[2026-09-29 09:09:49] skip selfcheck_store (done)
+[2026-09-29 09:09:49] skip selfcheck_qwen4b (done)
+[2026-09-29 09:09:49] skip selfcheck_granite (done)
+[2026-09-29 09:09:49] skip ladder_qwen4b (done)
+[2026-09-29 09:09:49] skip ladder_granite (done)
+[2026-09-29 09:09:49] skip ladder_qwen4b_snapkv_aligned (done)
+[2026-09-29 09:09:49] skip longbench_streamingllm_chunked (done)
+[2026-09-29 09:09:49] skip longbench_h2o_chunked (done)
+[2026-09-29 09:09:49] run  ruler32k_snapkv_aligned (attempt 1)
+[2026-09-29 10:30:11] end  ruler32k_snapkv_aligned: done {'records': 1040, 'errors': 0, 'error_keys': []}
+[2026-09-29 10:30:11] run  ruler32k_streamingllm_chunked (attempt 1)
+[2026-09-29 13:11:58] end  ruler32k_streamingllm_chunked: done {'records': 1040, 'errors': 0, 'error_keys': []}
+[2026-09-29 13:11:58] run  ruler32k_h2o_chunked (attempt 1)
+[2026-09-29 18:17:03] campaign start (pid 22292)
+[2026-09-29 18:17:03] skip selfcheck_store (done)
+[2026-09-29 18:17:03] skip selfcheck_qwen4b (done)
+[2026-09-29 18:17:03] skip selfcheck_granite (done)
+[2026-09-29 18:17:03] skip ladder_qwen4b (done)
+[2026-09-29 18:17:03] skip ladder_granite (done)
+[2026-09-29 18:17:03] skip ladder_qwen4b_snapkv_aligned (done)
+[2026-09-29 18:17:03] skip longbench_streamingllm_chunked (done)
+[2026-09-29 18:17:03] skip longbench_h2o_chunked (done)
+[2026-09-29 18:17:03] skip ruler32k_snapkv_aligned (done)
+[2026-09-29 18:17:03] skip ruler32k_streamingllm_chunked (done)
+[2026-09-29 18:17:03] run  ruler32k_h2o_chunked (attempt 1)
+[2026-09-29 20:33:58] end  ruler32k_h2o_chunked: done {'records': 1040, 'errors': 0, 'error_keys': []}
+[2026-09-29 20:33:58] run  ruler64k_streamingllm_chunked (attempt 1)
+[2026-09-29 22:31:54] end  ruler64k_streamingllm_chunked: done {'records': 260, 'errors': 0, 'error_keys': []}
+[2026-09-29 22:31:54] run  ruler64k_h2o_chunked (attempt 1)
+[2026-09-30 03:30:57] end  ruler64k_h2o_chunked: done {'records': 260, 'errors': 0, 'error_keys': []}
+[2026-09-30 03:30:57] run  diag_granite_snapshot (attempt 1)
+[2026-09-30 03:35:02] end  diag_granite_snapshot: done {'records': 6, 'errors': 0, 'error_keys': [], 'status': {'ok': 6}}
+[2026-09-30 03:35:02] run  concurrency_qwen4b_16k (attempt 1)
+[2026-09-30 03:54:40] end  concurrency_qwen4b_16k: done {'records': 5, 'errors': 0, 'error_keys': [], 'status': {'spilled': 2, 'ok': 3}}
+[2026-09-30 03:54:40] campaign complete

@@ -1,0 +1,88 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\FIX_granite_mid_res128_streamlow.jsonl
+[ckpt] 0 points already recorded
+  running dkv@24576 ...
+    dkv@24576: ok peak=8.318469632 (90s)
+  running dkv@32768 ...
+    dkv@32768: ok peak=8.899277312 (121s)
+  running dkv@49152 ...
+    dkv@49152: spilled peak=10.08919808 (221s)
+  dkv: stopping, ceiling found below 65536
+  dkv: stopping, ceiling found below 98304
+
+
+=== FIX_granite_mid_res128_streamlow.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    24576    24576      8.32     61.0    0.874       ok
+   dkv    32768    32768      8.90     96.0    1.096       ok
+   dkv    49152    49152     10.09    194.8    1.539  spilled
+   dkv    65536        -         -        -        - skipped_after_oom
+   dkv    98304        -         -        -        - skipped_after_oom
+  dkv: 0.0709 GB per 1k tokens, floor 6.58 GB  (max OK 32768 tok @ 8.90 GB)
+         predicted ceiling ~77,989 tok on a 12.9 GB card
+         first spill at 49152 tok (10.09 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\FIX_granite_high_res256_streamlow.jsonl
+[ckpt] 0 points already recorded
+  running dkv@24576 ...
+    dkv@24576: ok peak=8.720060416 (82s)
+  running dkv@32768 ...
+    dkv@32768: ok peak=9.221385728 (117s)
+  running dkv@49152 ...
+    dkv@49152: spilled peak=10.531310592 (295s)
+  dkv: stopping, ceiling found below 65536
+  dkv: stopping, ceiling found below 98304
+
+
+=== FIX_granite_high_res256_streamlow.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=high
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    24576    24576      8.72     57.2    1.335       ok
+   dkv    32768    32768      9.22     91.4    1.725       ok
+   dkv    49152    49152     10.53    268.0    2.503  spilled
+   dkv    65536        -         -        -        - skipped_after_oom
+   dkv    98304        -         -        -        - skipped_after_oom
+  dkv: 0.0612 GB per 1k tokens, floor 7.22 GB  (max OK 32768 tok @ 9.22 GB)
+         predicted ceiling ~79,895 tok on a 12.9 GB card
+         first spill at 49152 tok (10.53 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\FIX_granite_high_res512_streamlow.jsonl
+[ckpt] 0 points already recorded
+  running dkv@24576 ...
+    dkv@24576: ok peak=9.395163136 (93s)
+  running dkv@32768 ...
+    dkv@32768: ok peak=10.34113792 (135s)
+  running dkv@49152 ...
+    dkv@49152: spilled peak=12.03962368 (510s)
+  dkv: stopping, ceiling found below 65536
+
+
+=== FIX_granite_high_res512_streamlow.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=high
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    24576    24576      9.40     63.5    2.258       ok
+   dkv    32768    32768     10.34    101.3    2.983       ok
+   dkv    49152    49152     12.04    471.9    4.433  spilled
+   dkv    65536        -         -        -        - skipped_after_oom
+  dkv: 0.1155 GB per 1k tokens, floor 6.56 GB  (max OK 32768 tok @ 10.34 GB)
+         predicted ceiling ~48,046 tok on a 12.9 GB card
+         first spill at 49152 tok (12.04 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\FIX_Qwen3.5-4B_mid_res128_streamlow.jsonl
+[ckpt] 0 points already recorded
+  running dkv@131072 ...
+    dkv@131072: ok peak=9.415341568 (305s)
+  running dkv@163840 ...
+    dkv@163840: spilled peak=11.013168128 (718s)
+  dkv: stopping, ceiling found below 196608
+
+
+=== FIX_Qwen3.5-4B_mid_res128_streamlow.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv   131072   131072      9.42    273.8    3.104       ok
+   dkv   163840   163840     11.01    694.6    3.813  spilled
+   dkv   196608        -         -        -        - skipped_after_oom
+         first spill at 163840 tok (11.01 GB) -- timings at and above this length are host-memory bound, not compute
+ROUTERFIX LADDERS COMPLETE

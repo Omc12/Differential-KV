@@ -1,0 +1,21 @@
+
+===== 2026-09-28 20:26:25  C:\Users\USER\AppData\Local\Programs\Python\Python313\python.exe C:\Users\USER\Desktop\Differential KV\benchmarks\context_ladder.py --model Qwen/Qwen3.5-4B --arms snapkv --contexts 32768 49152 65536 --baseline-params {"budget": 2016, "window": 32} --out C:\Users\USER\Desktop\Differential KV\paper\results\ladder\Qwen3.5-4B_mid_nf4_snapkv_aligned.jsonl
+[msvc] developer environment imported (10 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] C:\Users\USER\Desktop\Differential KV\paper\results\ladder\Qwen3.5-4B_mid_nf4_snapkv_aligned.jsonl
+[ckpt] 0 points already recorded
+  running snapkv@32768 ...
+    snapkv@32768: ok peak=3.375824384 (57s)
+  running snapkv@49152 ...
+    snapkv@49152: ok peak=3.375824384 (61s)
+  running snapkv@65536 ...
+    snapkv@65536: spilled peak=3.375824384 (133s)
+
+
+=== Qwen3.5-4B_mid_nf4_snapkv_aligned.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+snapkv    32768    32768      3.38     26.1    0.067       ok
+snapkv    49152    49152      3.38     37.4    0.067       ok
+snapkv    65536    65536      3.38    109.3    0.067  spilled
+  snapkv: 0.0000 GB per 1k tokens, floor 3.38 GB  (max OK 49152 tok @ 3.38 GB)
+         first spill at 65536 tok (3.38 GB) -- timings at and above this length are host-memory bound, not compute

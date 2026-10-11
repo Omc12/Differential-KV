@@ -1,0 +1,48 @@
+[msvc] developer environment imported (10 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\granite-4.2-8b_mid_nf4_dkv_streaming.jsonl
+[ckpt] 0 points already recorded
+  running dkv@16384 ...
+    dkv@16384: ok peak=9.493384192 (41s)
+  running dkv@24576 ...
+    dkv@24576: spilled peak=11.372287488 (77s)
+  dkv: stopping, ceiling found below 32768
+  dkv: stopping, ceiling found below 49152
+  dkv: stopping, ceiling found below 65536
+  dkv: stopping, ceiling found below 98304
+  dkv: stopping, ceiling found below 131072
+
+
+=== granite-4.2-8b_mid_nf4_dkv_streaming.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    16384    16384      9.49     15.0    0.653       ok
+   dkv    24576    24576     11.37     51.6    0.874  spilled
+   dkv    32768        -         -        -        - skipped_after_oom
+   dkv    49152        -         -        -        - skipped_after_oom
+   dkv    65536        -         -        -        - skipped_after_oom
+   dkv    98304        -         -        -        - skipped_after_oom
+   dkv   131072        -         -        -        - skipped_after_oom
+         first spill at 24576 tok (11.37 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (10 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\Qwen3.5-4B_mid_nf4_dkv_streaming.jsonl
+[ckpt] 0 points already recorded
+  running dkv@65536 ...
+    dkv@65536: ok peak=8.535798784 (74s)
+  running dkv@98304 ...
+    dkv@98304: ok peak=9.890739712 (101s)
+  running dkv@131072 ...
+    dkv@131072: spilled peak=11.221849088 (183s)
+  dkv: stopping, ceiling found below 196608
+
+
+=== Qwen3.5-4B_mid_nf4_dkv_streaming.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    65536    65536      8.54     43.3    1.686       ok
+   dkv    98304    98304      9.89     77.1    2.395       ok
+   dkv   131072   131072     11.22    159.3    3.104  spilled
+   dkv   196608        -         -        -        - skipped_after_oom
+  dkv: 0.0413 GB per 1k tokens, floor 5.83 GB  (max OK 98304 tok @ 9.89 GB)
+         predicted ceiling ~151,864 tok on a 12.9 GB card
+         first spill at 131072 tok (11.22 GB) -- timings at and above this length are host-memory bound, not compute
+STREAMING DKV LADDERS COMPLETE

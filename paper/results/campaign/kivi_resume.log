@@ -1,0 +1,88 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  Qwen/Qwen3.5-4B: 8 layers converted, store 0.0413 GB vs bf16 0.1342 GB (3.25x), top-1 agree 0.939, KL mean 4.33e-03 max 1.97e-02 -> ok
+  ibm-granite/granite-4.2-8b: 40 layers converted, store 0.2089 GB vs bf16 0.6711 GB (3.21x), top-1 agree 0.939, KL mean 1.61e-02 max 6.53e-02 -> ok
+KIVI CHUNKED SELFCHECK PASS
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_Qwen3.5-4B_kivi4_chunked.jsonl
+[ckpt] 4 points already recorded
+  skip kivi4_chunked@65536 (done: ok)
+  skip kivi4_chunked@98304 (done: ok)
+  skip kivi4_chunked@131072 (done: spilled)
+  skip kivi4_chunked@163840 (done: skipped_after_oom)
+
+
+=== GEN128_Qwen3.5-4B_kivi4_chunked.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_chunked    65536    65536      7.84     72.6    0.615       ok
+kivi4_chunked    98304    98304     10.16    121.1    0.922       ok
+kivi4_chunked   131072   131072     12.48    390.4    1.228  spilled
+kivi4_chunked   163840        -         -        -        - skipped_after_oom
+  kivi4_chunked: 0.0708 GB per 1k tokens, floor 3.20 GB  (max OK 98304 tok @ 10.16 GB)
+         predicted ceiling ~125,738 tok on a 12.9 GB card
+         first spill at 131072 tok (12.48 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\GEN128_granite_kivi4_chunked.jsonl
+[ckpt] 6 points already recorded
+  skip kivi4_chunked@16384 (done: ok)
+  skip kivi4_chunked@24576 (done: ok)
+  skip kivi4_chunked@32768 (done: ok)
+  skip kivi4_chunked@49152 (done: ok)
+  skip kivi4_chunked@65536 (done: spilled)
+  skip kivi4_chunked@98304 (done: skipped_after_oom)
+
+
+=== GEN128_granite_kivi4_chunked.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_chunked    16384    16384      7.61     44.9    0.791       ok
+kivi4_chunked    24576    24576      8.50     68.7    1.179       ok
+kivi4_chunked    32768    32768      9.39     99.6    1.567       ok
+kivi4_chunked    49152    49152     11.18    161.5    2.343       ok
+kivi4_chunked    65536    65536     12.96   1520.7    3.119  spilled
+kivi4_chunked    98304        -         -        -        - skipped_after_oom
+  kivi4_chunked: 0.1090 GB per 1k tokens, floor 5.82 GB  (max OK 49152 tok @ 11.18 GB)
+         predicted ceiling ~57,668 tok on a 12.9 GB card
+         first spill at 65536 tok (12.96 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] reclaiming stale lock from pid 20264 (not running)
+[ckpt] paper\results\ruler\BEYOND_granite_kivi4_chunked_24k-32k.jsonl
+[ckpt] 55 recorded, 205 pending (of 260 generated)
+  [1/205] 24576/niah_multiquery#5 -> 'Let\'s carefully extract all the "special magic num' (69.9s/item, ~238 min left)
+  [2/205] 24576/niah_multiquery#6 -> 'Let\'s carefully extract all the "special magic num' (69.5s/item, ~235 min left)
+  [3/205] 24576/niah_multiquery#7 -> 'Based on the provided text, we need to extract all' (69.9s/item, ~235 min left)
+  [4/205] 24576/niah_multiquery#8 -> 'Let\'s carefully extract all the "special magic num' (69.4s/item, ~232 min left)
+  [5/205] 24576/niah_multiquery#9 -> 'Let\'s carefully extract all the "special magic num' (69.2s/item, ~231 min left)
+  [6/205] 24576/niah_multivalue#0 -> 'Let\'s carefully extract all the "special magic num' (147.7s/item, ~490 min left)
+  [7/205] 24576/niah_multivalue#1 -> 'Let\'s carefully extract all the "special magic num' (136.7s/item, ~451 min left)
+  [8/205] 24576/niah_multivalue#2 -> 'Let\'s carefully extract all the "special magic num' (128.0s/item, ~420 min left)
+  [9/205] 24576/niah_multivalue#3 -> 'Let\'s carefully extract all the "special magic num' (154.0s/item, ~503 min left)
+  [10/205] 24576/niah_multivalue#4 -> 'Let\'s carefully extract all the "special magic num' (232.0s/item, ~754 min left)
+  [11/205] 24576/niah_multivalue#5 -> 'Let\'s carefully extract all the "special magic num' (257.8s/item, ~833 min left)
+  [12/205] 24576/niah_multivalue#6 -> 'Let\'s carefully extract all the "special magic num' (310.8s/item, ~1000 min left)
+  [13/205] 24576/niah_multivalue#7 -> 'Let\'s carefully extract all the "special magic num' (294.6s/item, ~943 min left)
+  [14/205] 24576/niah_multivalue#8 -> 'Let\'s carefully extract all the "special magic num' (278.5s/item, ~887 min left)
+  [15/205] 24576/niah_multivalue#9 -> 'Let\'s carefully extract all the "special magic num' (264.5s/item, ~838 min left)
+  [16/205] 24576/niah_single_1#0 -> 'The special magic number mentioned in the text is:' (251.7s/item, ~793 min left)
+  [17/205] 24576/niah_single_1#1 -> 'The special magic number mentioned in the text is:' (286.0s/item, ~896 min left)
+  [18/205] 24576/niah_single_1#2 -> 'The special magic number mentioned in the text is:' (273.5s/item, ~853 min left)
+  [19/205] 24576/niah_single_1#3 -> 'The special magic number mentioned in the text is:' (290.3s/item, ~900 min left)
+  [20/205] 24576/niah_single_1#4 -> 'The special magic number mentioned in the text is:' (314.6s/item, ~970 min left)
+  [21/205] 24576/niah_single_1#5 -> 'The special magic number mentioned in the text is:' (314.9s/item, ~966 min left)
+  [22/205] 24576/niah_single_1#6 -> 'The special magic number mentioned in the text is:' (327.4s/item, ~998 min left)
+  [23/205] 24576/niah_single_1#7 -> 'The special magic number mentioned in the text is:' (329.0s/item, ~998 min left)
+  [24/205] 24576/niah_single_1#8 -> 'The special magic number mentioned in the text is:' (336.3s/item, ~1015 min left)
+  [25/205] 24576/niah_single_1#9 -> 'The special magic number mentioned in the text is:' (358.5s/item, ~1075 min left)
+  [26/205] 24576/niah_single_2#0 -> 'The special magic number for "uncovered-turkey" me' (390.0s/item, ~1163 min left)
+  [27/205] 24576/niah_single_2#1 -> 'The special magic number for roasted-poetry mentio' (417.5s/item, ~1239 min left)
+  [28/205] 24576/niah_single_2#2 -> 'The special magic number mentioned in the text is:' (444.2s/item, ~1310 min left)
+  [29/205] 24576/niah_single_2#3 -> 'The special magic number for vague-shear mentioned' (451.9s/item, ~1326 min left)
+  [30/205] 24576/niah_single_2#4 -> 'The special magic number for aggressive-psychology' (476.1s/item, ~1389 min left)
+  [31/205] 24576/niah_single_2#5 -> 'The special magic number for fair-yogurt mentioned' (505.3s/item, ~1465 min left)
+  [32/205] 24576/niah_single_2#6 -> 'The special magic number for shiny-fleece mentione' (520.3s/item, ~1500 min left)
+  [33/205] 24576/niah_single_2#7 -> 'The special magic number for solid-sanction mentio' (541.8s/item, ~1553 min left)
+  [34/205] 24576/niah_single_2#8 -> 'The special magic number for dark-boyhood mentione' (560.6s/item, ~1598 min left)
+  [35/205] 24576/niah_single_2#9 -> 'The special magic number for annoying-doorbell men' (584.1s/item, ~1655 min left)
+  [36/205] 24576/niah_single_3#0 -> 'The special magic uuid for silky-mapping mentioned' (612.8s/item, ~1726 min left)
+  [37/205] 24576/niah_single_3#1 -> 'The special magic UUID for therapeutic-catsup ment' (627.8s/item, ~1758 min left)
+  [38/205] 24576/niah_single_3#2 -> 'The special magic UUID for dark-boyhood mentioned ' (646.7s/item, ~1800 min left)

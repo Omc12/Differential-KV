@@ -1,0 +1,83 @@
+[msvc] developer environment imported (10 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\Qwen3.5-4B_mid_nf4_dense_defrag.jsonl
+[ckpt] 0 points already recorded
+  running dense@49152 ...
+    dense@49152: ok peak=7.621164032 (43s)
+  running dense@65536 ...
+    dense@65536: ok peak=9.09886976 (54s)
+  running dense@98304 ...
+    dense@98304: spilled peak=12.052708864 (95s)
+  dense: stopping, ceiling found below 131072
+
+
+=== Qwen3.5-4B_mid_nf4_dense_defrag.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense    49152    49152      7.62     24.2    1.611       ok
+ dense    65536    65536      9.10     36.2    2.147       ok
+ dense    98304    98304     12.05     77.4    3.221  spilled
+ dense   131072        -         -        -        - skipped_after_oom
+  dense: 0.0902 GB per 1k tokens, floor 3.19 GB  (max OK 65536 tok @ 9.10 GB)
+         predicted ceiling ~98,871 tok on a 12.9 GB card
+         first spill at 98304 tok (12.05 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (10 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\granite-4.2-8b_mid_nf4_dense_defrag.jsonl
+[ckpt] 0 points already recorded
+  running dense@16384 ...
+    dense@16384: ok peak=9.417511936 (41s)
+  running dense@24576 ...
+    dense@24576: spilled peak=11.231514624 (78s)
+  dense: stopping, ceiling found below 32768
+
+
+=== granite-4.2-8b_mid_nf4_dense_defrag.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense    16384    16384      9.42     10.3    2.684       ok
+ dense    24576    24576     11.23     58.0    4.027  spilled
+ dense    32768        -         -        -        - skipped_after_oom
+         first spill at 24576 tok (11.23 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (10 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\granite-4.2-8b_mid_nf4_dkv_noremat.jsonl
+[ckpt] 0 points already recorded
+  running dkv@16384 ...
+    dkv@16384: ok peak=9.493384192 (41s)
+  running dkv@24576 ...
+    dkv@24576: spilled peak=11.372287488 (77s)
+  dkv: stopping, ceiling found below 32768
+  dkv: stopping, ceiling found below 49152
+  dkv: stopping, ceiling found below 65536
+  dkv: stopping, ceiling found below 98304
+
+
+=== granite-4.2-8b_mid_nf4_dkv_noremat.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    16384    16384      9.49     15.4    0.653       ok
+   dkv    24576    24576     11.37     52.2    0.874  spilled
+   dkv    32768        -         -        -        - skipped_after_oom
+   dkv    49152        -         -        -        - skipped_after_oom
+   dkv    65536        -         -        -        - skipped_after_oom
+   dkv    98304        -         -        -        - skipped_after_oom
+         first spill at 24576 tok (11.37 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (10 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\Qwen3.5-4B_mid_nf4_dkv_noremat.jsonl
+[ckpt] 0 points already recorded
+  running dkv@65536 ...
+    dkv@65536: ok peak=8.535798784 (77s)
+  running dkv@98304 ...
+    dkv@98304: ok peak=9.890739712 (97s)
+  running dkv@131072 ...
+    dkv@131072: spilled peak=11.221849088 (151s)
+
+
+=== Qwen3.5-4B_mid_nf4_dkv_noremat.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    65536    65536      8.54     49.4    1.686       ok
+   dkv    98304    98304      9.89     75.5    2.395       ok
+   dkv   131072   131072     11.22    128.8    3.104  spilled
+  dkv: 0.0413 GB per 1k tokens, floor 5.83 GB  (max OK 98304 tok @ 9.89 GB)
+         predicted ceiling ~151,864 tok on a 12.9 GB card
+         first spill at 131072 tok (11.22 GB) -- timings at and above this length are host-memory bound, not compute
+FAIRNESS LADDERS COMPLETE
