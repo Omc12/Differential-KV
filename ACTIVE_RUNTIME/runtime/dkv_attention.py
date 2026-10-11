@@ -914,11 +914,12 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
         # line): rebuilding is then paid once per refresh interval instead of
         # every step where memory allows, and never at the cost of reach.
         _nostore = not _remat_fits(pool, block_indices)
-    elif os.environ.get("DKV_REMAT_GATE", "0") == "1" or _exact_lean():
+    elif os.environ.get("DKV_REMAT_GATE", "1" if _exact_lean() else "0") == "1":
         # Same memory gate for the default (exact-mode) cache, which otherwise
         # keeps every layer unconditionally -- at length a dense-size copy that
-        # can carry decode past the card. Off by default until measured;
-        # DKV_EXACT_LEAN=1 turns it on together with the tiled exact prefill.
+        # can carry decode past the card. On by default with DKV_EXACT_LEAN
+        # (CUDA); DKV_REMAT_GATE=0 turns it off. Without it granite exact
+        # spills at 20,480 even with the tiled prefill.
         _nostore = not _remat_fits(pool, block_indices)
     if block_indices is None or block_indices.numel() == 0:
         _remat_why("no-blocks")
@@ -2390,11 +2391,22 @@ def _to_device_positions(positions: list, device) -> torch.Tensor:
 
 
 def _exact_lean() -> bool:
-    """DKV_EXACT_LEAN=1 (default off until measured): exact prefill attends its
-    raw history a tile at a time (see _dense_history_attend_tiled) and the
-    decode cache takes the memory gate (DKV_REMAT_GATE). Same arithmetic up to
-    float rounding; only the transient memory changes."""
-    return os.environ.get("DKV_EXACT_LEAN", "0") == "1"
+    """DKV_EXACT_LEAN: exact prefill attends its raw history a tile at a time
+    (see _dense_history_attend_tiled) and the decode cache takes the memory gate
+    (DKV_REMAT_GATE). Same arithmetic up to float rounding.
+
+    ON by default on CUDA since 2026-10-11 (DKV_EXACT_LEAN=0 restores the
+    previous path). Granite tier 2 vs the previous exact path: -0.0001
+    [-0.0057, +0.0045]. Exact-mode reach: granite 16,384 -> 24,576, Qwen3.5-4B
+    98,304 -> 131,072 (a preallocated dense cache: 20,480 / 122,880). The tiled
+    prefill alone costs nothing and carries all of Qwen's gain; granite's needs
+    the gate, which costs ~11% decode speed when memory is tight (6.2 vs 7.0
+    tok/s at <=16k) -- DKV_REMAT_GATE=0 trades that reach back for the speed.
+    The kernel is CUDA's, so non-CUDA devices keep the previous path."""
+    v = os.environ.get("DKV_EXACT_LEAN", "auto")
+    if v == "auto":
+        return torch.cuda.is_available()
+    return v == "1"
 
 
 def _dense_history_attend_tiled(chunk_q, dense_blocks, cos_all, sin_all, groups,
@@ -6640,7 +6652,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         dense_k = []
                                         dense_v = []
                                         dense_positions_list = []
-                                        _lean = _exact_lean()
+                                        _lean = _exact_lean() and chunk_q.is_cuda
                                         lean_blocks = []
 
                                         for b in history_blocks:

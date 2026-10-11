@@ -413,7 +413,7 @@ def main():
                         # store / schedule switches (2026-10-04); recorded only
                         # when set, so default stores keep matching
                         "DKV_STORE", "DKV_KEY_QUANT", "DKV_RESID_ATTN",
-                        "DKV_STREAM_ELASTIC", "DKV_PREFILL_SDPA",
+                        "DKV_STREAM_ELASTIC", "DKV_PREFILL_SDPA", "DKV_EXACT_LEAN",
                         "DKV_REMAT_GATE") if k in os.environ} or None,
            "protocol": "ruler-official-generators"}
     # Only when used, so stores written before the option existed still match.

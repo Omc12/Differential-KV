@@ -724,7 +724,7 @@ def main():
                         "DKV_STREAM_PROFILE",
                         # store / schedule switches (2026-10-04)
                         "DKV_STORE", "DKV_KEY_QUANT", "DKV_RESID_ATTN",
-                        "DKV_STREAM_ELASTIC", "DKV_PREFILL_SDPA", "DKV_REMAT_GATE")
+                        "DKV_STREAM_ELASTIC", "DKV_PREFILL_SDPA", "DKV_EXACT_LEAN", "DKV_REMAT_GATE")
                        if k in os.environ} or None,
            "decode_defaults": "serving" if args.arm == "dkv" else None,
            # The attention path the PREFILL ran under. Recorded because

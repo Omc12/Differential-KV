@@ -20,6 +20,16 @@ set DKV_STORE=lowrank
 set DKV_PREFILL_SDPA=1
 set DKV_STREAM_ELASTIC=1
 
+rem -- A0. EXACT-mode ceilings under DKV_EXACT_LEAN (default since 2026-10-11): outputs
+rem    are identical to the old exact path (tier 2 -0.0001), so exact QUALITY results
+rem    stand; only exact reach/peak/timing changed (granite 16k -> 24k, Qwen 98k -> 131k+).
+setlocal
+set DKV_STREAMING_COMPRESS=0
+set DKV_EXACT_LEAN=1
+"%PY%" benchmarks\context_ladder.py --model %GR% --arms dkv --gen 128 --contexts 4096 8192 16384 20480 24576 28672 --timeout 7200 --out %R%\ladder\V3_granite_dkv_exact.jsonl
+"%PY%" benchmarks\context_ladder.py --model %QW% --arms dkv --gen 128 --contexts 8192 16384 32768 65536 98304 131072 147456 163840 --timeout 7200 --out %R%\ladder\V3_Qwen3.5-4B_dkv_exact.jsonl
+endlocal
+
 rem -- A1. ceilings + timing (same contexts / streaming switch as the paper's TILED ladders)
 setlocal
 set DKV_STREAMING_COMPRESS=auto

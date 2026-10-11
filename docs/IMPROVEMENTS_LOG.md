@@ -350,8 +350,29 @@ efficient kernel and merges tiles by log-sum-exp; and turns on the decode-cache 
 gate (`DKV_REMAT_GATE`). Same arithmetic up to rounding. Expected: exact ceiling close
 to the preallocated dense one; it cannot pass it (exact prefill must hold the raw KV).
 Tests written (tests/test_exact_lean.py, 5) and benchmarks/run_exact_lean.cmd (unit
-tests, tier 2 vs default exact, exact ladders granite 16k-28k, Qwen 98k-131k); not run
-(GPU busy with another project). Default-on only after they pass.
+tests, tier 2 vs default exact, exact ladders granite 16k-28k, Qwen 98k-131k).
+
+Results (2026-10-11):
+- Unit tests 24/24 (5 new).
+- Tier 2, granite, 374 steps, vs default exact: KL 0.3134 vs 0.3136, **paired -0.0001
+  [-0.0057, +0.0045]** (identical up to rounding); peak 10.10 vs 10.72 GB; decode 6.2 vs
+  7.0 tok/s (graph-free tool).
+- Exact-mode reach:
+
+| model | default exact | DKV_EXACT_LEAN | preallocated dense |
+|---|---|---|---|
+| granite-4.2-8b | 16,384 | **24,576** (11.37 / 11.68 GB); 28,672 spills | 20,480 |
+| Qwen3.5-4B | 98,304 | **131,072** (11.13 / 11.75 GB), all of 98k-131k clean; slope predicts ~157k | 122,880 |
+
+  Exact mode now reaches past a preallocated dense cache on both models.
+- Ablation, tiled prefill alone (`DKV_REMAT_GATE=0`): tier 2 +0.0001 [-0.0055, +0.0048],
+  decode **7.0 tok/s (no cost)**, Qwen 122,880 / 131,072 still clean (all of Qwen's gain),
+  granite spills at 20,480. So the tiled prefill is free; granite's reach needs the
+  decode-cache gate, which costs ~11% decode when memory is tight.
+- **ON by default on CUDA from 2026-10-11** (`DKV_EXACT_LEAN` default auto; `=0` restores
+  the previous path; `DKV_REMAT_GATE=0` keeps the tiled prefill but drops the gate, i.e.
+  speed over granite's extra reach). Exact QUALITY results stand (outputs identical);
+  exact reach, peak and timing are re-measured in V3 part A0.
 
 ## Store modes (2026-10-04)
 
@@ -359,7 +380,7 @@ tests, tier 2 vs default exact, exact ladders granite 16k-28k, Qwen 98k-131k); n
 `DKV_RESID_ATTN=1` (an explicitly set switch wins) and works in exact and streaming mode
 alike (runtime/native_block_pool.py `store_mode`). RULER / LongBench runners now record
 DKV_STORE, DKV_KEY_QUANT, DKV_RESID_ATTN, DKV_STREAM_ELASTIC, DKV_PREFILL_SDPA and
-DKV_REMAT_GATE in their config when set (they recorded a fixed list, so a hybrid run
+DKV_REMAT_GATE (and since 2026-10-11 DKV_EXACT_LEAN) in their config when set (they recorded a fixed list, so a hybrid run
 would have matched a low-rank store), and the code fingerprint now also hashes
 streaming_sparse_ingest.py, lowrank.py and native_block_pool.py.
 
@@ -383,7 +404,7 @@ resumable. Estimates from the old runs' wall times.
 
 | part | script | what | est. |
 |---|---|---|---|
-| A | run_v3_a_dkv_stream.cmd | DKV streaming, new defaults: ladders (granite 24k-131k, Qwen 131k-262k), LongBench forced stream, RULER Qwen forced 32k, RULER beyond limits (granite 24k-32k, Qwen 131k) | 4-5 h |
+| A | run_v3_a_dkv_stream.cmd | A0 exact-mode ladders under DKV_EXACT_LEAN (+1 h); DKV streaming, new defaults: ladders (granite 24k-131k, Qwen 131k-262k), LongBench forced stream, RULER Qwen forced 32k, RULER beyond limits (granite 24k-32k, Qwen 131k) | 4-5 h |
 | B | run_v3_b_kivi_tiled.cmd | kivi4_tiled: ladders both models, LongBench 12k, RULER granite 24k-32k, Qwen 32k and 131k | 6-7 h |
 | C1 | run_v3_c_hybrid.cmd c1 | hybrid exact: ladders, LongBench 12k, RULER Qwen 4k-32k and 64k | 7-8 h |
 | C2 | run_v3_c_hybrid.cmd c2 | hybrid streaming: the part-A set | 6-7 h |
