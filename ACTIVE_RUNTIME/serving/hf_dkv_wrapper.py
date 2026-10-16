@@ -1675,6 +1675,9 @@ class PyTorchDKVHFWrapper:
         repetition_penalty: float = 1.15,
         query_text: Optional[str] = None,
     ):
+        import time as _gen_clock
+        # t0 and one timestamp per emitted token (see the sample step below).
+        self.last_timing = {"t0": _gen_clock.perf_counter(), "token_times": []}
         session_id = self.active_session or "default"
 
         # O(1) Smart Prefix Check: check if the session already has resident KV cache.
@@ -2366,6 +2369,11 @@ class PyTorchDKVHFWrapper:
             # Sample
             next_id = _compiled_sample_fn(logits, effective_temperature, top_p)
             next_id_val = next_id.item()
+            # Systems timing: .item() has just synchronised, so this is when the
+            # token really existed. last_timing gives TTFT (first entry - t0)
+            # and the decode rate from ONE call, with no second prefill's
+            # jitter folded in (see benchmarks/bench_systems_cuda.py).
+            self.last_timing["token_times"].append(_gen_clock.perf_counter())
 
             # Strict Factual Alignment (SFA) State Update and Loop Check
             if srl_state is not None:

@@ -167,6 +167,16 @@ def run_point(args) -> None:
                              top_p=1.0, repetition_penalty=1.0)
             torch.cuda.synchronize()
             res["wall_s"] = time.perf_counter() - t0
+            # TTFT and decode rate from the wrapper's per-token timestamps
+            # (systems-v2 definition, same as bench_systems_cuda): the DKV rows
+            # used to carry only wall_s, so prefill and decode were not separable.
+            _tm = getattr(w, "last_timing", None) or {}
+            _ts = _tm.get("token_times") or []
+            if _ts:
+                res["ttft_s"] = _ts[0] - _tm["t0"]
+                res["prefill_s"] = res["ttft_s"]
+                if len(_ts) > 1 and _ts[-1] > _ts[0]:
+                    res["decode_tps"] = (len(_ts) - 1) / (_ts[-1] - _ts[0])
             try:
                 sess = w.manager.sessions.get(sid) or {}
                 res["blocks"] = int(sum(sess.get("num_blocks") or []))

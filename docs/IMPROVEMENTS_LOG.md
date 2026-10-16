@@ -408,6 +408,7 @@ resumable. Estimates from the old runs' wall times.
 | B | run_v3_b_kivi_tiled.cmd | kivi4_tiled: ladders both models, LongBench 12k, RULER granite 24k-32k, Qwen 32k and 131k | 6-7 h |
 | C1 | run_v3_c_hybrid.cmd c1 | hybrid exact: ladders, LongBench 12k, RULER Qwen 4k-32k and 64k | 7-8 h |
 | C2 | run_v3_c_hybrid.cmd c2 | hybrid streaming: the part-A set | 6-7 h |
+| S | run_v3_s_systems.cmd | the MLSys systems table, systems-v2: TTFT, decode tok/s, peak alloc+reserved, KV bytes vs context; dense (defrag), dense static, SnapKV, KIVI-4 tiled, chunked StreamingLLM/H2O, DKV exact/auto, hybrid exact/auto; both models; median of 3 after warmup | 7-9 h |
 
 Pre-flight for part C (2026-10-05): the hybrid had never run on Qwen3.5-4B (hybrid
 architecture, head_dim 256) in the runtime. Smoke, 4 RULER 16k items, 32 steps: exact
@@ -515,6 +516,9 @@ packed hybrid + `DKV_RESID_ATTN` on granite and on Qwen2.5-7B.
 
 | Date | Fix | Why |
 |---|---|---|
+| 2026-10-17 | **KV accounting v2** (`dkv_kv_bytes`): count only layers that hold KV, each with its own block/residual counts; rows carry `kv_acct: 2`, `kv_layers` | It multiplied layer 0's counts by every decoder layer: on Qwen3.5-4B (8 of 32 layers hold KV) every DKV absolute GB, store and dense-equivalent, was 4x high (32k dense-equiv 4.29 vs the true 1.07 GB the baselines report), and layer 0 there holds no blocks, so its counts were fallbacks. Ratios were right. Granite (all layers attention) unaffected. tests/test_kv_accounting.py (3, CPU) |
+| 2026-10-17 | **systems-v2** (`bench_systems_cuda.py`): TTFT and decode rate from inside ONE call per repeat (DKV: per-token timestamps after the sampler's sync, `hf_dkv_wrapper.last_timing`; baselines: run_baseline's own prefill/decode split); peaks max over repeats, allocated AND reserved, spill on either; every DKV_* switch in the config; arm stops after a spill; per-point timeout | v1 differenced two separate calls, decode/s = K / (T(1+K) - T(1)), folding one prefill's jitter into decode (at 131k ~100 s prefill vs ~6 s decode); spill detection read allocated only; configs had no DKV switches, so a hybrid or streaming run could merge into a low-rank store |
+| 2026-10-17 | Context ladder records `ttft_s` / `decode_tps` for DKV rows (same timestamps) | DKV ladder rows had only wall time; prefill and decode were not separable |
 | 2026-10-03 | Decode-fidelity disables CUDA graphs in DKV arms | The forcing hook cannot be captured; replays returned stale buffers (KL 4-15 on prompts under `DKV_GRAPH_MAX_CTX`=8192) |
 | 2026-10-03 | Tier-1 base uses the runtime's residual rule | Runtime ranks joint ABSOLUTE error with one index set for K and V; the first screen used relative error, overstating attention weighting's gain |
 | 2026-10-03 | Tier-1 tools read RoPE / scale / q-k norms from the live model | No per-architecture code |

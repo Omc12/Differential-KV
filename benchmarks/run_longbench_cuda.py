@@ -331,13 +331,30 @@ def dkv_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
         res_tok = kv_tok // 2
 
     s0 = mgr.sessions.get(sid) or {}
-    nb = ((s0.get("num_blocks") or [0])[0]) or (seq_len // B) or 1
+    # KV-HOLDING LAYERS ONLY (accounting v2, 2026-10-17). This used to read
+    # layer 0 and multiply by mgr.num_layers. On hybrid architectures only some
+    # layers hold KV (Qwen3.5-4B: 8 of 32), so every absolute GB -- store AND
+    # dense equivalent -- came out 4x high, and layer 0 there is a linear-
+    # attention layer with no blocks, so its block/residual counts were
+    # fallbacks rather than measurements. The baselines already counted
+    # attention layers only (kv_baselines.run_baseline), so the two sides were
+    # not on the same axis. A layer holds KV iff it owns blocks.
+    nb_all = list(s0.get("num_blocks") or [])
+    kv_layers = [l for l, n in enumerate(nb_all) if n > 0]
+    if not kv_layers:
+        # Nothing compressed yet (prompt shorter than one block): no way to tell
+        # attention layers from the store, so count every layer, and say so.
+        kv_layers = list(range(L))
+        print("[dkv_kv_bytes] WARNING: no layer holds blocks; counting all "
+              f"{L} layers (prompt shorter than a block?)", flush=True)
+    l0 = kv_layers[0]
+    nb = nb_all[l0] if nb_all else ((seq_len // B) or 1)
     cfg = getattr(mgr, "config", None)
     max_dense = int(getattr(cfg, "max_active_dense_tokens", None)
                     or getattr(mgr, "max_active_dense_tokens", 1024) or 1024)
-    raw_dl = (s0.get("dense_lens") or [0])[0]
+    raw_dl = (s0.get("dense_lens") or [0] * (l0 + 1))[l0]
     dl = min(raw_dl, max_dense) if raw_dl > 0 else min(seq_len, max_dense)
-    res_n0 = (s0.get("comp_res_n") or [[]])[0][:nb]
+    res_n0 = (s0.get("comp_res_n") or [[]] * (l0 + 1))[l0][:nb]
     preset = str(getattr(cfg, "preset", None) or os.environ.get("DKV_PRESET", "mid")).lower()
     # READ IT FROM THE CONFIG, and say so loudly if it is not there. The
     # fallback this replaced was {"low": 40, "mid": 64, "high": 128}, copied
@@ -357,7 +374,16 @@ def dkv_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
     res_cap = int(res_cap)
     res_used = sum(min(int(x), res_cap) for x in res_n0) if res_n0 else nb * res_cap
 
-    store_used = L * (nb * lowrank_block + res_used * res_tok + dl * kv_tok)
+    # Sum over the KV-holding layers with each layer's own block and residual
+    # counts (blocks per layer can differ near the end of a prompt).
+    comp_all = list(s0.get("comp_res_n") or [])
+    store_used = 0
+    for l in kv_layers:
+        nb_l = nb_all[l] if l < len(nb_all) and nb_all[l] else nb
+        rn = comp_all[l][:nb_l] if l < len(comp_all) and comp_all[l] else None
+        res_l = sum(min(int(x), res_cap) for x in rn) if rn else nb_l * res_cap
+        store_used += nb_l * lowrank_block + res_l * res_tok + dl * kv_tok
+    L = len(kv_layers)
     pool_physical = 0
     if pool is not None and hasattr(pool, "_pool_mb"):
         try:
@@ -371,7 +397,11 @@ def dkv_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
         "kv_dense_equiv_gb": dense_equiv / 1e9,
         "kv_compression_x": (dense_equiv / store_used) if store_used else 0.0,
         "kv_footprint_realized": True,
-        "blocks_layer0": nb,
+        # v2 = KV-holding layers only; rows without this field used every layer
+        # (4x high on Qwen3.5-4B, exact on models where every layer is attention)
+        "kv_acct": 2,
+        "kv_layers": L,
+        "blocks_layer0": nb,             # first KV-holding layer, despite the name
         "residual_tokens_layer0": res_used,
         "dense_window_tokens": dl,
     }
