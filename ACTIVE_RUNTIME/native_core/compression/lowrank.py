@@ -1024,7 +1024,7 @@ def compress_lowrank(
 def decompress_lowrank(lr: LowRankDelta,
                        dtype: torch.dtype = torch.float16) -> torch.Tensor:
     """Reconstruct [n_deltas, feat_dim] from LowRankDelta."""
-    return (lr.U.float() @ lr.V * lr.scale).to(dtype)
+    return (lr.U.float() @ lr.V.float() * lr.scale).to(dtype)
 
 
 def compress_kv_sequence_lowrank(

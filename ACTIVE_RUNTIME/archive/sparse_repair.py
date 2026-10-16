@@ -65,7 +65,7 @@ def decompress_lowrank_sparse(
 ) -> torch.Tensor:
     """Reconstruct with sparse repair."""
     # 1. Base low-rank reconstruction
-    recon = (lrs.low_rank.U.float() @ lrs.low_rank.V * lrs.low_rank.scale).to(dtype)
+    recon = (lrs.low_rank.U.float() @ lrs.low_rank.V.float() * lrs.low_rank.scale).to(dtype)
     
     # 2. Add sparse repair
     if lrs.sparse_indices.numel() > 0:
