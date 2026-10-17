@@ -1,0 +1,13 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\diag\TRACE_qwen_elastic_131k.jsonl
+[ckpt] 0 points already recorded
+  running dkv@131072 ...
+    dkv@131072: spilled peak=18.58034176 (364s)
+
+
+=== TRACE_qwen_elastic_131k.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv   131072   131072     18.58    336.5    0.763  spilled
+         first spill at 131072 tok (18.58 GB) -- timings at and above this length are host-memory bound, not compute
+TRACE COMPLETE

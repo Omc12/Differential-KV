@@ -1641,6 +1641,11 @@ class StreamingSparseIngestManager:
             # natural per-layer batch there is only ~49 blocks — the "cap" was
             # acting as a floor and inflating every transient ~5x.
             _B_MAX = int(os.environ.get("DKV_COMPRESS_BLOCK_BATCH", "64"))
+            # Memory-tight boundary (see compress_deferred_blocks(final=True)):
+            # a 64-block batch's transients are ~3 GB on Qwen3.5-4B.
+            _cap = getattr(self, "_compress_batch_cap", None)
+            if _cap:
+                _B_MAX = min(_B_MAX, int(_cap))
             for _T_active, _group in _by_T.items():
                 for _cs in range(0, len(_group), _B_MAX):
                     _sub = _group[_cs:_cs + _B_MAX]
@@ -1965,6 +1970,12 @@ class StreamingSparseIngestManager:
         if blocks_to_compress:
             try:
                 self._submit_blocks_batched(session_id, layer_idx, blocks_to_compress)
+                if os.environ.get("DKV_DBG_ELASTIC") == "1":
+                    import torch as _t
+                    print(f"[ELASTIC-FWD] seq={total_seq_len} layer={layer_idx} "
+                          f"n={len(blocks_to_compress)} after alloc="
+                          f"{_t.cuda.memory_allocated() / 1e9:.2f} peak="
+                          f"{_t.cuda.max_memory_allocated() / 1e9:.2f}", flush=True)
             except Exception as _e:
                 import traceback
                 print(f"[DIAG compress_deferred_layer] ERROR in _submit_blocks_batched layer={layer_idx}: {_e}", flush=True)
@@ -2011,6 +2022,31 @@ class StreamingSparseIngestManager:
             _b.state = "ACCUMULATING"               # stays exact for now
             self.update_metadata_state(session_id, layer_idx, _b)
         return blocks_to_compress[:n_now]
+
+    def _boundary_batch_cap(self):
+        """Batch cap for the prefill-boundary compression when memory is tight.
+
+        The elastic window can leave many raw blocks for the boundary to
+        compress, at a moment when memory is already high (it held them because
+        there was room). A 64-block compression batch's transients are ~3 GB on
+        Qwen3.5-4B, which at 262k took RESERVED memory past the card (12.97 GB,
+        allocated only 9.49). So: return cached blocks first, and if less than
+        DKV_BOUNDARY_HEADROOM_GB (default 4.0) remains under the 94% line,
+        compress 16 blocks at a time (~0.7 GB). Arithmetic is unchanged --
+        batching only groups independent per-block SVDs.
+        """
+        try:
+            import torch as _t
+            if not _t.cuda.is_available():
+                return None
+            _t.cuda.empty_cache()
+            total = _t.cuda.get_device_properties(_t.cuda.current_device()).total_memory
+            used = max(_t.cuda.memory_reserved(), _t.cuda.memory_allocated())
+            room = 0.94 * total - used
+            need = float(os.environ.get("DKV_BOUNDARY_HEADROOM_GB", "4.0")) * 1e9
+            return 16 if room < need else None
+        except Exception:                                        # noqa: BLE001
+            return None
 
     def compress_deferred_blocks(self, session_id: str, final: bool = False) -> None:
         """
@@ -2108,13 +2144,26 @@ class StreamingSparseIngestManager:
 
             if not final:
                 blocks_to_compress = self._elastic_hold(session_id, layer_idx, blocks_to_compress, total_seq_len)
+            else:
+                self._compress_batch_cap = self._boundary_batch_cap() if blocks_to_compress else None
 
             if _diag and layer_idx == 0:
                 print(f"[DIAG compress_deferred] layer=0 blocks_to_compress={len(blocks_to_compress)}", flush=True)
 
             if blocks_to_compress:
+                _dbg_el = os.environ.get("DKV_DBG_ELASTIC") == "1"
+                if _dbg_el:
+                    import torch as _t
+                    print(f"[ELASTIC-BOUNDARY] final={final} layer={layer_idx} "
+                          f"n={len(blocks_to_compress)} before alloc="
+                          f"{_t.cuda.memory_allocated() / 1e9:.2f} "
+                          f"resv={_t.cuda.memory_reserved() / 1e9:.2f}", flush=True)
                 try:
                     self._submit_blocks_batched(session_id, layer_idx, blocks_to_compress)
+                    if _dbg_el:
+                        print(f"[ELASTIC-BOUNDARY] layer={layer_idx} after alloc="
+                              f"{_t.cuda.memory_allocated() / 1e9:.2f} peak="
+                              f"{_t.cuda.max_memory_allocated() / 1e9:.2f}", flush=True)
                 except Exception as _e:
                     import traceback
                     print(f"[DIAG compress_deferred] ERROR in _submit_blocks_batched layer={layer_idx}: {_e}", flush=True)
@@ -2123,6 +2172,7 @@ class StreamingSparseIngestManager:
                     for _b in blocks_to_compress:
                         if _b.state == "SUBMITTED":
                             _b.state = "ACCUMULATING"
+        self._compress_batch_cap = None
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 

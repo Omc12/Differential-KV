@@ -333,6 +333,45 @@ KL 0.219 at 8.3 tok/s (base streaming 0.527 at 5.5). Store 0.809 GB (2.75x; base
 memory-sized cache using free headroom under the spill line (gives way to the store;
 reach to be confirmed by ladder).
 
+## Regression found by V3 part A: Qwen3.5-4B streaming spilled at 131k (fixed 2026-10-17)
+
+Symptom: Qwen3.5-4B auto streaming at 131,072 peaked 18.58 GB alloc / 26.4 reserved
+(paper ladder before the October defaults: 6.71 GB, reach 262k). Granite unaffected.
+
+Diagnosis (instrument first):
+- Bisect, Qwen forced streaming at 65k, one default off per arm: only elastic changes
+  the peak (8.56 -> 5.04 GB); fused history attention and lean exact do not.
+- Memory trace per chunk (DKV_DBG_ELASTIC) and per history step (DKV_DBG_MEM): elastic
+  held ~113k raw tokens (~80-120 blocks per layer) because after-chunk memory showed
+  room; the spike (8.2 -> 18.6 GB) came in the first chunk after the first in-forward
+  compression. From then on those layers take the INCREMENTAL prefill branch
+  (compressed history present), and that branch attended raw history EAGERLY: the
+  whole [H, Q, raw tokens] score matrix plus a softmax copy plus repeat_kv'd K/V. With
+  only the recency window raw (pre-elastic) it was small; with 113k raw it was ~10 GB.
+  The lean exact fix (10-11) had tiled the other branch only.
+
+Fix: the incremental branch uses the same tiled raw-history attention
+(`_dense_history_attend_tiled`) under DKV_EXACT_LEAN (default on, CUDA). Same
+arithmetic. Unit tests 27/27.
+
+Check (benchmarks/run_inc_tiled_check.cmd): Qwen auto streaming 131,072 ok **10.10 GB**,
+196,608 ok **10.37 GB** (were: spill at 131k, 18.58 GB). Elastic now borrows up to
+~3.5 GB of headroom by design, so the peak sits above the pre-elastic 6.7 GB but under
+the spill line.
+- 262,144 then still spilled on RESERVED memory (12.97 GB reserved, 9.49 allocated). The
+  boundary compresses everything elastic held in 64-block batches, ~3 GB of transients
+  each, when memory is already high. Fix: `_boundary_batch_cap` -- at the prefill
+  boundary, return cached blocks, and if under DKV_BOUNDARY_HEADROOM_GB (4.0) remains
+  below the 94% line, compress 16 blocks per batch (~0.7 GB). Arithmetic unchanged.
+  Re-run: **262,144 ok, 9.14 / 11.30 GB**, 484 s. Qwen streaming reaches the model's
+  maximum again.
+- Tier 2, granite streaming (elastic), fixed vs pre-fix: +0.010 [-0.048, +0.066] (no
+  change; KL 0.389 vs 0.378, rounding from the tiled merge compounding over steps).
+
+The V3 part A streaming ladders measured on the eager path moved to
+paper/results/superseded/v3_inc_eager/ and are re-run; part A's LongBench/RULER rows
+stand (outputs identical; only memory/time differed).
+
 ## Exact mode reach: DKV_EXACT_LEAN (2026-10-06, code only, NOT yet tested)
 
 Why exact mode's ceiling sits below a preallocated dense cache (Qwen3.5-4B: 98,304 vs

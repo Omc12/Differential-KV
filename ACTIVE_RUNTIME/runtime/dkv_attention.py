@@ -6356,11 +6356,23 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     dense_k = []
                                     dense_v = []
                                     dense_positions_list = []
+                                    # Raw (uncompressed) history, tiled -- the same
+                                    # helper the chunked branch uses. This branch built
+                                    # ALL raw history at once and scored it EAGERLY:
+                                    # [H, Q, raw tokens] scores plus a softmax copy.
+                                    # Harmless while raw history was only the recency
+                                    # window; with the elastic window holding ~113k raw
+                                    # tokens it was a ~10 GB transient (Qwen3.5-4B,
+                                    # 131k: 6.71 -> 18.58 GB peak, spilled).
+                                    _lean_inc = _exact_lean() and chunk_q.is_cuda
+                                    lean_blocks = []
 
                                     for b in history_blocks:
                                         if getattr(b, "state", None) == "COMPRESSED" \
                                                 and b.U is not None and b.V is not None:
                                             comp_blocks.append(b)
+                                        elif _lean_inc:
+                                            lean_blocks.append(b)
                                         else:
                                             ak = b.anchor_kv[0, 0]
                                             av = b.anchor_kv[0, 1]
@@ -6394,6 +6406,10 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _rot_emb_fn_inc = _resolve_rotary_emb(model)
                                     cos_all, sin_all = _rot_emb_fn_inc(value_states[b_idx:b_idx+1], hist_pos)
 
+                                    if lean_blocks:
+                                        out_hist_dense, lse_hist_dense = _dense_history_attend_tiled(
+                                            chunk_q, lean_blocks, cos_all, sin_all,
+                                            num_key_value_groups, attn_scale)
                                     if dense_k:
                                         k_dense = torch.cat(dense_k, dim=1).unsqueeze(0)
                                         v_dense = torch.cat(dense_v, dim=1).unsqueeze(0)
@@ -6694,6 +6710,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             model, value_states[b_idx:b_idx + 1],
                                             max_pos, query_states.device)
 
+                                        _dbg_mem = os.environ.get("DKV_DBG_MEM") == "1"
+                                        if _dbg_mem:
+                                            print(f"[MEM] L{captured_layer_idx} K_b={K_b} start "
+                                                  f"alloc={torch.cuda.memory_allocated()/1e9:.2f} "
+                                                  f"peak={torch.cuda.max_memory_allocated()/1e9:.2f} "
+                                                  f"exact={len(lean_blocks) or len(dense_k)} comp={len(comp_blocks)}",
+                                                  flush=True)
                                         if lean_blocks:
                                             out_hist_dense, lse_hist_dense = _dense_history_attend_tiled(
                                                 chunk_q, lean_blocks, cos_all, sin_all,
@@ -6756,10 +6779,18 @@ def apply_dkv_attention_patch(model, kv_manager):
                                                 out_hist_dense = torch.matmul(weights_dense, v_dense_rep)
                                                 del scores_dense, weights_dense
 
+                                        if _dbg_mem:
+                                            print(f"[MEM] L{captured_layer_idx} after-exact "
+                                                  f"alloc={torch.cuda.memory_allocated()/1e9:.2f} "
+                                                  f"peak={torch.cuda.max_memory_allocated()/1e9:.2f}", flush=True)
                                         if comp_blocks and getattr(kv_manager, "native_pool", None) is not None:
                                             out_hist_comp, lse_hist_comp = _project_then_attend_history(
                                                 chunk_q, comp_blocks, kv_manager.native_pool, sid, cos_all, sin_all
                                             )
+                                        if _dbg_mem:
+                                            print(f"[MEM] L{captured_layer_idx} after-comp "
+                                                  f"alloc={torch.cuda.memory_allocated()/1e9:.2f} "
+                                                  f"peak={torch.cuda.max_memory_allocated()/1e9:.2f}", flush=True)
 
                                     # Combine Path A and Path B
                                     out_chunk = _combine_outputs([
