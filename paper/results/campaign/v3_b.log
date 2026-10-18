@@ -1,0 +1,817 @@
+
+===== start Sun Oct 18 03:40:38 2026 =====
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V3_granite_kivi4_tiled.jsonl
+[ckpt] 0 points already recorded
+  running kivi4_tiled@16384 ...
+    kivi4_tiled@16384: ok peak=6.776910336 (66s)
+  running kivi4_tiled@32768 ...
+    kivi4_tiled@32768: ok peak=7.552856576 (87s)
+  running kivi4_tiled@49152 ...
+    kivi4_tiled@49152: ok peak=8.328540672 (127s)
+  running kivi4_tiled@65536 ...
+    kivi4_tiled@65536: ok peak=9.106059776 (171s)
+  running kivi4_tiled@98304 ...
+    kivi4_tiled@98304: ok peak=10.65690368 (270s)
+  running kivi4_tiled@131072 ...
+    kivi4_tiled@131072: spilled peak=12.20879616 (489s)
+
+
+=== V3_granite_kivi4_tiled.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_tiled    16384    16384      6.78     36.4    0.910       ok
+kivi4_tiled    32768    32768      7.55     68.1    1.686       ok
+kivi4_tiled    49152    49152      8.33    105.3    2.462       ok
+kivi4_tiled    65536    65536      9.11    147.0    3.238       ok
+kivi4_tiled    98304    98304     10.66    245.6    4.790       ok
+kivi4_tiled   131072   131072     12.21    467.9    6.342  spilled
+  kivi4_tiled: 0.0473 GB per 1k tokens, floor 6.00 GB  (max OK 98304 tok @ 10.66 GB)
+         predicted ceiling ~128,910 tok on a 12.9 GB card
+         first spill at 131072 tok (12.21 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V3_Qwen3.5-4B_kivi4_tiled.jsonl
+[ckpt] 0 points already recorded
+  running kivi4_tiled@65536 ...
+    kivi4_tiled@65536: ok peak=3.903650304 (80s)
+  running kivi4_tiled@98304 ...
+    kivi4_tiled@98304: ok peak=4.209834496 (103s)
+  running kivi4_tiled@131072 ...
+    kivi4_tiled@131072: ok peak=4.516018688 (139s)
+  running kivi4_tiled@163840 ...
+    kivi4_tiled@163840: ok peak=4.82220288 (183s)
+  running kivi4_tiled@196608 ...
+    kivi4_tiled@196608: ok peak=5.128387072 (225s)
+  running kivi4_tiled@262144 ...
+    kivi4_tiled@262144: ok peak=5.740755456 (329s)
+
+
+=== V3_Qwen3.5-4B_kivi4_tiled.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_tiled    65536    65536      3.90     55.8    0.639       ok
+kivi4_tiled    98304    98304      4.21     85.0    0.946       ok
+kivi4_tiled   131072   131072      4.52    119.7    1.252       ok
+kivi4_tiled   163840   163840      4.82    159.6    1.558       ok
+kivi4_tiled   196608   196608      5.13    204.8    1.864       ok
+kivi4_tiled   262144   262144      5.74    309.2    2.476       ok
+  kivi4_tiled: 0.0093 GB per 1k tokens, floor 3.29 GB  (max OK 262144 tok @ 5.74 GB)
+         predicted ceiling ~943,292 tok on a 12.9 GB card
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\longbench\V3_granite-4.2-8b_kivi4_tiled_len12000.jsonl
+[ckpt] 0 items already recorded
+[ckpt] 120 items pending
+Loading weights:   0%|          | 0/363 [00:00<?, ?it/s]Loading weights:   0%|          | 1/363 [00:00<04:35,  1.31it/s]Loading weights:   1%|          | 2/363 [00:01<04:23,  1.37it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   1%|          | 4/363 [00:01<01:51,  3.21it/s]Loading weights:   2%|▏         | 6/363 [00:01<01:13,  4.86it/s]Loading weights:   4%|▎         | 13/363 [00:01<00:27, 12.95it/s]Loading weights:   4%|▍         | 16/363 [00:02<00:24, 14.01it/s]Loading weights:   6%|▌         | 22/363 [00:02<00:17, 19.70it/s]Loading weights:   7%|▋         | 25/363 [00:02<00:17, 19.01it/s]Loading weights:   9%|▉         | 32/363 [00:02<00:12, 27.14it/s]Loading weights:  11%|█▏        | 41/363 [00:02<00:08, 39.47it/s]Loading weights:  14%|█▍        | 50/363 [00:02<00:06, 50.06it/s]Loading weights:  17%|█▋        | 60/363 [00:02<00:05, 58.42it/s]Loading weights:  20%|█▉        | 71/363 [00:02<00:04, 70.88it/s]Loading weights:  22%|██▏       | 81/363 [00:03<00:03, 77.27it/s]Loading weights:  25%|██▌       | 91/363 [00:03<00:03, 82.18it/s]Loading weights:  28%|██▊       | 100/363 [00:03<00:05, 51.80it/s]Loading weights:  29%|██▉       | 107/363 [00:03<00:06, 40.83it/s]Loading weights:  31%|███       | 113/363 [00:04<00:07, 35.58it/s]Loading weights:  33%|███▎      | 118/363 [00:04<00:06, 35.05it/s]Loading weights:  34%|███▍      | 123/363 [00:04<00:08, 29.08it/s]Loading weights:  36%|███▌      | 130/363 [00:04<00:07, 32.62it/s]Loading weights:  37%|███▋      | 134/363 [00:04<00:08, 28.52it/s]Loading weights:  38%|███▊      | 139/363 [00:05<00:07, 29.38it/s]Loading weights:  39%|███▉      | 143/363 [00:05<00:08, 27.25it/s]Loading weights:  41%|████      | 148/363 [00:05<00:07, 28.71it/s]Loading weights:  42%|████▏     | 152/363 [00:05<00:07, 26.65it/s]Loading weights:  43%|████▎     | 157/363 [00:05<00:07, 28.30it/s]Loading weights:  44%|████▍     | 160/363 [00:05<00:08, 24.45it/s]Loading weights:  46%|████▌     | 166/363 [00:06<00:06, 28.33it/s]Loading weights:  47%|████▋     | 169/363 [00:06<00:07, 24.84it/s]Loading weights:  48%|████▊     | 175/363 [00:06<00:06, 28.32it/s]Loading weights:  49%|████▉     | 178/363 [00:06<00:07, 24.37it/s]Loading weights:  51%|█████     | 184/363 [00:06<00:06, 27.80it/s]Loading weights:  52%|█████▏    | 187/363 [00:06<00:07, 23.73it/s]Loading weights:  53%|█████▎    | 193/363 [00:07<00:06, 27.28it/s]Loading weights:  54%|█████▍    | 196/363 [00:07<00:06, 23.90it/s]Loading weights:  56%|█████▌    | 202/363 [00:07<00:05, 27.25it/s]Loading weights:  56%|█████▋    | 205/363 [00:07<00:06, 23.81it/s]Loading weights:  58%|█████▊    | 211/363 [00:07<00:05, 27.34it/s]Loading weights:  59%|█████▉    | 214/363 [00:07<00:06, 23.84it/s]Loading weights:  61%|██████    | 220/363 [00:08<00:05, 27.21it/s]Loading weights:  61%|██████▏   | 223/363 [00:08<00:05, 23.93it/s]Loading weights:  63%|██████▎   | 229/363 [00:08<00:04, 27.44it/s]Loading weights:  64%|██████▍   | 232/363 [00:08<00:05, 23.93it/s]Loading weights:  66%|██████▌   | 238/363 [00:08<00:04, 26.70it/s]Loading weights:  66%|██████▋   | 241/363 [00:09<00:05, 23.40it/s]Loading weights:  68%|██████▊   | 247/363 [00:09<00:04, 26.96it/s]Loading weights:  69%|██████▉   | 250/363 [00:09<00:04, 23.65it/s]Loading weights:  71%|███████   | 256/363 [00:09<00:03, 26.91it/s]Loading weights:  71%|███████▏  | 259/363 [00:09<00:04, 23.38it/s]Loading weights:  73%|███████▎  | 265/363 [00:09<00:03, 25.66it/s]Loading weights:  74%|███████▍  | 268/363 [00:10<00:04, 22.24it/s]Loading weights:  75%|███████▌  | 274/363 [00:10<00:03, 25.31it/s]Loading weights:  76%|███████▋  | 277/363 [00:10<00:03, 22.17it/s]Loading weights:  78%|███████▊  | 283/363 [00:10<00:03, 25.36it/s]Loading weights:  79%|███████▉  | 286/363 [00:10<00:03, 22.10it/s]Loading weights:  80%|████████  | 292/363 [00:11<00:02, 25.43it/s]Loading weights:  81%|████████▏ | 295/363 [00:11<00:03, 22.23it/s]Loading weights:  83%|████████▎ | 301/363 [00:11<00:02, 25.46it/s]Loading weights:  84%|████████▎ | 304/363 [00:11<00:02, 22.17it/s]Loading weights:  85%|████████▌ | 310/363 [00:11<00:02, 25.18it/s]Loading weights:  86%|████████▌ | 313/363 [00:12<00:02, 22.12it/s]Loading weights:  88%|████████▊ | 319/363 [00:12<00:01, 25.38it/s]Loading weights:  89%|████████▊ | 322/363 [00:12<00:01, 22.16it/s]Loading weights:  90%|█████████ | 328/363 [00:12<00:01, 25.37it/s]Loading weights:  91%|█████████ | 331/363 [00:12<00:01, 22.08it/s]Loading weights:  93%|█████████▎| 337/363 [00:12<00:01, 25.17it/s]Loading weights:  94%|█████████▎| 340/363 [00:13<00:01, 21.99it/s]Loading weights:  95%|█████████▌| 346/363 [00:13<00:00, 24.84it/s]Loading weights:  96%|█████████▌| 349/363 [00:13<00:00, 21.64it/s]Loading weights:  98%|█████████▊| 355/363 [00:13<00:00, 24.98it/s]Loading weights:  99%|█████████▊| 358/363 [00:13<00:00, 21.59it/s]Loading weights: 100%|██████████| 363/363 [00:14<00:00, 25.85it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/120] qasper#0 4104 tok -> 'The ground truth for fake news in the study is established b' (7.1s/item, ~14 min left)
+  [2/120] qasper#1 3412 tok -> 'GhostVLAD is an extension of NetVLAD that adds ghost cluster' (6.2s/item, ~12 min left)
+  [3/120] qasper#2 4474 tok -> '68.8% to 71.8%' (5.5s/item, ~11 min left)
+  [4/120] qasper#3 3084 tok -> 'Context tweets are directly used as additional text features' (6.9s/item, ~13 min left)
+  [5/120] qasper#4 4547 tok -> 'FoxNews, CNN, ESPN, New York Times, Time magazine, Huffingto' (7.1s/item, ~14 min left)
+  [6/120] qasper#5 5554 tok -> 'Yes' (6.5s/item, ~12 min left)
+  [7/120] qasper#6 5783 tok -> 'The article proposes an evaluation protocol that uses import' (8.4s/item, ~16 min left)
+  [8/120] qasper#7 6688 tok -> 'CNN/DailyMail, NYT, and XSum' (8.0s/item, ~15 min left)
+  [9/120] qasper#8 3593 tok -> 'The article states that GM$\\_$KL achieves better correlation' (8.9s/item, ~16 min left)
+  [10/120] qasper#9 5477 tok -> 'The ensemble is formed by greedily adding the best performin' (8.7s/item, ~16 min left)
+  [11/120] qasper#10 4734 tok -> 'The Friends dataset comes from TV sitcom scripts, and the Em' (8.4s/item, ~15 min left)
+  [12/120] qasper#11 3347 tok -> 'English' (7.9s/item, ~14 min left)
+  [13/120] qasper#12 3430 tok -> 'IMDb dataset of movie reviews' (7.5s/item, ~13 min left)
+  [14/120] qasper#13 8927 tok -> 'The article does not provide a specific accuracy value (e.g.' (8.2s/item, ~14 min left)
+  [15/120] qasper#14 4880 tok -> 'Yes' (7.8s/item, ~14 min left)
+  [16/120] qasper#15 12015 tok -> 'The article mentions using a set of 246,945 documents (184,0' (8.7s/item, ~15 min left)
+  [17/120] qasper#16 12015 tok -> 'unanswerable' (8.6s/item, ~15 min left)
+  [18/120] qasper#17 5269 tok -> 'RNN-based NMT and Transformer NMT models' (8.4s/item, ~14 min left)
+  [19/120] qasper#18 5270 tok -> 'The three regularization terms are: (1) neutral features wit' (8.4s/item, ~14 min left)
+  [20/120] qasper#19 6072 tok -> 'SVM with unigram, bigram, and trigram features; SVM with ave' (8.5s/item, ~14 min left)
+  [21/120] narrativeqa#0 12015 tok -> 'Saltram stays with the Mulvilles all winter.' (8.5s/item, ~14 min left)
+  [22/120] narrativeqa#1 12016 tok -> "Mary's affection is unreciprocated due to Ann's emotional di" (8.6s/item, ~14 min left)
+  [23/120] narrativeqa#2 8512 tok -> "On Atlas' mountain in a cavern by a secret fountain." (8.5s/item, ~14 min left)
+  [24/120] narrativeqa#3 9371 tok -> 'To persuade Socrates to escape imprisonment.' (8.5s/item, ~14 min left)
+  [25/120] narrativeqa#4 12015 tok -> 'Because Otto was the Baron’s son and heir.' (8.5s/item, ~13 min left)
+  [26/120] narrativeqa#5 12015 tok -> 'At least six hours' (8.5s/item, ~13 min left)
+  [27/120] narrativeqa#6 12016 tok -> "No mention of an entertainers' manager or affair in the stor" (8.6s/item, ~13 min left)
+  [28/120] narrativeqa#7 12016 tok -> 'Dana Barrett' (8.5s/item, ~13 min left)
+  [29/120] narrativeqa#8 12015 tok -> 'American' (8.5s/item, ~13 min left)
+  [30/120] narrativeqa#9 8518 tok -> 'The Witch did not explicitly name a specific group or indivi' (9.0s/item, ~14 min left)
+  [31/120] narrativeqa#10 12015 tok -> 'Because he possesses unique 20th‑century scientific knowledg' (9.1s/item, ~13 min left)
+  [32/120] narrativeqa#11 12015 tok -> 'Soames describes a uniformed, ghostly crowd in a reading roo' (9.2s/item, ~13 min left)
+  [33/120] narrativeqa#12 11726 tok -> 'Fifty years from her death.' (9.1s/item, ~13 min left)
+  [34/120] narrativeqa#13 11961 tok -> 'Their daughter, Virginie Vervelle' (9.1s/item, ~13 min left)
+  [35/120] narrativeqa#14 11956 tok -> 'Pierre Grassou' (9.1s/item, ~13 min left)
+  [36/120] narrativeqa#15 12014 tok -> "The slime enters Dana's apartment via the baby's body, which" (9.2s/item, ~13 min left)
+  [37/120] narrativeqa#16 12015 tok -> 'Elder Childers explains town rights to the people.' (9.2s/item, ~13 min left)
+  [38/120] narrativeqa#17 12015 tok -> 'Because he possesses unique 20th‑century scientific knowledg' (9.2s/item, ~13 min left)
+  [39/120] narrativeqa#18 12015 tok -> 'The question asks: "What does Reiko see in the photograph th' (9.8s/item, ~13 min left)
+  [40/120] narrativeqa#19 9370 tok -> 'multiple ethical arguments' (9.7s/item, ~13 min left)
+  [41/120] hotpotqa#0 11634 tok -> 'Gates v. Collier' (9.7s/item, ~13 min left)
+  [42/120] hotpotqa#1 12015 tok -> 'Charles L. Clifford' (9.6s/item, ~13 min left)
+  [43/120] hotpotqa#2 12015 tok -> 'Flint' (9.6s/item, ~12 min left)
+  [44/120] hotpotqa#3 12015 tok -> 'Mars' (9.5s/item, ~12 min left)
+  [45/120] hotpotqa#4 12015 tok -> 'film' (9.5s/item, ~12 min left)
+  [46/120] hotpotqa#5 12015 tok -> 'One' (9.5s/item, ~12 min left)
+  [47/120] hotpotqa#6 12015 tok -> 'Mayiladuthurai' (9.4s/item, ~11 min left)
+  [48/120] hotpotqa#7 2357 tok -> 'Pleiospilos' (9.3s/item, ~11 min left)
+  [49/120] hotpotqa#8 12015 tok -> '2013' (9.3s/item, ~11 min left)
+  [50/120] hotpotqa#9 8990 tok -> 'Fitz and the Tantrums' (9.2s/item, ~11 min left)
+  [51/120] hotpotqa#10 12015 tok -> '1984 is not the birth year; the question asks for the birth ' (9.3s/item, ~11 min left)
+  [52/120] hotpotqa#11 12015 tok -> 'Hans Peekel' (9.3s/item, ~10 min left)
+  [53/120] hotpotqa#12 12015 tok -> 'Olivia de Havilland' (9.2s/item, ~10 min left)
+  [54/120] hotpotqa#13 10630 tok -> 'number five' (9.2s/item, ~10 min left)
+  [55/120] hotpotqa#14 12015 tok -> 'The forests of Mara and Mondrem contained red, fallow and ro' (9.3s/item, ~10 min left)
+  [56/120] hotpotqa#15 12015 tok -> '2000 and 2004 Summer Olympics\n\nNote: The question asks which' (9.3s/item, ~10 min left)
+  [57/120] hotpotqa#16 6391 tok -> 'Claudio López' (9.2s/item, ~10 min left)
+  [58/120] hotpotqa#17 12015 tok -> 'Ronald Reagan' (9.2s/item, ~10 min left)
+  [59/120] hotpotqa#18 12015 tok -> 'Honey to the B' (9.2s/item, ~9 min left)
+  [60/120] hotpotqa#19 12015 tok -> 'Roy Orbison' (9.2s/item, ~9 min left)
+  [61/120] multifieldqa_en#0 1622 tok -> 'South West Ultras' (9.1s/item, ~9 min left)
+  [62/120] multifieldqa_en#1 11329 tok -> 'No.' (9.0s/item, ~9 min left)
+  [63/120] multifieldqa_en#2 8517 tok -> 'Low-temperature scanning tunneling microscopy and spectrosco' (9.0s/item, ~9 min left)
+  [64/120] multifieldqa_en#3 12015 tok -> 'An ICD (implantable cardioverter-defibrillator) is a surgica' (9.2s/item, ~9 min left)
+  [65/120] multifieldqa_en#4 7682 tok -> 'It is important for the sides of the fuselage to be sloped (' (9.2s/item, ~8 min left)
+  [66/120] multifieldqa_en#5 11554 tok -> 'The proximity of superconductivity induces non-local pairing' (9.3s/item, ~8 min left)
+  [67/120] multifieldqa_en#6 8124 tok -> 'Electricity is used in everyday life for lighting, heating, ' (9.4s/item, ~8 min left)
+  [68/120] multifieldqa_en#7 3135 tok -> 'Vice Admiral' (9.3s/item, ~8 min left)
+  [69/120] multifieldqa_en#8 1978 tok -> '15–3' (9.2s/item, ~8 min left)
+  [70/120] multifieldqa_en#9 12015 tok -> 'Vitamin K3 (menadione), Vitamin K4, and Vitamin K5\n\nNote: Th' (9.3s/item, ~8 min left)
+  [71/120] multifieldqa_en#10 9567 tok -> 'Yes' (9.3s/item, ~8 min left)
+  [72/120] multifieldqa_en#11 10050 tok -> '3-D printing and software development' (9.2s/item, ~7 min left)
+  [73/120] multifieldqa_en#12 12015 tok -> 'Adult women: 90 μg; adult men: 120 μg\n\n(Note: The answer is ' (9.3s/item, ~7 min left)
+  [74/120] multifieldqa_en#13 8124 tok -> 'watt' (9.3s/item, ~7 min left)
+  [75/120] multifieldqa_en#14 9763 tok -> 'The main advantage of a horizontal business model for mobile' (9.3s/item, ~7 min left)
+  [76/120] multifieldqa_en#15 2895 tok -> 'Jacob C. Landau' (9.2s/item, ~7 min left)
+  [77/120] multifieldqa_en#16 8252 tok -> 'The research uses a compositional emergent communication fra' (9.2s/item, ~7 min left)
+  [78/120] multifieldqa_en#17 9318 tok -> 'The function $\\beta(r)$ is determined by solving the differe' (9.3s/item, ~7 min left)
+  [79/120] multifieldqa_en#18 10049 tok -> '70-75 metres\n</think>70-75 metres' (9.3s/item, ~6 min left)
+  [80/120] multifieldqa_en#19 3917 tok -> 'The vaccines were trialed against other vaccines (i.e., toxi' (9.3s/item, ~6 min left)
+  [81/120] gov_report#0 10804 tok -> '**Summary of Report: Multiyear Procurement (MYP) and Block B' (10.6s/item, ~7 min left)
+  [82/120] gov_report#1 12015 tok -> '**Summary of Report: Air Force and Navy Fixed-Wing Aircraft ' (11.9s/item, ~8 min left)
+  [83/120] gov_report#2 9741 tok -> '**Summary of Report: Use of Financial Rewards by U.S. Fish a' (13.0s/item, ~8 min left)
+  [84/120] gov_report#3 8830 tok -> '**Summary of the Report: Cross-Border Data Flows, Privacy, a' (14.1s/item, ~8 min left)
+  [85/120] gov_report#4 12015 tok -> '**Summary of the Federal Airport Infrastructure Funding Repo' (15.3s/item, ~9 min left)
+  [86/120] gov_report#5 7903 tok -> '**Summary of GAO Report on DOD MILCON Cost Estimating Practi' (16.3s/item, ~9 min left)
+  [87/120] gov_report#6 4246 tok -> '**Summary of the Government Report on Federal Student Aid Sc' (17.1s/item, ~9 min left)
+  [88/120] gov_report#7 12015 tok -> '**Summary of the Government Accountability Office (GAO) Repo' (18.3s/item, ~10 min left)
+  [89/120] gov_report#8 4002 tok -> '**Summary of USAID Assistance to the West Bank and Gaza (FY ' (18.9s/item, ~10 min left)
+  [90/120] gov_report#9 12015 tok -> '**Summary of the Report: Small Business Access to Capital an' (20.0s/item, ~10 min left)
+  [91/120] gov_report#10 12015 tok -> '**Summary of the Report: Navy Force Structure and Shipbuildi' (21.1s/item, ~10 min left)
+  [92/120] gov_report#11 10594 tok -> '**Summary of GAO Report on SBA’s 7(a) Loan Program Oversight' (22.1s/item, ~10 min left)
+  [93/120] gov_report#12 11057 tok -> '**Summary of Report: "Managing for Results: Agencies’ Trends' (23.1s/item, ~10 min left)
+  [94/120] gov_report#13 8882 tok -> '**Summary of Report: Implementing Telework – Using Telework ' (23.9s/item, ~10 min left)
+  [95/120] gov_report#14 12015 tok -> '**Summary of the Government Report on Cybersecurity Risks to' (24.9s/item, ~10 min left)
+  [96/120] gov_report#15 7720 tok -> '**Summary of Government Report on the Office of the Under Se' (25.6s/item, ~10 min left)
+  [97/120] gov_report#16 5331 tok -> '**Summary of the Robert T. Stafford Disaster Relief and Emer' (26.3s/item, ~10 min left)
+  [98/120] gov_report#17 10617 tok -> '**Summary of the GAO Report on the Forest Service’s Internal' (27.2s/item, ~10 min left)
+  [99/120] gov_report#18 6638 tok -> '**Summary of the Senate Confirmation Process**\n\nThe U.S. Con' (27.8s/item, ~10 min left)
+  [100/120] gov_report#19 4251 tok -> "**Summary of the Longshore and Harbor Workers' Compensation " (28.4s/item, ~9 min left)
+  [101/120] passage_retrieval_en#0 11339 tok -> 'Paragraph 15' (28.2s/item, ~9 min left)
+  [102/120] passage_retrieval_en#1 11753 tok -> 'Paragraph 8' (28.0s/item, ~8 min left)
+  [103/120] passage_retrieval_en#2 12014 tok -> 'Paragraph 1\n\nHowever, upon careful review, the abstract desc' (27.8s/item, ~8 min left)
+  [104/120] passage_retrieval_en#3 12015 tok -> 'Paragraph 15' (27.7s/item, ~7 min left)
+  [105/120] passage_retrieval_en#4 12015 tok -> 'Paragraph 14' (27.5s/item, ~7 min left)
+  [106/120] passage_retrieval_en#5 12015 tok -> 'Paragraph 3' (27.3s/item, ~6 min left)
+  [107/120] passage_retrieval_en#6 11920 tok -> 'Paragraph 24' (27.1s/item, ~6 min left)
+  [108/120] passage_retrieval_en#7 12015 tok -> 'Paragraph 27' (26.9s/item, ~5 min left)
+  [109/120] passage_retrieval_en#8 10692 tok -> 'Paragraph 30' (26.7s/item, ~5 min left)
+  [110/120] passage_retrieval_en#9 12015 tok -> 'Paragraph 12' (26.6s/item, ~4 min left)
+  [111/120] passage_retrieval_en#10 12015 tok -> 'Paragraph 22' (26.4s/item, ~4 min left)
+  [112/120] passage_retrieval_en#11 12015 tok -> 'Paragraph 30' (26.3s/item, ~4 min left)
+  [113/120] passage_retrieval_en#12 12015 tok -> 'Paragraph 24' (26.1s/item, ~3 min left)
+  [114/120] passage_retrieval_en#13 12015 tok -> 'None of the provided paragraphs match the abstract.\n\nThe abs' (26.0s/item, ~3 min left)
+  [115/120] passage_retrieval_en#14 12015 tok -> 'Paragraph 3' (25.8s/item, ~2 min left)
+  [116/120] passage_retrieval_en#15 12015 tok -> 'Paragraph 8' (25.7s/item, ~2 min left)
+  [117/120] passage_retrieval_en#16 12015 tok -> 'Paragraph 3' (25.5s/item, ~1 min left)
+  [118/120] passage_retrieval_en#17 12015 tok -> 'Paragraph 17' (25.4s/item, ~1 min left)
+  [119/120] passage_retrieval_en#18 12015 tok -> 'Paragraph 4' (25.2s/item, ~0 min left)
+  [120/120] passage_retrieval_en#19 12015 tok -> 'Paragraph 3' (25.1s/item, ~0 min left)
+
+
+=== V3_granite-4.2-8b_kivi4_tiled_len12000.jsonl ===
+ibm-granite/granite-4.2-8b arm=kivi4_tiled preset=None quant=nf4 maxlen=12000
+                  task    n    score
+            gov_report   20    31.66
+              hotpotqa   20    30.07
+       multifieldqa_en   20    39.74
+           narrativeqa   20    22.05
+  passage_retrieval_en   20    85.00
+                qasper   20    42.81
+    MACRO(all samples)  120    41.89
+  ttft 5.83s | decode 6.3 tok/s | peak 6.42 GB | KV 0.536 GB (2.9x) | ctx 9526 tok
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V3_BEYOND_granite_kivi4_tiled_24k-32k.jsonl
+[ckpt] 0 recorded, 260 pending (of 260 generated)
+Loading weights:   0%|          | 0/363 [00:00<?, ?it/s]Loading weights:   0%|          | 1/363 [00:00<01:42,  3.53it/s]Loading weights:   1%|          | 2/363 [00:00<01:24,  4.29it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   2%|▏         | 6/363 [00:00<00:27, 13.09it/s]Loading weights:   4%|▍         | 15/363 [00:00<00:10, 32.66it/s]Loading weights:   7%|▋         | 24/363 [00:00<00:07, 47.41it/s]Loading weights:   9%|▉         | 33/363 [00:00<00:05, 58.30it/s]Loading weights:  12%|█▏        | 42/363 [00:01<00:04, 64.97it/s]Loading weights:  14%|█▍        | 51/363 [00:01<00:04, 71.30it/s]Loading weights:  17%|█▋        | 60/363 [00:01<00:03, 76.56it/s]Loading weights:  19%|█▉        | 69/363 [00:01<00:03, 79.93it/s]Loading weights:  21%|██▏       | 78/363 [00:01<00:03, 77.44it/s]Loading weights:  24%|██▎       | 86/363 [00:01<00:03, 77.92it/s]Loading weights:  26%|██▌       | 95/363 [00:01<00:03, 75.94it/s]Loading weights:  29%|██▊       | 104/363 [00:01<00:03, 74.02it/s]Loading weights:  31%|███       | 113/363 [00:01<00:03, 72.82it/s]Loading weights:  34%|███▎      | 122/363 [00:02<00:03, 71.98it/s]Loading weights:  36%|███▌      | 131/363 [00:02<00:03, 71.00it/s]Loading weights:  39%|███▊      | 140/363 [00:02<00:03, 71.78it/s]Loading weights:  41%|████      | 149/363 [00:02<00:02, 74.08it/s]Loading weights:  44%|████▍     | 159/363 [00:02<00:02, 75.65it/s]Loading weights:  46%|████▋     | 168/363 [00:02<00:02, 78.54it/s]Loading weights:  49%|████▉     | 177/363 [00:02<00:02, 80.54it/s]Loading weights:  51%|█████     | 186/363 [00:02<00:02, 81.60it/s]Loading weights:  54%|█████▎    | 195/363 [00:02<00:02, 82.73it/s]Loading weights:  56%|█████▌    | 204/363 [00:03<00:01, 83.77it/s]Loading weights:  59%|█████▊    | 213/363 [00:03<00:01, 84.56it/s]Loading weights:  61%|██████    | 222/363 [00:03<00:01, 84.59it/s]Loading weights:  64%|██████▎   | 231/363 [00:03<00:01, 85.57it/s]Loading weights:  66%|██████▌   | 240/363 [00:03<00:01, 85.28it/s]Loading weights:  69%|██████▊   | 249/363 [00:03<00:01, 85.09it/s]Loading weights:  71%|███████   | 258/363 [00:03<00:01, 84.89it/s]Loading weights:  74%|███████▎  | 267/363 [00:03<00:01, 84.89it/s]Loading weights:  76%|███████▌  | 276/363 [00:03<00:01, 85.31it/s]Loading weights:  79%|███████▊  | 285/363 [00:04<00:00, 85.94it/s]Loading weights:  81%|████████  | 294/363 [00:04<00:00, 86.51it/s]Loading weights:  83%|████████▎ | 303/363 [00:04<00:00, 85.60it/s]Loading weights:  86%|████████▌ | 312/363 [00:04<00:00, 83.84it/s]Loading weights:  88%|████████▊ | 321/363 [00:04<00:00, 84.11it/s]Loading weights:  91%|█████████ | 330/363 [00:04<00:00, 84.85it/s]Loading weights:  93%|█████████▎| 339/363 [00:04<00:00, 84.32it/s]Loading weights:  96%|█████████▌| 348/363 [00:04<00:00, 83.11it/s]Loading weights:  98%|█████████▊| 357/363 [00:04<00:00, 83.94it/s]Loading weights: 100%|██████████| 363/363 [00:04<00:00, 73.84it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/260] 24576/cwe#0 -> 'We are given a long list of numbered words (from 1' (49.5s/item, ~214 min left)
+  [2/260] 24576/cwe#1 -> 'We are asked to find the 10 most common words in t' (49.1s/item, ~211 min left)
+  [3/260] 24576/cwe#2 -> 'We are asked to find the 10 most common words in t' (49.1s/item, ~210 min left)
+  [4/260] 24576/cwe#3 -> 'We are asked to find the 10 most common words in t' (49.2s/item, ~210 min left)
+  [5/260] 24576/cwe#4 -> 'We are asked to find the 10 most common words in t' (49.2s/item, ~209 min left)
+  [6/260] 24576/cwe#5 -> 'We are asked to find the 10 most common words in t' (49.2s/item, ~208 min left)
+  [7/260] 24576/cwe#6 -> 'We are asked to find the 10 most common words in t' (49.1s/item, ~207 min left)
+  [8/260] 24576/cwe#7 -> 'We are asked to find the 10 most common words in t' (49.1s/item, ~206 min left)
+  [9/260] 24576/cwe#8 -> 'We are asked to find the 10 most common words in t' (49.1s/item, ~206 min left)
+  [10/260] 24576/cwe#9 -> 'We are asked to find the 10 most common words in t' (49.2s/item, ~205 min left)
+  [11/260] 24576/fwe#0 -> 'uojcxm  \nqicczu  \nwdeqgc' (46.8s/item, ~194 min left)
+  [12/260] 24576/fwe#1 -> 'timnmj\nvquhcu\nemrvyg' (44.6s/item, ~184 min left)
+  [13/260] 24576/fwe#2 -> 'uoyyhz\nwlaenw\nlmpsbr' (42.8s/item, ~176 min left)
+  [14/260] 24576/fwe#3 -> 'twupzi\nwlgwkl\nvukvmz' (41.2s/item, ~169 min left)
+  [15/260] 24576/fwe#4 -> 'uskhktd\nwukrrm\neyxfke' (40.0s/item, ~163 min left)
+  [16/260] 24576/fwe#5 -> 'tdxujv\nvmwtds\nkgflej' (38.7s/item, ~158 min left)
+  [17/260] 24576/fwe#6 -> 'uctvav, wqnwdq, klnvvw' (37.7s/item, ~153 min left)
+  [18/260] 24576/fwe#7 -> 'vcvlrc, voxdrs, kxmpgu' (36.7s/item, ~148 min left)
+  [19/260] 24576/fwe#8 -> 'tigysh\nvuocuc\nuzmsbx' (35.9s/item, ~144 min left)
+  [20/260] 24576/fwe#9 -> 'wgqfre\nulgwwu\nvobgph' (35.1s/item, ~140 min left)
+  [21/260] 24576/niah_multikey_1#0 -> 'The special magic number for **painful-pigpen** me' (35.6s/item, ~142 min left)
+  [22/260] 24576/niah_multikey_1#1 -> 'The text mentions several "special magic numbers" ' (36.3s/item, ~144 min left)
+  [23/260] 24576/niah_multikey_1#2 -> 'The special magic number for **hurried-tensor** me' (36.9s/item, ~146 min left)
+  [24/260] 24576/niah_multikey_1#3 -> 'The special magic number for **big-river** mention' (37.4s/item, ~147 min left)
+  [25/260] 24576/niah_multikey_1#4 -> 'The special magic number for **blue-eyed-drummer**' (38.0s/item, ~149 min left)
+  [26/260] 24576/niah_multikey_1#5 -> 'The special magic number for **handsome-lap** ment' (38.5s/item, ~150 min left)
+  [27/260] 24576/niah_multikey_1#6 -> 'The special magic number for stimulating-brown men' (38.8s/item, ~151 min left)
+  [28/260] 24576/niah_multikey_1#7 -> 'The special magic number for **salty-spiritual** m' (39.3s/item, ~152 min left)
+  [29/260] 24576/niah_multikey_1#8 -> 'The special magic number for **inconclusive-sweets' (39.7s/item, ~153 min left)
+  [30/260] 24576/niah_multikey_1#9 -> 'The special magic number for outrageous-filth ment' (40.0s/item, ~153 min left)
+  [31/260] 24576/niah_multikey_2#0 -> 'The user asks: "What is the special magic number f' (40.3s/item, ~154 min left)
+  [32/260] 24576/niah_multikey_2#1 -> 'The user asks: "What is the special magic number f' (40.9s/item, ~156 min left)
+  [33/260] 24576/niah_multikey_2#2 -> 'The user asks: "What is the special magic number f' (41.3s/item, ~156 min left)
+  [34/260] 24576/niah_multikey_2#3 -> 'The user asks: "What is the special magic number f' (41.6s/item, ~157 min left)
+  [35/260] 24576/niah_multikey_2#4 -> 'The user asks: "What is the special magic number f' (41.9s/item, ~157 min left)
+  [36/260] 24576/niah_multikey_2#5 -> 'The special magic number for **wooden-osmosis** me' (41.9s/item, ~156 min left)
+  [37/260] 24576/niah_multikey_2#6 -> 'The user asks: "What is the special magic number f' (42.1s/item, ~156 min left)
+  [38/260] 24576/niah_multikey_2#7 -> 'The user asks: "What is the special magic number f' (42.3s/item, ~157 min left)
+  [39/260] 24576/niah_multikey_2#8 -> 'The user asks: "What is the special magic number f' (42.6s/item, ~157 min left)
+  [40/260] 24576/niah_multikey_2#9 -> 'The user asks: "What is the special magic number f' (42.8s/item, ~157 min left)
+  [41/260] 24576/niah_multikey_3#0 -> 'The special magic UUID mentioned in the provided t' (43.0s/item, ~157 min left)
+  [42/260] 24576/niah_multikey_3#1 -> 'The special magic UUID mentioned in the provided t' (43.0s/item, ~156 min left)
+  [43/260] 24576/niah_multikey_3#2 -> 'The special magic UUID mentioned in the provided t' (43.2s/item, ~156 min left)
+  [44/260] 24576/niah_multikey_3#3 -> 'The special magic UUID mentioned in the text for `' (43.4s/item, ~156 min left)
+  [45/260] 24576/niah_multikey_3#4 -> 'The special magic UUID mentioned in the text for `' (43.5s/item, ~156 min left)
+  [46/260] 24576/niah_multikey_3#5 -> 'The special magic UUID mentioned in the text for `' (43.8s/item, ~156 min left)
+  [47/260] 24576/niah_multikey_3#6 -> 'The special magic UUID for `25b83368-3e6a-4edb-962' (44.1s/item, ~156 min left)
+  [48/260] 24576/niah_multikey_3#7 -> 'The special magic UUID mentioned in the provided t' (44.2s/item, ~156 min left)
+  [49/260] 24576/niah_multikey_3#8 -> 'The special magic UUID mentioned in the text for `' (44.3s/item, ~156 min left)
+  [50/260] 24576/niah_multikey_3#9 -> 'The special magic UUID mentioned in the provided t' (44.5s/item, ~156 min left)
+  [51/260] 24576/niah_multiquery#0 -> 'Let\'s carefully extract all the "special magic num' (44.6s/item, ~155 min left)
+  [52/260] 24576/niah_multiquery#1 -> 'Let\'s carefully extract all the "special magic num' (44.7s/item, ~155 min left)
+  [53/260] 24576/niah_multiquery#2 -> 'Let\'s carefully extract all the "special magic num' (44.8s/item, ~155 min left)
+  [54/260] 24576/niah_multiquery#3 -> 'Let\'s carefully extract all the "special magic num' (45.0s/item, ~155 min left)
+  [55/260] 24576/niah_multiquery#4 -> 'Let\'s carefully extract all the "special magic num' (45.1s/item, ~154 min left)
+  [56/260] 24576/niah_multiquery#5 -> 'Let\'s carefully extract all the "special magic num' (45.2s/item, ~154 min left)
+  [57/260] 24576/niah_multiquery#6 -> 'Let\'s carefully extract all the "special magic num' (45.3s/item, ~153 min left)
+  [58/260] 24576/niah_multiquery#7 -> 'Based on the provided text, we need to extract all' (45.4s/item, ~153 min left)
+
+===== start Sun Oct 18 16:59:54 2026 =====
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V3_granite_kivi4_tiled.jsonl
+[ckpt] 6 points already recorded
+  skip kivi4_tiled@16384 (done: ok)
+  skip kivi4_tiled@32768 (done: ok)
+  skip kivi4_tiled@49152 (done: ok)
+  skip kivi4_tiled@65536 (done: ok)
+  skip kivi4_tiled@98304 (done: ok)
+  skip kivi4_tiled@131072 (done: spilled)
+
+
+=== V3_granite_kivi4_tiled.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_tiled    16384    16384      6.78     36.4    0.910       ok
+kivi4_tiled    32768    32768      7.55     68.1    1.686       ok
+kivi4_tiled    49152    49152      8.33    105.3    2.462       ok
+kivi4_tiled    65536    65536      9.11    147.0    3.238       ok
+kivi4_tiled    98304    98304     10.66    245.6    4.790       ok
+kivi4_tiled   131072   131072     12.21    467.9    6.342  spilled
+  kivi4_tiled: 0.0473 GB per 1k tokens, floor 6.00 GB  (max OK 98304 tok @ 10.66 GB)
+         predicted ceiling ~128,910 tok on a 12.9 GB card
+         first spill at 131072 tok (12.21 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V3_Qwen3.5-4B_kivi4_tiled.jsonl
+[ckpt] 6 points already recorded
+  skip kivi4_tiled@65536 (done: ok)
+  skip kivi4_tiled@98304 (done: ok)
+  skip kivi4_tiled@131072 (done: ok)
+  skip kivi4_tiled@163840 (done: ok)
+  skip kivi4_tiled@196608 (done: ok)
+  skip kivi4_tiled@262144 (done: ok)
+
+
+=== V3_Qwen3.5-4B_kivi4_tiled.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_tiled    65536    65536      3.90     55.8    0.639       ok
+kivi4_tiled    98304    98304      4.21     85.0    0.946       ok
+kivi4_tiled   131072   131072      4.52    119.7    1.252       ok
+kivi4_tiled   163840   163840      4.82    159.6    1.558       ok
+kivi4_tiled   196608   196608      5.13    204.8    1.864       ok
+kivi4_tiled   262144   262144      5.74    309.2    2.476       ok
+  kivi4_tiled: 0.0093 GB per 1k tokens, floor 3.29 GB  (max OK 262144 tok @ 5.74 GB)
+         predicted ceiling ~943,292 tok on a 12.9 GB card
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\longbench\V3_granite-4.2-8b_kivi4_tiled_len12000.jsonl
+[ckpt] 120 items already recorded
+[ckpt] 0 items pending
+nothing to do; scoring what is on disk
+
+=== V3_granite-4.2-8b_kivi4_tiled_len12000.jsonl ===
+ibm-granite/granite-4.2-8b arm=kivi4_tiled preset=None quant=nf4 maxlen=12000
+                  task    n    score
+            gov_report   20    31.66
+              hotpotqa   20    30.07
+       multifieldqa_en   20    39.74
+           narrativeqa   20    22.05
+  passage_retrieval_en   20    85.00
+                qasper   20    42.81
+    MACRO(all samples)  120    41.89
+  ttft 5.83s | decode 6.3 tok/s | peak 6.42 GB | KV 0.536 GB (2.9x) | ctx 9526 tok
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V3_BEYOND_granite_kivi4_tiled_24k-32k.jsonl
+[ckpt] 58 recorded, 202 pending (of 260 generated)
+Loading weights:   0%|          | 0/363 [00:00<?, ?it/s]Loading weights:   0%|          | 1/363 [00:00<04:40,  1.29it/s]Loading weights:   1%|          | 2/363 [00:01<04:27,  1.35it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   1%|          | 4/363 [00:01<01:58,  3.03it/s]Loading weights:   2%|▏         | 6/363 [00:01<01:17,  4.58it/s]Loading weights:   3%|▎         | 10/363 [00:01<00:38,  9.26it/s]Loading weights:   4%|▎         | 13/363 [00:02<00:27, 12.56it/s]Loading weights:   4%|▍         | 16/363 [00:02<00:28, 12.01it/s]Loading weights:   6%|▌         | 22/363 [00:02<00:19, 17.70it/s]Loading weights:   7%|▋         | 25/363 [00:02<00:23, 14.51it/s]Loading weights:   9%|▊         | 31/363 [00:03<00:17, 18.71it/s]Loading weights:   9%|▉         | 34/363 [00:03<00:18, 18.09it/s]Loading weights:  11%|█         | 40/363 [00:03<00:14, 22.29it/s]Loading weights:  12%|█▏        | 43/363 [00:03<00:15, 20.57it/s]Loading weights:  13%|█▎        | 49/363 [00:03<00:12, 24.59it/s]Loading weights:  14%|█▍        | 52/363 [00:03<00:14, 22.20it/s]Loading weights:  16%|█▌        | 58/363 [00:04<00:11, 25.76it/s]Loading weights:  17%|█▋        | 61/363 [00:04<00:13, 23.21it/s]Loading weights:  18%|█▊        | 67/363 [00:04<00:11, 26.75it/s]Loading weights:  19%|█▉        | 70/363 [00:04<00:12, 23.37it/s]Loading weights:  21%|██        | 76/363 [00:04<00:10, 26.86it/s]Loading weights:  22%|██▏       | 79/363 [00:05<00:13, 21.75it/s]Loading weights:  23%|██▎       | 82/363 [00:05<00:12, 22.73it/s]Loading weights:  23%|██▎       | 85/363 [00:05<00:12, 22.15it/s]Loading weights:  24%|██▍       | 88/363 [00:05<00:14, 19.07it/s]Loading weights:  25%|██▌       | 91/363 [00:05<00:13, 20.68it/s]Loading weights:  26%|██▌       | 94/363 [00:05<00:13, 20.41it/s]Loading weights:  27%|██▋       | 97/363 [00:05<00:14, 18.22it/s]Loading weights:  28%|██▊       | 103/363 [00:06<00:11, 23.23it/s]Loading weights:  29%|██▉       | 106/363 [00:06<00:12, 20.71it/s]Loading weights:  31%|███       | 112/363 [00:06<00:10, 24.34it/s]Loading weights:  32%|███▏      | 115/363 [00:06<00:11, 21.37it/s]Loading weights:  33%|███▎      | 121/363 [00:06<00:10, 23.62it/s]Loading weights:  34%|███▍      | 124/363 [00:07<00:11, 20.13it/s]Loading weights:  36%|███▌      | 130/363 [00:07<00:09, 23.88it/s]Loading weights:  37%|███▋      | 133/363 [00:07<00:10, 21.11it/s]Loading weights:  38%|███▊      | 139/363 [00:07<00:09, 24.60it/s]Loading weights:  39%|███▉      | 142/363 [00:07<00:10, 21.96it/s]Loading weights:  41%|████      | 148/363 [00:08<00:08, 25.45it/s]Loading weights:  42%|████▏     | 151/363 [00:08<00:09, 22.11it/s]Loading weights:  43%|████▎     | 157/363 [00:08<00:08, 25.10it/s]Loading weights:  44%|████▍     | 160/363 [00:08<00:09, 21.81it/s]Loading weights:  46%|████▌     | 166/363 [00:08<00:07, 25.39it/s]Loading weights:  47%|████▋     | 169/363 [00:09<00:08, 22.15it/s]Loading weights:  48%|████▊     | 175/363 [00:09<00:07, 25.32it/s]Loading weights:  49%|████▉     | 178/363 [00:09<00:08, 21.85it/s]Loading weights:  51%|█████     | 184/363 [00:09<00:07, 24.75it/s]Loading weights:  52%|█████▏    | 187/363 [00:09<00:08, 21.76it/s]Loading weights:  53%|█████▎    | 193/363 [00:10<00:07, 24.16it/s]Loading weights:  54%|█████▍    | 196/363 [00:10<00:08, 20.87it/s]Loading weights:  56%|█████▌    | 202/363 [00:10<00:06, 24.14it/s]Loading weights:  56%|█████▋    | 205/363 [00:10<00:07, 21.34it/s]Loading weights:  58%|█████▊    | 211/363 [00:10<00:06, 24.63it/s]Loading weights:  59%|█████▉    | 214/363 [00:11<00:06, 21.55it/s]Loading weights:  61%|██████    | 220/363 [00:11<00:05, 24.48it/s]Loading weights:  61%|██████▏   | 223/363 [00:11<00:06, 21.53it/s]Loading weights:  63%|██████▎   | 229/363 [00:11<00:05, 24.76it/s]Loading weights:  64%|██████▍   | 232/363 [00:11<00:06, 21.41it/s]Loading weights:  66%|██████▌   | 238/363 [00:11<00:05, 24.49it/s]Loading weights:  66%|██████▋   | 241/363 [00:12<00:05, 21.23it/s]Loading weights:  68%|██████▊   | 247/363 [00:12<00:04, 24.59it/s]Loading weights:  69%|██████▉   | 250/363 [00:12<00:05, 21.44it/s]Loading weights:  71%|███████   | 256/363 [00:12<00:04, 24.58it/s]Loading weights:  71%|███████▏  | 259/363 [00:12<00:04, 21.43it/s]Loading weights:  73%|███████▎  | 265/363 [00:13<00:03, 24.52it/s]Loading weights:  74%|███████▍  | 268/363 [00:13<00:04, 21.51it/s]Loading weights:  75%|███████▌  | 274/363 [00:13<00:03, 24.39it/s]Loading weights:  76%|███████▋  | 277/363 [00:13<00:03, 21.60it/s]Loading weights:  78%|███████▊  | 283/363 [00:13<00:03, 24.80it/s]Loading weights:  79%|███████▉  | 286/363 [00:14<00:03, 21.71it/s]Loading weights:  80%|████████  | 292/363 [00:14<00:02, 24.86it/s]Loading weights:  81%|████████▏ | 295/363 [00:14<00:03, 21.79it/s]Loading weights:  83%|████████▎ | 301/363 [00:14<00:02, 24.83it/s]Loading weights:  84%|████████▎ | 304/363 [00:14<00:02, 21.80it/s]Loading weights:  85%|████████▌ | 310/363 [00:15<00:02, 24.89it/s]Loading weights:  86%|████████▌ | 313/363 [00:15<00:02, 21.93it/s]Loading weights:  88%|████████▊ | 319/363 [00:15<00:01, 24.97it/s]Loading weights:  89%|████████▊ | 322/363 [00:15<00:01, 21.75it/s]Loading weights:  90%|█████████ | 328/363 [00:15<00:01, 24.82it/s]Loading weights:  91%|█████████ | 331/363 [00:16<00:01, 21.70it/s]Loading weights:  93%|█████████▎| 337/363 [00:16<00:01, 24.91it/s]Loading weights:  94%|█████████▎| 340/363 [00:16<00:01, 21.77it/s]Loading weights:  95%|█████████▌| 346/363 [00:16<00:00, 24.86it/s]Loading weights:  96%|█████████▌| 349/363 [00:16<00:00, 21.63it/s]Loading weights:  98%|█████████▊| 355/363 [00:17<00:00, 24.64it/s]Loading weights:  99%|█████████▊| 358/363 [00:17<00:00, 21.09it/s]Loading weights: 100%|██████████| 363/363 [00:17<00:00, 20.94it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/202] 24576/niah_multiquery#8 -> 'Let\'s carefully extract all the "special magic num' (50.8s/item, ~170 min left)
+  [2/202] 24576/niah_multiquery#9 -> 'Let\'s carefully extract all the "special magic num' (50.3s/item, ~168 min left)
+  [3/202] 24576/niah_multivalue#0 -> 'Let\'s carefully extract all the "special magic num' (50.2s/item, ~166 min left)
+  [4/202] 24576/niah_multivalue#1 -> 'The text mentions **three** special magic numbers ' (50.1s/item, ~165 min left)
+  [5/202] 24576/niah_multivalue#2 -> 'Let\'s carefully extract all the "special magic num' (50.1s/item, ~164 min left)
+  [6/202] 24576/niah_multivalue#3 -> 'Let\'s carefully extract all the "special magic num' (50.1s/item, ~164 min left)
+  [7/202] 24576/niah_multivalue#4 -> 'Let\'s carefully extract all the "special magic num' (50.1s/item, ~163 min left)
+  [8/202] 24576/niah_multivalue#5 -> 'Let\'s carefully extract all the "special magic num' (50.1s/item, ~162 min left)
+  [9/202] 24576/niah_multivalue#6 -> 'Let\'s carefully extract all the "special magic num' (50.0s/item, ~161 min left)
+  [10/202] 24576/niah_multivalue#7 -> 'Let\'s carefully extract all the "special magic num' (50.0s/item, ~160 min left)
+  [11/202] 24576/niah_multivalue#8 -> 'Let\'s carefully extract all the "special magic num' (50.4s/item, ~160 min left)
+  [12/202] 24576/niah_multivalue#9 -> 'Let\'s carefully extract all the "special magic num' (50.4s/item, ~160 min left)
+  [13/202] 24576/niah_single_1#0 -> 'The special magic number mentioned in the text is:' (49.4s/item, ~156 min left)
+  [14/202] 24576/niah_single_1#1 -> 'The special magic number mentioned in the text is:' (47.7s/item, ~150 min left)
+  [15/202] 24576/niah_single_1#2 -> 'The special magic number mentioned in the text is:' (46.3s/item, ~144 min left)
+  [16/202] 24576/niah_single_1#3 -> 'The special magic number mentioned in the text is:' (45.6s/item, ~141 min left)
+  [17/202] 24576/niah_single_1#4 -> 'The special magic number mentioned in the text is:' (44.4s/item, ~137 min left)
+  [18/202] 24576/niah_single_1#5 -> 'The special magic number mentioned in the text is:' (43.4s/item, ~133 min left)
+  [19/202] 24576/niah_single_1#6 -> 'The special magic number mentioned in the text is:' (43.4s/item, ~132 min left)
+  [20/202] 24576/niah_single_1#7 -> 'The special magic number mentioned in the text is:' (42.6s/item, ~129 min left)
+  [21/202] 24576/niah_single_1#8 -> 'The special magic number mentioned in the text is:' (41.9s/item, ~126 min left)
+  [22/202] 24576/niah_single_1#9 -> 'The special magic number mentioned in the text is:' (41.7s/item, ~125 min left)
+  [23/202] 24576/niah_single_2#0 -> 'The special magic number for "uncovered-turkey" me' (41.7s/item, ~124 min left)
+  [24/202] 24576/niah_single_2#1 -> 'The special magic number for roasted-poetry mentio' (42.0s/item, ~125 min left)
+  [25/202] 24576/niah_single_2#2 -> 'The special magic number mentioned in the text is:' (42.1s/item, ~124 min left)
+  [26/202] 24576/niah_single_2#3 -> 'The special magic number for vague-shear mentioned' (42.4s/item, ~124 min left)
+  [27/202] 24576/niah_single_2#4 -> 'The special magic number for aggressive-psychology' (42.6s/item, ~124 min left)
+  [28/202] 24576/niah_single_2#5 -> 'The special magic number for fair-yogurt mentioned' (42.6s/item, ~124 min left)
+  [29/202] 24576/niah_single_2#6 -> 'The special magic number for shiny-fleece mentione' (42.5s/item, ~123 min left)
+  [30/202] 24576/niah_single_2#7 -> 'The special magic number for solid-sanction mentio' (42.4s/item, ~122 min left)
+  [31/202] 24576/niah_single_2#8 -> 'The special magic number for dark-boyhood mentione' (42.7s/item, ~122 min left)
+  [32/202] 24576/niah_single_2#9 -> 'The special magic number for annoying-doorbell men' (42.5s/item, ~120 min left)
+  [33/202] 24576/niah_single_3#0 -> 'The special magic uuid for silky-mapping mentioned' (42.7s/item, ~120 min left)
+  [34/202] 24576/niah_single_3#1 -> 'The special magic UUID for therapeutic-catsup ment' (43.0s/item, ~120 min left)
+  [35/202] 24576/niah_single_3#2 -> 'The special magic UUID for dark-boyhood mentioned ' (43.2s/item, ~120 min left)
+  [36/202] 24576/niah_single_3#3 -> 'The special magic UUID mentioned in the text is:\n\n' (43.4s/item, ~120 min left)
+  [37/202] 24576/niah_single_3#4 -> 'The special magic uuid for lush-tornado mentioned ' (43.6s/item, ~120 min left)
+  [38/202] 24576/niah_single_3#5 -> 'The special magic uuid for screeching-drag mention' (43.8s/item, ~120 min left)
+  [39/202] 24576/niah_single_3#6 -> 'The special magic uuid mentioned in the text is:\n\n' (44.0s/item, ~120 min left)
+  [40/202] 24576/niah_single_3#7 -> 'The special magic uuid for deranged-asparagus ment' (44.1s/item, ~119 min left)
+  [41/202] 24576/niah_single_3#8 -> 'The special magic uuid for stale-spaghetti mention' (44.3s/item, ~119 min left)
+  [42/202] 24576/niah_single_3#9 -> 'The special magic uuid for yummy-dynasty mentioned' (44.4s/item, ~118 min left)
+  [43/202] 24576/qa_1#0 -> 'France' (43.8s/item, ~116 min left)
+  [44/202] 24576/qa_1#1 -> 'The Normans were in Normandy from the 10th century' (43.3s/item, ~114 min left)
+  [45/202] 24576/qa_1#2 -> 'Norse originated from Denmark, Iceland, Norway, an' (42.9s/item, ~112 min left)
+  [46/202] 24576/qa_1#3 -> 'Rollo' (42.3s/item, ~110 min left)
+  [47/202] 24576/qa_1#4 -> '10th century' (41.8s/item, ~108 min left)
+  [48/202] 24576/qa_1#5 -> 'William II of Normandy' (41.3s/item, ~106 min left)
+  [49/202] 24576/qa_1#6 -> 'The documents indicate that the Normans formed the' (41.0s/item, ~104 min left)
+  [50/202] 24576/qa_1#7 -> 'The Normans were primarily Catholic.' (40.5s/item, ~103 min left)
+  [51/202] 24576/qa_1#8 -> 'Norman comes from the French words Normans/Normanz' (40.2s/item, ~101 min left)
+  [52/202] 24576/qa_1#9 -> '9th century' (39.8s/item, ~99 min left)
+  [53/202] 24576/qa_2#0 -> 'No' (39.4s/item, ~98 min left)
+  [54/202] 24576/qa_2#1 -> 'There is no document indicating that a woman portr' (39.1s/item, ~96 min left)
+  [55/202] 24576/qa_2#2 -> 'Animorphs' (38.7s/item, ~95 min left)
+  [56/202] 24576/qa_2#3 -> 'Yes' (38.4s/item, ~93 min left)
+  [57/202] 24576/qa_2#4 -> 'The question asks: "The director of the romantic c' (38.1s/item, ~92 min left)
+  [58/202] 24576/qa_2#5 -> 'YG Entertainment' (37.8s/item, ~91 min left)
+  [59/202] 24576/qa_2#6 -> 'No one in the provided documents matches both crit' (37.5s/item, ~89 min left)
+  [60/202] 24576/qa_2#7 -> '3,677' (37.2s/item, ~88 min left)
+  [61/202] 24576/qa_2#8 -> 'Terry Richardson' (36.9s/item, ~87 min left)
+  [62/202] 24576/qa_2#9 -> 'Yes' (36.6s/item, ~85 min left)
+  [63/202] 24576/vt#0 -> 'We are asked to find all variables that are assign' (36.4s/item, ~84 min left)
+  [64/202] 24576/vt#1 -> 'We are asked to find all variables that are assign' (36.3s/item, ~83 min left)
+  [65/202] 24576/vt#2 -> 'We are asked to find all variables that are assign' (36.1s/item, ~82 min left)
+  [66/202] 24576/vt#3 -> 'We are asked to find all variables that are assign' (35.9s/item, ~81 min left)
+  [67/202] 24576/vt#4 -> 'We are asked to find all variables that are assign' (35.8s/item, ~81 min left)
+  [68/202] 24576/vt#5 -> 'We are asked to **find all variables that are assi' (35.6s/item, ~80 min left)
+  [69/202] 24576/vt#6 -> 'We are asked to find all variables that are assign' (35.5s/item, ~79 min left)
+  [70/202] 24576/vt#7 -> 'We are asked to find all variables that are assign' (35.4s/item, ~78 min left)
+  [71/202] 24576/vt#8 -> 'We are asked to find all variables that are assign' (35.2s/item, ~77 min left)
+  [72/202] 24576/vt#9 -> 'We are asked to find all variables that are assign' (35.1s/item, ~76 min left)
+  [73/202] 32768/cwe#0 -> 'We are asked to find the 10 most common words in t' (35.5s/item, ~76 min left)
+  [74/202] 32768/cwe#1 -> 'We are given a long numbered list of words (first ' (35.9s/item, ~77 min left)
+  [75/202] 32768/cwe#2 -> 'We are asked to find the 10 most common words in t' (36.2s/item, ~77 min left)
+  [76/202] 32768/cwe#3 -> 'We are asked to find the 10 most common words in t' (36.6s/item, ~77 min left)
+  [77/202] 32768/cwe#4 -> 'We are asked to find the 10 most common words in t' (37.0s/item, ~77 min left)
+  [78/202] 32768/cwe#5 -> 'We are asked to find the 10 most common words in t' (37.3s/item, ~77 min left)
+  [79/202] 32768/cwe#6 -> 'We are asked: "What are the 10 most common words i' (37.6s/item, ~77 min left)
+  [80/202] 32768/cwe#7 -> 'We are given a long numbered list of words (first ' (38.0s/item, ~77 min left)
+  [81/202] 32768/cwe#8 -> 'We are asked to find the 10 most common words in t' (38.3s/item, ~77 min left)
+  [82/202] 32768/cwe#9 -> 'We are given a long numbered list of words (from 1' (38.6s/item, ~77 min left)
+  [83/202] 32768/fwe#0 -> 'tgjovi\ntvorfz\nklfedo' (38.4s/item, ~76 min left)
+  [84/202] 32768/fwe#1 -> 'tywcou\njyfeeh\nuzvcls' (38.3s/item, ~75 min left)
+  [85/202] 32768/fwe#2 -> 'tmzbeq, unqtbr, joeews' (38.2s/item, ~74 min left)
+  [86/202] 32768/fwe#3 -> 'tuhuto\njsuzzi\nuvaezr' (38.0s/item, ~74 min left)
+  [87/202] 32768/fwe#4 -> 'szskug\nukwozw\nirphlx' (37.9s/item, ~73 min left)
+  [88/202] 32768/fwe#5 -> 'swkywm\ntpynpq\njqplce' (37.7s/item, ~72 min left)
+  [89/202] 32768/fwe#6 -> 'tmmakv\nungxwr\njvblrn' (37.7s/item, ~71 min left)
+  [90/202] 32768/fwe#7 -> 'suqsdg\njfmfxz\nuchvil' (37.6s/item, ~70 min left)
+  [91/202] 32768/fwe#8 -> 'tuknkf, jtsrkv, upggys' (37.5s/item, ~69 min left)
+  [92/202] 32768/fwe#9 -> 'tczzpm\nueooyb\njzbckl' (37.4s/item, ~69 min left)
+  [93/202] 32768/niah_multikey_1#0 -> 'The special magic number for **roomy-extent** ment' (37.7s/item, ~69 min left)
+  [94/202] 32768/niah_multikey_1#1 -> 'The text contains multiple references to "special ' (38.0s/item, ~68 min left)
+  [95/202] 32768/niah_multikey_1#2 -> 'The text mentions several "special magic numbers" ' (38.3s/item, ~68 min left)
+  [96/202] 32768/niah_multikey_1#3 -> 'The special magic number for **blue-eyed-drummer**' (38.5s/item, ~68 min left)
+  [97/202] 32768/niah_multikey_1#4 -> 'The special magic number for **handsome-lap** ment' (38.7s/item, ~68 min left)
+  [98/202] 32768/niah_multikey_1#5 -> 'The text mentions a "special magic number" in the ' (38.9s/item, ~67 min left)
+  [99/202] 32768/niah_multikey_1#6 -> 'The text contains multiple references to "special ' (39.2s/item, ~67 min left)
+  [100/202] 32768/niah_multikey_1#7 -> 'The text mentions:\n\n> "One of the special magic nu' (39.5s/item, ~67 min left)
+  [101/202] 32768/niah_multikey_1#8 -> 'The text mentions several "special magic numbers,"' (39.7s/item, ~67 min left)
+  [102/202] 32768/niah_multikey_1#9 -> 'The text mentions:\n\n> "One of the special magic nu' (40.0s/item, ~67 min left)
+  [103/202] 32768/niah_multikey_2#0 -> 'The user asks: "What is the special magic number f' (40.2s/item, ~66 min left)
+  [104/202] 32768/niah_multikey_2#1 -> 'The text provided contains many entries of the for' (40.5s/item, ~66 min left)
+  [105/202] 32768/niah_multikey_2#2 -> 'The user asks: "What is the special magic number f' (40.7s/item, ~66 min left)
+  [106/202] 32768/niah_multikey_2#3 -> 'The user asks: "What is the special magic number f' (41.0s/item, ~66 min left)
+  [107/202] 32768/niah_multikey_2#4 -> 'The user asks: "What is the special magic number f' (41.2s/item, ~65 min left)
+  [108/202] 32768/niah_multikey_2#5 -> 'The special magic number for **observant-spud** me' (41.2s/item, ~65 min left)
+  [109/202] 32768/niah_multikey_2#6 -> 'The user asks: "What is the special magic number f' (41.5s/item, ~64 min left)
+  [110/202] 32768/niah_multikey_2#7 -> 'The user asks: "What is the special magic number f' (41.7s/item, ~64 min left)
+  [111/202] 32768/niah_multikey_2#8 -> 'The user asks: "What is the special magic number f' (41.9s/item, ~64 min left)
+  [112/202] 32768/niah_multikey_2#9 -> 'The user asks: "What is the special magic number f' (42.1s/item, ~63 min left)
+  [113/202] 32768/niah_multikey_3#0 -> 'The user asks: "What is the special magic uuid for' (42.3s/item, ~63 min left)
+  [114/202] 32768/niah_multikey_3#1 -> 'The user asks: "What is the special magic uuid for' (42.5s/item, ~62 min left)
+  [115/202] 32768/niah_multikey_3#2 -> 'The special magic UUID mentioned in the text for `' (42.7s/item, ~62 min left)
+  [116/202] 32768/niah_multikey_3#3 -> 'The user asks: "What is the special magic uuid for' (42.9s/item, ~62 min left)
+  [117/202] 32768/niah_multikey_3#4 -> 'The special magic UUID mentioned in the text for `' (43.2s/item, ~61 min left)
+  [118/202] 32768/niah_multikey_3#5 -> 'The user asks: "What is the special magic uuid for' (43.3s/item, ~61 min left)
+  [119/202] 32768/niah_multikey_3#6 -> 'The user asks: "What is the special magic uuid for' (43.5s/item, ~60 min left)
+  [120/202] 32768/niah_multikey_3#7 -> 'The special magic UUID mentioned in the text for `' (43.7s/item, ~60 min left)
+  [121/202] 32768/niah_multikey_3#8 -> 'The user asks: "What is the special magic uuid for' (43.9s/item, ~59 min left)
+  [122/202] 32768/niah_multikey_3#9 -> 'The special magic UUID mentioned in the text for `' (44.1s/item, ~59 min left)
+  [123/202] 32768/niah_multiquery#0 -> 'Let\'s carefully extract all the "special magic num' (44.3s/item, ~58 min left)
+  [124/202] 32768/niah_multiquery#1 -> 'Based on the provided text, the only explicit ment' (44.5s/item, ~58 min left)
+  [125/202] 32768/niah_multiquery#2 -> 'Let\'s carefully extract all the "special magic num' (44.7s/item, ~57 min left)
+  [126/202] 32768/niah_multiquery#3 -> 'Let\'s carefully extract all the "special magic num' (44.8s/item, ~57 min left)
+  [127/202] 32768/niah_multiquery#4 -> 'Let\'s carefully extract all the "special magic num' (45.0s/item, ~56 min left)
+  [128/202] 32768/niah_multiquery#5 -> 'Based on the provided text, the "special magic num' (45.2s/item, ~56 min left)
+  [129/202] 32768/niah_multiquery#6 -> 'Let\'s carefully extract all the "special magic num' (45.3s/item, ~55 min left)
+  [130/202] 32768/niah_multiquery#7 -> 'Let\'s carefully extract all the "special magic num' (45.5s/item, ~55 min left)
+  [131/202] 32768/niah_multiquery#8 -> 'Let\'s carefully extract all the "special magic num' (45.6s/item, ~54 min left)
+  [132/202] 32768/niah_multiquery#9 -> 'Based on the provided text, the only explicit "spe' (45.8s/item, ~53 min left)
+  [133/202] 32768/niah_multivalue#0 -> 'Let\'s carefully extract all the "special magic num' (45.9s/item, ~53 min left)
+  [134/202] 32768/niah_multivalue#1 -> 'The text mentions **three** occurrences of the phr' (46.1s/item, ~52 min left)
+  [135/202] 32768/niah_multivalue#2 -> 'Let\'s carefully extract all the "special magic num' (46.2s/item, ~52 min left)
+  [136/202] 32768/niah_multivalue#3 -> 'Let\'s carefully extract all the "special magic num' (46.4s/item, ~51 min left)
+  [137/202] 32768/niah_multivalue#4 -> 'Let\'s carefully extract all the "special magic num' (46.5s/item, ~50 min left)
+  [138/202] 32768/niah_multivalue#5 -> 'Let\'s carefully extract all the "special magic num' (46.7s/item, ~50 min left)
+  [139/202] 32768/niah_multivalue#6 -> 'Let\'s carefully extract all the "special magic num' (46.8s/item, ~49 min left)
+  [140/202] 32768/niah_multivalue#7 -> 'Let\'s carefully extract all the "special magic num' (47.0s/item, ~49 min left)
+  [141/202] 32768/niah_multivalue#8 -> 'Let\'s carefully extract all the "special magic num' (47.1s/item, ~48 min left)
+  [142/202] 32768/niah_multivalue#9 -> 'Let\'s carefully extract all the "special magic num' (47.2s/item, ~47 min left)
+  [143/202] 32768/niah_single_1#0 -> 'The special magic number mentioned in the text is:' (47.2s/item, ~46 min left)
+  [144/202] 32768/niah_single_1#1 -> 'The special magic number mentioned in the text is:' (47.2s/item, ~46 min left)
+  [145/202] 32768/niah_single_1#2 -> 'The special magic number mentioned in the text is:' (47.2s/item, ~45 min left)
+  [146/202] 32768/niah_single_1#3 -> 'The special magic number mentioned in the text is:' (47.2s/item, ~44 min left)
+  [147/202] 32768/niah_single_1#4 -> 'The special magic number mentioned in the text is:' (47.2s/item, ~43 min left)
+  [148/202] 32768/niah_single_1#5 -> 'The special magic number mentioned in the text is:' (47.2s/item, ~43 min left)
+  [149/202] 32768/niah_single_1#6 -> 'The special magic number mentioned in the text is:' (47.2s/item, ~42 min left)
+  [150/202] 32768/niah_single_1#7 -> 'The special magic number mentioned in the text is:' (47.2s/item, ~41 min left)
+  [151/202] 32768/niah_single_1#8 -> 'The special magic number mentioned in the text is:' (47.2s/item, ~40 min left)
+  [152/202] 32768/niah_single_1#9 -> 'The special magic number mentioned in the text is:' (47.2s/item, ~39 min left)
+  [153/202] 32768/niah_single_2#0 -> 'The special magic number for uncovered-turkey ment' (47.4s/item, ~39 min left)
+  [154/202] 32768/niah_single_2#1 -> 'The special magic number for roasted-poetry mentio' (47.4s/item, ~38 min left)
+  [155/202] 32768/niah_single_2#2 -> 'The special magic number mentioned in the text is:' (47.5s/item, ~37 min left)
+  [156/202] 32768/niah_single_2#3 -> 'The special magic number for vague-shear mentioned' (47.6s/item, ~36 min left)
+  [157/202] 32768/niah_single_2#4 -> 'The text mentions a "special magic number for aggr' (47.7s/item, ~36 min left)
+  [158/202] 32768/niah_single_2#5 -> 'The text mentions a "special magic number for fair' (47.8s/item, ~35 min left)
+  [159/202] 32768/niah_single_2#6 -> 'The special magic number for shiny-fleece mentione' (47.9s/item, ~34 min left)
+  [160/202] 32768/niah_single_2#7 -> 'The special magic number for solid-sanction mentio' (48.0s/item, ~34 min left)
+  [161/202] 32768/niah_single_2#8 -> 'The text mentions:\n\n> "One of the special magic nu' (48.1s/item, ~33 min left)
+  [162/202] 32768/niah_single_2#9 -> 'The special magic number for annoying-doorbell men' (48.2s/item, ~32 min left)
+  [163/202] 32768/niah_single_3#0 -> 'The special magic UUID mentioned in the text is:\n\n' (48.3s/item, ~31 min left)
+  [164/202] 32768/niah_single_3#1 -> 'The special magic uuid for deranged-assurance ment' (48.4s/item, ~31 min left)
+  [165/202] 32768/niah_single_3#2 -> 'The special magic uuid for screeching-drag mention' (48.5s/item, ~30 min left)
+  [166/202] 32768/niah_single_3#3 -> 'The special magic UUID mentioned in the text is:\n\n' (48.6s/item, ~29 min left)
+  [167/202] 32768/niah_single_3#4 -> 'The special magic UUID mentioned in the text is:\n\n' (48.7s/item, ~28 min left)
+  [168/202] 32768/niah_single_3#5 -> 'The special magic uuid for stale-spaghetti mention' (48.8s/item, ~28 min left)
+  [169/202] 32768/niah_single_3#6 -> 'The special magic uuid for yummy-dynasty mentioned' (48.9s/item, ~27 min left)
+  [170/202] 32768/niah_single_3#7 -> 'The special magic UUID mentioned in the text is:\n\n' (49.0s/item, ~26 min left)
+  [171/202] 32768/niah_single_3#8 -> 'The special magic uuid for raspy-common mentioned ' (49.1s/item, ~25 min left)
+  [172/202] 32768/niah_single_3#9 -> 'The special magic uuid for bizarre-skirt mentioned' (49.3s/item, ~25 min left)
+  [173/202] 32768/qa_1#0 -> 'France' (49.1s/item, ~24 min left)
+  [174/202] 32768/qa_1#1 -> 'The Normans were in Normandy from the 10th century' (49.0s/item, ~23 min left)
+  [175/202] 32768/qa_1#2 -> 'Norse originated from Denmark, Iceland, Norway, an' (49.0s/item, ~22 min left)
+  [176/202] 32768/qa_1#3 -> 'Rollo' (48.8s/item, ~21 min left)
+  [177/202] 32768/qa_1#4 -> '10th century' (48.7s/item, ~20 min left)
+  [178/202] 32768/qa_1#5 -> 'Duke William II of Normandy' (48.6s/item, ~19 min left)
+  [179/202] 32768/qa_1#6 -> 'The documents indicate that the Duchy of Normandy ' (48.5s/item, ~19 min left)
+  [180/202] 32768/qa_1#7 -> 'The Normans were Christian (Catholic).' (48.4s/item, ~18 min left)
+  [181/202] 32768/qa_1#8 -> 'Norman comes from the French words Normans/Normanz' (48.3s/item, ~17 min left)
+  [182/202] 32768/qa_1#9 -> '12th century (between 1200 and 1245)' (48.2s/item, ~16 min left)
+  [183/202] 32768/qa_2#0 -> 'No' (48.1s/item, ~15 min left)
+  [184/202] 32768/qa_2#1 -> 'There is no document indicating that a woman portr' (48.0s/item, ~14 min left)
+  [185/202] 32768/qa_2#2 -> 'Animorphs' (47.9s/item, ~14 min left)
+  [186/202] 32768/qa_2#3 -> 'Yes' (47.8s/item, ~13 min left)
+  [187/202] 32768/qa_2#4 -> 'Adriana Trigiani' (47.7s/item, ~12 min left)
+  [188/202] 32768/qa_2#5 -> 'YG Entertainment' (47.6s/item, ~11 min left)
+  [189/202] 32768/qa_2#6 -> 'Eenasul Fateh' (47.5s/item, ~10 min left)
+  [190/202] 32768/qa_2#7 -> 'The arena where the Lewiston Maineiacs played thei' (47.4s/item, ~9 min left)
+  [191/202] 32768/qa_2#8 -> 'Annie Morton' (47.3s/item, ~9 min left)
+  [192/202] 32768/qa_2#9 -> 'Yes' (47.2s/item, ~8 min left)
+  [193/202] 32768/vt#0 -> 'We are asked to find all variables that are assign' (47.1s/item, ~7 min left)
+  [194/202] 32768/vt#1 -> 'We are asked to **find all variables that are assi' (47.1s/item, ~6 min left)
+  [195/202] 32768/vt#2 -> 'We are asked to **find all variables that are assi' (47.0s/item, ~5 min left)
+  [196/202] 32768/vt#3 -> 'We are asked to find all variables that are assign' (47.0s/item, ~5 min left)
+  [197/202] 32768/vt#4 -> 'We are asked to find all variables that are assign' (46.9s/item, ~4 min left)
+  [198/202] 32768/vt#5 -> 'We are asked to **find all variables that are assi' (46.9s/item, ~3 min left)
+  [199/202] 32768/vt#6 -> 'We are asked to find all variables that are assign' (46.8s/item, ~2 min left)
+  [200/202] 32768/vt#7 -> 'We are asked to find all variables that are assign' (46.8s/item, ~2 min left)
+  [201/202] 32768/vt#8 -> 'We are asked to **find all variables that are assi' (46.7s/item, ~1 min left)
+  [202/202] 32768/vt#9 -> 'We are asked to **find all variables that are assi' (46.7s/item, ~0 min left)
+
+
+=== V3_BEYOND_granite_kivi4_tiled_24k-32k.jsonl ===
+ibm-granite/granite-4.2-8b arm=kivi4_tiled preset=None quant=nf4
+              task    24576    32768
+     niah_single_1    100.0    100.0
+     niah_single_2    100.0    100.0
+     niah_single_3    100.0    100.0
+   niah_multikey_1    100.0     90.0
+   niah_multikey_2     80.0     50.0
+   niah_multikey_3    100.0     60.0
+   niah_multivalue     37.5     25.0
+   niah_multiquery     27.5     52.5
+                vt      0.0      0.0
+               cwe      3.0      6.0
+               fwe     70.0     93.3
+              qa_1     60.0     40.0
+              qa_2     40.0     40.0
+         RULER avg     62.9     58.2
+  ttft 22.08s | decode 3.6 tok/s | peak 7.31 GB | KV 1.423 GB (3.2x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V3_Qwen3.5-4B_kivi4_tiled_32k.jsonl
+[ckpt] 0 recorded, 130 pending (of 130 generated)
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1160.41it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:01<07:43,  1.09s/it]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   2%|▏         | 9/426 [00:01<00:41, 10.03it/s]Loading weights:   3%|▎         | 14/426 [00:01<00:27, 14.90it/s]Loading weights:   6%|▌         | 26/426 [00:01<00:12, 30.79it/s]Loading weights:   8%|▊         | 36/426 [00:01<00:09, 42.19it/s]Loading weights:  10%|█         | 44/426 [00:01<00:08, 43.85it/s]Loading weights:  12%|█▏        | 51/426 [00:01<00:08, 45.11it/s]Loading weights:  15%|█▌        | 64/426 [00:01<00:05, 60.96it/s]Loading weights:  17%|█▋        | 72/426 [00:02<00:05, 62.69it/s]Loading weights:  19%|█▉        | 80/426 [00:02<00:05, 59.25it/s]Loading weights:  22%|██▏       | 92/426 [00:02<00:04, 71.10it/s]Loading weights:  23%|██▎       | 100/426 [00:02<00:05, 55.38it/s]Loading weights:  27%|██▋       | 114/426 [00:02<00:04, 70.95it/s]Loading weights:  29%|██▉       | 123/426 [00:02<00:04, 67.49it/s]Loading weights:  31%|███       | 132/426 [00:02<00:04, 70.61it/s]Loading weights:  33%|███▎      | 142/426 [00:03<00:03, 74.25it/s]Loading weights:  35%|███▌      | 150/426 [00:03<00:04, 67.29it/s]Loading weights:  37%|███▋      | 158/426 [00:03<00:04, 64.06it/s]Loading weights:  40%|███▉      | 170/426 [00:03<00:03, 76.02it/s]Loading weights:  42%|████▏     | 179/426 [00:03<00:03, 75.64it/s]Loading weights:  44%|████▍     | 187/426 [00:03<00:03, 62.87it/s]Loading weights:  47%|████▋     | 199/426 [00:03<00:03, 74.36it/s]Loading weights:  49%|████▉     | 208/426 [00:04<00:03, 64.06it/s]Loading weights:  52%|█████▏    | 221/426 [00:04<00:02, 76.35it/s]Loading weights:  54%|█████▍    | 230/426 [00:04<00:02, 74.33it/s]Loading weights:  56%|█████▌    | 238/426 [00:04<00:02, 74.54it/s]Loading weights:  58%|█████▊    | 248/426 [00:04<00:02, 78.32it/s]Loading weights:  60%|██████    | 257/426 [00:04<00:02, 65.10it/s]Loading weights:  62%|██████▏   | 265/426 [00:04<00:02, 63.59it/s]Loading weights:  65%|██████▌   | 277/426 [00:05<00:02, 74.00it/s]Loading weights:  67%|██████▋   | 287/426 [00:05<00:01, 78.09it/s]Loading weights:  69%|██████▉   | 296/426 [00:05<00:01, 72.77it/s]Loading weights:  72%|███████▏  | 305/426 [00:05<00:01, 74.67it/s]Loading weights:  73%|███████▎  | 313/426 [00:05<00:01, 61.56it/s]Loading weights:  77%|███████▋  | 326/426 [00:05<00:01, 74.25it/s]Loading weights:  78%|███████▊  | 334/426 [00:05<00:01, 67.23it/s]Loading weights:  81%|████████  | 344/426 [00:05<00:01, 73.16it/s]Loading weights:  83%|████████▎ | 354/426 [00:06<00:00, 77.37it/s]Loading weights:  85%|████████▌ | 363/426 [00:06<00:00, 65.38it/s]Loading weights:  87%|████████▋ | 371/426 [00:06<00:00, 63.00it/s]Loading weights:  90%|████████▉ | 383/426 [00:06<00:00, 73.07it/s]Loading weights:  92%|█████████▏| 393/426 [00:06<00:00, 76.11it/s]Loading weights:  94%|█████████▍| 401/426 [00:06<00:00, 66.35it/s]Loading weights:  96%|█████████▋| 411/426 [00:06<00:00, 69.37it/s]Loading weights:  98%|█████████▊| 419/426 [00:07<00:00, 57.21it/s]Loading weights: 100%|██████████| 426/426 [00:07<00:00, 59.03it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/130] 32768/cwe#0 -> 'Based on a frequency analysis of the provided list' (28.4s/item, ~61 min left)
+  [2/130] 32768/cwe#1 -> 'Based on a comprehensive count of the words provid' (28.6s/item, ~61 min left)
+  [3/130] 32768/cwe#2 -> 'Based on a frequency analysis of the provided list' (28.5s/item, ~60 min left)
+  [4/130] 32768/cwe#3 -> 'Based on an analysis of the provided list of words' (28.6s/item, ~60 min left)
+  [5/130] 32768/cwe#4 -> 'Based on an analysis of the provided list of 4,353' (28.5s/item, ~59 min left)
+  [6/130] 32768/cwe#5 -> 'Based on a comprehensive count of the words provid' (28.5s/item, ~59 min left)
+  [7/130] 32768/cwe#6 -> 'Based on an analysis of the provided list of 4,383' (28.4s/item, ~58 min left)
+  [8/130] 32768/cwe#7 -> 'Based on a frequency analysis of the provided list' (28.2s/item, ~57 min left)
+  [9/130] 32768/cwe#8 -> 'Based on an analysis of the provided list of 4,383' (28.3s/item, ~57 min left)
+  [10/130] 32768/cwe#9 -> 'Based on a comprehensive analysis of the provided ' (28.2s/item, ~56 min left)
+  [11/130] 32768/fwe#0 -> 'tgjovi, ksxqrl, tvorfz' (26.9s/item, ~53 min left)
+  [12/130] 32768/fwe#1 -> 'tywcou, jyfeeh, uzvcls' (25.7s/item, ~51 min left)
+  [13/130] 32768/fwe#2 -> 'tmzbeq, joeews, unqtbr' (24.8s/item, ~48 min left)
+  [14/130] 32768/fwe#3 -> 'tuhuto, jvixbl, uvaezr' (23.9s/item, ~46 min left)
+  [15/130] 32768/fwe#4 -> 'szskug, irphlx, ukwozw' (23.2s/item, ~44 min left)
+  [16/130] 32768/fwe#5 -> 'swkywm, jqplce, tpynpq' (22.6s/item, ~43 min left)
+  [17/130] 32768/fwe#6 -> 'tmmakv, jvblrn, ungxwr' (22.2s/item, ~42 min left)
+  [18/130] 32768/fwe#7 -> 'suqsdg, jfmfxz, uchvil' (21.8s/item, ~41 min left)
+  [19/130] 32768/fwe#8 -> 'tuknkf, jtsrkv, upggys' (21.4s/item, ~40 min left)
+  [20/130] 32768/fwe#9 -> 'tczzpm, jzbckl, ueooyb' (21.0s/item, ~38 min left)
+  [21/130] 32768/niah_multikey_1#0 -> 'The special magic number for painful-pigpen is **1' (20.7s/item, ~38 min left)
+  [22/130] 32768/niah_multikey_1#1 -> 'The special magic number for plucky-prefix is **90' (20.5s/item, ~37 min left)
+  [23/130] 32768/niah_multikey_1#2 -> 'The special magic number for hurried-tensor is **1' (20.3s/item, ~36 min left)
+  [24/130] 32768/niah_multikey_1#3 -> 'The special magic number for big-river mentioned i' (20.2s/item, ~36 min left)
+  [25/130] 32768/niah_multikey_1#4 -> 'The special magic number for excellent-pence menti' (20.0s/item, ~35 min left)
+  [26/130] 32768/niah_multikey_1#5 -> 'The special magic number for handsome-lap is **364' (19.9s/item, ~34 min left)
+  [27/130] 32768/niah_multikey_1#6 -> 'The special magic number for stimulating-brown is ' (19.7s/item, ~34 min left)
+  [28/130] 32768/niah_multikey_1#7 -> 'The special magic number for salty-spiritual is **' (19.6s/item, ~33 min left)
+  [29/130] 32768/niah_multikey_1#8 -> 'The special magic number for hot-dramaturge is **7' (19.5s/item, ~33 min left)
+  [30/130] 32768/niah_multikey_1#9 -> 'The special magic number for inconclusive-sweets i' (19.4s/item, ~32 min left)
+  [31/130] 32768/niah_multikey_2#0 -> 'The special magic number for painful-weasel is **5' (19.3s/item, ~32 min left)
+  [32/130] 32768/niah_multikey_2#1 -> 'The special magic number for rough-hatred is **631' (19.2s/item, ~31 min left)
+  [33/130] 32768/niah_multikey_2#2 -> 'The special magic number for bewildered-rider is *' (19.1s/item, ~31 min left)
+  [34/130] 32768/niah_multikey_2#3 -> 'The special magic number for rainy-fisting is **64' (19.0s/item, ~30 min left)
+  [35/130] 32768/niah_multikey_2#4 -> 'The special magic number for black-broad is **4576' (18.9s/item, ~30 min left)
+  [36/130] 32768/niah_multikey_2#5 -> 'The special magic number for stormy-patrolling is ' (18.9s/item, ~30 min left)
+  [37/130] 32768/niah_multikey_2#6 -> 'The special magic number for silky-chowder is **61' (18.8s/item, ~29 min left)
+  [38/130] 32768/niah_multikey_2#7 -> 'The special magic number for phobic-railing is **5' (18.7s/item, ~29 min left)
+  [39/130] 32768/niah_multikey_2#8 -> 'The special magic number for domineering-lapdog is' (18.7s/item, ~28 min left)
+  [40/130] 32768/niah_multikey_2#9 -> 'The special magic number for sincere-leash is **36' (18.6s/item, ~28 min left)
+  [41/130] 32768/niah_multikey_3#0 -> 'The special magic uuid for `66ed34e2-c1ed-4940-a10' (18.7s/item, ~28 min left)
+  [42/130] 32768/niah_multikey_3#1 -> 'The special magic uuid for `cf237be0-ecb3-474d-8da' (18.8s/item, ~28 min left)
+  [43/130] 32768/niah_multikey_3#2 -> 'The special magic uuid for `78936d2d-8647-43c7-9d6' (18.8s/item, ~27 min left)
+  [44/130] 32768/niah_multikey_3#3 -> 'The special magic uuid for `db9a437a-6049-4fed-86a' (18.9s/item, ~27 min left)
+  [45/130] 32768/niah_multikey_3#4 -> 'The special magic uuid for `b2204f32-e202-4858-961' (19.0s/item, ~27 min left)
+  [46/130] 32768/niah_multikey_3#5 -> 'The special magic uuid for `0c1d7fd5-2216-446c-8da' (19.0s/item, ~27 min left)
+  [47/130] 32768/niah_multikey_3#6 -> 'The special magic uuid for `990999f8-f3fd-4005-a2b' (19.1s/item, ~26 min left)
+  [48/130] 32768/niah_multikey_3#7 -> 'The special magic uuid for `0dfd7bf6-5d65-498b-988' (19.1s/item, ~26 min left)
+  [49/130] 32768/niah_multikey_3#8 -> 'The special magic uuid for `4a17ba92-f1af-4c00-a19' (19.2s/item, ~26 min left)
+  [50/130] 32768/niah_multikey_3#9 -> 'The special magic uuid for `e687e1f3-a061-4b97-a35' (19.2s/item, ~26 min left)
+  [51/130] 32768/niah_multiquery#0 -> 'Based on the text provided, here are the special m' (19.3s/item, ~25 min left)
+  [52/130] 32768/niah_multiquery#1 -> 'Based on the text provided, here are the special m' (19.4s/item, ~25 min left)
+  [53/130] 32768/niah_multiquery#2 -> 'Based on the text provided, here are the special m' (19.5s/item, ~25 min left)
+  [54/130] 32768/niah_multiquery#3 -> 'Based on the text provided, here are the special m' (19.6s/item, ~25 min left)
+  [55/130] 32768/niah_multiquery#4 -> 'Based on the text provided, here are the special m' (19.6s/item, ~25 min left)
+  [56/130] 32768/niah_multiquery#5 -> 'Based on the text provided, here are the special m' (19.7s/item, ~24 min left)
+  [57/130] 32768/niah_multiquery#6 -> 'Based on the text provided, here are the special m' (19.8s/item, ~24 min left)
+  [58/130] 32768/niah_multiquery#7 -> 'Based on the text provided, here are the special m' (19.9s/item, ~24 min left)
+  [59/130] 32768/niah_multiquery#8 -> 'Based on the text provided, here are the special m' (19.9s/item, ~24 min left)
+  [60/130] 32768/niah_multiquery#9 -> 'Based on the text provided, here are the special m' (20.0s/item, ~23 min left)
+  [61/130] 32768/niah_multivalue#0 -> 'Based on the text provided, here are the special m' (20.0s/item, ~23 min left)
+  [62/130] 32768/niah_multivalue#1 -> 'Based on the text provided, here are the special m' (20.0s/item, ~23 min left)
+  [63/130] 32768/niah_multivalue#2 -> 'Based on the text provided, here are the special m' (20.2s/item, ~23 min left)
+  [64/130] 32768/niah_multivalue#3 -> 'Based on the text provided, here are the special m' (20.2s/item, ~22 min left)
+  [65/130] 32768/niah_multivalue#4 -> 'Based on the text provided, here are the special m' (20.2s/item, ~22 min left)
+  [66/130] 32768/niah_multivalue#5 -> 'Based on the text provided, here are the special m' (20.2s/item, ~22 min left)
+  [67/130] 32768/niah_multivalue#6 -> 'Based on the text provided, here are the special m' (20.3s/item, ~21 min left)
+  [68/130] 32768/niah_multivalue#7 -> 'Based on the text provided, here are the special m' (20.3s/item, ~21 min left)
+  [69/130] 32768/niah_multivalue#8 -> 'Based on the text provided, here are the special m' (20.3s/item, ~21 min left)
+  [70/130] 32768/niah_multivalue#9 -> 'Based on the text provided, here are the special m' (20.3s/item, ~20 min left)
+  [71/130] 32768/niah_single_1#0 -> 'The special magic number for smoggy-caliber mentio' (20.3s/item, ~20 min left)
+  [72/130] 32768/niah_single_1#1 -> 'The special magic number for typical-toilet mentio' (20.2s/item, ~20 min left)
+  [73/130] 32768/niah_single_1#2 -> 'The special magic number for flippant-twine mentio' (20.2s/item, ~19 min left)
+  [74/130] 32768/niah_single_1#3 -> 'The special magic number for old-snowplow mentione' (20.1s/item, ~19 min left)
+  [75/130] 32768/niah_single_1#4 -> 'The special magic number for knowledgeable-hometow' (20.1s/item, ~18 min left)
+  [76/130] 32768/niah_single_1#5 -> 'The special magic number for strong-hive mentioned' (20.0s/item, ~18 min left)
+  [77/130] 32768/niah_single_1#6 -> 'The special magic number for disgusted-buckle ment' (20.0s/item, ~18 min left)
+  [78/130] 32768/niah_single_1#7 -> 'The special magic number for terrible-online menti' (19.9s/item, ~17 min left)
+  [79/130] 32768/niah_single_1#8 -> 'The special magic number for flaky-endoderm mentio' (19.9s/item, ~17 min left)
+  [80/130] 32768/niah_single_1#9 -> 'The special magic number for grandiose-clave menti' (19.9s/item, ~17 min left)
+  [81/130] 32768/niah_single_2#0 -> 'The special magic number for roasted-poetry mentio' (19.8s/item, ~16 min left)
+  [82/130] 32768/niah_single_2#1 -> 'The special magic number for lovely-filter mention' (19.8s/item, ~16 min left)
+  [83/130] 32768/niah_single_2#2 -> 'The special magic number for aggressive-psychology' (19.7s/item, ~15 min left)
+  [84/130] 32768/niah_single_2#3 -> 'The special magic number for fair-yogurt mentioned' (19.7s/item, ~15 min left)
+  [85/130] 32768/niah_single_2#4 -> 'The special magic number for shiny-fleece mentione' (19.6s/item, ~15 min left)
+  [86/130] 32768/niah_single_2#5 -> 'The special magic number for dark-boyhood mentione' (19.6s/item, ~14 min left)
+  [87/130] 32768/niah_single_2#6 -> 'The special magic number for used-postfix mentione' (19.6s/item, ~14 min left)
+  [88/130] 32768/niah_single_2#7 -> 'The special magic number for rhetorical-industry m' (19.5s/item, ~14 min left)
+  [89/130] 32768/niah_single_2#8 -> 'The special magic number for tested-shout mentione' (19.5s/item, ~13 min left)
+  [90/130] 32768/niah_single_2#9 -> 'The special magic number for workable-chateau ment' (19.5s/item, ~13 min left)
+  [91/130] 32768/niah_single_3#0 -> 'The special magic uuid for sordid-bath mentioned i' (19.5s/item, ~13 min left)
+  [92/130] 32768/niah_single_3#1 -> 'The special magic uuid for dark-boyhood mentioned ' (19.5s/item, ~12 min left)
+  [93/130] 32768/niah_single_3#2 -> 'The special magic uuid for deranged-assurance ment' (19.5s/item, ~12 min left)
+  [94/130] 32768/niah_single_3#3 -> 'The special magic uuid for screeching-drag mention' (19.5s/item, ~12 min left)
+  [95/130] 32768/niah_single_3#4 -> 'The special magic uuid for tested-shout mentioned ' (19.5s/item, ~11 min left)
+  [96/130] 32768/niah_single_3#5 -> 'The special magic uuid for quick-vane mentioned in' (19.5s/item, ~11 min left)
+  [97/130] 32768/niah_single_3#6 -> 'The special magic uuid for stale-spaghetti mention' (19.5s/item, ~11 min left)
+  [98/130] 32768/niah_single_3#7 -> 'The special magic uuid for **fortunate-coevolution' (19.5s/item, ~10 min left)
+  [99/130] 32768/niah_single_3#8 -> 'The special magic uuid for cultured-silly mentione' (19.5s/item, ~10 min left)
+  [100/130] 32768/niah_single_3#9 -> 'The special magic uuid for wide-spume mentioned in' (19.5s/item, ~10 min left)
+  [101/130] 32768/qa_1#0 -> 'France' (19.4s/item, ~9 min left)
+  [102/130] 32768/qa_1#1 -> 'The Normans were in Normandy from the 10th and 11t' (19.4s/item, ~9 min left)
+  [103/130] 32768/qa_1#2 -> 'Denmark, Iceland, and Norway' (19.3s/item, ~9 min left)
+  [104/130] 32768/qa_1#3 -> 'Rollo' (19.3s/item, ~8 min left)
+  [105/130] 32768/qa_1#4 -> '10th century' (19.2s/item, ~8 min left)
+  [106/130] 32768/qa_1#5 -> 'William the Conqueror' (19.2s/item, ~8 min left)
+  [107/130] 32768/qa_1#6 -> 'Rollo' (19.1s/item, ~7 min left)
+  [108/130] 32768/qa_1#7 -> 'Catholicism (Christianity)' (19.1s/item, ~7 min left)
+  [109/130] 32768/qa_1#8 -> 'Norseman or Viking' (19.1s/item, ~7 min left)
+  [110/130] 32768/qa_1#9 -> '9th century' (19.0s/item, ~6 min left)
+  [111/130] 32768/qa_2#0 -> 'No. Scott Derrickson is American, while Ed Wood wa' (19.0s/item, ~6 min left)
+  [112/130] 32768/qa_2#1 -> 'United States ambassador to Ghana and to Czechoslo' (19.0s/item, ~6 min left)
+  [113/130] 32768/qa_2#2 -> 'Animorphs' (18.9s/item, ~5 min left)
+  [114/130] 32768/qa_2#3 -> 'No' (18.9s/item, ~5 min left)
+  [115/130] 32768/qa_2#4 -> 'Greenwich Village' (18.8s/item, ~5 min left)
+  [116/130] 32768/qa_2#5 -> 'YG Entertainment' (18.8s/item, ~4 min left)
+  [117/130] 32768/qa_2#6 -> 'Eenasul Fateh' (18.7s/item, ~4 min left)
+  [118/130] 32768/qa_2#7 -> '4,000' (18.7s/item, ~4 min left)
+  [119/130] 32768/qa_2#8 -> 'Annie Morton is older. Annie Morton was born in 19' (18.7s/item, ~3 min left)
+  [120/130] 32768/qa_2#9 -> 'Yes' (18.7s/item, ~3 min left)
+  [121/130] 32768/vt#0 -> 'Based on the text provided, here is the chain of v' (18.6s/item, ~3 min left)
+  [122/130] 32768/vt#1 -> 'Based on the text provided, here is the chain of v' (18.6s/item, ~2 min left)
+  [123/130] 32768/vt#2 -> 'Based on the text provided, here is the chain of v' (18.6s/item, ~2 min left)
+  [124/130] 32768/vt#3 -> 'Based on the text provided, here is the chain of v' (18.6s/item, ~2 min left)
+  [125/130] 32768/vt#4 -> 'Based on the text provided, here is the chain of v' (18.6s/item, ~2 min left)
+  [126/130] 32768/vt#5 -> 'Based on the text provided, here is the chain of v' (18.6s/item, ~1 min left)
+  [127/130] 32768/vt#6 -> 'Based on the text provided, here is the chain of v' (18.6s/item, ~1 min left)
+  [128/130] 32768/vt#7 -> 'Based on the text provided, here is the chain of v' (18.6s/item, ~1 min left)
+  [129/130] 32768/vt#8 -> 'Based on the text provided, here is the chain of v' (18.6s/item, ~0 min left)
+  [130/130] 32768/vt#9 -> 'Based on the text provided, here is the chain of v' (18.6s/item, ~0 min left)
+
+
+=== V3_Qwen3.5-4B_kivi4_tiled_32k.jsonl ===
+Qwen/Qwen3.5-4B arm=kivi4_tiled preset=None quant=nf4
+              task    32768
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2    100.0
+   niah_multikey_3    100.0
+   niah_multivalue    100.0
+   niah_multiquery    100.0
+                vt      0.0
+               cwe     52.0
+               fwe    100.0
+              qa_1     80.0
+              qa_2     70.0
+         RULER avg     84.8
+  ttft 13.66s | decode 8.6 tok/s | peak 3.58 GB | KV 0.316 GB (3.3x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V3_BEYOND_Qwen3.5-4B_kivi4_tiled_131k.jsonl
+[ckpt] 0 recorded, 65 pending (of 65 generated)
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1393.69it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:18,  3.06it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   5%|▌         | 22/426 [00:00<00:06, 64.76it/s]Loading weights:  10%|▉         | 42/426 [00:00<00:03, 103.96it/s]Loading weights:  15%|█▌        | 66/426 [00:00<00:02, 143.23it/s]Loading weights:  22%|██▏       | 93/426 [00:00<00:01, 174.79it/s]Loading weights:  27%|██▋       | 115/426 [00:00<00:01, 187.42it/s]Loading weights:  32%|███▏      | 136/426 [00:00<00:01, 190.31it/s]Loading weights:  37%|███▋      | 157/426 [00:01<00:01, 194.01it/s]Loading weights:  43%|████▎     | 185/426 [00:01<00:01, 213.56it/s]Loading weights:  49%|████▉     | 208/426 [00:01<00:01, 206.60it/s]Loading weights:  56%|█████▌    | 238/426 [00:01<00:00, 225.90it/s]Loading weights:  61%|██████▏   | 261/426 [00:01<00:00, 215.70it/s]Loading weights:  68%|██████▊   | 291/426 [00:01<00:00, 231.93it/s]Loading weights:  74%|███████▍  | 315/426 [00:01<00:00, 218.65it/s]Loading weights:  80%|████████  | 341/426 [00:01<00:00, 229.33it/s]Loading weights:  86%|████████▌ | 365/426 [00:01<00:00, 209.29it/s]Loading weights:  93%|█████████▎| 396/426 [00:02<00:00, 232.86it/s]Loading weights:  99%|█████████▊| 420/426 [00:02<00:00, 212.44it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 188.24it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/65] 131072/cwe#0 -> 'Based on a frequency analysis of the provided list' (116.3s/item, ~124 min left)
+  [2/65] 131072/cwe#1 -> 'Based on a frequency analysis of the provided list' (114.6s/item, ~120 min left)
+  [3/65] 131072/cwe#2 -> 'Based on a frequency analysis of the provided list' (115.4s/item, ~119 min left)
+  [4/65] 131072/cwe#3 -> 'Based on a frequency analysis of the provided list' (115.6s/item, ~118 min left)
+  [5/65] 131072/cwe#4 -> 'Based on a comprehensive count of the words provid' (115.8s/item, ~116 min left)
+  [6/65] 131072/fwe#0 -> 'pmqysy, zhtlig, blpxps' (110.0s/item, ~108 min left)
+  [7/65] 131072/fwe#1 -> 'pnesyg, zitagf, bvpnes' (105.6s/item, ~102 min left)
+  [8/65] 131072/fwe#2 -> 'pnvgbi, zkcezm, bsyqzp' (102.8s/item, ~98 min left)
+  [9/65] 131072/fwe#3 -> 'polfxt\nziiyjl\nyuoorf' (100.7s/item, ~94 min left)
+  [10/65] 131072/fwe#4 -> 'pvnctf, zkukak, bmgpbw' (98.9s/item, ~91 min left)
+  [11/65] 131072/niah_multikey_1#0 -> 'The special magic number for abaft-placode is **75' (98.0s/item, ~88 min left)
+  [12/65] 131072/niah_multikey_1#1 -> 'The special magic number for hurried-tensor is **1' (97.2s/item, ~86 min left)
+  [13/65] 131072/niah_multikey_1#2 -> 'The special magic number for big-river mentioned i' (96.7s/item, ~84 min left)
+  [14/65] 131072/niah_multikey_1#3 -> 'The special magic number for excellent-pence menti' (96.2s/item, ~82 min left)
+  [15/65] 131072/niah_multikey_1#4 -> 'The special magic number for handsome-lap mentione' (95.8s/item, ~80 min left)
+  [16/65] 131072/niah_multikey_2#0 -> 'The special magic number for tasty-constant is **8' (95.4s/item, ~78 min left)
+  [17/65] 131072/niah_multikey_2#1 -> 'The special magic number for loutish-honor is **45' (95.0s/item, ~76 min left)
+  [18/65] 131072/niah_multikey_2#2 -> 'The special magic number for scandalous-tow-truck ' (94.8s/item, ~74 min left)
+  [19/65] 131072/niah_multikey_2#3 -> 'The special magic number for plausible-tab is **37' (94.4s/item, ~72 min left)
+  [20/65] 131072/niah_multikey_2#4 -> 'The special magic number for wealthy-frequency is ' (94.1s/item, ~71 min left)
+  [21/65] 131072/niah_multikey_3#0 -> 'The special magic uuid for `48ae3ff6-b546-4718-ba4' (94.4s/item, ~69 min left)
+  [22/65] 131072/niah_multikey_3#1 -> 'The special magic uuid for `a4eb9dba-59f4-45d4-91f' (94.7s/item, ~68 min left)
+  [23/65] 131072/niah_multikey_3#2 -> 'The special magic uuid for `f14ba25a-e36b-4636-ba2' (95.1s/item, ~67 min left)
+  [24/65] 131072/niah_multikey_3#3 -> 'The special magic uuid for `df80846e-d9ad-4a5f-a38' (95.4s/item, ~65 min left)
+  [25/65] 131072/niah_multikey_3#4 -> 'The special magic uuid for `545d740a-d63e-4059-864' (95.7s/item, ~64 min left)
+  [26/65] 131072/niah_multiquery#0 -> 'Based on the text provided, here are the special m' (96.1s/item, ~62 min left)
+  [27/65] 131072/niah_multiquery#1 -> 'Based on the text provided, here are the special m' (96.5s/item, ~61 min left)
+  [28/65] 131072/niah_multiquery#2 -> 'Based on the text provided, here are the special m' (96.8s/item, ~60 min left)
+  [29/65] 131072/niah_multiquery#3 -> 'Based on the text provided, here are the special m' (97.1s/item, ~58 min left)
+  [30/65] 131072/niah_multiquery#4 -> 'Based on the text provided, here are the special m' (97.3s/item, ~57 min left)
+  [31/65] 131072/niah_multivalue#0 -> 'Based on the text provided, here are the special m' (97.5s/item, ~55 min left)
+  [32/65] 131072/niah_multivalue#1 -> 'Based on the text provided, here are the special m' (98.1s/item, ~54 min left)
+  [33/65] 131072/niah_multivalue#2 -> 'Based on the text provided, here are the special m' (98.2s/item, ~52 min left)
+  [34/65] 131072/niah_multivalue#3 -> 'Based on the text provided, here are the special m' (98.3s/item, ~51 min left)
+  [35/65] 131072/niah_multivalue#4 -> 'Based on the text provided, here are the special m' (98.4s/item, ~49 min left)
+  [36/65] 131072/niah_single_1#0 -> 'The special magic number for weak-jeweller mention' (98.2s/item, ~47 min left)
+  [37/65] 131072/niah_single_1#1 -> 'The special magic number for harmonious-uniform me' (98.0s/item, ~46 min left)
+  [38/65] 131072/niah_single_1#2 -> 'The special magic number for loving-cockroach ment' (97.8s/item, ~44 min left)
+  [39/65] 131072/niah_single_1#3 -> 'The special magic number for discreet-commodity me' (97.6s/item, ~42 min left)
+  [40/65] 131072/niah_single_1#4 -> 'The special magic number for uncovered-turkey ment' (97.4s/item, ~41 min left)
+  [41/65] 131072/niah_single_2#0 -> 'The special magic number for vague-shear mentioned' (97.2s/item, ~39 min left)
+  [42/65] 131072/niah_single_2#1 -> 'The special magic number for berserk-suitcase ment' (97.0s/item, ~37 min left)
+  [43/65] 131072/niah_single_2#2 -> 'The special magic number for deafening-radish ment' (96.9s/item, ~36 min left)
+  [44/65] 131072/niah_single_2#3 -> 'The special magic number for solid-sanction mentio' (97.3s/item, ~34 min left)
+  [45/65] 131072/niah_single_2#4 -> 'The special magic number for dark-boyhood mentione' (97.4s/item, ~32 min left)
+  [46/65] 131072/niah_single_3#0 -> 'The special magic uuid for dark-boyhood mentioned ' (97.4s/item, ~31 min left)
+  [47/65] 131072/niah_single_3#1 -> 'The special magic uuid for lush-tornado mentioned ' (97.4s/item, ~29 min left)
+  [48/65] 131072/niah_single_3#2 -> 'The special magic uuid for tested-shout mentioned ' (97.4s/item, ~28 min left)
+  [49/65] 131072/niah_single_3#3 -> 'The special magic uuid for quick-vane mentioned in' (97.3s/item, ~26 min left)
+  [50/65] 131072/niah_single_3#4 -> 'The special magic uuid for stale-spaghetti mention' (97.3s/item, ~24 min left)
+  [51/65] 131072/qa_1#0 -> 'France' (97.1s/item, ~23 min left)
+  [52/65] 131072/qa_1#1 -> 'The Normans gave their name to Normandy in the 10t' (97.0s/item, ~21 min left)
+  [53/65] 131072/qa_1#2 -> 'Denmark, Iceland, and Norway' (96.7s/item, ~19 min left)
+  [54/65] 131072/qa_1#3 -> 'Rollo' (96.5s/item, ~18 min left)
+  [55/65] 131072/qa_1#4 -> '10th century' (96.3s/item, ~16 min left)
+  [56/65] 131072/qa_2#0 -> 'No' (96.1s/item, ~14 min left)
+  [57/65] 131072/qa_2#1 -> 'Lieutenant Anita Van Buren' (95.8s/item, ~13 min left)
+  [58/65] 131072/qa_2#2 -> 'The Hork-Bajir Chronicles' (95.6s/item, ~11 min left)
+  [59/65] 131072/qa_2#3 -> 'No, the Laleli Mosque is located in the Laleli nei' (95.5s/item, ~10 min left)
+  [60/65] 131072/qa_2#4 -> 'New York City' (95.3s/item, ~8 min left)
+  [61/65] 131072/vt#0 -> 'Based on the text provided, here is the chain of v' (95.2s/item, ~6 min left)
+  [62/65] 131072/vt#1 -> 'Based on the chain of variable assignments in the ' (95.2s/item, ~5 min left)
+  [63/65] 131072/vt#2 -> 'Based on the variable assignments hidden in the te' (95.1s/item, ~3 min left)
+  [64/65] 131072/vt#3 -> 'Based on the chain of variable assignments in the ' (95.1s/item, ~2 min left)
+  [65/65] 131072/vt#4 -> 'Based on the chain of variable assignments in the ' (95.0s/item, ~0 min left)
+
+
+=== V3_BEYOND_Qwen3.5-4B_kivi4_tiled_131k.jsonl ===
+Qwen/Qwen3.5-4B arm=kivi4_tiled preset=None quant=nf4
+              task   131072
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2    100.0
+   niah_multikey_3    100.0
+   niah_multivalue     95.0
+   niah_multiquery    100.0
+                vt      8.0
+               cwe     52.0
+               fwe     93.3
+              qa_1     80.0
+              qa_2     20.0
+         RULER avg     80.6
+  ttft 83.20s | decode 3.9 tok/s | peak 4.50 GB | KV 1.232 GB (3.5x)
+V3 PART B COMPLETE
