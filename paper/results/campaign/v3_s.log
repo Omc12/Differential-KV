@@ -1,0 +1,603 @@
+
+===== start Mon Oct 19 16:06:42 2026 =====
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dense@8192 ...
+    dense@8192: ttft=2.7976635999948485 tps=16.960663680686032 peak=3.969016832
+  running dense@16384 ...
+    dense@16384: ttft=6.099339499996859 tps=14.04043255762922 peak=4.673457152
+  running dense@32768 ...
+    dense@32768: ttft=13.937677099995199 tps=8.392923087255356 peak=6.153268736
+  running dense@65536 ...
+    dense@65536: ttft=33.89057669999602 tps=4.798987894929191 peak=9.109199872
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm       8192      16384      32768      65536
+-------------------------------------------------------
+     dense      2.80       6.10      13.94      33.89 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       8192      16384      32768      65536
+-------------------------------------------------------
+     dense     16.96      14.04       8.39       4.80 
+
+=== peak VRAM allocated (GB) ===
+       arm       8192      16384      32768      65536
+-------------------------------------------------------
+     dense      3.97       4.67       6.15       9.11 
+
+=== peak VRAM reserved (GB) ===
+       arm       8192      16384      32768      65536
+-------------------------------------------------------
+     dense      4.88       5.81       7.20      11.60 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dense@8192 ...
+    dense@8192: ttft=2.9366962000058265 tps=15.603941430776676 peak=4.479396864
+  running dense@16384 ...
+    dense@16384: ttft=6.643861600001401 tps=14.697292417301139 peak=4.746136576
+  running dense@32768 ...
+    dense@32768: ttft=16.632913300003565 tps=16.823212264529882 peak=5.5107328
+  running dense@65536 ...
+    dense@65536: ttft=43.2008754999988 tps=10.606102882134593 peak=7.289316352
+  running dense@98304 ...
+    dense@98304: ttft=83.74106790000951 tps=7.885998166396691 peak=9.067701248
+  running dense@122880 ...
+    dense@122880: ttft=120.96729899999627 tps=6.49245168090106 peak=10.40148992
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm       8192      16384      32768      65536      98304     122880
+-----------------------------------------------------------------------------
+     dense      2.94       6.64      16.63      43.20      83.74     120.97 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       8192      16384      32768      65536      98304     122880
+-----------------------------------------------------------------------------
+     dense     15.60      14.70      16.82      10.61       7.89       6.49 
+
+=== peak VRAM allocated (GB) ===
+       arm       8192      16384      32768      65536      98304     122880
+-----------------------------------------------------------------------------
+     dense      4.48       4.75       5.51       7.29       9.07      10.40 
+
+=== peak VRAM reserved (GB) ===
+       arm       8192      16384      32768      65536      98304     122880
+-----------------------------------------------------------------------------
+     dense      5.01       5.88       6.45       8.30      10.34      11.88 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running snapkv@8192 ...
+    snapkv@8192: ttft=3.1032359000018914 tps=15.035818906115962 peak=4.45695488
+  running snapkv@16384 ...
+    snapkv@16384: ttft=6.111139400003594 tps=14.367518832952305 peak=4.725095424
+  running snapkv@32768 ...
+    snapkv@32768: ttft=13.702270599998883 tps=15.813733103213405 peak=5.455192064
+  running snapkv@49152 ...
+    snapkv@49152: ttft=22.653914800001075 tps=15.36141401390581 peak=6.308800512
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm       8192      16384      32768      49152
+-------------------------------------------------------
+    snapkv      3.10       6.11      13.70      22.65 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       8192      16384      32768      49152
+-------------------------------------------------------
+    snapkv     15.04      14.37      15.81      15.36 
+
+=== peak VRAM allocated (GB) ===
+       arm       8192      16384      32768      49152
+-------------------------------------------------------
+    snapkv      4.46       4.73       5.46       6.31 
+
+=== peak VRAM reserved (GB) ===
+       arm       8192      16384      32768      49152
+-------------------------------------------------------
+    snapkv      5.17       5.19       6.47       7.33 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running kivi4_tiled@8192 ...
+    kivi4_tiled@8192: ttft=3.1492415000029723 tps=12.94175923624926 peak=3.806995456
+  running kivi4_tiled@16384 ...
+    kivi4_tiled@16384: ttft=6.469343500000832 tps=10.704792504314675 peak=3.884065792
+  running kivi4_tiled@32768 ...
+    kivi4_tiled@32768: ttft=13.89883220000047 tps=7.934130409910232 peak=4.037157888
+  running kivi4_tiled@65536 ...
+    kivi4_tiled@65536: ttft=32.89329139999609 tps=6.005534219894163 peak=4.34334208
+  running kivi4_tiled@131072 ...
+    kivi4_tiled@131072: ttft=85.20151379999879 tps=3.8926634815646355 peak=4.961084416
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm       8192      16384      32768      65536     131072
+------------------------------------------------------------------
+kivi4_tiled      3.15       6.47      13.90      32.89      85.20 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       8192      16384      32768      65536     131072
+------------------------------------------------------------------
+kivi4_tiled     12.94      10.70       7.93       6.01       3.89 
+
+=== peak VRAM allocated (GB) ===
+       arm       8192      16384      32768      65536     131072
+------------------------------------------------------------------
+kivi4_tiled      3.81       3.88       4.04       4.34       4.96 
+
+=== peak VRAM reserved (GB) ===
+       arm       8192      16384      32768      65536     131072
+------------------------------------------------------------------
+kivi4_tiled      4.31       4.41       4.57       4.91       5.59 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running streamingllm_chunked@32768 ...
+    streamingllm_chunked@32768: ttft=10.803870000003371 tps=15.022568983158626 peak=3.812779008
+  running streamingllm_chunked@131072 ...
+    streamingllm_chunked@131072: ttft=44.169165899998916 tps=14.776705228927383 peak=3.812779008
+  running h2o_chunked@32768 ...
+    h2o_chunked@32768: ttft=32.72173949999706 tps=14.635207545042825 peak=3.702998016
+  running h2o_chunked@131072 ...
+    h2o_chunked@131072: ttft=131.61201199999778 tps=16.037848928679 peak=3.703522304
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm      32768     131072
+---------------------------------
+h2o_chunked     32.72     131.61 
+streamingllm_chunked     10.80      44.17 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      32768     131072
+---------------------------------
+h2o_chunked     14.64      16.04 
+streamingllm_chunked     15.02      14.78 
+
+=== peak VRAM allocated (GB) ===
+       arm      32768     131072
+---------------------------------
+h2o_chunked      3.70       3.70 
+streamingllm_chunked      3.81       3.81 
+
+=== peak VRAM reserved (GB) ===
+       arm      32768     131072
+---------------------------------
+h2o_chunked      3.99       3.99 
+streamingllm_chunked      4.16       4.16 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dkv@8192 ...
+    dkv@8192: ttft=3.3810969999976805 tps=10.27963712944691 peak=3.927346688
+  running dkv@16384 ...
+    dkv@16384: ttft=6.8065219999989495 tps=10.077527997496912 peak=4.4581888
+  running dkv@32768 ...
+    dkv@32768: ttft=14.566016900003888 tps=7.289529389463664 peak=5.784118784
+  running dkv@65536 ...
+    dkv@65536: ttft=33.24200810000184 tps=7.093454556921954 peak=8.51842304
+  running dkv@131072 ...
+    dkv@131072: ttft=85.13861609999731 tps=6.948417542959861 peak=8.75405824
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm       8192      16384      32768      65536     131072
+------------------------------------------------------------------
+       dkv      3.38       6.81      14.57      33.24      85.14 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       8192      16384      32768      65536     131072
+------------------------------------------------------------------
+       dkv     10.28      10.08       7.29       7.09       6.95 
+
+=== peak VRAM allocated (GB) ===
+       arm       8192      16384      32768      65536     131072
+------------------------------------------------------------------
+       dkv      3.93       4.46       5.78       8.52       8.75 
+
+=== peak VRAM reserved (GB) ===
+       arm       8192      16384      32768      65536     131072
+------------------------------------------------------------------
+       dkv      4.18       5.21       6.00       8.93      10.49 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dkv@196608 ...
+    dkv@196608: ttft=191.0536721000026 tps=6.0881214870949725 peak=9.014363648
+  running dkv@262144 ...
+    dkv@262144: ttft=483.5040177999981 tps=5.819537294224753 peak=9.888615936
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm     196608     262144
+---------------------------------
+       dkv    191.05     483.50 
+
+=== decode throughput (tok/s, higher better) ===
+       arm     196608     262144
+---------------------------------
+       dkv      6.09       5.82 
+
+=== peak VRAM allocated (GB) ===
+       arm     196608     262144
+---------------------------------
+       dkv      9.01       9.89 
+
+=== peak VRAM reserved (GB) ===
+       arm     196608     262144
+---------------------------------
+       dkv     11.09      11.34 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dkv@8192 ...
+    dkv@8192: ttft=3.3614568000048166 tps=11.152900603685977 peak=3.907300864
+  running dkv@16384 ...
+    dkv@16384: ttft=7.312798899998597 tps=10.796754057100708 peak=4.530259456
+  running dkv@32768 ...
+    dkv@32768: ttft=16.09790969999449 tps=7.398137045054786 peak=5.97984256
+  running dkv@65536 ...
+    dkv@65536: ttft=34.87282500000583 tps=7.281309951348262 peak=8.882816512
+  running dkv@131072 ...
+    dkv@131072: ttft=89.08982090000063 tps=7.000901442633197 peak=9.270598656
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm       8192      16384      32768      65536     131072
+------------------------------------------------------------------
+       dkv      3.36       7.31      16.10      34.87      89.09 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       8192      16384      32768      65536     131072
+------------------------------------------------------------------
+       dkv     11.15      10.80       7.40       7.28       7.00 
+
+=== peak VRAM allocated (GB) ===
+       arm       8192      16384      32768      65536     131072
+------------------------------------------------------------------
+       dkv      3.91       4.53       5.98       8.88       9.27 
+
+=== peak VRAM reserved (GB) ===
+       arm       8192      16384      32768      65536     131072
+------------------------------------------------------------------
+       dkv      4.14       4.90       6.33       9.70      10.34 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dkv@196608 ...
+    dkv@196608: ttft=206.54492879999452 tps=6.723226863159081 peak=9.883898368
+  running dkv@262144 ...
+    dkv@262144: ttft=436.2117875999975 tps=7.042176264858769 peak=9.351404032
+
+################ Qwen/Qwen3.5-4B ################
+
+=== TTFT (s, lower better) ===
+       arm     196608     262144
+---------------------------------
+       dkv    206.54     436.21 
+
+=== decode throughput (tok/s, higher better) ===
+       arm     196608     262144
+---------------------------------
+       dkv      6.72       7.04 
+
+=== peak VRAM allocated (GB) ===
+       arm     196608     262144
+---------------------------------
+       dkv      9.88       9.35 
+
+=== peak VRAM reserved (GB) ===
+       arm     196608     262144
+---------------------------------
+       dkv     11.25      11.31 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dense@4096 ...
+    dense@4096: ttft=1.5651582000064082 tps=14.996244594278252 peak=6.880032768
+  running dense@8192 ...
+    dense@8192: ttft=3.3605124999958207 tps=8.639525769250142 peak=7.622422528
+  running dense@16384 ...
+    dense@16384: ttft=8.087884900000063 tps=4.792532591284052 peak=9.434255872
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm       4096       8192      16384
+--------------------------------------------
+     dense      1.57       3.36       8.09 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       4096       8192      16384
+--------------------------------------------
+     dense     15.00       8.64       4.79 
+
+=== peak VRAM allocated (GB) ===
+       arm       4096       8192      16384
+--------------------------------------------
+     dense      6.88       7.62       9.43 
+
+=== peak VRAM reserved (GB) ===
+       arm       4096       8192      16384
+--------------------------------------------
+     dense      7.77       8.70      10.63 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dense@4096 ...
+    dense@4096: ttft=1.6222566000069492 tps=18.61510919107266 peak=7.095986176
+  running dense@8192 ...
+    dense@8192: ttft=3.787604500008456 tps=19.02724860071399 peak=7.767074816
+  running dense@16384 ...
+    dense@16384: ttft=10.35972820000461 tps=12.279250946806934 peak=9.109252096
+  running dense@20480 ...
+    dense@20480: ttft=14.749533800008066 tps=10.396713972991071 peak=9.836822528
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm       4096       8192      16384      20480
+-------------------------------------------------------
+     dense      1.62       3.79      10.36      14.75 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       4096       8192      16384      20480
+-------------------------------------------------------
+     dense     18.62      19.03      12.28      10.40 
+
+=== peak VRAM allocated (GB) ===
+       arm       4096       8192      16384      20480
+-------------------------------------------------------
+     dense      7.10       7.77       9.11       9.84 
+
+=== peak VRAM reserved (GB) ===
+       arm       4096       8192      16384      20480
+-------------------------------------------------------
+     dense      7.92       8.71      10.69      10.78 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running snapkv@4096 ...
+    snapkv@4096: ttft=1.6635393999968073 tps=18.031888201414546 peak=7.068833792
+  running snapkv@8192 ...
+    snapkv@8192: ttft=3.4718562999987626 tps=18.50765225932442 peak=8.006073344
+  running snapkv@16384 ...
+    snapkv@16384: ttft=8.208327000000281 tps=18.18839398579905 peak=10.220993536
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm       4096       8192      16384
+--------------------------------------------
+    snapkv      1.66       3.47       8.21 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       4096       8192      16384
+--------------------------------------------
+    snapkv     18.03      18.51      18.19 
+
+=== peak VRAM allocated (GB) ===
+       arm       4096       8192      16384
+--------------------------------------------
+    snapkv      7.07       8.01      10.22 
+
+=== peak VRAM reserved (GB) ===
+       arm       4096       8192      16384
+--------------------------------------------
+    snapkv      7.59       8.53      10.86 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running kivi4_tiled@4096 ...
+    kivi4_tiled@4096: ttft=2.230568899998616 tps=10.072608163503777 peak=6.542096384
+  running kivi4_tiled@8192 ...
+    kivi4_tiled@8192: ttft=4.886894199997187 tps=7.727817241164417 peak=6.736082944
+  running kivi4_tiled@16384 ...
+    kivi4_tiled@16384: ttft=10.914872800000012 tps=5.232368604235479 peak=7.124056064
+  running kivi4_tiled@32768 ...
+    kivi4_tiled@32768: ttft=27.036960099998396 tps=3.2814170746126843 peak=7.899478016
+  running kivi4_tiled@65536 ...
+    kivi4_tiled@65536: ttft=74.79206569999951 tps=1.857921618260054 peak=9.471162368
+  running kivi4_tiled@98304 ...
+    kivi4_tiled@98304: ttft=143.11342240000522 tps=1.2935229528661905 peak=11.055560704
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm       4096       8192      16384      32768      65536      98304
+-----------------------------------------------------------------------------
+kivi4_tiled      2.23       4.89      10.91      27.04      74.79     143.11 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       4096       8192      16384      32768      65536      98304
+-----------------------------------------------------------------------------
+kivi4_tiled     10.07       7.73       5.23       3.28       1.86       1.29 
+
+=== peak VRAM allocated (GB) ===
+       arm       4096       8192      16384      32768      65536      98304
+-----------------------------------------------------------------------------
+kivi4_tiled      6.54       6.74       7.12       7.90       9.47      11.06 
+
+=== peak VRAM reserved (GB) ===
+       arm       4096       8192      16384      32768      65536      98304
+-----------------------------------------------------------------------------
+kivi4_tiled      6.99       7.18       7.57       8.35      10.01      11.50 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running streamingllm_chunked@16384 ...
+    streamingllm_chunked@16384: ttft=5.927861600001052 tps=16.956180846194815 peak=6.741620736
+  running streamingllm_chunked@65536 ...
+    streamingllm_chunked@65536: ttft=23.619997399997374 tps=18.4041714611907 peak=6.741620736
+  running h2o_chunked@16384 ...
+    h2o_chunked@16384: ttft=12.238567400003376 tps=17.355777361797987 peak=9.41079552
+  running h2o_chunked@65536 ...
+    h2o_chunked@65536: ttft=50.143503999999666 tps=17.806467314407215 peak=9.411319808
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm      16384      65536
+---------------------------------
+h2o_chunked     12.24      50.14 
+streamingllm_chunked      5.93      23.62 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      16384      65536
+---------------------------------
+h2o_chunked     17.36      17.81 
+streamingllm_chunked     16.96      18.40 
+
+=== peak VRAM allocated (GB) ===
+       arm      16384      65536
+---------------------------------
+h2o_chunked      9.41       9.41 
+streamingllm_chunked      6.74       6.74 
+
+=== peak VRAM reserved (GB) ===
+       arm      16384      65536
+---------------------------------
+h2o_chunked     10.29      10.29 
+streamingllm_chunked      7.06       7.06 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dkv@4096 ...
+    dkv@4096: ttft=2.330518900002062 tps=6.7977638798185565 peak=8.042257408
+  running dkv@8192 ...
+    dkv@8192: ttft=4.94393829999899 tps=6.988503104348301 peak=8.977524736
+  running dkv@16384 ...
+    dkv@16384: ttft=11.375481100003526 tps=4.346534410319579 peak=10.079378432
+  running dkv@24576 ...
+    dkv@24576: ttft=19.46348030000081 tps=3.8892400818672477 peak=11.074799104
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm       4096       8192      16384      24576
+-------------------------------------------------------
+       dkv      2.33       4.94      11.38      19.46 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       4096       8192      16384      24576
+-------------------------------------------------------
+       dkv      6.80       6.99       4.35       3.89 
+
+=== peak VRAM allocated (GB) ===
+       arm       4096       8192      16384      24576
+-------------------------------------------------------
+       dkv      8.04       8.98      10.08      11.07 
+
+=== peak VRAM reserved (GB) ===
+       arm       4096       8192      16384      24576
+-------------------------------------------------------
+       dkv      8.28       9.35      10.44      11.25 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dkv@32768 ...
+    dkv@32768: ttft=38.19802740000159 tps=3.606028312472486 peak=8.83292416
+  running dkv@65536 ...
+    dkv@65536: ttft=129.07989449999877 tps=3.6741446571154897 peak=9.445933568
+  running dkv@131072 ...
+    dkv@131072: ttft=382.34550200000376 tps=3.6705387083913283 peak=10.281252352
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm      32768      65536     131072
+--------------------------------------------
+       dkv     38.20     129.08     382.35 
+
+=== decode throughput (tok/s, higher better) ===
+       arm      32768      65536     131072
+--------------------------------------------
+       dkv      3.61       3.67       3.67 
+
+=== peak VRAM allocated (GB) ===
+       arm      32768      65536     131072
+--------------------------------------------
+       dkv      8.83       9.45      10.28 
+
+=== peak VRAM reserved (GB) ===
+       arm      32768      65536     131072
+--------------------------------------------
+       dkv      9.14       9.87      10.87 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dkv@4096 ...
+    dkv@4096: ttft=2.5748785000032512 tps=6.879922255157483 peak=8.175900672
+  running dkv@8192 ...
+    dkv@8192: ttft=5.5877784000040265 tps=7.169650510905186 peak=9.157789696
+  running dkv@16384 ...
+    dkv@16384: ttft=12.674743099996704 tps=5.218982810466441 peak=10.039235584
+  running dkv@24576 ...
+    dkv@24576: ttft=21.691081099997973 tps=4.59141141055723 peak=11.650766336
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm       4096       8192      16384      24576
+-------------------------------------------------------
+       dkv      2.57       5.59      12.67      21.69 
+
+=== decode throughput (tok/s, higher better) ===
+       arm       4096       8192      16384      24576
+-------------------------------------------------------
+       dkv      6.88       7.17       5.22       4.59 
+
+=== peak VRAM allocated (GB) ===
+       arm       4096       8192      16384      24576
+-------------------------------------------------------
+       dkv      8.18       9.16      10.04      11.65 
+
+=== peak VRAM reserved (GB) ===
+       arm       4096       8192      16384      24576
+-------------------------------------------------------
+       dkv      8.45       9.48      10.35      11.92 
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+  running dkv@32768 ...
+    dkv@32768: ttft=47.12343939999846 tps=3.773219708716238 peak=10.499567616
+  running dkv@65536 ...
+    dkv@65536: ttft=126.54801429999497 tps=3.5880370382517546 peak=10.77141248
+  running dkv@131072 ...
+    dkv@131072: ttft=515.109828099994 tps=3.3633627851285675 peak=12.7937536
+
+################ ibm-granite/granite-4.2-8b ################
+
+=== TTFT (s, lower better) ===
+       arm      32768      65536     131072
+--------------------------------------------
+       dkv     47.12     126.55     515.11*
+
+=== decode throughput (tok/s, higher better) ===
+       arm      32768      65536     131072
+--------------------------------------------
+       dkv      3.77       3.59       3.36*
+
+=== peak VRAM allocated (GB) ===
+       arm      32768      65536     131072
+--------------------------------------------
+       dkv     10.50      10.77      12.79*
+
+=== peak VRAM reserved (GB) ===
+       arm      32768      65536     131072
+--------------------------------------------
+       dkv     10.97      11.04      13.40*
+
+* = spilled to host memory; that timing is PCIe bandwidth, not compute.
+V3 PART S COMPLETE

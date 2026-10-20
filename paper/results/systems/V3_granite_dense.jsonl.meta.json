@@ -1,0 +1,16 @@
+{
+  "baseline_params": {
+    "defrag": true
+  },
+  "chunk": 1024,
+  "dkv_decode_rev": "a15167beab36",
+  "dkv_env": {
+    "DKV_TRITON_STRICT": "1"
+  },
+  "gen": 64,
+  "model": "ibm-granite/granite-4.2-8b",
+  "preset": "mid",
+  "protocol": "systems-v2",
+  "quant": "nf4",
+  "reps": 3
+}
