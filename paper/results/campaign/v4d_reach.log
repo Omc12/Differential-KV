@@ -1,0 +1,35 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V4D_granite_kivi4_tiled_114k.jsonl
+[ckpt] 0 points already recorded
+  running kivi4_tiled@114688 ...
+    kivi4_tiled@114688: spilled peak=11.43284992 (325s)
+
+
+=== V4D_granite_kivi4_tiled_114k.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi4_tiled   114688   114688     11.43    297.1    5.566  spilled
+         first spill at 114688 tok (11.43 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V4D_granite_kivi2_tiled_114k.jsonl
+[ckpt] 0 points already recorded
+  running kivi2_tiled@114688 ...
+    kivi2_tiled@114688: ok peak=9.106846208 (407s)
+
+
+=== V4D_granite_kivi2_tiled_114k.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi2_tiled   114688   114688      9.11    383.3    3.241       ok
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V4D_granite_dkv_auto_114k.jsonl
+[ckpt] 0 points already recorded
+  running dkv@114688 ...
+    dkv@114688: ok peak=10.469093888 (428s)
+
+
+=== V4D_granite_dkv_auto_114k.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv   114688   114688     10.47    383.6    3.318       ok
+V4-D REACH COMPLETE
