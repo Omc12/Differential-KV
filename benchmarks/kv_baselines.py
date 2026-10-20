@@ -211,7 +211,8 @@ def cache_set_kv(pkv, i, k, v) -> None:
 
 
 def chunked_prefill(model, ids: List[int], device: str, chunk: int = 1024,
-                    defrag: bool = False, static_len: int = 0):
+                    defrag: bool = False, static_len: int = 0,
+                    offload: bool = False):
     """Dense prefill in chunks -> (past_key_values, last-position logits).
 
     Chunked because the lm_head runs on every position: a single-shot forward
@@ -235,7 +236,14 @@ def chunked_prefill(model, ids: List[int], device: str, chunk: int = 1024,
     preallocated length under a mask, which costs time, not memory.
     """
     past, out = None, None
-    if static_len:
+    if offload:
+        # Exact KV kept in host memory: transformers' offloaded DynamicCache
+        # holds one layer (plus the prefetched next) on the GPU and streams the
+        # rest over PCIe every forward. The alternative to compression a
+        # single-GPU user already has; it pays in transfer time, not quality.
+        from transformers import DynamicCache
+        past = DynamicCache(config=model.config, offloading=True)
+    elif static_len:
         from transformers import StaticCache
         past = StaticCache(config=model.config, max_cache_len=int(static_len))
     with torch.no_grad():
@@ -331,7 +339,8 @@ KV_TRANSFORMS = {
 
 # Methods whose reported KV bytes are actually allocated (see module docstring).
 _REALIZED = {"dense", "streamingllm", "keynorm_hh", "snapkv", "h2o",
-             "streamingllm_chunked", "h2o_chunked", "kivi4_chunked", "kivi4_tiled"}
+             "streamingllm_chunked", "h2o_chunked", "kivi4_chunked", "kivi4_tiled",
+             "kivi2_tiled"}
 
 
 def attn_by_cache_layer(pkv, atts) -> Dict[int, torch.Tensor]:
@@ -386,7 +395,7 @@ def _select_by_attention(prefix_scores: torch.Tensor, keep: int,
 
 def _evict_by_observed_attention(model, ids: List[int], device: str, chunk: int,
                                  budget: int, window: int, pool_kernel: int,
-                                 recency_window: int = 0):
+                                 recency_window: int = 0, defrag: bool = False):
     """Shared engine for snapkv and h2o.
 
     Prefills all but the last `window` tokens, runs those `window` tokens with
@@ -400,7 +409,9 @@ def _evict_by_observed_attention(model, ids: List[int], device: str, chunk: int,
 
     # Prefill under whatever the model was loaded with (SDPA): this is the
     # expensive part and it needs no attention weights.
-    past, _ = chunked_prefill(model, prefix_ids, device, chunk)
+    # defrag: the allocator fix dense gets (see chunked_prefill); without it
+    # the post-hoc arms spill on fragmentation, not on their KV.
+    past, _ = chunked_prefill(model, prefix_ids, device, chunk, defrag=defrag)
     pos = torch.tensor([list(range(plen, prompt_len))], device=device)
     # Only the observation window needs them.
     with eager_attention(model):
@@ -604,10 +615,23 @@ def _unpack4(p: torch.Tensor) -> torch.Tensor:
     return torch.stack((p & 15, p >> 4), dim=-1).flatten(-2)
 
 
+def _pack2(q: torch.Tensor) -> torch.Tensor:
+    return (q[..., 0::4] | (q[..., 1::4] << 2) | (q[..., 2::4] << 4)
+            | (q[..., 3::4] << 6)).to(torch.uint8)
+
+
+def _unpack2(p: torch.Tensor) -> torch.Tensor:
+    return torch.stack((p & 3, (p >> 2) & 3, (p >> 4) & 3, p >> 6), dim=-1).flatten(-2)
+
+
+_PACK = {4: (_pack4, _unpack4), 2: (_pack2, _unpack2)}
+
+
 class _KiviLayerMixin:
     """Grafted onto a transformers cache layer that holds attention KV."""
     kivi_group = 32
     kivi_residual = 128
+    kivi_bits = 4
 
     def _kivi_state(self):
         st = self.__dict__.get("_kivi")
@@ -682,9 +706,11 @@ KIVI_TILE_TOKENS = 8192
 _KIVI_TILED_CACHE = {"cache": None}
 
 
-def _kivi_quantize_into(st, rk, rv, G, R, keep_tail):
+def _kivi_quantize_into(st, rk, rv, G, R, keep_tail, bits=4):
     """Quantize whole groups of the 16-bit window older than the last
     max(R, keep_tail) tokens; return the remaining window."""
+    lv = float(2 ** bits - 1)
+    pack = _PACK[bits][0]
     n_res = rk.shape[-2]
     hold = max(R, keep_tail)
     n_q = ((n_res - hold) // G) * G if n_res > hold else 0
@@ -693,14 +719,14 @@ def _kivi_quantize_into(st, rk, rv, G, R, keep_tail):
         B, H, _, Dk = k.shape
         kg = k.reshape(B, H, n_q // G, G, Dk)
         kmin = kg.amin(dim=3, keepdim=True)
-        ks = (kg.amax(dim=3, keepdim=True) - kmin).clamp_min(1e-8) / 15.0
-        kq = torch.clamp(torch.round((kg - kmin) / ks), 0, 15).to(torch.uint8)
+        ks = (kg.amax(dim=3, keepdim=True) - kmin).clamp_min(1e-8) / lv
+        kq = torch.clamp(torch.round((kg - kmin) / ks), 0, lv).to(torch.uint8)
         vmin = v.amin(dim=-1, keepdim=True)
-        vs = (v.amax(dim=-1, keepdim=True) - vmin).clamp_min(1e-8) / 15.0
-        vq = torch.clamp(torch.round((v - vmin) / vs), 0, 15).to(torch.uint8)
+        vs = (v.amax(dim=-1, keepdim=True) - vmin).clamp_min(1e-8) / lv
+        vq = torch.clamp(torch.round((v - vmin) / vs), 0, lv).to(torch.uint8)
         dt = rk.dtype
-        st["k"].append((_pack4(kq), ks.to(dt), kmin.to(dt)))
-        st["v"].append((_pack4(vq), vs.to(dt), vmin.to(dt)))
+        st["k"].append((pack(kq), ks.to(dt), kmin.to(dt)))
+        st["v"].append((pack(vq), vs.to(dt), vmin.to(dt)))
         rk, rv = rk[..., n_q:, :].contiguous(), rv[..., n_q:, :].contiguous()
     return rk, rv
 
@@ -712,7 +738,8 @@ def _kivi_tiled_update(self, key_states, value_states, *args, **kwargs):
     if st["rk"] is not None:
         # quantize the PREVIOUS forward's tokens (see the note above)
         st["rk"], st["rv"] = _kivi_quantize_into(
-            st, st["rk"], st["rv"], self.kivi_group, self.kivi_residual, 0)
+            st, st["rk"], st["rv"], self.kivi_group, self.kivi_residual, 0,
+            self.kivi_bits)
     st["rk"] = key_states if st["rk"] is None else torch.cat([st["rk"], key_states], -2)
     st["rv"] = value_states if st["rv"] is None else torch.cat([st["rv"], value_states], -2)
     st["n"] += key_states.shape[-2]
@@ -727,7 +754,9 @@ def _kivi_tiled_attention(module, query, key, value, attention_mask,
     if sliding_window is not None or softcap is not None or dropout:
         raise NotImplementedError("kivi4_tiled: sliding window / softcap / dropout")
     cache = _KIVI_TILED_CACHE["cache"]
-    st = cache.layers[module.layer_idx].__dict__.get("_kivi")
+    lyr = cache.layers[module.layer_idx]
+    st = lyr.__dict__.get("_kivi")
+    unpack = _PACK[getattr(lyr, "kivi_bits", 4)][1]
     B, H, Q, D = query.shape
     Hk = key.shape[1]
     g = H // Hk
@@ -763,9 +792,9 @@ def _kivi_tiled_attention(module, query, key, value, attention_mask,
             ks, vs, n = [], [], 0
             while i < n_entries and (n == 0 or n < KIVI_TILE_TOKENS):
                 p, sc, z = st["k"][i]
-                ks.append((_unpack4(p).to(dt) * sc + z).flatten(2, 3))
+                ks.append((unpack(p).to(dt) * sc + z).flatten(2, 3))
                 p, sc, z = st["v"][i]
-                vs.append(_unpack4(p).to(dt) * sc + z)
+                vs.append(unpack(p).to(dt) * sc + z)
                 n += vs[-1].shape[-2]
                 i += 1
             Kt = torch.cat(ks, -2).contiguous()
@@ -793,7 +822,8 @@ def _kivi_tiled_register():
 
 
 def _kivi_chunked(model, ids: List[int], device: str, chunk: int,
-                  group: int = 32, residual: int = 128, tiled: bool = False):
+                  group: int = 32, residual: int = 128, tiled: bool = False,
+                  bits: int = 4):
     """Prefill in chunks into a cache whose attention layers store 4-bit KV."""
     from transformers import DynamicCache
     from transformers.cache_utils import DynamicLayer
@@ -804,7 +834,7 @@ def _kivi_chunked(model, ids: List[int], device: str, chunk: int,
         if isinstance(lyr, DynamicLayer):
             # Bound per instance: re-classing the layer is refused by CPython
             # ("object layout differs") for these ABC-derived classes.
-            lyr.kivi_group, lyr.kivi_residual = group, residual
+            lyr.kivi_group, lyr.kivi_residual, lyr.kivi_bits = group, residual, bits
             for name in ("update", "get_seq_length", "kivi_bytes", "_kivi_state"):
                 setattr(lyr, name, types.MethodType(getattr(_KiviLayerMixin, name), lyr))
             if tiled:
@@ -843,7 +873,11 @@ CHUNKED_DEFAULTS = {
     "h2o_chunked": {"budget": 2048, "recency_window": 512, "prefill_chunk": 256},
     "kivi4_chunked": {"group": 32, "residual": 128},
     "kivi4_tiled": {"group": 32, "residual": 128},
+    # KIVI-2 as published: per-channel keys in groups of 32, per-token values,
+    # a 128-token 16-bit window, read tile by tile like kivi4_tiled.
+    "kivi2_tiled": {"group": 32, "residual": 128, "bits": 2},
 }
+KIVI_TILED = ("kivi4_tiled", "kivi2_tiled")
 
 
 def prefill_attn(method: str) -> str:
@@ -898,6 +932,7 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
             window=params.get("window", 32),
             pool_kernel=params.get("pool_kernel", 7 if method == "snapkv" else 0),
             recency_window=params.get("recency_window", 0 if method == "snapkv" else 512),
+            defrag=bool(params.get("defrag", False)),
         )
         if cuda:
             torch.cuda.synchronize()
@@ -910,10 +945,10 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
             past, last_logits, phys_gb, max_cache = _streamingllm_chunked(
                 model, ids, device, chunk, params["n_sink"],
                 params["recency_window"])
-        elif method in ("kivi4_chunked", "kivi4_tiled"):
+        elif method in ("kivi4_chunked",) + KIVI_TILED:
             past, last_logits, phys_gb, max_cache = _kivi_chunked(
                 model, ids, device, chunk, params["group"], params["residual"],
-                tiled=(method == "kivi4_tiled"))
+                tiled=(method in KIVI_TILED), bits=params.get("bits", 4))
         else:
             past, last_logits, phys_gb, max_cache = _h2o_chunked(
                 model, ids, device, params["prefill_chunk"], params["budget"],
@@ -925,11 +960,15 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
     else:
         defrag = bool(params.pop("defrag", False)) if method == "dense" else False
         static = bool(params.pop("static", False)) if method == "dense" else False
+        offload = bool(params.pop("offload", False)) if method == "dense" else False
         # +1: the decode loop writes one position per generated token, and the
         # last prefill logits produce the first of them.
         static_len = (prompt_len + gen_len + 1) if static else 0
         past, last_logits = chunked_prefill(model, ids, device, chunk,
-                                            defrag=defrag, static_len=static_len)
+                                            defrag=defrag, static_len=static_len,
+                                            offload=offload)
+        if offload:
+            params["offload"] = True
         if defrag:
             params["defrag"] = True          # keep it on the record
         if static:
@@ -987,7 +1026,7 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
     if cuda:
         torch.cuda.synchronize()
     decode_s = time.perf_counter() - t2
-    if method in ("kivi4_chunked", "kivi4_tiled"):
+    if method in ("kivi4_chunked",) + KIVI_TILED:
         if "_kivi_prev_attn" in model.__dict__:
             # every later arm in this process must get the model's own attention
             model.set_attn_implementation(model.__dict__.pop("_kivi_prev_attn"))

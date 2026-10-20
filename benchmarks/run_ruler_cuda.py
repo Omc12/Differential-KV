@@ -176,6 +176,10 @@ def score_files(paths: List[str]) -> None:
                   f"| KV {avg('kv_physical_gb'):.3f} GB ({avg('kv_compression_x'):.1f}x)")
 
 
+def answer_prefix_on() -> bool:
+    return os.environ.get("RULER_ANSWER_PREFIX", "1") != "0"
+
+
 def build_ruler_prompt(tok, item, thinking: bool = False) -> str:
     """Wrap the bare task text in the model's chat template.
 
@@ -196,6 +200,15 @@ def build_ruler_prompt(tok, item, thinking: bool = False) -> str:
     prefix = item.get("answer_prefix") or ""
     if prefix and text.endswith(prefix):
         body = text[: -len(prefix)]
+    elif prefix and answer_prefix_on():
+        # The generator stores the prefix BESIDE the input, not inside it, so
+        # the branch above never fired and every task ran with no prefix: the
+        # models opened with a preamble ("Based on the text provided, here
+        # is...") that spent variable tracking's 30-token budget before any
+        # answer, and vt scored ~0 for every arm, dense included. RULER's own
+        # pipeline appends the prefix here. RULER_ANSWER_PREFIX=0 restores the
+        # old behaviour (needed to resume stores written before this fix).
+        body = text
     else:
         body, prefix = text, ""
 
@@ -414,11 +427,17 @@ def main():
                         # when set, so default stores keep matching
                         "DKV_STORE", "DKV_KEY_QUANT", "DKV_RESID_ATTN",
                         "DKV_STREAM_ELASTIC", "DKV_PREFILL_SDPA", "DKV_EXACT_LEAN",
-                        "DKV_REMAT_GATE") if k in os.environ} or None,
+                        "DKV_REMAT_GATE",
+                        # routing ablation (attend-all is DKV_TOPK_BLOCKS=0)
+                        "DKV_TOPK_BLOCKS") if k in os.environ} or None,
            "protocol": "ruler-official-generators"}
     # Only when used, so stores written before the option existed still match.
     if args.per_task:
         cfg["per_task"] = args.per_task
+    # Recorded only when on, so stores written before the fix still match
+    # under RULER_ANSWER_PREFIX=0 and a fixed run can never append to them.
+    if answer_prefix_on():
+        cfg["answer_prefix"] = "separate-field"
     store = ResumableJSONL(out, config=cfg)
     done = store.load_done()
 
