@@ -1,0 +1,1820 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V4S_Qwen3.5-4B_dkv_mid_attendall_32k.jsonl
+[ckpt] 0 recorded, 65 pending (of 65 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 965.87it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:27,  2.89it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   3%|▎         | 14/426 [00:00<00:10, 39.56it/s]Loading weights:   9%|▉         | 40/426 [00:00<00:03, 103.18it/s]Loading weights:  14%|█▍        | 61/426 [00:00<00:02, 133.08it/s]Loading weights:  19%|█▉        | 80/426 [00:00<00:02, 147.09it/s]Loading weights:  23%|██▎       | 99/426 [00:00<00:02, 158.47it/s]Loading weights:  30%|███       | 128/426 [00:00<00:01, 192.80it/s]Loading weights:  35%|███▍      | 149/426 [00:01<00:01, 192.46it/s]Loading weights:  40%|████      | 172/426 [00:01<00:01, 195.89it/s]Loading weights:  46%|████▋     | 198/426 [00:01<00:01, 212.53it/s]Loading weights:  52%|█████▏    | 220/426 [00:01<00:00, 206.43it/s]Loading weights:  57%|█████▋    | 242/426 [00:01<00:00, 200.39it/s]Loading weights:  62%|██████▏   | 263/426 [00:01<00:00, 196.18it/s]Loading weights:  68%|██████▊   | 290/426 [00:01<00:00, 213.59it/s]Loading weights:  73%|███████▎  | 312/426 [00:01<00:00, 191.51it/s]Loading weights:  80%|████████  | 341/426 [00:01<00:00, 214.73it/s]Loading weights:  85%|████████▌ | 364/426 [00:02<00:00, 198.64it/s]Loading weights:  90%|█████████ | 385/426 [00:02<00:00, 200.68it/s]Loading weights:  96%|█████████▋| 411/426 [00:02<00:00, 213.60it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 175.27it/s]
+[DKV] Heap trimmed. RSS: 1146 MB → 1146 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] CUDA graph capture skipped: no decode cache supplied and mutation-out is not active, so capture's warmup writes could not be rolled back. On the routed path this means --fastdc / DKV_GRAPH_MUTATION_OUT is off, or the gate disabled it for this session.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1561 MB → 1561 MB (saved 0 MB)
+[Pool] Lazy-allocated 264 slots for ~32229 tokens = 112.6 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) is running on layer 3.
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/65] 32768/cwe#0 -> 'Based on an analysis of the provided list of 4,353' (28.0s/item, ~30 min left)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+  [2/65] 32768/cwe#1 -> 'Based on an analysis of the provided list of 4,383' (27.3s/item, ~29 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+  [3/65] 32768/cwe#2 -> 'Based on a comprehensive count of the words provid' (27.4s/item, ~28 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+  [4/65] 32768/cwe#3 -> 'Based on an analysis of the provided list of 4,383' (27.3s/item, ~28 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+  [5/65] 32768/cwe#4 -> 'Based on an analysis of the provided list of 4,353' (27.2s/item, ~27 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+  [6/65] 32768/fwe#0 -> 'tgjovi, ksxqrl, tvorfz' (25.0s/item, ~25 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+  [7/65] 32768/fwe#1 -> 'tywcou, jyfeeh, uzvcls' (23.3s/item, ~23 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+  [8/65] 32768/fwe#2 -> 'tmzbeq, joeews, unqtbr' (22.1s/item, ~21 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+  [9/65] 32768/fwe#3 -> 'tuhuto, jvixbl, uvaezr' (21.1s/item, ~20 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+  [10/65] 32768/fwe#4 -> 'szskug, irphlx, ukwozw' (20.3s/item, ~19 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+  [11/65] 32768/niah_multikey_1#0 -> 'The special magic number for painful-pigpen mentio' (20.0s/item, ~18 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+  [12/65] 32768/niah_multikey_1#1 -> 'The special magic number for plucky-prefix mention' (19.7s/item, ~17 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+  [13/65] 32768/niah_multikey_1#2 -> 'The special magic number for hurried-tensor mentio' (19.4s/item, ~17 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+  [14/65] 32768/niah_multikey_1#3 -> 'The special magic number for big-river mentioned i' (19.3s/item, ~16 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+  [15/65] 32768/niah_multikey_1#4 -> 'The special magic number for excellent-pence menti' (19.1s/item, ~16 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+  [16/65] 32768/niah_multikey_2#0 -> 'The special magic number for painful-weasel is **5' (18.9s/item, ~15 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+  [17/65] 32768/niah_multikey_2#1 -> 'The special magic number for rough-hatred is **672' (18.7s/item, ~15 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+  [18/65] 32768/niah_multikey_2#2 -> 'The special magic number for bewildered-rider is *' (18.6s/item, ~15 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+  [19/65] 32768/niah_multikey_2#3 -> 'The special magic number for rainy-fisting is **63' (18.5s/item, ~14 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+  [20/65] 32768/niah_multikey_2#4 -> 'The special magic number for black-broad is **4394' (18.4s/item, ~14 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV HF] WARNING: repetition loop detected at token 110. Escalating penalty window to 256 tokens and strength to 1.3x.
+  [21/65] 32768/niah_multikey_3#0 -> 'The special magic uuid for `66ed34e2-c1ed-4940-a10' (18.8s/item, ~14 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+  [22/65] 32768/niah_multikey_3#1 -> 'The special magic uuid for `cf237be0-ecb3-474d-8da' (18.9s/item, ~14 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+  [23/65] 32768/niah_multikey_3#2 -> 'The special magic uuid for `78936d2d-8647-43c7-9d6' (19.2s/item, ~13 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+  [24/65] 32768/niah_multikey_3#3 -> 'The special magic uuid for `db9a437a-6049-4fed-86a' (19.3s/item, ~13 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+  [25/65] 32768/niah_multikey_3#4 -> 'The special magic uuid for `b2204f32-e202-4858-961' (19.6s/item, ~13 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+  [26/65] 32768/niah_multiquery#0 -> 'Based on the text provided, here are the special m' (19.8s/item, ~13 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+  [27/65] 32768/niah_multiquery#1 -> 'Based on the text provided, here are the special m' (19.9s/item, ~13 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+  [28/65] 32768/niah_multiquery#2 -> 'Based on the text provided, here are the special m' (20.0s/item, ~12 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+  [29/65] 32768/niah_multiquery#3 -> 'Based on the text provided, here are the special m' (20.1s/item, ~12 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+  [30/65] 32768/niah_multiquery#4 -> 'Based on the text provided, here are the special m' (20.2s/item, ~12 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+  [31/65] 32768/niah_multivalue#0 -> 'Based on the text provided, here are the special m' (20.2s/item, ~11 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+  [32/65] 32768/niah_multivalue#1 -> 'Based on the text provided, here are the special m' (20.2s/item, ~11 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+  [33/65] 32768/niah_multivalue#2 -> 'Based on the text provided, here are the special m' (20.3s/item, ~11 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+  [34/65] 32768/niah_multivalue#3 -> 'Based on the text provided, here are the special m' (20.3s/item, ~10 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+  [35/65] 32768/niah_multivalue#4 -> 'Based on the text provided, here are the special m' (20.4s/item, ~10 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+  [36/65] 32768/niah_single_1#0 -> 'The special magic number for smoggy-caliber mentio' (20.3s/item, ~10 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+  [37/65] 32768/niah_single_1#1 -> 'The special magic number for typical-toilet mentio' (20.2s/item, ~9 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+  [38/65] 32768/niah_single_1#2 -> 'The special magic number for flippant-twine mentio' (20.1s/item, ~9 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+  [39/65] 32768/niah_single_1#3 -> 'The special magic number for old-snowplow mentione' (20.0s/item, ~9 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+  [40/65] 32768/niah_single_1#4 -> 'The special magic number for knowledgeable-hometow' (19.9s/item, ~8 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+  [41/65] 32768/niah_single_2#0 -> 'The special magic number for roasted-poetry mentio' (19.8s/item, ~8 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+  [42/65] 32768/niah_single_2#1 -> 'The special magic number for lovely-filter mention' (19.8s/item, ~8 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+  [43/65] 32768/niah_single_2#2 -> 'The special magic number for aggressive-psychology' (19.7s/item, ~7 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+  [44/65] 32768/niah_single_2#3 -> 'The special magic number for fair-yogurt mentioned' (19.6s/item, ~7 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+  [45/65] 32768/niah_single_2#4 -> 'The special magic number for shiny-fleece mentione' (19.5s/item, ~7 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+  [46/65] 32768/niah_single_3#0 -> 'The special magic uuid for sordid-bath mentioned i' (19.5s/item, ~6 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+  [47/65] 32768/niah_single_3#1 -> 'The special magic uuid for dark-boyhood mentioned ' (19.5s/item, ~6 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+  [48/65] 32768/niah_single_3#2 -> 'The special magic uuid for deranged-assurance ment' (19.5s/item, ~6 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+  [49/65] 32768/niah_single_3#3 -> 'The special magic uuid for screeching-drag mention' (19.5s/item, ~5 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+  [50/65] 32768/niah_single_3#4 -> 'The special magic uuid for tested-shout mentioned ' (19.5s/item, ~5 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+  [51/65] 32768/qa_1#0 -> 'France' (19.4s/item, ~5 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+  [52/65] 32768/qa_1#1 -> 'The Normans were in Normandy from the 9th century,' (19.4s/item, ~4 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+  [53/65] 32768/qa_1#2 -> 'Denmark, Norway, Sweden, Iceland, and the Faroe Is' (19.3s/item, ~4 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+  [54/65] 32768/qa_1#3 -> 'Rollo' (19.2s/item, ~4 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+  [55/65] 32768/qa_1#4 -> '10th' (19.1s/item, ~3 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+  [56/65] 32768/qa_2#0 -> 'No. Scott Derrickson is American, while Ed Wood wa' (19.1s/item, ~3 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+  [57/65] 32768/qa_2#1 -> 'United States Ambassador to the United Kingdom' (19.0s/item, ~3 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+  [58/65] 32768/qa_2#2 -> 'Animorphs' (18.9s/item, ~2 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+  [59/65] 32768/qa_2#3 -> 'No, the Laleli Mosque is located in the Laleli nei' (18.9s/item, ~2 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+  [60/65] 32768/qa_2#4 -> 'Greenwich Village' (18.8s/item, ~2 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+  [61/65] 32768/vt#0 -> 'Based on the text provided, here is the tracking o' (18.8s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+  [62/65] 32768/vt#1 -> 'Based on the text provided, here is the chain of v' (18.8s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+  [63/65] 32768/vt#2 -> 'Based on the text provided, here is the tracking o' (18.8s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+  [64/65] 32768/vt#3 -> 'Based on the text provided, here is the tracking o' (18.7s/item, ~0 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+  [65/65] 32768/vt#4 -> 'Based on the text provided, here is the tracking o' (18.7s/item, ~0 min left)
+
+
+=== V4S_Qwen3.5-4B_dkv_mid_attendall_32k.jsonl ===
+Qwen/Qwen3.5-4B arm=dkv preset=mid quant=nf4
+              task    32768
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2     20.0
+   niah_multikey_3     20.0
+   niah_multivalue    100.0
+   niah_multiquery    100.0
+                vt      0.0
+               cwe     48.0
+               fwe    100.0
+              qa_1     60.0
+              qa_2     40.0
+         RULER avg     68.3
+  ttft nans | decode nan tok/s | peak 5.73 GB | KV 0.241 GB (4.5x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V4S_Qwen3.5-4B_kivi2_tiled_32k.jsonl
+[ckpt] 0 recorded, 65 pending (of 65 generated)
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1123.88it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:24,  2.95it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   4%|▍         | 18/426 [00:00<00:07, 52.43it/s]Loading weights:  10%|▉         | 41/426 [00:00<00:03, 101.63it/s]Loading weights:  15%|█▌        | 65/426 [00:00<00:02, 137.68it/s]Loading weights:  21%|██        | 89/426 [00:00<00:02, 165.30it/s]Loading weights:  26%|██▌       | 109/426 [00:00<00:01, 171.49it/s]Loading weights:  31%|███       | 133/426 [00:00<00:01, 188.01it/s]Loading weights:  36%|███▌      | 154/426 [00:01<00:01, 189.00it/s]Loading weights:  43%|████▎     | 182/426 [00:01<00:01, 214.07it/s]Loading weights:  48%|████▊     | 205/426 [00:01<00:01, 200.31it/s]Loading weights:  55%|█████▍    | 234/426 [00:01<00:00, 220.59it/s]Loading weights:  60%|██████    | 257/426 [00:01<00:00, 208.56it/s]Loading weights:  65%|██████▌   | 279/426 [00:01<00:00, 205.51it/s]Loading weights:  72%|███████▏  | 305/426 [00:01<00:00, 220.22it/s]Loading weights:  77%|███████▋  | 328/426 [00:01<00:00, 220.55it/s]Loading weights:  82%|████████▏ | 351/426 [00:01<00:00, 218.65it/s]Loading weights:  88%|████████▊ | 374/426 [00:02<00:00, 209.08it/s]Loading weights:  93%|█████████▎| 398/426 [00:02<00:00, 210.66it/s]Loading weights:  99%|█████████▊| 420/426 [00:02<00:00, 203.95it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 181.37it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/65] 32768/cwe#0 -> 'Based on the analysis of the provided list of 4353' (30.7s/item, ~33 min left)
+  [2/65] 32768/cwe#1 -> 'Based on an analysis of the provided list of 4383 ' (30.2s/item, ~32 min left)
+  [3/65] 32768/cwe#2 -> 'Based on the analysis of the provided list of 4353' (30.1s/item, ~31 min left)
+  [4/65] 32768/cwe#3 -> 'Based on the analysis of the provided list of word' (30.0s/item, ~30 min left)
+  [5/65] 32768/cwe#4 -> 'Based on the analysis of the provided list of 4353' (29.8s/item, ~30 min left)
+  [6/65] 32768/fwe#0 -> 'Based on the analysis of the frequency of each wor' (28.0s/item, ~28 min left)
+  [7/65] 32768/fwe#1 -> 'Based on the analysis of the text provided, ignori' (26.6s/item, ~26 min left)
+  [8/65] 32768/fwe#2 -> 'Based on the analysis of the frequency of each wor' (25.7s/item, ~24 min left)
+  [9/65] 32768/fwe#3 -> 'Based on the analysis of the provided text, tracki' (24.8s/item, ~23 min left)
+  [10/65] 32768/fwe#4 -> 'Based on the analysis of the text provided, tracki' (24.1s/item, ~22 min left)
+  [11/65] 32768/niah_multikey_1#0 -> 'The special magic number for painful-pigpen mentio' (23.4s/item, ~21 min left)
+  [12/65] 32768/niah_multikey_1#1 -> 'The special magic number for plucky-prefix mention' (22.9s/item, ~20 min left)
+  [13/65] 32768/niah_multikey_1#2 -> 'The special magic number for hurried-tensor is **1' (22.5s/item, ~19 min left)
+  [14/65] 32768/niah_multikey_1#3 -> 'The special magic number for big-river mentioned i' (22.1s/item, ~19 min left)
+  [15/65] 32768/niah_multikey_1#4 -> 'The special magic number for excellent-pence menti' (21.7s/item, ~18 min left)
+  [16/65] 32768/niah_multikey_2#0 -> 'The special magic number for painful-weasel is 571' (21.4s/item, ~17 min left)
+  [17/65] 32768/niah_multikey_2#1 -> 'The special magic number for rough-hatred is **631' (21.1s/item, ~17 min left)
+  [18/65] 32768/niah_multikey_2#2 -> 'The special magic number for bewildered-rider is 4' (20.9s/item, ~16 min left)
+  [19/65] 32768/niah_multikey_2#3 -> 'The special magic number for rainy-fisting is 6475' (20.6s/item, ~16 min left)
+  [20/65] 32768/niah_multikey_2#4 -> 'The special magic number for black-broad is 457630' (20.4s/item, ~15 min left)
+  [21/65] 32768/niah_multikey_3#0 -> 'The special magic uuid for `66ed34e2-c1ed-4940-a10' (20.5s/item, ~15 min left)
+  [22/65] 32768/niah_multikey_3#1 -> 'The special magic uuid for `cf237be0-ecb3-474d-8da' (20.7s/item, ~15 min left)
+  [23/65] 32768/niah_multikey_3#2 -> 'The special magic uuid for `78936d2d-8647-43c7-9d6' (20.8s/item, ~15 min left)
+  [24/65] 32768/niah_multikey_3#3 -> 'The special magic uuid for `db9a437a-6049-4fed-86a' (20.8s/item, ~14 min left)
+  [25/65] 32768/niah_multikey_3#4 -> 'The special magic uuid for `b2204f32-e202-4858-961' (21.0s/item, ~14 min left)
+  [26/65] 32768/niah_multiquery#0 -> 'Based on the text provided, here are the special m' (21.4s/item, ~14 min left)
+  [27/65] 32768/niah_multiquery#1 -> 'Based on the text provided, here are the special m' (21.6s/item, ~14 min left)
+  [28/65] 32768/niah_multiquery#2 -> 'Based on the text provided, here are the special m' (21.6s/item, ~13 min left)
+  [29/65] 32768/niah_multiquery#3 -> 'Based on the text provided, here are the special m' (21.8s/item, ~13 min left)
+  [30/65] 32768/niah_multiquery#4 -> 'Based on the text provided, here are the special m' (22.0s/item, ~13 min left)
+  [31/65] 32768/niah_multivalue#0 -> 'The special magic numbers for wide-spume hidden in' (22.0s/item, ~12 min left)
+  [32/65] 32768/niah_multivalue#1 -> 'The special magic numbers hidden in the text are:\n' (22.0s/item, ~12 min left)
+  [33/65] 32768/niah_multivalue#2 -> 'Based on the text provided, here are the special m' (22.2s/item, ~12 min left)
+  [34/65] 32768/niah_multivalue#3 -> 'Based on the text provided, here are the special m' (22.4s/item, ~12 min left)
+  [35/65] 32768/niah_multivalue#4 -> 'The special magic numbers for obedient-breeze hidd' (22.4s/item, ~11 min left)
+  [36/65] 32768/niah_single_1#0 -> 'The special magic number for smoggy-caliber mentio' (22.3s/item, ~11 min left)
+  [37/65] 32768/niah_single_1#1 -> 'The special magic number for typical-toilet mentio' (22.1s/item, ~10 min left)
+  [38/65] 32768/niah_single_1#2 -> 'The special magic number for flippant-twine mentio' (22.0s/item, ~10 min left)
+  [39/65] 32768/niah_single_1#3 -> 'The special magic number for old-snowplow mentione' (21.9s/item, ~9 min left)
+  [40/65] 32768/niah_single_1#4 -> 'The special magic number for **knowledgeable-homet' (21.8s/item, ~9 min left)
+  [41/65] 32768/niah_single_2#0 -> 'The special magic number for roasted-poetry mentio' (21.6s/item, ~9 min left)
+  [42/65] 32768/niah_single_2#1 -> 'The special magic number for lovely-filter mention' (21.5s/item, ~8 min left)
+  [43/65] 32768/niah_single_2#2 -> 'The special magic number for aggressive-psychology' (21.4s/item, ~8 min left)
+  [44/65] 32768/niah_single_2#3 -> 'The special magic number for fair-yogurt mentioned' (21.3s/item, ~7 min left)
+  [45/65] 32768/niah_single_2#4 -> 'The special magic number for shiny-fleece mentione' (21.2s/item, ~7 min left)
+  [46/65] 32768/niah_single_3#0 -> 'The special magic uuid for sordid-bath mentioned i' (21.2s/item, ~7 min left)
+  [47/65] 32768/niah_single_3#1 -> 'The special magic uuid for dark-boyhood mentioned ' (21.5s/item, ~6 min left)
+  [48/65] 32768/niah_single_3#2 -> 'The special magic uuid for deranged-assurance ment' (21.5s/item, ~6 min left)
+  [49/65] 32768/niah_single_3#3 -> 'The special magic uuid for screeching-drag mention' (21.4s/item, ~6 min left)
+  [50/65] 32768/niah_single_3#4 -> 'The special magic uuid for tested-shout mentioned ' (21.6s/item, ~5 min left)
+  [51/65] 32768/qa_1#0 -> 'France' (21.4s/item, ~5 min left)
+  [52/65] 32768/qa_1#1 -> 'In the 10th and 11th centuries.' (21.3s/item, ~5 min left)
+  [53/65] 32768/qa_1#2 -> 'According to Document 3, the Normans (Norsemen) ar' (21.3s/item, ~4 min left)
+  [54/65] 32768/qa_1#3 -> 'Rollo' (21.1s/item, ~4 min left)
+  [55/65] 32768/qa_1#4 -> '10th century' (21.0s/item, ~3 min left)
+  [56/65] 32768/qa_2#0 -> 'No' (20.9s/item, ~3 min left)
+  [57/65] 32768/qa_2#1 -> 'The woman who portrayed Corlex Archer in the film ' (20.8s/item, ~3 min left)
+  [58/65] 32768/qa_2#2 -> 'The Hork-Bajir Chronicles' (20.7s/item, ~2 min left)
+  [59/65] 32768/qa_2#3 -> 'No' (20.5s/item, ~2 min left)
+  [60/65] 32768/qa_2#4 -> 'New York City' (20.4s/item, ~2 min left)
+  [61/65] 32768/vt#0 -> 'Based on the chain of variable assignments hidden ' (20.4s/item, ~1 min left)
+  [62/65] 32768/vt#1 -> 'Based on the text provided, here is the tracking o' (20.4s/item, ~1 min left)
+  [63/65] 32768/vt#2 -> 'To find the variables assigned the value **72955**' (20.3s/item, ~1 min left)
+  [64/65] 32768/vt#3 -> 'To find the variables assigned the value **77969**' (20.3s/item, ~0 min left)
+  [65/65] 32768/vt#4 -> 'Based on the text provided, here is the step-by-st' (20.3s/item, ~0 min left)
+
+
+=== V4S_Qwen3.5-4B_kivi2_tiled_32k.jsonl ===
+Qwen/Qwen3.5-4B arm=kivi2_tiled preset=None quant=nf4
+              task    32768
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3     80.0
+   niah_multikey_1    100.0
+   niah_multikey_2    100.0
+   niah_multikey_3    100.0
+   niah_multivalue    100.0
+   niah_multiquery    100.0
+                vt      0.0
+               cwe     56.0
+               fwe     40.0
+              qa_1     80.0
+              qa_2     20.0
+         RULER avg     75.1
+  ttft 13.71s | decode 7.5 tok/s | peak 3.45 GB | KV 0.188 GB (5.5x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V4S_Qwen3.5-4B_dense_prefix_32k.jsonl
+[ckpt] 0 recorded, 65 pending (of 65 generated)
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1283.25it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:29,  2.84it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   5%|▌         | 22/426 [00:00<00:06, 60.65it/s]Loading weights:  10%|▉         | 41/426 [00:00<00:03, 96.39it/s]Loading weights:  15%|█▌        | 65/426 [00:00<00:02, 133.92it/s]Loading weights:  21%|██        | 90/426 [00:00<00:02, 164.65it/s]Loading weights:  26%|██▌       | 110/426 [00:00<00:01, 172.98it/s]Loading weights:  31%|███       | 133/426 [00:00<00:01, 184.86it/s]Loading weights:  36%|███▌      | 154/426 [00:01<00:01, 187.34it/s]Loading weights:  43%|████▎     | 184/426 [00:01<00:01, 217.15it/s]Loading weights:  49%|████▊     | 207/426 [00:01<00:01, 197.69it/s]Loading weights:  55%|█████▌    | 235/426 [00:01<00:00, 216.64it/s]Loading weights:  61%|██████    | 258/426 [00:01<00:00, 202.56it/s]Loading weights:  67%|██████▋   | 287/426 [00:01<00:00, 222.16it/s]Loading weights:  73%|███████▎  | 310/426 [00:01<00:00, 209.61it/s]Loading weights:  78%|███████▊  | 332/426 [00:01<00:00, 206.79it/s]Loading weights:  84%|████████▍ | 358/426 [00:02<00:00, 216.75it/s]Loading weights:  89%|████████▉ | 380/426 [00:02<00:00, 211.94it/s]Loading weights:  94%|█████████▍| 402/426 [00:02<00:00, 207.41it/s]Loading weights:  99%|█████████▉| 423/426 [00:02<00:00, 202.34it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 178.93it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/65] 32768/cwe#0 -> ' 1. park 2. store 3. schooner 4. server 5. cosset ' (18.9s/item, ~20 min left)
+  [2/65] 32768/cwe#1 -> '\n1. **pecan**\n2. **calculus**\n3. **gong**\n4. **dri' (92.2s/item, ~97 min left)
+  [3/65] 32768/cwe#2 -> '\n1. **polo** (appears ~40+ times)\n2. **detailed** ' (70.5s/item, ~73 min left)
+  [4/65] 32768/cwe#3 -> ' 1. city 2. post 3. let 4. evidence 5. saffron 6. ' (57.4s/item, ~58 min left)
+  [5/65] 32768/cwe#4 -> '\n1. **leeway**\n2. **snotty**\n3. **bathroom**\n4. **' (51.3s/item, ~51 min left)
+  [6/65] 32768/fwe#0 -> '\n\n1. **tgjovi**\n2. **ksxqrl**\n3. **tvorfz**' (45.2s/item, ~44 min left)
+  [7/65] 32768/fwe#1 -> '\n\n1. **tywcou**\n2. **jyfeeh**\n3. **uzvcls**' (40.7s/item, ~39 min left)
+  [8/65] 32768/fwe#2 -> '\n\n1. tmzbeq\n2. joeews\n3. unqtbr' (37.4s/item, ~36 min left)
+  [9/65] 32768/fwe#3 -> '\n\n1. **tuhuto**\n2. **jvixbl**\n3. **uvaezr**' (34.7s/item, ~32 min left)
+  [10/65] 32768/fwe#4 -> '\n\n1. szskug\n2. irphlx\n3. ukwozw' (32.5s/item, ~30 min left)
+  [11/65] 32768/niah_multikey_1#0 -> ' **1908841**.' (31.9s/item, ~29 min left)
+  [12/65] 32768/niah_multikey_1#1 -> ' **9075854**.' (30.4s/item, ~27 min left)
+  [13/65] 32768/niah_multikey_1#2 -> ' **1959074**.' (29.1s/item, ~25 min left)
+  [14/65] 32768/niah_multikey_1#3 -> ' **2140194**.' (28.9s/item, ~25 min left)
+  [15/65] 32768/niah_multikey_1#4 -> ' **6271130**.' (28.6s/item, ~24 min left)
+  [16/65] 32768/niah_multikey_2#0 -> ' **5716623**.' (27.7s/item, ~23 min left)
+  [17/65] 32768/niah_multikey_2#1 -> ' **6318899**.' (26.9s/item, ~22 min left)
+  [18/65] 32768/niah_multikey_2#2 -> ' **4747013**.' (26.7s/item, ~21 min left)
+  [19/65] 32768/niah_multikey_2#3 -> ' **6475517**.' (26.1s/item, ~20 min left)
+  [20/65] 32768/niah_multikey_2#4 -> ' **4576301**.' (25.5s/item, ~19 min left)
+  [21/65] 32768/niah_multikey_3#0 -> ':\n\n**14308e24-709b-4f65-aa3e-442f23cdec84**' (25.1s/item, ~18 min left)
+  [22/65] 32768/niah_multikey_3#1 -> ':\n\n**1130521c-c83a-42b3-b6f4-fc48e6bd7f5e**' (26.7s/item, ~19 min left)
+  [23/65] 32768/niah_multikey_3#2 -> ':\n\n**e6adf948-8205-4ed3-ac9f-b045012bdad5**' (26.3s/item, ~18 min left)
+  [24/65] 32768/niah_multikey_3#3 -> ':\n\n**3e5ca817-a947-4157-b841-76db545eaa79**' (25.8s/item, ~18 min left)
+  [25/65] 32768/niah_multikey_3#4 -> ':\n\n**1565b21b-80a3-446e-b42d-4e17b52f1129**' (27.4s/item, ~18 min left)
+  [26/65] 32768/niah_multiquery#0 -> ':\n\n*   **excellent-pence**: 6271130\n*   **tricky-b' (27.2s/item, ~18 min left)
+  [27/65] 32768/niah_multiquery#1 -> ':\n\n*   **ugly-map**: 2737893\n*   **damaged-bread**' (26.9s/item, ~17 min left)
+  [28/65] 32768/niah_multiquery#2 -> ':\n\n*   **sharp-season**: 1162230\n*   **vigorous-ra' (26.7s/item, ~16 min left)
+  [29/65] 32768/niah_multiquery#3 -> ':\n\n*   **early-steeple**: 6573147\n*   **modern-vul' (26.5s/item, ~16 min left)
+  [30/65] 32768/niah_multiquery#4 -> ':\n\n*   **condemned-pizza**: 5382463\n*   **eager-su' (26.4s/item, ~15 min left)
+  [31/65] 32768/niah_multivalue#0 -> ':\n\n*   **7264956**\n*   **7693979**\n*   **8350099**' (28.0s/item, ~16 min left)
+  [32/65] 32768/niah_multivalue#1 -> ':\n\n*   **4860684**\n*   **1352896**\n*   **4694634**' (29.6s/item, ~16 min left)
+  [33/65] 32768/niah_multivalue#2 -> ':\n\n*   **8935169**\n*   **5076817**\n*   **7829332**' (29.3s/item, ~16 min left)
+  [34/65] 32768/niah_multivalue#3 -> ':\n\n*   **3351868**\n*   **8526486**\n*   **8077999**' (29.0s/item, ~15 min left)
+  [35/65] 32768/niah_multivalue#4 -> ':\n\n*   **1247595**\n*   **1848731**\n*   **2564689**' (30.4s/item, ~15 min left)
+  [36/65] 32768/niah_single_1#0 -> ' **4226067**.' (30.0s/item, ~14 min left)
+  [37/65] 32768/niah_single_1#1 -> ' **4823498**.' (29.5s/item, ~14 min left)
+  [38/65] 32768/niah_single_1#2 -> ' **2694522**.' (29.1s/item, ~13 min left)
+  [39/65] 32768/niah_single_1#3 -> ' **7120868**.' (28.8s/item, ~12 min left)
+  [40/65] 32768/niah_single_1#4 -> ' **4514944**.' (28.4s/item, ~12 min left)
+  [41/65] 32768/niah_single_2#0 -> ' **5107245**.' (28.1s/item, ~11 min left)
+  [42/65] 32768/niah_single_2#1 -> ' **5528972**.' (28.0s/item, ~11 min left)
+  [43/65] 32768/niah_single_2#2 -> ' **6292423**.' (27.7s/item, ~10 min left)
+  [44/65] 32768/niah_single_2#3 -> ' **9375710**.' (27.3s/item, ~10 min left)
+  [45/65] 32768/niah_single_2#4 -> ' **5408072**.' (27.0s/item, ~9 min left)
+  [46/65] 32768/niah_single_3#0 -> ':\n\n**663f1c97-9562-49f0-a5d7-b8756dadd6c7**' (26.8s/item, ~8 min left)
+  [47/65] 32768/niah_single_3#1 -> ':\n\n**c17af08a-1745-46d8-be57-0ddf827050a8**' (27.5s/item, ~8 min left)
+  [48/65] 32768/niah_single_3#2 -> ':\n\n**ae340454-cac5-468c-a8f4-9481a0a04dc4**' (28.2s/item, ~8 min left)
+  [49/65] 32768/niah_single_3#3 -> ':\n\n**ae270da7-02f0-4b90-b143-262fdc5c0eed**' (28.0s/item, ~7 min left)
+  [50/65] 32768/niah_single_3#4 -> ':\n\n**6f4cc69a-4b22-4308-9c8e-aee95715bd6f**' (28.6s/item, ~7 min left)
+  [51/65] 32768/qa_1#0 -> ' France' (28.3s/item, ~7 min left)
+  [52/65] 32768/qa_1#1 -> ' The Normans were in Normandy from the 10th and 11' (28.1s/item, ~6 min left)
+  [53/65] 32768/qa_1#2 -> ' Denmark, Iceland, and Norway.' (27.8s/item, ~6 min left)
+  [54/65] 32768/qa_1#3 -> ' Rollo' (27.5s/item, ~5 min left)
+  [55/65] 32768/qa_1#4 -> ' 10th century' (27.4s/item, ~5 min left)
+  [56/65] 32768/qa_2#0 -> ' No. Scott Derrickson is American, while Ed Wood w' (27.2s/item, ~4 min left)
+  [57/65] 32768/qa_2#1 -> ' United States ambassador to Ghana and to Czechosl' (27.0s/item, ~4 min left)
+  [58/65] 32768/qa_2#2 -> ' The Hork-Bajir Chronicles' (26.7s/item, ~3 min left)
+  [59/65] 32768/qa_2#3 -> ' No. The Laleli Mosque is located in Laleli, Fatih' (26.5s/item, ~3 min left)
+  [60/65] 32768/qa_2#4 -> ' Greenwich Village' (26.3s/item, ~2 min left)
+  [61/65] 32768/vt#0 -> ' AJTWY KTOPF FLAIR KEMDQ AKOAQ\n\n**Chain of Reasoni' (26.8s/item, ~2 min left)
+  [62/65] 32768/vt#1 -> ' QTYFA DDROF STEPT CVZCA IRYKS\n\n**Chain of Reasoni' (27.3s/item, ~1 min left)
+  [63/65] 32768/vt#2 -> ' VSLTZ HVNML TGWVC WGMPJ AWEFU' (27.5s/item, ~1 min left)
+  [64/65] 32768/vt#3 -> ' MNLTI SHGDF DNTEF MSZNH CFFEA' (27.6s/item, ~0 min left)
+  [65/65] 32768/vt#4 -> ' BQBDO HZDTP UFNLL WZHQP TYFFR\n\n**Chain of Reasoni' (28.1s/item, ~0 min left)
+
+
+=== V4S_Qwen3.5-4B_dense_prefix_32k.jsonl ===
+Qwen/Qwen3.5-4B arm=dense preset=None quant=nf4
+              task    32768
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2    100.0
+   niah_multikey_3    100.0
+   niah_multivalue    100.0
+   niah_multiquery    100.0
+                vt    100.0
+               cwe     96.0
+               fwe    100.0
+              qa_1     80.0
+              qa_2     40.0
+         RULER avg     93.5
+  ttft 12.87s | decode 6.3 tok/s | peak 6.06 GB | KV 1.043 GB (1.0x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V4S_Qwen3.5-4B_dkv_mid_prefix_32k.jsonl
+[ckpt] 0 recorded, 65 pending (of 65 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1271.19it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:22,  2.98it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   5%|▌         | 22/426 [00:00<00:06, 62.79it/s]Loading weights:  10%|▉         | 41/426 [00:00<00:03, 99.71it/s]Loading weights:  15%|█▌        | 64/426 [00:00<00:02, 136.49it/s]Loading weights:  19%|█▉        | 82/426 [00:00<00:02, 147.60it/s]Loading weights:  23%|██▎       | 100/426 [00:00<00:02, 156.10it/s]Loading weights:  30%|███       | 129/426 [00:00<00:01, 194.71it/s]Loading weights:  35%|███▌      | 151/426 [00:01<00:01, 191.95it/s]Loading weights:  41%|████      | 173/426 [00:01<00:01, 195.80it/s]Loading weights:  47%|████▋     | 200/426 [00:01<00:01, 211.65it/s]Loading weights:  53%|█████▎    | 224/426 [00:01<00:00, 214.49it/s]Loading weights:  58%|█████▊    | 249/426 [00:01<00:00, 222.50it/s]Loading weights:  64%|██████▍   | 272/426 [00:01<00:00, 221.72it/s]Loading weights:  69%|██████▉   | 295/426 [00:01<00:00, 207.36it/s]Loading weights:  74%|███████▍  | 317/426 [00:01<00:00, 205.90it/s]Loading weights:  81%|████████  | 344/426 [00:01<00:00, 218.42it/s]Loading weights:  86%|████████▌ | 367/426 [00:02<00:00, 203.39it/s]Loading weights:  92%|█████████▏| 394/426 [00:02<00:00, 218.65it/s]Loading weights:  98%|█████████▊| 417/426 [00:02<00:00, 203.61it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 180.50it/s]
+[DKV] Heap trimmed. RSS: 1145 MB → 1145 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] CUDA graph capture skipped: no decode cache supplied and mutation-out is not active, so capture's warmup writes could not be rolled back. On the routed path this means --fastdc / DKV_GRAPH_MUTATION_OUT is off, or the gate disabled it for this session.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1560 MB → 1560 MB (saved 0 MB)
+[Pool] Lazy-allocated 264 slots for ~32246 tokens = 112.6 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) is running on layer 3.
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-cwe-0 candidates=29 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/65] 32768/cwe#0 -> '1. schooner 2. park 3. store 4. desk 5. cosset 6. ' (20.2s/item, ~22 min left)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-cwe-1 candidates=29 router=residual ROUTING RUNS
+  [2/65] 32768/cwe#1 -> '1. **pecan**\n2. **catcher**\n3. **bowler**\n4. **gon' (23.4s/item, ~25 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-cwe-2 candidates=29 router=residual ROUTING RUNS
+  [3/65] 32768/cwe#2 -> '1. **smolt**\n2. **polo**\n3. **detailed**\n4. **curi' (24.0s/item, ~25 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-cwe-3 candidates=29 router=residual ROUTING RUNS
+  [4/65] 32768/cwe#3 -> '1. let 2. post 3. city 4. saffron 5. evidence 6. s' (22.7s/item, ~23 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-cwe-4 candidates=29 router=residual ROUTING RUNS
+  [5/65] 32768/cwe#4 -> '1. **leeway**\n2. **effacement**\n3. **brushfire**\n4' (23.2s/item, ~23 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-fwe-0 candidates=26 router=residual ROUTING RUNS
+  [6/65] 32768/fwe#0 -> '1. **tgjovi**\n2. **ksxqrl**\n3. **tvorfz**' (21.8s/item, ~21 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-fwe-1 candidates=25 router=residual ROUTING RUNS
+  [7/65] 32768/fwe#1 -> '1. **tywcou**\n2. **jyfeeh**\n3. **uzvcls**' (20.8s/item, ~20 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-fwe-2 candidates=27 router=residual ROUTING RUNS
+  [8/65] 32768/fwe#2 -> '1. tmzbeq\n2. joeews\n3. unqtbr' (20.1s/item, ~19 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-fwe-3 candidates=24 router=residual ROUTING RUNS
+  [9/65] 32768/fwe#3 -> '1. **tuhuto**\n2. **jvixbl**\n3. **uvaezr**' (19.3s/item, ~18 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-fwe-4 candidates=25 router=residual ROUTING RUNS
+  [10/65] 32768/fwe#4 -> '1. szskug\n2. irphlx\n3. ukwozw' (18.8s/item, ~17 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+  [11/65] 32768/niah_multikey_1#0 -> '**1908841**.' (18.5s/item, ~17 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_1-1 candidates=29 router=residual ROUTING RUNS
+  [12/65] 32768/niah_multikey_1#1 -> '**9075854**.' (18.2s/item, ~16 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_1-2 candidates=29 router=residual ROUTING RUNS
+  [13/65] 32768/niah_multikey_1#2 -> '**1959074**.' (18.0s/item, ~16 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_1-3 candidates=29 router=residual ROUTING RUNS
+  [14/65] 32768/niah_multikey_1#3 -> '**2140194**.' (17.8s/item, ~15 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_1-4 candidates=29 router=residual ROUTING RUNS
+  [15/65] 32768/niah_multikey_1#4 -> '**6271130**.' (17.6s/item, ~15 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+  [16/65] 32768/niah_multikey_2#0 -> '**5716623**.' (17.4s/item, ~14 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-1 candidates=29 router=residual ROUTING RUNS
+  [17/65] 32768/niah_multikey_2#1 -> '**6723047**.' (17.3s/item, ~14 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-2 candidates=29 router=residual ROUTING RUNS
+  [18/65] 32768/niah_multikey_2#2 -> '**4725910**.' (17.2s/item, ~13 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-3 candidates=29 router=residual ROUTING RUNS
+  [19/65] 32768/niah_multikey_2#3 -> '**6357568**.' (17.1s/item, ~13 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-4 candidates=29 router=residual ROUTING RUNS
+  [20/65] 32768/niah_multikey_2#4 -> '**4394402**.' (17.0s/item, ~13 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_3-0 candidates=27 router=residual ROUTING RUNS
+  [21/65] 32768/niah_multikey_3#0 -> ':\n\n**1ee0d7608-d72d-424f-94b9-5d826b0115ca**\n\nWait' (17.5s/item, ~13 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_3-1 candidates=29 router=residual ROUTING RUNS
+  [22/65] 32768/niah_multikey_3#1 -> ':\n\n**113267753489**\n\nWait, let me re-read the spec' (17.9s/item, ~13 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_3-2 candidates=27 router=residual ROUTING RUNS
+  [23/65] 32768/niah_multikey_3#2 -> ':\n\n**e6adf948-82d0-4ed3-ac9f-b0b46c462a7**\n\n*(Note' (18.2s/item, ~13 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_3-3 candidates=27 router=residual ROUTING RUNS
+  [24/65] 32768/niah_multikey_3#3 -> ':\n\n**3e5ca817-a947-4157-b841-76db545eaa79**' (18.1s/item, ~12 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_3-4 candidates=29 router=residual ROUTING RUNS
+  [25/65] 32768/niah_multikey_3#4 -> ':\n\n**156b2204f32-e202-4858-9618-91b09e86e4e8**\n\nWa' (18.5s/item, ~12 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+  [26/65] 32768/niah_multiquery#0 -> ':\n\n*   **excellent-pence**: 6271130\n*   **tricky-b' (18.6s/item, ~12 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multiquery-1 candidates=29 router=residual ROUTING RUNS
+  [27/65] 32768/niah_multiquery#1 -> ':\n\n*   **ugly-map**: 2737893\n*   **damaged-bread**' (18.7s/item, ~12 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multiquery-2 candidates=29 router=residual ROUTING RUNS
+  [28/65] 32768/niah_multiquery#2 -> ':\n\n*   **sharp-season**: 1162230\n*   **vigorous-ra' (18.7s/item, ~12 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multiquery-3 candidates=29 router=residual ROUTING RUNS
+  [29/65] 32768/niah_multiquery#3 -> ':\n\n*   **early-steeple**: 6573147\n*   **modern-vul' (18.8s/item, ~11 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multiquery-4 candidates=29 router=residual ROUTING RUNS
+  [30/65] 32768/niah_multiquery#4 -> ':\n\n*   **condemned-pizza**: 5382463\n*   **eager-su' (18.9s/item, ~11 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-0 candidates=29 router=residual ROUTING RUNS
+  [31/65] 32768/niah_multivalue#0 -> ':\n\n*   **7264956**\n*   **7693979**\n*   **8350099**' (18.9s/item, ~11 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-1 candidates=29 router=residual ROUTING RUNS
+  [32/65] 32768/niah_multivalue#1 -> ':\n\n*   **4860684**\n*   **1352896**\n*   **4694634**' (18.9s/item, ~10 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-2 candidates=29 router=residual ROUTING RUNS
+  [33/65] 32768/niah_multivalue#2 -> ':\n\n*   **8935169**\n*   **5076817**\n*   **7829332**' (18.9s/item, ~10 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-3 candidates=29 router=residual ROUTING RUNS
+  [34/65] 32768/niah_multivalue#3 -> ':\n\n*   **3351868**\n*   **8526486**\n*   **8077999**' (18.9s/item, ~10 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-4 candidates=29 router=residual ROUTING RUNS
+  [35/65] 32768/niah_multivalue#4 -> ':\n\n*   **1247595**\n*   **1848731**\n*   **2564689**' (18.9s/item, ~9 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_1-0 candidates=29 router=residual ROUTING RUNS
+  [36/65] 32768/niah_single_1#0 -> '**4226067**.' (18.8s/item, ~9 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_1-1 candidates=29 router=residual ROUTING RUNS
+  [37/65] 32768/niah_single_1#1 -> '**4823498**.' (18.7s/item, ~9 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_1-2 candidates=29 router=residual ROUTING RUNS
+  [38/65] 32768/niah_single_1#2 -> '**2694522**.' (18.6s/item, ~8 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_1-3 candidates=29 router=residual ROUTING RUNS
+  [39/65] 32768/niah_single_1#3 -> '**7120868**.' (18.5s/item, ~8 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_1-4 candidates=29 router=residual ROUTING RUNS
+  [40/65] 32768/niah_single_1#4 -> '**4514944**.' (18.4s/item, ~8 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_2-0 candidates=29 router=residual ROUTING RUNS
+  [41/65] 32768/niah_single_2#0 -> '**5107245**.' (18.3s/item, ~7 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_2-1 candidates=29 router=residual ROUTING RUNS
+  [42/65] 32768/niah_single_2#1 -> '**5528972**.' (18.3s/item, ~7 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_2-2 candidates=29 router=residual ROUTING RUNS
+  [43/65] 32768/niah_single_2#2 -> '**6292423**.' (18.2s/item, ~7 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_2-3 candidates=29 router=residual ROUTING RUNS
+  [44/65] 32768/niah_single_2#3 -> '**9375710**.' (18.1s/item, ~6 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_2-4 candidates=29 router=residual ROUTING RUNS
+  [45/65] 32768/niah_single_2#4 -> '**5408072**.' (18.1s/item, ~6 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+  [46/65] 32768/niah_single_3#0 -> ':\n\n**663f1c97-9562-49f0-a5d7-b8756dadd6c7**' (18.0s/item, ~6 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_3-1 candidates=29 router=residual ROUTING RUNS
+  [47/65] 32768/niah_single_3#1 -> ':\n\n**c17af08a-1745-46d8-be57-0ddf827050a8**' (18.0s/item, ~5 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_3-2 candidates=29 router=residual ROUTING RUNS
+  [48/65] 32768/niah_single_3#2 -> ':\n\n**ae340454-cac5-468c-a8f4-9481a0a04dc4**' (18.0s/item, ~5 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_3-3 candidates=29 router=residual ROUTING RUNS
+  [49/65] 32768/niah_single_3#3 -> ':\n\n**ae270da7-02f0-4b90-b143-262fdc5c0eed**' (18.0s/item, ~5 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_3-4 candidates=29 router=residual ROUTING RUNS
+  [50/65] 32768/niah_single_3#4 -> ':\n\n**6f4cc69a-4b22-4308-9c8e-aee95715bd6f**' (18.0s/item, ~5 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+  [51/65] 32768/qa_1#0 -> 'France' (17.9s/item, ~4 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-1 candidates=28 router=residual ROUTING RUNS
+  [52/65] 32768/qa_1#1 -> 'The Normans were in Normandy from the 9th century,' (17.9s/item, ~4 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-2 candidates=29 router=residual ROUTING RUNS
+  [53/65] 32768/qa_1#2 -> 'Denmark, Norway, Sweden, Iceland, and the Faroe Is' (17.9s/item, ~4 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-3 candidates=26 router=residual ROUTING RUNS
+  [54/65] 32768/qa_1#3 -> 'Rollo (also known as Robert the Normans)' (17.8s/item, ~3 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-4 candidates=29 router=residual ROUTING RUNS
+  [55/65] 32768/qa_1#4 -> '10th century' (17.8s/item, ~3 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_2-0 candidates=29 router=residual ROUTING RUNS
+  [56/65] 32768/qa_2#0 -> 'No. Scott Derrickson is American, while Ed Wood wa' (17.7s/item, ~3 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_2-1 candidates=28 router=residual ROUTING RUNS
+  [57/65] 32768/qa_2#1 -> 'United States Ambassador to the United Kingdom' (17.7s/item, ~2 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_2-2 candidates=27 router=residual ROUTING RUNS
+  [58/65] 32768/qa_2#2 -> 'The Animorphs' (17.6s/item, ~2 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_2-3 candidates=26 router=residual ROUTING RUNS
+  [59/65] 32768/qa_2#3 -> 'No. The Laleli Mosque is located in the Laleli nei' (17.6s/item, ~2 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_2-4 candidates=29 router=residual ROUTING RUNS
+  [60/65] 32768/qa_2#4 -> 'Greenwich Village' (17.5s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+  [61/65] 32768/vt#0 -> 'AJTWY KTOPF FLAIR KEMDQ AKOAQ' (17.5s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-1 candidates=29 router=residual ROUTING RUNS
+  [62/65] 32768/vt#1 -> 'QTYFA DDROF STEPT CVZCA IRYKS\n\n**Chain of Reasonin' (17.5s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-2 candidates=29 router=residual ROUTING RUNS
+  [63/65] 32768/vt#2 -> 'VSLTZ HVNML TGWVC WGMPJ AWEFU' (17.5s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-3 candidates=29 router=residual ROUTING RUNS
+  [64/65] 32768/vt#3 -> 'MNLTI SHGDF DNTEF MSZNH CFFEA' (17.4s/item, ~0 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-4 candidates=29 router=residual ROUTING RUNS
+  [65/65] 32768/vt#4 -> 'BQBDO HZDTP UFNLL WZHQP TYFFR\n\n**Chain of Reasonin' (17.4s/item, ~0 min left)
+
+
+=== V4S_Qwen3.5-4B_dkv_mid_prefix_32k.jsonl ===
+Qwen/Qwen3.5-4B arm=dkv preset=mid quant=nf4
+              task    32768
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2     20.0
+   niah_multikey_3     20.0
+   niah_multivalue    100.0
+   niah_multiquery    100.0
+                vt    100.0
+               cwe     98.0
+               fwe    100.0
+              qa_1     60.0
+              qa_2     40.0
+         RULER avg     79.8
+  ttft nans | decode nan tok/s | peak 5.73 GB | KV 0.241 GB (4.5x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V4_Qwen3.5-4B_dense_offload.jsonl
+[ckpt] 0 points already recorded
+  running dense@131072 ...
+    dense@131072: died peak=- (1300s)
+  dense: stopping, ceiling found below 262144
+
+
+=== V4_Qwen3.5-4B_dense_offload.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense   131072        -         -        -        -     died
+ dense   262144        -         -        -        - skipped_after_oom
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V4_granite_dense_offload.jsonl
+[ckpt] 0 points already recorded
+  running dense@32768 ...
+    dense@32768: oom peak=- (122s)
+  dense: stopping, ceiling found below 65536
+
+
+=== V4_granite_dense_offload.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+ dense    32768    32768         -        -        -      oom
+ dense    65536        -         -        -        - skipped_after_oom
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V4_granite_kivi2_tiled.jsonl
+[ckpt] 0 points already recorded
+  running kivi2_tiled@98304 ...
+    kivi2_tiled@98304: ok peak=8.66657536 (336s)
+  running kivi2_tiled@131072 ...
+    kivi2_tiled@131072: ok peak=9.547248128 (466s)
+
+
+=== V4_granite_kivi2_tiled.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi2_tiled    98304    98304      8.67    300.0    2.800       ok
+kivi2_tiled   131072   131072      9.55    444.0    3.681       ok
+  kivi2_tiled: 0.0269 GB per 1k tokens, floor 6.02 GB  (max OK 131072 tok @ 9.55 GB)
+         predicted ceiling ~226,256 tok on a 12.9 GB card
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V4_Qwen3.5-4B_kivi2_tiled.jsonl
+[ckpt] 0 points already recorded
+  running kivi2_tiled@262144 ...
+    kivi2_tiled@262144: ok peak=4.671207936 (366s)
+
+
+=== V4_Qwen3.5-4B_kivi2_tiled.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+kivi2_tiled   262144   262144      4.67    340.1    1.407       ok
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V4S_Qwen3.5-4B_sl_chunked_eqbytes_131k.jsonl
+[ckpt] 0 recorded, 65 pending (of 65 generated)
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1238.35it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:12,  3.21it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   3%|▎         | 14/426 [00:00<00:09, 42.84it/s]Loading weights:  10%|▉         | 41/426 [00:00<00:03, 109.63it/s]Loading weights:  15%|█▌        | 65/426 [00:00<00:02, 144.68it/s]Loading weights:  21%|██        | 89/426 [00:00<00:01, 172.58it/s]Loading weights:  26%|██▌       | 110/426 [00:00<00:01, 178.25it/s]Loading weights:  31%|███       | 132/426 [00:00<00:01, 188.73it/s]Loading weights:  36%|███▌      | 153/426 [00:01<00:01, 182.45it/s]Loading weights:  43%|████▎     | 185/426 [00:01<00:01, 214.36it/s]Loading weights:  49%|████▉     | 208/426 [00:01<00:01, 208.57it/s]Loading weights:  56%|█████▌    | 238/426 [00:01<00:00, 226.75it/s]Loading weights:  62%|██████▏   | 262/426 [00:01<00:00, 218.73it/s]Loading weights:  68%|██████▊   | 291/426 [00:01<00:00, 232.91it/s]Loading weights:  74%|███████▍  | 315/426 [00:01<00:00, 222.23it/s]Loading weights:  81%|████████  | 343/426 [00:01<00:00, 237.62it/s]Loading weights:  86%|████████▋ | 368/426 [00:01<00:00, 220.56it/s]Loading weights:  93%|█████████▎| 396/426 [00:02<00:00, 233.21it/s]Loading weights:  99%|█████████▊| 420/426 [00:02<00:00, 214.06it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 189.09it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/65] 131072/cwe#0 -> 'Based on a frequency analysis of the provided list' (69.7s/item, ~74 min left)
+  [2/65] 131072/cwe#1 -> 'Based on a frequency analysis of the provided list' (68.9s/item, ~72 min left)
+  [3/65] 131072/cwe#2 -> 'Based on a frequency analysis of the provided list' (69.0s/item, ~71 min left)
+  [4/65] 131072/cwe#3 -> 'Based on a frequency analysis of the provided list' (68.7s/item, ~70 min left)
+  [5/65] 131072/cwe#4 -> 'Based on a frequency analysis of the provided list' (68.8s/item, ~69 min left)
+  [6/65] 131072/fwe#0 -> 'pmqysy zhtlig blpxps' (66.5s/item, ~65 min left)
+  [7/65] 131072/fwe#1 -> 'pnesyg zitagf bvpnes' (64.8s/item, ~63 min left)
+  [8/65] 131072/fwe#2 -> 'pnvgi, zkcezm, bsyqzp' (63.8s/item, ~61 min left)
+  [9/65] 131072/fwe#3 -> 'polfxt ziiyjl bpnuky' (63.1s/item, ~59 min left)
+  [10/65] 131072/fwe#4 -> 'pvnctf bmgpbw ywhjnl' (62.3s/item, ~57 min left)
+  [11/65] 131072/niah_multikey_1#0 -> 'Based on the text provided, there is no mention of' (63.0s/item, ~57 min left)
+  [12/65] 131072/niah_multikey_1#1 -> 'Based on the text provided, there is no mention of' (63.5s/item, ~56 min left)
+  [13/65] 131072/niah_multikey_1#2 -> 'Based on the text provided, the special magic numb' (63.5s/item, ~55 min left)
+  [14/65] 131072/niah_multikey_1#3 -> 'Based on the text provided, there is **no mention*' (63.8s/item, ~54 min left)
+  [15/65] 131072/niah_multikey_1#4 -> 'Based on the text provided, there is no mention of' (64.1s/item, ~53 min left)
+  [16/65] 131072/niah_multikey_2#0 -> 'Based on the text provided, there is no mention of' (64.1s/item, ~52 min left)
+  [17/65] 131072/niah_multikey_2#1 -> 'Based on the text provided, there is no mention of' (64.3s/item, ~51 min left)
+  [18/65] 131072/niah_multikey_2#2 -> 'Based on the text provided, there is no mention of' (64.2s/item, ~50 min left)
+  [19/65] 131072/niah_multikey_2#3 -> 'Based on the text provided, there is no mention of' (64.5s/item, ~49 min left)
+  [20/65] 131072/niah_multikey_2#4 -> 'The special magic number for wealthy-frequency men' (64.3s/item, ~48 min left)
+  [21/65] 131072/niah_multikey_3#0 -> 'Based on the text provided, there is no mention of' (64.5s/item, ~47 min left)
+  [22/65] 131072/niah_multikey_3#1 -> 'The special magic uuid for **a4eb9dba-59f4-45d4-91' (64.5s/item, ~46 min left)
+  [23/65] 131072/niah_multikey_3#2 -> 'The special magic uuid for **f14ba25a-e36b-4636-ba' (64.5s/item, ~45 min left)
+  [24/65] 131072/niah_multikey_3#3 -> 'Based on the text provided, there is no mention of' (64.7s/item, ~44 min left)
+  [25/65] 131072/niah_multikey_3#4 -> 'Based on the text provided, there is no mention of' (64.9s/item, ~43 min left)
+  [26/65] 131072/niah_multiquery#0 -> 'Based on the text provided, here are the special m' (65.0s/item, ~42 min left)
+  [27/65] 131072/niah_multiquery#1 -> 'Based on the text provided, here are the special m' (65.2s/item, ~41 min left)
+  [28/65] 131072/niah_multiquery#2 -> 'Based on the text provided, there are **no special' (65.2s/item, ~40 min left)
+  [29/65] 131072/niah_multiquery#3 -> 'Based on the text provided, there are **no special' (65.3s/item, ~39 min left)
+  [30/65] 131072/niah_multiquery#4 -> 'Based on the text provided, there is only **one** ' (65.3s/item, ~38 min left)
+  [31/65] 131072/niah_multivalue#0 -> 'Based on the text provided, there are **no special' (65.3s/item, ~37 min left)
+  [32/65] 131072/niah_multivalue#1 -> 'Based on the text provided, there are **no special' (65.4s/item, ~36 min left)
+  [33/65] 131072/niah_multivalue#2 -> 'Based on the text provided, there are **no special' (65.6s/item, ~35 min left)
+  [34/65] 131072/niah_multivalue#3 -> 'Based on the text provided, here are the special m' (65.6s/item, ~34 min left)
+  [35/65] 131072/niah_multivalue#4 -> 'Based on the text provided, here are the special m' (65.7s/item, ~33 min left)
+  [36/65] 131072/niah_single_1#0 -> 'Based on the text provided, there is **no mention*' (65.8s/item, ~32 min left)
+  [37/65] 131072/niah_single_1#1 -> 'Based on the text provided, there is **no mention*' (65.9s/item, ~31 min left)
+  [38/65] 131072/niah_single_1#2 -> 'Based on the text provided, there is **no mention*' (65.9s/item, ~30 min left)
+  [39/65] 131072/niah_single_1#3 -> 'Based on the text provided, there is **no mention*' (65.9s/item, ~29 min left)
+  [40/65] 131072/niah_single_1#4 -> 'Based on the text provided, there is **no mention*' (65.9s/item, ~27 min left)
+  [41/65] 131072/niah_single_2#0 -> 'Based on the text provided, there is no mention of' (66.0s/item, ~26 min left)
+  [42/65] 131072/niah_single_2#1 -> 'Based on the text provided, the special magic numb' (65.9s/item, ~25 min left)
+  [43/65] 131072/niah_single_2#2 -> 'Based on the text provided, there is no mention of' (66.0s/item, ~24 min left)
+  [44/65] 131072/niah_single_2#3 -> 'Based on the text provided, there is no mention of' (66.1s/item, ~23 min left)
+  [45/65] 131072/niah_single_2#4 -> 'Based on the text provided, there is **no mention*' (66.2s/item, ~22 min left)
+  [46/65] 131072/niah_single_3#0 -> 'Based on the text provided, there is no mention of' (66.2s/item, ~21 min left)
+  [47/65] 131072/niah_single_3#1 -> 'Based on the text provided, the special magic uuid' (66.2s/item, ~20 min left)
+  [48/65] 131072/niah_single_3#2 -> 'Based on the text provided, there is no mention of' (66.2s/item, ~19 min left)
+  [49/65] 131072/niah_single_3#3 -> 'Based on the text provided, there is no mention of' (66.1s/item, ~18 min left)
+  [50/65] 131072/niah_single_3#4 -> 'Based on the text provided, there is no mention of' (66.2s/item, ~17 min left)
+  [51/65] 131072/qa_1#0 -> 'France' (66.0s/item, ~15 min left)
+  [52/65] 131072/qa_1#1 -> 'The Normans adopted the feudal doctrines of the re' (65.9s/item, ~14 min left)
+  [53/65] 131072/qa_1#2 -> 'Scandinavia and northern Europe' (65.8s/item, ~13 min left)
+  [54/65] 131072/qa_1#3 -> 'None' (65.6s/item, ~12 min left)
+  [55/65] 131072/qa_1#4 -> '10th' (65.5s/item, ~11 min left)
+  [56/65] 131072/qa_2#0 -> 'No' (65.3s/item, ~10 min left)
+  [57/65] 131072/qa_2#1 -> 'None' (65.2s/item, ~9 min left)
+  [58/65] 131072/qa_2#2 -> 'The X-Files' (65.1s/item, ~8 min left)
+  [59/65] 131072/qa_2#3 -> 'No' (64.9s/item, ~6 min left)
+  [60/65] 131072/qa_2#4 -> 'New York City' (64.8s/item, ~5 min left)
+  [61/65] 131072/vt#0 -> 'Based on the text provided, there are **no variabl' (64.7s/item, ~4 min left)
+  [62/65] 131072/vt#1 -> 'Based on the text provided, there are **no variabl' (64.6s/item, ~3 min left)
+  [63/65] 131072/vt#2 -> 'Based on the text provided, there are **no variabl' (64.6s/item, ~2 min left)
+  [64/65] 131072/vt#3 -> 'Based on the text provided, there are **no variabl' (64.5s/item, ~1 min left)
+  [65/65] 131072/vt#4 -> 'Based on the text provided, there are **no variabl' (64.4s/item, ~0 min left)
+
+
+=== V4S_Qwen3.5-4B_sl_chunked_eqbytes_131k.jsonl ===
+Qwen/Qwen3.5-4B arm=streamingllm_chunked preset=None quant=nf4
+              task   131072
+     niah_single_1      0.0
+     niah_single_2     20.0
+     niah_single_3     20.0
+   niah_multikey_1     20.0
+   niah_multikey_2     20.0
+   niah_multikey_3     40.0
+   niah_multivalue     15.0
+   niah_multiquery     25.0
+                vt      0.0
+               cwe     46.0
+               fwe     86.7
+              qa_1     40.0
+              qa_2     20.0
+         RULER avg     27.1
+  ttft 57.25s | decode 10.7 tok/s | peak 5.34 GB | KV 0.780 GB (5.5x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V4_Qwen3.5-4B_snapkv_defrag.jsonl
+[ckpt] 0 points already recorded
+  running snapkv@65536 ...
+    snapkv@65536: ok peak=3.385908224 (64s)
+  running snapkv@98304 ...
+    snapkv@98304: ok peak=3.3869568 (88s)
+  running snapkv@122880 ...
+    snapkv@122880: spilled peak=3.385908224 (148s)
+
+
+=== V4_Qwen3.5-4B_snapkv_defrag.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+snapkv    65536    65536      3.39     43.4    0.067       ok
+snapkv    98304    98304      3.39     68.3    0.067       ok
+snapkv   122880   122880      3.39    127.4    0.067  spilled
+  snapkv: 0.0000 GB per 1k tokens, floor 3.38 GB  (max OK 98304 tok @ 3.39 GB)
+         predicted ceiling ~272,549,684 tok on a 12.9 GB card
+         first spill at 122880 tok (3.39 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V4_granite_snapkv_defrag.jsonl
+[ckpt] 0 points already recorded
+  running snapkv@20480 ...
+    snapkv@20480: spilled peak=6.271604736 (51s)
+  snapkv: stopping, ceiling found below 24576
+
+
+=== V4_granite_snapkv_defrag.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+snapkv    20480    20480      6.27     19.2    0.336  spilled
+snapkv    24576        -         -        -        - skipped_after_oom
+         first spill at 20480 tok (6.27 GB) -- timings at and above this length are host-memory bound, not compute
+V4-SHORT COMPLETE

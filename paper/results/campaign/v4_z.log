@@ -1,0 +1,188 @@
+
+===== start Tue Oct 20 08:57:14 2026 =====
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\smoke\V4Z_qwen_kivi2_tiled.jsonl
+[ckpt] 0 recorded, 2 pending (of 2 generated)
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1288.57it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:30,  2.82it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   3%|▎         | 14/426 [00:00<00:10, 38.80it/s]Loading weights:   9%|▉         | 40/426 [00:00<00:03, 102.16it/s]Loading weights:  14%|█▍        | 61/426 [00:00<00:02, 131.31it/s]Loading weights:  19%|█▉        | 80/426 [00:00<00:02, 146.20it/s]Loading weights:  23%|██▎       | 99/426 [00:00<00:02, 156.23it/s]Loading weights:  28%|██▊       | 120/426 [00:00<00:01, 170.76it/s]Loading weights:  34%|███▍      | 146/426 [00:01<00:01, 194.32it/s]Loading weights:  39%|███▉      | 167/426 [00:01<00:01, 198.01it/s]Loading weights:  44%|████▍     | 188/426 [00:01<00:01, 190.65it/s]Loading weights:  49%|████▉     | 208/426 [00:01<00:01, 188.38it/s]Loading weights:  55%|█████▌    | 235/426 [00:01<00:00, 208.78it/s]Loading weights:  60%|██████    | 257/426 [00:01<00:00, 197.70it/s]Loading weights:  65%|██████▌   | 278/426 [00:01<00:00, 199.56it/s]Loading weights:  71%|███████▏  | 304/426 [00:01<00:00, 215.55it/s]Loading weights:  77%|███████▋  | 326/426 [00:01<00:00, 208.35it/s]Loading weights:  82%|████████▏ | 348/426 [00:02<00:00, 202.73it/s]Loading weights:  87%|████████▋ | 369/426 [00:02<00:00, 196.49it/s]Loading weights:  93%|█████████▎| 396/426 [00:02<00:00, 213.83it/s]Loading weights:  98%|█████████▊| 418/426 [00:02<00:00, 188.56it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 172.26it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/2] 4096/niah_single_1#0 -> ' **5437923**.' (2.6s/item, ~0 min left)
+  [2/2] 4096/vt#0 -> ' FUPIL RNUYT RHRQC YGUD BZPTL\n\n**Step-by-step deri' (3.3s/item, ~0 min left)
+
+
+=== V4Z_qwen_kivi2_tiled.jsonl ===
+Qwen/Qwen3.5-4B arm=kivi2_tiled preset=None quant=nf4
+              task     4096
+     niah_single_1    100.0
+                vt     80.0
+         RULER avg     90.0
+  ttft 1.68s | decode 12.4 tok/s | peak 3.27 GB | KV 0.051 GB (2.6x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\smoke\V4Z_granite_kivi2_tiled.jsonl
+[ckpt] 0 recorded, 2 pending (of 2 generated)
+Loading weights:   0%|          | 0/363 [00:00<?, ?it/s]Loading weights:   0%|          | 1/363 [00:00<04:30,  1.34it/s]Loading weights:   1%|          | 2/363 [00:01<04:33,  1.32it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   1%|          | 4/363 [00:01<01:57,  3.06it/s]Loading weights:   2%|▏         | 6/363 [00:01<01:17,  4.62it/s]Loading weights:   4%|▎         | 13/363 [00:02<00:28, 12.26it/s]Loading weights:   4%|▍         | 16/363 [00:02<00:25, 13.36it/s]Loading weights:   6%|▌         | 22/363 [00:02<00:18, 18.82it/s]Loading weights:   7%|▋         | 25/363 [00:02<00:18, 18.17it/s]Loading weights:   9%|▊         | 31/363 [00:02<00:14, 22.80it/s]Loading weights:   9%|▉         | 34/363 [00:02<00:15, 20.88it/s]Loading weights:  11%|█         | 40/363 [00:02<00:11, 28.10it/s]Loading weights:  13%|█▎        | 49/363 [00:03<00:07, 40.12it/s]Loading weights:  16%|█▌        | 58/363 [00:03<00:06, 50.80it/s]Loading weights:  18%|█▊        | 67/363 [00:03<00:04, 59.64it/s]Loading weights:  21%|██        | 76/363 [00:03<00:04, 67.09it/s]Loading weights:  23%|██▎       | 85/363 [00:03<00:03, 72.63it/s]Loading weights:  26%|██▌       | 94/363 [00:03<00:04, 65.69it/s]Loading weights:  28%|██▊       | 102/363 [00:03<00:05, 50.10it/s]Loading weights:  30%|██▉       | 108/363 [00:04<00:07, 36.25it/s]Loading weights:  31%|███       | 113/363 [00:04<00:07, 31.93it/s]Loading weights:  32%|███▏      | 117/363 [00:04<00:07, 32.03it/s]Loading weights:  33%|███▎      | 121/363 [00:04<00:07, 32.20it/s]Loading weights:  34%|███▍      | 125/363 [00:04<00:08, 28.43it/s]Loading weights:  36%|███▌      | 130/363 [00:05<00:07, 29.32it/s]Loading weights:  37%|███▋      | 134/363 [00:05<00:08, 26.73it/s]Loading weights:  38%|███▊      | 139/363 [00:05<00:07, 28.35it/s]Loading weights:  39%|███▉      | 142/363 [00:05<00:08, 24.63it/s]Loading weights:  41%|████      | 148/363 [00:05<00:07, 28.21it/s]Loading weights:  42%|████▏     | 151/363 [00:05<00:08, 24.64it/s]Loading weights:  43%|████▎     | 157/363 [00:06<00:07, 27.76it/s]Loading weights:  44%|████▍     | 160/363 [00:06<00:08, 24.18it/s]Loading weights:  46%|████▌     | 166/363 [00:06<00:07, 27.43it/s]Loading weights:  47%|████▋     | 169/363 [00:06<00:08, 23.56it/s]Loading weights:  48%|████▊     | 175/363 [00:06<00:07, 26.70it/s]Loading weights:  49%|████▉     | 178/363 [00:07<00:08, 22.85it/s]Loading weights:  51%|█████     | 184/363 [00:07<00:06, 25.99it/s]Loading weights:  52%|█████▏    | 187/363 [00:07<00:07, 22.87it/s]Loading weights:  53%|█████▎    | 193/363 [00:07<00:06, 25.97it/s]Loading weights:  54%|█████▍    | 196/363 [00:07<00:07, 22.34it/s]Loading weights:  56%|█████▌    | 202/363 [00:07<00:06, 25.71it/s]Loading weights:  56%|█████▋    | 205/363 [00:08<00:07, 22.51it/s]Loading weights:  58%|█████▊    | 211/363 [00:08<00:05, 25.97it/s]Loading weights:  59%|█████▉    | 214/363 [00:08<00:06, 22.90it/s]Loading weights:  61%|██████    | 220/363 [00:08<00:05, 26.06it/s]Loading weights:  61%|██████▏   | 223/363 [00:08<00:06, 22.89it/s]Loading weights:  63%|██████▎   | 229/363 [00:09<00:05, 26.19it/s]Loading weights:  64%|██████▍   | 232/363 [00:09<00:05, 22.38it/s]Loading weights:  66%|██████▌   | 238/363 [00:09<00:04, 25.53it/s]Loading weights:  66%|██████▋   | 241/363 [00:09<00:05, 22.46it/s]Loading weights:  68%|██████▊   | 247/363 [00:09<00:04, 25.98it/s]Loading weights:  69%|██████▉   | 250/363 [00:09<00:04, 22.77it/s]Loading weights:  71%|███████   | 256/363 [00:10<00:04, 25.29it/s]Loading weights:  71%|███████▏  | 259/363 [00:10<00:04, 21.86it/s]Loading weights:  73%|███████▎  | 265/363 [00:10<00:03, 25.23it/s]Loading weights:  74%|███████▍  | 268/363 [00:10<00:04, 22.13it/s]Loading weights:  75%|███████▌  | 274/363 [00:10<00:03, 25.04it/s]Loading weights:  76%|███████▋  | 277/363 [00:11<00:03, 22.14it/s]Loading weights:  78%|███████▊  | 283/363 [00:11<00:03, 24.97it/s]Loading weights:  79%|███████▉  | 286/363 [00:11<00:03, 22.23it/s]Loading weights:  80%|████████  | 292/363 [00:11<00:02, 25.61it/s]Loading weights:  81%|████████▏ | 295/363 [00:11<00:02, 22.74it/s]Loading weights:  83%|████████▎ | 301/363 [00:12<00:02, 26.06it/s]Loading weights:  84%|████████▎ | 304/363 [00:12<00:02, 21.34it/s]Loading weights:  85%|████████▌ | 310/363 [00:12<00:02, 23.95it/s]Loading weights:  86%|████████▌ | 313/363 [00:12<00:02, 20.70it/s]Loading weights:  88%|████████▊ | 319/363 [00:12<00:01, 24.34it/s]Loading weights:  89%|████████▊ | 322/363 [00:13<00:01, 21.70it/s]Loading weights:  90%|█████████ | 328/363 [00:13<00:01, 25.08it/s]Loading weights:  91%|█████████ | 331/363 [00:13<00:01, 22.20it/s]Loading weights:  93%|█████████▎| 337/363 [00:13<00:01, 25.52it/s]Loading weights:  94%|█████████▎| 340/363 [00:13<00:01, 22.18it/s]Loading weights:  95%|█████████▌| 346/363 [00:14<00:00, 25.46it/s]Loading weights:  96%|█████████▌| 349/363 [00:14<00:00, 22.14it/s]Loading weights:  98%|█████████▊| 355/363 [00:14<00:00, 25.68it/s]Loading weights:  99%|█████████▊| 358/363 [00:14<00:00, 22.32it/s]Loading weights: 100%|██████████| 363/363 [00:14<00:00, 24.73it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/2] 4096/niah_single_1#0 -> ': **7374122**.\n\n(Note: In the text, it says "One o' (20.2s/item, ~0 min left)
+  [2/2] 4096/vt#0 -> ' DRXWX UFUSM OXDDM NOITL VXLXL\n\nExplanation:\n\nWe a' (13.0s/item, ~0 min left)
+
+
+=== V4Z_granite_kivi2_tiled.jsonl ===
+ibm-granite/granite-4.2-8b arm=kivi2_tiled preset=None quant=nf4
+              task     4096
+     niah_single_1    100.0
+                vt    100.0
+         RULER avg    100.0
+  ttft 2.60s | decode 8.0 tok/s | peak 6.09 GB | KV 0.255 GB (2.6x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\smoke\V4Z_qwen_offload.jsonl
+[ckpt] 0 recorded, 2 pending (of 2 generated)
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1220.52it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:01<07:42,  1.09s/it]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   3%|▎         | 11/426 [00:01<00:33, 12.21it/s]Loading weights:   4%|▍         | 17/426 [00:01<00:22, 18.38it/s]Loading weights:   6%|▌         | 26/426 [00:01<00:13, 29.30it/s]Loading weights:   8%|▊         | 36/426 [00:01<00:09, 41.02it/s]Loading weights:  10%|█         | 43/426 [00:01<00:09, 41.87it/s]Loading weights:  12%|█▏        | 50/426 [00:01<00:08, 45.08it/s]Loading weights:  15%|█▍        | 62/426 [00:01<00:06, 59.55it/s]Loading weights:  16%|█▋        | 70/426 [00:02<00:06, 58.60it/s]Loading weights:  19%|█▊        | 79/426 [00:02<00:05, 63.80it/s]Loading weights:  21%|██        | 89/426 [00:02<00:04, 69.43it/s]Loading weights:  23%|██▎       | 97/426 [00:02<00:05, 62.99it/s]Loading weights:  24%|██▍       | 104/426 [00:02<00:05, 58.24it/s]Loading weights:  27%|██▋       | 117/426 [00:02<00:04, 72.52it/s]Loading weights:  29%|██▉       | 125/426 [00:02<00:04, 70.77it/s]Loading weights:  31%|███       | 133/426 [00:03<00:04, 64.23it/s]Loading weights:  34%|███▎      | 143/426 [00:03<00:04, 70.54it/s]Loading weights:  35%|███▌      | 151/426 [00:03<00:04, 60.92it/s]Loading weights:  37%|███▋      | 158/426 [00:03<00:04, 62.53it/s]Loading weights:  40%|███▉      | 170/426 [00:03<00:03, 74.99it/s]Loading weights:  42%|████▏     | 178/426 [00:03<00:03, 72.22it/s]Loading weights:  44%|████▎     | 186/426 [00:03<00:03, 65.47it/s]Loading weights:  46%|████▋     | 198/426 [00:03<00:03, 75.92it/s]Loading weights:  48%|████▊     | 206/426 [00:04<00:03, 56.27it/s]Loading weights:  52%|█████▏    | 220/426 [00:04<00:02, 73.17it/s]Loading weights:  54%|█████▍    | 229/426 [00:04<00:02, 68.67it/s]Loading weights:  56%|█████▌    | 238/426 [00:04<00:02, 71.36it/s]Loading weights:  58%|█████▊    | 248/426 [00:04<00:02, 75.38it/s]Loading weights:  60%|██████    | 257/426 [00:04<00:02, 64.16it/s]Loading weights:  62%|██████▏   | 265/426 [00:04<00:02, 62.48it/s]Loading weights:  65%|██████▌   | 277/426 [00:05<00:02, 70.76it/s]Loading weights:  67%|██████▋   | 287/426 [00:05<00:01, 74.09it/s]Loading weights:  69%|██████▉   | 295/426 [00:05<00:01, 66.36it/s]Loading weights:  72%|███████▏  | 305/426 [00:05<00:01, 72.08it/s]Loading weights:  73%|███████▎  | 313/426 [00:05<00:01, 59.17it/s]Loading weights:  77%|███████▋  | 327/426 [00:05<00:01, 74.13it/s]Loading weights:  79%|███████▉  | 336/426 [00:05<00:01, 71.40it/s]Loading weights:  81%|████████  | 344/426 [00:06<00:01, 71.06it/s]Loading weights:  83%|████████▎ | 354/426 [00:06<00:00, 74.77it/s]Loading weights:  85%|████████▍ | 362/426 [00:06<00:00, 66.57it/s]Loading weights:  87%|████████▋ | 369/426 [00:06<00:00, 60.52it/s]Loading weights:  90%|████████▉ | 382/426 [00:06<00:00, 74.22it/s]Loading weights:  92%|█████████▏| 390/426 [00:06<00:00, 71.95it/s]Loading weights:  93%|█████████▎| 398/426 [00:06<00:00, 65.08it/s]Loading weights:  96%|█████████▌| 410/426 [00:07<00:00, 75.02it/s]Loading weights:  98%|█████████▊| 418/426 [00:07<00:00, 55.68it/s]Loading weights: 100%|██████████| 426/426 [00:07<00:00, 58.18it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/2] 4096/niah_single_1#0 -> ' **5437923**.' (2.4s/item, ~0 min left)
+  [2/2] 4096/vt#0 -> ' FUPIL RNUYT RHRQC YGIUD BZPTL' (2.4s/item, ~0 min left)
+
+
+=== V4Z_qwen_offload.jsonl ===
+Qwen/Qwen3.5-4B arm=dense preset=None quant=nf4
+              task     4096
+     niah_single_1    100.0
+                vt    100.0
+         RULER avg    100.0
+  ttft 1.57s | decode 15.5 tok/s | peak 3.45 GB | KV 0.132 GB (1.0x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\smoke\V4Z_granite_offload.jsonl
+[ckpt] 0 recorded, 2 pending (of 2 generated)
+Loading weights:   0%|          | 0/363 [00:00<?, ?it/s]Loading weights:   0%|          | 1/363 [00:00<04:35,  1.31it/s]Loading weights:   1%|          | 2/363 [00:01<04:22,  1.38it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   1%|          | 4/363 [00:01<01:52,  3.20it/s]Loading weights:   2%|▏         | 6/363 [00:01<01:14,  4.81it/s]Loading weights:   4%|▎         | 13/363 [00:01<00:27, 12.75it/s]Loading weights:   4%|▍         | 16/363 [00:02<00:25, 13.65it/s]Loading weights:   6%|▌         | 22/363 [00:02<00:18, 18.93it/s]Loading weights:   7%|▋         | 25/363 [00:02<00:18, 18.20it/s]Loading weights:   9%|▊         | 31/363 [00:02<00:13, 25.51it/s]Loading weights:  11%|█         | 40/363 [00:02<00:08, 37.73it/s]Loading weights:  13%|█▎        | 49/363 [00:02<00:06, 47.72it/s]Loading weights:  16%|█▌        | 58/363 [00:02<00:05, 56.60it/s]Loading weights:  18%|█▊        | 67/363 [00:03<00:04, 64.18it/s]Loading weights:  21%|██        | 76/363 [00:03<00:04, 70.03it/s]Loading weights:  23%|██▎       | 85/363 [00:03<00:03, 74.26it/s]Loading weights:  26%|██▌       | 94/363 [00:03<00:04, 65.85it/s]Loading weights:  28%|██▊       | 102/363 [00:03<00:05, 49.65it/s]Loading weights:  30%|██▉       | 108/363 [00:03<00:06, 36.50it/s]Loading weights:  31%|███       | 113/363 [00:04<00:07, 32.32it/s]Loading weights:  32%|███▏      | 117/363 [00:04<00:07, 32.15it/s]Loading weights:  33%|███▎      | 121/363 [00:04<00:07, 31.97it/s]Loading weights:  34%|███▍      | 125/363 [00:04<00:08, 28.57it/s]Loading weights:  36%|███▌      | 130/363 [00:04<00:07, 29.65it/s]Loading weights:  37%|███▋      | 134/363 [00:04<00:08, 26.91it/s]Loading weights:  38%|███▊      | 139/363 [00:05<00:07, 28.43it/s]Loading weights:  39%|███▉      | 142/363 [00:05<00:08, 24.90it/s]Loading weights:  41%|████      | 148/363 [00:05<00:07, 28.49it/s]Loading weights:  42%|████▏     | 151/363 [00:05<00:08, 24.74it/s]Loading weights:  43%|████▎     | 157/363 [00:05<00:07, 27.93it/s]Loading weights:  44%|████▍     | 160/363 [00:06<00:08, 24.11it/s]Loading weights:  46%|████▌     | 166/363 [00:06<00:07, 27.75it/s]Loading weights:  47%|████▋     | 169/363 [00:06<00:07, 24.32it/s]Loading weights:  48%|████▊     | 175/363 [00:06<00:06, 27.83it/s]Loading weights:  49%|████▉     | 178/363 [00:06<00:07, 24.40it/s]Loading weights:  51%|█████     | 184/363 [00:06<00:06, 27.33it/s]Loading weights:  52%|█████▏    | 187/363 [00:07<00:07, 23.66it/s]Loading weights:  53%|█████▎    | 193/363 [00:07<00:06, 26.93it/s]Loading weights:  54%|█████▍    | 196/363 [00:07<00:07, 23.45it/s]Loading weights:  56%|█████▌    | 202/363 [00:07<00:05, 27.06it/s]Loading weights:  56%|█████▋    | 205/363 [00:07<00:06, 23.42it/s]Loading weights:  58%|█████▊    | 211/363 [00:07<00:05, 27.14it/s]Loading weights:  59%|█████▉    | 214/363 [00:08<00:06, 23.75it/s]Loading weights:  61%|██████    | 220/363 [00:08<00:05, 27.08it/s]Loading weights:  61%|██████▏   | 223/363 [00:08<00:05, 23.53it/s]Loading weights:  63%|██████▎   | 229/363 [00:08<00:05, 26.69it/s]Loading weights:  64%|██████▍   | 232/363 [00:08<00:05, 23.24it/s]Loading weights:  66%|██████▌   | 238/363 [00:09<00:04, 26.52it/s]Loading weights:  66%|██████▋   | 241/363 [00:09<00:05, 23.08it/s]Loading weights:  68%|██████▊   | 247/363 [00:09<00:04, 26.29it/s]Loading weights:  69%|██████▉   | 250/363 [00:09<00:04, 22.84it/s]Loading weights:  71%|███████   | 256/363 [00:09<00:04, 26.04it/s]Loading weights:  71%|███████▏  | 259/363 [00:09<00:04, 22.75it/s]Loading weights:  73%|███████▎  | 265/363 [00:10<00:03, 26.02it/s]Loading weights:  74%|███████▍  | 268/363 [00:10<00:04, 22.86it/s]Loading weights:  75%|███████▌  | 274/363 [00:10<00:03, 25.80it/s]Loading weights:  76%|███████▋  | 277/363 [00:10<00:03, 22.76it/s]Loading weights:  78%|███████▊  | 283/363 [00:10<00:03, 25.52it/s]Loading weights:  79%|███████▉  | 286/363 [00:11<00:03, 22.13it/s]Loading weights:  80%|████████  | 292/363 [00:11<00:02, 25.74it/s]Loading weights:  81%|████████▏ | 295/363 [00:11<00:02, 22.75it/s]Loading weights:  83%|████████▎ | 301/363 [00:11<00:02, 26.01it/s]Loading weights:  84%|████████▎ | 304/363 [00:11<00:02, 22.54it/s]Loading weights:  85%|████████▌ | 310/363 [00:12<00:02, 25.59it/s]Loading weights:  86%|████████▌ | 313/363 [00:12<00:02, 22.59it/s]Loading weights:  88%|████████▊ | 319/363 [00:12<00:01, 25.92it/s]Loading weights:  89%|████████▊ | 322/363 [00:12<00:01, 22.57it/s]Loading weights:  90%|█████████ | 328/363 [00:12<00:01, 26.46it/s]Loading weights:  91%|█████████ | 331/363 [00:12<00:01, 23.61it/s]Loading weights:  93%|█████████▎| 337/363 [00:13<00:00, 26.89it/s]Loading weights:  94%|█████████▎| 340/363 [00:13<00:00, 23.57it/s]Loading weights:  95%|█████████▌| 346/363 [00:13<00:00, 27.18it/s]Loading weights:  96%|█████████▌| 349/363 [00:13<00:00, 23.62it/s]Loading weights:  98%|█████████▊| 355/363 [00:13<00:00, 27.24it/s]Loading weights:  99%|█████████▊| 358/363 [00:13<00:00, 24.00it/s]Loading weights: 100%|██████████| 363/363 [00:14<00:00, 25.86it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/2] 4096/niah_single_1#0 -> ': **7374122**.\n\nI have memorized it as instructed.' (4.9s/item, ~0 min left)
+  [2/2] 4096/vt#0 -> ' DRXWX UFUSM OXDDM NOITL VXLXL\n\nExplanation:\n\nWe a' (5.0s/item, ~0 min left)
+
+
+=== V4Z_granite_offload.jsonl ===
+ibm-granite/granite-4.2-8b arm=dense preset=None quant=nf4
+              task     4096
+     niah_single_1    100.0
+                vt    100.0
+         RULER avg    100.0
+  ttft 1.90s | decode 8.9 tok/s | peak 6.06 GB | KV 0.659 GB (1.0x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\smoke\V4Z_qwen_snapkv_defrag.jsonl
+[ckpt] 0 recorded, 2 pending (of 2 generated)
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 807.30it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:01<07:53,  1.11s/it]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   2%|▏         | 9/426 [00:01<00:42,  9.79it/s]Loading weights:   3%|▎         | 14/426 [00:01<00:28, 14.37it/s]Loading weights:   6%|▌         | 26/426 [00:01<00:13, 29.57it/s]Loading weights:   8%|▊         | 36/426 [00:01<00:09, 39.67it/s]Loading weights:  10%|█         | 43/426 [00:01<00:09, 39.73it/s]Loading weights:  12%|█▏        | 49/426 [00:01<00:09, 41.31it/s]Loading weights:  14%|█▍        | 61/426 [00:02<00:06, 56.01it/s]Loading weights:  16%|█▌        | 69/426 [00:02<00:06, 53.06it/s]Loading weights:  19%|█▊        | 79/426 [00:02<00:05, 59.73it/s]Loading weights:  21%|██        | 89/426 [00:02<00:05, 64.80it/s]Loading weights:  23%|██▎       | 97/426 [00:02<00:05, 58.82it/s]Loading weights:  24%|██▍       | 104/426 [00:02<00:05, 54.67it/s]Loading weights:  27%|██▋       | 115/426 [00:02<00:04, 66.64it/s]Loading weights:  29%|██▉       | 123/426 [00:03<00:04, 62.30it/s]Loading weights:  31%|███       | 132/426 [00:03<00:04, 64.63it/s]Loading weights:  33%|███▎      | 142/426 [00:03<00:04, 68.48it/s]Loading weights:  35%|███▌      | 150/426 [00:03<00:04, 62.18it/s]Loading weights:  37%|███▋      | 157/426 [00:03<00:04, 57.98it/s]Loading weights:  40%|███▉      | 170/426 [00:03<00:03, 73.02it/s]Loading weights:  42%|████▏     | 178/426 [00:03<00:03, 70.53it/s]Loading weights:  44%|████▎     | 186/426 [00:03<00:03, 64.61it/s]Loading weights:  46%|████▋     | 198/426 [00:04<00:03, 75.11it/s]Loading weights:  48%|████▊     | 206/426 [00:04<00:03, 56.20it/s]Loading weights:  52%|█████▏    | 220/426 [00:04<00:02, 72.95it/s]Loading weights:  54%|█████▍    | 229/426 [00:04<00:02, 67.45it/s]Loading weights:  56%|█████▌    | 238/426 [00:04<00:02, 70.06it/s]Loading weights:  58%|█████▊    | 248/426 [00:04<00:02, 73.34it/s]Loading weights:  60%|██████    | 256/426 [00:05<00:02, 65.60it/s]Loading weights:  62%|██████▏   | 264/426 [00:05<00:02, 61.94it/s]Loading weights:  64%|██████▍   | 274/426 [00:05<00:02, 70.27it/s]Loading weights:  66%|██████▌   | 282/426 [00:05<00:02, 65.30it/s]Loading weights:  68%|██████▊   | 291/426 [00:05<00:01, 68.49it/s]Loading weights:  71%|███████   | 301/426 [00:05<00:01, 73.40it/s]Loading weights:  73%|███████▎  | 309/426 [00:05<00:01, 65.16it/s]Loading weights:  74%|███████▍  | 316/426 [00:05<00:01, 59.57it/s]Loading weights:  77%|███████▋  | 329/426 [00:06<00:01, 73.65it/s]Loading weights:  79%|███████▉  | 337/426 [00:06<00:01, 70.07it/s]Loading weights:  81%|████████  | 345/426 [00:06<00:01, 62.98it/s]Loading weights:  83%|████████▎ | 355/426 [00:06<00:00, 71.26it/s]Loading weights:  85%|████████▌ | 363/426 [00:06<00:01, 60.08it/s]Loading weights:  87%|████████▋ | 370/426 [00:06<00:00, 61.02it/s]Loading weights:  89%|████████▉ | 380/426 [00:06<00:00, 69.83it/s]Loading weights:  91%|█████████ | 388/426 [00:07<00:00, 64.36it/s]Loading weights:  93%|█████████▎| 397/426 [00:07<00:00, 66.27it/s]Loading weights:  96%|█████████▌| 407/426 [00:07<00:00, 68.53it/s]Loading weights:  97%|█████████▋| 415/426 [00:07<00:00, 60.73it/s]Loading weights:  99%|█████████▉| 422/426 [00:07<00:00, 55.60it/s]Loading weights: 100%|██████████| 426/426 [00:07<00:00, 55.66it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/2] 4096/niah_single_1#0 -> ' **5437923**.' (3.0s/item, ~0 min left)
+  [2/2] 4096/vt#0 -> ' FUPIL RNUYT RHRQC YGIUD BZPTL' (2.9s/item, ~0 min left)
+
+
+=== V4Z_qwen_snapkv_defrag.jsonl ===
+Qwen/Qwen3.5-4B arm=snapkv preset=None quant=nf4
+              task     4096
+     niah_single_1    100.0
+                vt    100.0
+         RULER avg    100.0
+  ttft 2.06s | decode 14.9 tok/s | peak 3.37 GB | KV 0.067 GB (2.0x)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\smoke\V4Z_qwen_dkv_attendall.jsonl
+[ckpt] 0 recorded, 2 pending (of 2 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1306.84it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:21,  2.99it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   5%|▍         | 20/426 [00:00<00:06, 58.96it/s]Loading weights:   9%|▉         | 40/426 [00:00<00:03, 100.05it/s]Loading weights:  14%|█▍        | 61/426 [00:00<00:02, 131.89it/s]Loading weights:  19%|█▉        | 80/426 [00:00<00:02, 147.02it/s]Loading weights:  23%|██▎       | 99/426 [00:00<00:02, 157.90it/s]Loading weights:  30%|███       | 128/426 [00:00<00:01, 191.66it/s]Loading weights:  35%|███▍      | 149/426 [00:01<00:01, 190.39it/s]Loading weights:  40%|████      | 171/426 [00:01<00:01, 198.68it/s]Loading weights:  46%|████▌     | 195/426 [00:01<00:01, 208.95it/s]Loading weights:  51%|█████     | 217/426 [00:01<00:01, 204.36it/s]Loading weights:  56%|█████▌    | 238/426 [00:01<00:00, 205.19it/s]Loading weights:  61%|██████    | 259/426 [00:01<00:00, 189.94it/s]Loading weights:  67%|██████▋   | 287/426 [00:01<00:00, 214.05it/s]Loading weights:  73%|███████▎  | 309/426 [00:01<00:00, 206.67it/s]Loading weights:  78%|███████▊  | 331/426 [00:01<00:00, 204.60it/s]Loading weights:  84%|████████▍ | 357/426 [00:02<00:00, 218.25it/s]Loading weights:  89%|████████▉ | 380/426 [00:02<00:00, 209.41it/s]Loading weights:  94%|█████████▍| 402/426 [00:02<00:00, 205.26it/s]Loading weights:  99%|█████████▉| 423/426 [00:02<00:00, 197.62it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 176.66it/s]
+[DKV] Heap trimmed. RSS: 1135 MB → 1135 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture permitted — static ABI required)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV] Heap trimmed. RSS: 1550 MB → 1550 MB (saved 0 MB)
+[DKV] auto-stream: session ruler-32768-niah_multikey_2-0 EXACT -- 32042 prompt tokens vs exact limit 131072
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] CUDA graph capture skipped: no decode cache supplied and mutation-out is not active, so capture's warmup writes could not be rolled back. On the routed path this means --fastdc / DKV_GRAPH_MUTATION_OUT is off, or the gate disabled it for this session.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[Pool] Lazy-allocated 264 slots for ~32041 tokens = 112.6 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) is running on layer 3.
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/2] 32768/niah_multikey_2#0 -> '**5716623**.' (17.1s/item, ~0 min left)
+[DKV] auto-stream: session ruler-32768-vt-0 EXACT -- 32741 prompt tokens vs exact limit 131072
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-0 candidates=29 router=residual ROUTING RUNS
+  [2/2] 32768/vt#0 -> 'AJTWY KTOPF FLAIR KEMDQ AKOAQ\n\n**Chain of Reasonin' (17.7s/item, ~0 min left)
+
+
+=== V4Z_qwen_dkv_attendall.jsonl ===
+Qwen/Qwen3.5-4B arm=dkv preset=mid quant=nf4
+              task    32768
+   niah_multikey_2    100.0
+                vt    100.0
+         RULER avg    100.0
+  ttft nans | decode nan tok/s | peak 5.77 GB | KV 0.232 GB (4.6x)
+V4 SMOKE COMPLETE
