@@ -1,0 +1,148 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\longbench\V4_granite-4.2-8b_kivi2_tiled_len12000.jsonl
+[ckpt] 0 items already recorded
+[ckpt] 120 items pending
+Loading weights:   0%|          | 0/363 [00:00<?, ?it/s]Loading weights:   0%|          | 1/363 [00:00<01:42,  3.53it/s]Loading weights:   1%|          | 2/363 [00:00<01:26,  4.18it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   2%|▏         | 6/363 [00:00<00:27, 12.79it/s]Loading weights:   4%|▍         | 15/363 [00:00<00:11, 31.53it/s]Loading weights:   7%|▋         | 24/363 [00:00<00:07, 45.69it/s]Loading weights:   9%|▉         | 33/363 [00:00<00:05, 55.93it/s]Loading weights:  12%|█▏        | 42/363 [00:01<00:05, 63.19it/s]Loading weights:  14%|█▍        | 51/363 [00:01<00:04, 68.88it/s]Loading weights:  17%|█▋        | 60/363 [00:01<00:04, 73.20it/s]Loading weights:  19%|█▉        | 69/363 [00:01<00:03, 75.56it/s]Loading weights:  21%|██▏       | 78/363 [00:01<00:03, 78.79it/s]Loading weights:  24%|██▍       | 87/363 [00:01<00:03, 79.15it/s]Loading weights:  26%|██▋       | 96/363 [00:01<00:03, 80.98it/s]Loading weights:  29%|██▉       | 105/363 [00:01<00:03, 81.63it/s]Loading weights:  31%|███▏      | 114/363 [00:01<00:03, 81.35it/s]Loading weights:  34%|███▍      | 123/363 [00:02<00:02, 81.59it/s]Loading weights:  36%|███▋      | 132/363 [00:02<00:02, 81.73it/s]Loading weights:  39%|███▉      | 141/363 [00:02<00:02, 82.17it/s]Loading weights:  41%|████▏     | 150/363 [00:02<00:02, 82.66it/s]Loading weights:  44%|████▍     | 159/363 [00:02<00:02, 81.95it/s]Loading weights:  46%|████▋     | 168/363 [00:02<00:02, 82.58it/s]Loading weights:  49%|████▉     | 177/363 [00:02<00:02, 83.54it/s]Loading weights:  51%|█████     | 186/363 [00:02<00:02, 83.49it/s]Loading weights:  54%|█████▎    | 195/363 [00:02<00:02, 83.13it/s]Loading weights:  56%|█████▌    | 204/363 [00:03<00:01, 83.10it/s]Loading weights:  59%|█████▊    | 213/363 [00:03<00:01, 83.08it/s]Loading weights:  61%|██████    | 222/363 [00:03<00:01, 83.76it/s]Loading weights:  64%|██████▎   | 231/363 [00:03<00:01, 83.84it/s]Loading weights:  66%|██████▌   | 240/363 [00:03<00:01, 82.57it/s]Loading weights:  69%|██████▊   | 249/363 [00:03<00:01, 82.06it/s]Loading weights:  71%|███████   | 258/363 [00:03<00:01, 82.75it/s]Loading weights:  74%|███████▎  | 267/363 [00:03<00:01, 83.08it/s]Loading weights:  76%|███████▌  | 276/363 [00:03<00:01, 84.01it/s]Loading weights:  79%|███████▊  | 285/363 [00:03<00:00, 84.44it/s]Loading weights:  81%|████████  | 294/363 [00:04<00:00, 84.06it/s]Loading weights:  83%|████████▎ | 303/363 [00:04<00:00, 83.52it/s]Loading weights:  86%|████████▌ | 312/363 [00:04<00:00, 83.39it/s]Loading weights:  88%|████████▊ | 321/363 [00:04<00:00, 81.89it/s]Loading weights:  91%|█████████ | 330/363 [00:04<00:00, 81.48it/s]Loading weights:  93%|█████████▎| 339/363 [00:04<00:00, 81.26it/s]Loading weights:  96%|█████████▌| 348/363 [00:04<00:00, 77.76it/s]Loading weights:  98%|█████████▊| 357/363 [00:04<00:00, 64.40it/s]Loading weights: 100%|██████████| 363/363 [00:04<00:00, 72.61it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/120] qasper#0 4104 tok -> 'The ground truth for fake news in the dataset was manually l' (9.2s/item, ~18 min left)
+  [2/120] qasper#1 3412 tok -> 'GhostVLAD adds ghost clusters alongside normal clusters in N' (7.7s/item, ~15 min left)
+  [3/120] qasper#2 4474 tok -> '68.8% to 71.8%' (6.5s/item, ~13 min left)
+  [4/120] qasper#3 3084 tok -> 'Context tweets are used as additional text features by conca' (6.6s/item, ~13 min left)
+  [5/120] qasper#4 4547 tok -> 'Fox News, CNN, The New York Times, BBC News, The Guardian, T' (7.4s/item, ~14 min left)
+  [6/120] qasper#5 5554 tok -> 'yes' (6.7s/item, ~13 min left)
+  [7/120] qasper#6 5783 tok -> 'The evaluation protocol uses importance estimates from crowd' (7.8s/item, ~15 min left)
+  [8/120] qasper#7 6688 tok -> 'CNN/DailyMail, NYT, and XSum' (7.5s/item, ~14 min left)
+  [9/120] qasper#8 3593 tok -> 'The article does not directly compare the proposed approach ' (7.6s/item, ~14 min left)
+  [10/120] qasper#9 5477 tok -> 'The ensemble selects the best performing single model and ad' (7.4s/item, ~14 min left)
+  [11/120] qasper#10 4734 tok -> 'Friends (TV sitcom scripts) and EmotionPush (anonymous Faceb' (7.2s/item, ~13 min left)
+  [12/120] qasper#11 3347 tok -> 'English' (6.8s/item, ~12 min left)
+  [13/120] qasper#12 3430 tok -> 'IMDb dataset of movie reviews' (6.5s/item, ~12 min left)
+  [14/120] qasper#13 8927 tok -> 'The article does not provide a specific accuracy value; it r' (7.1s/item, ~13 min left)
+  [15/120] qasper#14 4880 tok -> 'Yes' (6.8s/item, ~12 min left)
+  [16/120] qasper#15 12015 tok -> 'The article mentions using a set of 246,945 documents (inclu' (7.9s/item, ~14 min left)
+  [17/120] qasper#16 12015 tok -> 'Healthcare (sector with highest volatility accuracy 0.44) — ' (9.8s/item, ~17 min left)
+  [18/120] qasper#17 5269 tok -> 'RNN-based NMT and Transformer NMT models' (9.5s/item, ~16 min left)
+  [19/120] qasper#18 5270 tok -> 'The three regularization terms are: (1) a KL divergence betw' (9.7s/item, ~16 min left)
+  [20/120] qasper#19 6072 tok -> '1) SVM with unigram, bigram, and trigram features; 2) SVM wi' (10.0s/item, ~17 min left)
+  [21/120] narrativeqa#0 12015 tok -> 'Saltram stays with the Kent Mulvilles as a guest.' (10.1s/item, ~17 min left)
+  [22/120] narrativeqa#1 12016 tok -> 'Mary’s emotional detachment and lack of reciprocal feeling.' (10.1s/item, ~16 min left)
+  [23/120] narrativeqa#2 8512 tok -> "On Atlas' mountain in a cavern by a secret fountain." (10.0s/item, ~16 min left)
+  [24/120] narrativeqa#3 9371 tok -> 'To persuade Socrates to escape from prison.' (9.9s/item, ~16 min left)
+  [25/120] narrativeqa#4 12015 tok -> "Because Otto was the Baron's son and heir" (9.9s/item, ~16 min left)
+  [26/120] narrativeqa#5 12015 tok -> 'Six hours' (9.8s/item, ~15 min left)
+  [27/120] narrativeqa#6 12016 tok -> "No mention of an entertainers' manager having an affair in t" (9.9s/item, ~15 min left)
+  [28/120] narrativeqa#7 12016 tok -> 'Dana Barrett' (9.9s/item, ~15 min left)
+  [29/120] narrativeqa#8 12015 tok -> 'American' (9.8s/item, ~15 min left)
+  [30/120] narrativeqa#9 8518 tok -> 'The witch wanted the court scribe to reveal his own lies.' (9.7s/item, ~15 min left)
+  [31/120] narrativeqa#10 12015 tok -> 'Because he is a stranger from the past with scientific knowl' (9.7s/item, ~14 min left)
+  [32/120] narrativeqa#11 12015 tok -> '"Parlons d\'autre chose"' (9.8s/item, ~14 min left)
+  [33/120] narrativeqa#12 11726 tok -> 'Fifty years from her death' (9.7s/item, ~14 min left)
+  [34/120] narrativeqa#13 11961 tok -> 'The Vervelle couple believes Grassou is the perfect match fo' (9.8s/item, ~14 min left)
+  [35/120] narrativeqa#14 11956 tok -> 'Pierre Grassou' (9.7s/item, ~14 min left)
+  [36/120] narrativeqa#15 12014 tok -> 'The buggy rolls away and stops in the middle of the street' (9.8s/item, ~14 min left)
+  [37/120] narrativeqa#16 12015 tok -> 'Elder Simms argues for God-knowing and God-doing' (9.8s/item, ~14 min left)
+  [38/120] narrativeqa#17 12015 tok -> 'Because he is a stranger from the past with scientific knowl' (9.8s/item, ~13 min left)
+  [39/120] narrativeqa#18 12015 tok -> 'Sadako’s face' (9.8s/item, ~13 min left)
+  [40/120] narrativeqa#19 9370 tok -> 'multiple ethical arguments' (9.7s/item, ~13 min left)
+  [41/120] hotpotqa#0 11634 tok -> 'Gates v. Collier' (9.7s/item, ~13 min left)
+  [42/120] hotpotqa#1 12015 tok -> 'David Niven' (9.7s/item, ~13 min left)
+  [43/120] hotpotqa#2 12015 tok -> 'Flint' (9.6s/item, ~12 min left)
+  [44/120] hotpotqa#3 12015 tok -> 'Jupiter' (9.6s/item, ~12 min left)
+  [45/120] hotpotqa#4 12015 tok -> 'The passage about Atom Egoyan mentions that his biggest comm' (9.7s/item, ~12 min left)
+  [46/120] hotpotqa#5 12015 tok -> 'Baron' (9.7s/item, ~12 min left)
+  [47/120] hotpotqa#6 12015 tok -> 'Thiruvaduthurai' (9.7s/item, ~12 min left)
+  [48/120] hotpotqa#7 2357 tok -> 'Pleiospilos' (9.5s/item, ~11 min left)
+  [49/120] hotpotqa#8 12015 tok -> '2021' (9.5s/item, ~11 min left)
+  [50/120] hotpotqa#9 8990 tok -> 'Noelle Scaggs' (9.4s/item, ~11 min left)
+  [51/120] hotpotqa#10 12015 tok -> '1983' (9.4s/item, ~11 min left)
+  [52/120] hotpotqa#11 12015 tok -> 'NPO Best' (9.4s/item, ~11 min left)
+  [53/120] hotpotqa#12 12015 tok -> 'Bette Davis' (9.4s/item, ~10 min left)
+  [54/120] hotpotqa#13 10630 tok -> 'number five' (9.3s/item, ~10 min left)
+  [55/120] hotpotqa#14 12015 tok -> 'Fallow deer, roe deer, and red deer' (9.4s/item, ~10 min left)
+  [56/120] hotpotqa#15 12015 tok -> '2000 Summer Olympics' (9.4s/item, ~10 min left)
+  [57/120] hotpotqa#16 6391 tok -> 'Mario Kempes' (9.3s/item, ~10 min left)
+  [58/120] hotpotqa#17 12015 tok -> 'Ronald Reagan' (9.3s/item, ~10 min left)
+  [59/120] hotpotqa#18 12015 tok -> 'We Found Love' (9.2s/item, ~9 min left)
+  [60/120] hotpotqa#19 12015 tok -> 'Tom Petty' (9.2s/item, ~9 min left)
+  [61/120] multifieldqa_en#0 1622 tok -> 'South West Ultras' (9.1s/item, ~9 min left)
+  [62/120] multifieldqa_en#1 11329 tok -> 'No. The ISR is not necessary for transgene reactivation, as ' (9.3s/item, ~9 min left)
+  [63/120] multifieldqa_en#2 8517 tok -> 'Low-temperature scanning tunneling microscopy (STM) and spec' (9.4s/item, ~9 min left)
+  [64/120] multifieldqa_en#3 12015 tok -> 'An ICD (implantable cardioverter-defibrillator) is a surgica' (9.6s/item, ~9 min left)
+  [65/120] multifieldqa_en#4 7682 tok -> 'Because sloping the sides (tumbling home) transforms the fus' (9.7s/item, ~9 min left)
+  [66/120] multifieldqa_en#5 11554 tok -> 'The proximity of superconductivity induces a CAR exchange me' (9.9s/item, ~9 min left)
+  [67/120] multifieldqa_en#6 8124 tok -> 'Electricity is used in everyday life for lighting, heating, ' (10.0s/item, ~9 min left)
+  [68/120] multifieldqa_en#7 3135 tok -> 'Vice Admiral' (9.9s/item, ~9 min left)
+  [69/120] multifieldqa_en#8 1978 tok -> '15–3' (9.8s/item, ~8 min left)
+  [70/120] multifieldqa_en#9 12015 tok -> 'The three synthetic types of vitamin K are K3 (menadione), K' (9.8s/item, ~8 min left)
+  [71/120] multifieldqa_en#10 9567 tok -> 'Yes.' (9.8s/item, ~8 min left)
+  [72/120] multifieldqa_en#11 10050 tok -> 'Danny works in 3-D printing and software development.' (9.8s/item, ~8 min left)
+  [73/120] multifieldqa_en#12 12015 tok -> 'The current dietary reference intake (AI) for vitamin K is 9' (9.9s/item, ~8 min left)
+  [74/120] multifieldqa_en#13 8124 tok -> 'watt' (9.9s/item, ~8 min left)
+  [75/120] multifieldqa_en#14 9763 tok -> 'One of the main advantages of a horizontal business model fo' (10.0s/item, ~7 min left)
+  [76/120] multifieldqa_en#15 2895 tok -> 'Jacob C. Landau' (9.9s/item, ~7 min left)
+  [77/120] multifieldqa_en#16 8252 tok -> 'Contrastive learning with an information bottleneck to learn' (9.9s/item, ~7 min left)
+  [78/120] multifieldqa_en#17 9318 tok -> 'The function $\\beta(r)$ is determined by imposing that the s' (10.0s/item, ~7 min left)
+  [79/120] multifieldqa_en#18 10049 tok -> '70–75 metres' (10.0s/item, ~7 min left)
+  [80/120] multifieldqa_en#19 3917 tok -> 'The text states that vaccines were not trialed against genui' (10.0s/item, ~7 min left)
+  [81/120] gov_report#0 10804 tok -> '**Summary of Report: Multiyear Procurement (MYP) and Block B' (11.8s/item, ~8 min left)
+  [82/120] gov_report#1 12015 tok -> '**Summary of Report: Sustainment of Air Force and Navy Fixed' (13.7s/item, ~9 min left)
+  [83/120] gov_report#2 9741 tok -> '**Summary of Report: U.S. Federal Agencies’ Use of Financial' (15.3s/item, ~9 min left)
+  [84/120] gov_report#3 8830 tok -> '**Summary of Report: Cross-Border Data Flows and Privacy in ' (16.9s/item, ~10 min left)
+  [85/120] gov_report#4 12015 tok -> '**Summary of the Report: Federal Support for Airport Infrast' (18.6s/item, ~11 min left)
+  [86/120] gov_report#5 7903 tok -> '**Summary of the GAO Report on DOD MILCON Cost Estimating Pr' (20.0s/item, ~11 min left)
+  [87/120] gov_report#6 4246 tok -> '**Summary of Report: Certification and Oversight of Schools ' (21.0s/item, ~12 min left)
+  [88/120] gov_report#7 12015 tok -> '**Summary of the Report: Cybersecurity Effectiveness in Fede' (22.6s/item, ~12 min left)
+  [89/120] gov_report#8 4002 tok -> '**Summary of Report: USAID Assistance to the West Bank and G' (23.5s/item, ~12 min left)
+  [90/120] gov_report#9 12015 tok -> '**Summary of the Report on the Small Business Lending Fund (' (24.9s/item, ~12 min left)
+  [91/120] gov_report#10 12015 tok -> '**Summary of the Report: Navy Force Structure and Shipbuildi' (26.4s/item, ~13 min left)
+  [92/120] gov_report#11 10594 tok -> '**Summary of the GAO Report on the SBA 7(a) Loan Program**\n\n' (27.7s/item, ~13 min left)
+  [93/120] gov_report#12 11057 tok -> '**Summary of Report: Managing for Results: Federal Managers’' (29.0s/item, ~13 min left)
+  [94/120] gov_report#13 8882 tok -> '**Summary of the GAO Report: Using Telework to Reduce Office' (30.1s/item, ~13 min left)
+  [95/120] gov_report#14 12015 tok -> '**Summary of the Report: Cybersecurity and Information Secur' (31.4s/item, ~13 min left)
+  [96/120] gov_report#15 7720 tok -> '**Summary of Report: Office of Policy and Planning (PLCY) Un' (32.4s/item, ~13 min left)
+  [97/120] gov_report#16 5331 tok -> '**Summary of the Report: FEMA’s Individual Assistance (IA) D' (33.3s/item, ~13 min left)
+  [98/120] gov_report#17 10617 tok -> '**Summary of GAO Report on Forest Service Internal Controls*' (34.5s/item, ~13 min left)
+  [99/120] gov_report#18 6638 tok -> 'The report explains the U.S. Senate’s confirmation process f' (35.4s/item, ~12 min left)
+  [100/120] gov_report#19 4251 tok -> '**Summary of the Longshore and Harbor Workers’ Compensation ' (36.1s/item, ~12 min left)
+  [101/120] passage_retrieval_en#0 11339 tok -> 'Paragraph 15' (35.9s/item, ~11 min left)
+  [102/120] passage_retrieval_en#1 11753 tok -> 'Paragraph 8' (35.6s/item, ~11 min left)
+  [103/120] passage_retrieval_en#2 12014 tok -> 'Paragraph 21' (35.3s/item, ~10 min left)
+  [104/120] passage_retrieval_en#3 12015 tok -> 'Paragraph 15' (35.1s/item, ~9 min left)
+  [105/120] passage_retrieval_en#4 12015 tok -> 'Paragraph 14' (34.8s/item, ~9 min left)
+  [106/120] passage_retrieval_en#5 12015 tok -> 'Paragraph 3' (34.6s/item, ~8 min left)
+  [107/120] passage_retrieval_en#6 11920 tok -> 'Paragraph 24' (34.3s/item, ~7 min left)
+  [108/120] passage_retrieval_en#7 12015 tok -> 'Paragraph 27' (34.1s/item, ~7 min left)
+  [109/120] passage_retrieval_en#8 10692 tok -> 'Paragraph 30' (33.8s/item, ~6 min left)
+  [110/120] passage_retrieval_en#9 12015 tok -> 'Paragraph 12' (33.6s/item, ~6 min left)
+  [111/120] passage_retrieval_en#10 12015 tok -> 'Paragraph 22' (33.4s/item, ~5 min left)
+  [112/120] passage_retrieval_en#11 12015 tok -> 'Paragraph 30' (33.2s/item, ~4 min left)
+  [113/120] passage_retrieval_en#12 12015 tok -> 'Paragraph 24' (32.9s/item, ~4 min left)
+  [114/120] passage_retrieval_en#13 12015 tok -> 'None of the provided paragraphs match the abstract.\n\n**Reaso' (32.8s/item, ~3 min left)
+  [115/120] passage_retrieval_en#14 12015 tok -> 'Paragraph 3' (32.6s/item, ~3 min left)
+  [116/120] passage_retrieval_en#15 12015 tok -> 'Paragraph 8' (32.4s/item, ~2 min left)
+  [117/120] passage_retrieval_en#16 12015 tok -> 'Paragraph 3' (32.2s/item, ~2 min left)
+  [118/120] passage_retrieval_en#17 12015 tok -> 'Paragraph 16' (32.0s/item, ~1 min left)
+  [119/120] passage_retrieval_en#18 12015 tok -> 'Paragraph 4' (31.8s/item, ~1 min left)
+  [120/120] passage_retrieval_en#19 12015 tok -> 'Paragraph 3' (31.6s/item, ~0 min left)
+
+
+=== V4_granite-4.2-8b_kivi2_tiled_len12000.jsonl ===
+ibm-granite/granite-4.2-8b arm=kivi2_tiled preset=None quant=nf4 maxlen=12000
+                  task    n    score
+            gov_report   20    30.74
+              hotpotqa   20    15.98
+       multifieldqa_en   20    33.80
+           narrativeqa   20    24.22
+  passage_retrieval_en   20    80.00
+                qasper   20    39.95
+    MACRO(all samples)  120    37.45
+  ttft 6.08s | decode 5.1 tok/s | peak 6.24 GB | KV 0.356 GB (4.3x) | ctx 9526 tok
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V4S_granite-4.2-8b_kivi2_tiled_24k-32k.jsonl
+[ckpt] 0 recorded, 130 pending (of 130 generated)
+Loading weights:   0%|          | 0/363 [00:00<?, ?it/s]Loading weights:   0%|          | 1/363 [00:00<04:37,  1.31it/s]Loading weights:   1%|          | 2/363 [00:01<04:30,  1.34it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   1%|          | 4/363 [00:01<01:54,  3.13it/s]Loading weights:   3%|▎         | 10/363 [00:01<00:35, 10.00it/s]Loading weights:   4%|▍         | 15/363 [00:01<00:22, 15.71it/s]Loading weights:   7%|▋         | 24/363 [00:01<00:12, 28.00it/s]Loading weights:   9%|▉         | 33/363 [00:02<00:08, 39.63it/s]Loading weights:  12%|█▏        | 42/363 [00:02<00:06, 49.89it/s]Loading weights:  14%|█▍        | 51/363 [00:02<00:05, 58.80it/s]Loading weights:  17%|█▋        | 60/363 [00:02<00:04, 66.22it/s]Loading weights:  19%|█▉        | 69/363 [00:02<00:04, 71.64it/s]Loading weights:  22%|██▏       | 79/363 [00:02<00:03, 79.28it/s]Loading weights:  24%|██▍       | 88/363 [00:02<00:03, 80.70it/s]Loading weights:  27%|██▋       | 97/363 [00:02<00:03, 77.88it/s]Loading weights:  29%|██▉       | 106/363 [00:02<00:03, 73.93it/s]Loading weights:  31%|███▏      | 114/363 [00:03<00:05, 46.77it/s]Loading weights:  33%|███▎      | 121/363 [00:03<00:05, 45.48it/s]Loading weights:  36%|███▌      | 130/363 [00:03<00:04, 51.49it/s]Loading weights:  38%|███▊      | 139/363 [00:03<00:03, 58.36it/s]Loading weights:  41%|████      | 148/363 [00:03<00:03, 64.08it/s]Loading weights:  43%|████▎     | 156/363 [00:03<00:03, 67.20it/s]Loading weights:  45%|████▌     | 164/363 [00:04<00:04, 45.66it/s]Loading weights:  47%|████▋     | 170/363 [00:04<00:05, 36.89it/s]Loading weights:  49%|████▉     | 177/363 [00:04<00:04, 41.70it/s]Loading weights:  51%|█████     | 186/363 [00:04<00:03, 50.54it/s]Loading weights:  54%|█████▎    | 195/363 [00:04<00:02, 57.89it/s]Loading weights:  56%|█████▌    | 204/363 [00:04<00:02, 64.19it/s]Loading weights:  59%|█████▊    | 213/363 [00:05<00:02, 68.94it/s]Loading weights:  61%|██████    | 222/363 [00:05<00:01, 73.69it/s]Loading weights:  63%|██████▎   | 230/363 [00:05<00:02, 63.17it/s]Loading weights:  65%|██████▌   | 237/363 [00:05<00:02, 56.68it/s]Loading weights:  67%|██████▋   | 244/363 [00:05<00:02, 54.82it/s]Loading weights:  70%|██████▉   | 253/363 [00:05<00:01, 62.06it/s]Loading weights:  72%|███████▏  | 262/363 [00:05<00:01, 68.17it/s]Loading weights:  75%|███████▍  | 271/363 [00:05<00:01, 72.71it/s]Loading weights:  77%|███████▋  | 279/363 [00:06<00:01, 64.05it/s]Loading weights:  79%|███████▉  | 286/363 [00:06<00:01, 43.55it/s]
