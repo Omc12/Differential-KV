@@ -75,6 +75,11 @@ echo V5 P4 COMPLETE
 if not "%1"=="" goto :eof
 
 :p5
+rem Superseded: p1 against tiled KIVI-4 (the same codes, every token attended) is
+rem the routing comparison at 131k. Kept for reference; run with p5full.
+echo V5 P5 SKIPPED
+goto :eof
+:p5full
 setlocal
 set DKV_QUANT_BITS=4
 set DKV_STREAM_AUTO_TOKENS=98304

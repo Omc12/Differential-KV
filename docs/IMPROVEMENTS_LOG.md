@@ -480,6 +480,21 @@ T2, Qwen3.5-4B, 6 prompts / 65 forced steps (`paper/results/diag/fidelity_codes_
 Paired vs lowrank: codes4 dKL -0.728 [-1.163, -0.377], codes2 -0.716 [-1.150, -0.366];
 neither has a step with KL > 0.5 (lowrank: 16). V5 campaign: `benchmarks/run_v5_codes.cmd`.
 
+V5 results (RULER on the paper's prompt, no answer prefix; 12-task averages, vt excluded):
+
+| run | codes4 in DKV | paired vs lowrank DKV | paired vs tiled KIVI-4 |
+|---|---|---|---|
+| Qwen3.5-4B 131k, 5/task (p1) | 75.3 | +8.58 [+1.58, +16.83] | -11.42 [-20.75, -2.58]; on the 9 tasks other than multikey_2/3 and multiquery +2.00 [-2.22, +7.56] |
+| granite 32k, 5/task (V5-B) | 56.1 | +8.50 [-0.83, +18.36] | -4.08 [-10.83, +2.58] |
+
+Reach / decode (ladder, one call, 128 tokens): Qwen codes4 131k ok 8.88 / 11.43 GB,
+decode 7.03 tok/s; 262k ok 10.35 / 11.58 GB, 7.18 tok/s (tiled KIVI-4: 3.80 and 2.16).
+Granite codes4 **spilled at 98,304** (14.38 / 18.06 GB) where tiled KIVI-4 fits (10.66 /
+11.50) with 0.6 GB fewer stored bytes; suspected cause: the fused history tile
+dequantizes 64 blocks of key AND value codes in fp32 per layer call. V5-D re-runs the
+granite ladder with `DKV_PREFILL_SDPA_TILE=16`. V5-C: codes4 attending every block at
+131k on the three tasks where it trails tiled KIVI-4.
+
 ## Batch E: prefill speed and baseline fairness (2026-10-04)
 
 **E2 larger prefill chunks -- no code.** `DKV_PREFILL_CHUNK_SIZE` already sets it
