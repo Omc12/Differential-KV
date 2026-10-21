@@ -533,6 +533,8 @@ def main():
                                       stop_ids, args.chunk, bparams)
         except Exception as e:                                   # noqa: BLE001
             print(f"  [{n}/{len(work)}] {key}: ERROR {type(e).__name__}: {str(e)[:150]}")
+            import traceback
+            traceback.print_exc()
             store.append(key, task=it["task"], length=it["length"], idx=it["idx"],
                          outputs=it["outputs"], error=f"{type(e).__name__}: {e}")
             continue

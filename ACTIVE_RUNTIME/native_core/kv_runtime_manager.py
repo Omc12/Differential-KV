@@ -209,7 +209,7 @@ class KVBlock:
             pool = self.pool
             pool_idx = self.pool_idx
             seq_len = int(pool.seq_lens[pool_idx].item())
-            rank = self.dynamic_rank if self.dynamic_rank > 0 else pool.U.shape[2]
+            rank = min(self.dynamic_rank, pool.U.shape[2]) if self.dynamic_rank > 0 else pool.U.shape[2]
             U_int8 = pool.U[pool_idx, :seq_len, :rank]
             scale_u = pool.U_scale[pool_idx]
             return U_int8.to(scale_u.dtype) * scale_u
@@ -237,7 +237,7 @@ class KVBlock:
         if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
             pool = self.pool
             pool_idx = self.pool_idx
-            rank = self.dynamic_rank if self.dynamic_rank > 0 else pool.V_KV.shape[2]
+            rank = min(self.dynamic_rank, pool.V_KV.shape[2]) if self.dynamic_rank > 0 else pool.V_KV.shape[2]
             # V lives at a BASIS ROW, which equals pool_idx unless shared bases
             # are on (native_core/compression/basis_group.py).
             v_row = pool.basis_row(pool_idx) if hasattr(pool, "basis_row") else pool_idx
