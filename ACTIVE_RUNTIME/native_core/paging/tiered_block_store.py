@@ -163,6 +163,11 @@ class TieredBlockStore:
                 self._cpu_store[slot_id]['kq'] = tuple(
                     t[slot_id].contiguous().cpu()
                     for t in (self.pool.kq_codes, self.pool.kq_scale, self.pool.kq_zero))
+            # Codes store (DKV_VALUE_QUANT): the values page the same way.
+            if getattr(self.pool, "vq_codes", None) is not None:
+                self._cpu_store[slot_id]['vq'] = tuple(
+                    t[slot_id].contiguous().cpu()
+                    for t in (self.pool.vq_codes, self.pool.vq_scale, self.pool.vq_zero))
             
             # Zero GPU slot to mark empty
             self.pool.seq_lens[slot_id] = 0
@@ -201,6 +206,10 @@ class TieredBlockStore:
                     for _dst, _src in zip((self.pool.kq_codes, self.pool.kq_scale,
                                            self.pool.kq_zero), store_data['kq']):
                         _dst[slot_id].copy_(_src, non_blocking=not blocking)
+                if store_data.get('vq') is not None:
+                    for _dst, _src in zip((self.pool.vq_codes, self.pool.vq_scale,
+                                           self.pool.vq_zero), store_data['vq']):
+                        _dst[slot_id].copy_(_src, non_blocking=not blocking)
                 self.pool.seq_lens[slot_id] = store_data['seq_len']
                 
                 event = torch.cuda.Event()
@@ -222,6 +231,10 @@ class TieredBlockStore:
             if store_data.get('kq') is not None:
                 for _dst, _src in zip((self.pool.kq_codes, self.pool.kq_scale,
                                        self.pool.kq_zero), store_data['kq']):
+                    _dst[slot_id].copy_(_src.to(self.device))
+            if store_data.get('vq') is not None:
+                for _dst, _src in zip((self.pool.vq_codes, self.pool.vq_scale,
+                                       self.pool.vq_zero), store_data['vq']):
                     _dst[slot_id].copy_(_src.to(self.device))
             self.pool.seq_lens[slot_id] = store_data['seq_len']
             

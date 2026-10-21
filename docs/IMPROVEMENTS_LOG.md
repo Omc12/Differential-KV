@@ -455,6 +455,31 @@ hybrid KL **0.0006** vs base 0.297 (paired -0.297 [-0.612, -0.039]), top-1 1.000
 11.2 vs 2.7 tok/s, store 0.750 vs 0.595 GB. The streaming arms were not run (stopped:
 GPU needed by another project); run them before part C2.
 
+## Codes store (2026-10-21): KIVI's codes as a DKV store
+
+`DKV_STORE=codes` [`DKV_QUANT_BITS=4|2`]: keys per-channel (groups of 32 tokens) and
+values per-token (groups of 32 channels), both at `DKV_QUANT_BITS`, the tiled KIVI
+baseline's layout, held in DKV's block pool and read by DKV's router, schedulers and
+tiled read path. Individually: `DKV_KEY_QUANT=pc2|pc4|pc8`, `DKV_VALUE_QUANT=pt2|pt4|pt8`.
+The factor is allocated at rank 1 and never read; no value residual is stored (positions
+stay -1); key residual positions stay, for the router, read from the key codes. Only the
+fused history tile reads value codes (the other prefill paths raise). Decode goes through
+the materialise path, as the hybrid's does. Accounting (`dkv_kv_bytes`) counts the value
+codes and scales. Tests: `ACTIVE_RUNTIME/tests/test_codes_store.py` (2-bit key codes,
+value round trip, pool write/read/grow, reconstruct, fused tile vs reference attention).
+
+T2, Qwen3.5-4B, 6 prompts / 65 forced steps (`paper/results/diag/fidelity_codes_qwen.log`):
+
+| arm | KL | top-1 | KV GB | cmp | peak | dec/s |
+|---|---|---|---|---|---|---|
+| lowrank (default) | 0.7286 | 0.815 | 0.137 | 3.32 | 4.64 | 12.4 |
+| hybrid | 0.3127 | 0.938 | 0.178 | 2.56 | 4.96 | 12.6 |
+| codes, 4 bits | **0.0003** | **1.000** | 0.215 | 2.12 | 5.21 | 13.1 |
+| codes, 2 bits | **0.0127** | **0.985** | 0.156 | 2.92 | 4.89 | 12.4 |
+
+Paired vs lowrank: codes4 dKL -0.728 [-1.163, -0.377], codes2 -0.716 [-1.150, -0.366];
+neither has a step with KL > 0.5 (lowrank: 16). V5 campaign: `benchmarks/run_v5_codes.cmd`.
+
 ## Batch E: prefill speed and baseline fairness (2026-10-04)
 
 **E2 larger prefill chunks -- no code.** `DKV_PREFILL_CHUNK_SIZE` already sets it

@@ -2669,6 +2669,11 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
             key_deltas=(delta_K_all.reshape(N_blocks, T_active, pool.V_KV.shape[3],
                                             pool.V_KV.shape[4])
                         if int(getattr(pool, "key_quant_bits", 0) or 0) else None),
+            # Codes store: the exact anchor-relative values, kept per-token
+            # quantized; the factor's value half is then never read.
+            value_deltas=(delta_V_all.reshape(N_blocks, T_active, pool.V_KV.shape[3],
+                                              pool.V_KV.shape[4])
+                          if int(getattr(pool, "value_quant_bits", 0) or 0) else None),
         )
         # Clear local GPU tensors on blocks to prevent VRAM leak.
         for _b in blocks_list:

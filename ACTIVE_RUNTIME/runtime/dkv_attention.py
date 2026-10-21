@@ -640,7 +640,8 @@ def _coarse_scale_kv(kv_manager, sid, layer_idx, pool, cos_all, sin_all,
                    res_k=g["res_k"] if has_res else None,
                    res_pos=g["res_pos"] if has_res else None,
                    res_v=g["res_v"] if has_res else None,
-                   res_pos_v=g["res_pos_v"] if has_res else None)
+                   res_pos_v=g["res_pos_v"] if has_res else None,
+                   k_delta=g.get("k_delta"), v_delta=g.get("v_delta"))
         return K, V, g["seq_lens"].clone(), drop_fine
     except Exception:                                            # noqa: BLE001
         return None
@@ -1279,7 +1280,7 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
             res_pos=_g["res_pos"] if _has_res else None,
             res_v=_g["res_v"] if _has_res else None,
             res_pos_v=_g["res_pos_v"] if _has_res else None,
-            k_delta=_g.get("k_delta"))
+            k_delta=_g.get("k_delta"), v_delta=_g.get("v_delta"))
         if _g.get("raw_k") and anchor_indices is not None and cos_all is not None:
             # ── EVERY KEY AT ITS OWN POSITION, which is MLX's form ───────────
             # _Km is now R-free: anchor_raw + delta_recon_raw + res_raw, one
@@ -1329,7 +1330,7 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
                     res_pos=_g2["res_pos"] if _g2.get("has_res") else None,
                     res_v=_g2["res_v"] if _g2.get("has_res") else None,
                     res_pos_v=_g2["res_pos_v"] if _g2.get("has_res") else None,
-                    k_delta=_g2.get("k_delta"))
+                    k_delta=_g2.get("k_delta"), v_delta=_g2.get("v_delta"))
         if not _nostore:
             _rc.put(_rkey, _Km, _Vm)
         # clone: under DKV_STATIC_GATHER the gather returns a PERSISTENT buffer
@@ -3538,8 +3539,18 @@ def apply_dkv_attention_patch(model, kv_manager):
                         _hist_kw["kq_codes"] = pool.kq_codes[pool_indices_t]
                         _hist_kw["kq_scale"] = pool.kq_scale[pool_indices_t]
                         _hist_kw["kq_zero"]  = pool.kq_zero[pool_indices_t]
+                    # Codes store (DKV_VALUE_QUANT): the values too, compact.
+                    if getattr(pool, "vq_codes", None) is not None:
+                        _hist_kw["vq_codes"] = pool.vq_codes[pool_indices_t]
+                        _hist_kw["vq_scale"] = pool.vq_scale[pool_indices_t]
+                        _hist_kw["vq_zero"]  = pool.vq_zero[pool_indices_t]
 
                     def _with_key_deltas(kw):
+                        if "vq_codes" in kw:
+                            # Only the fused tile reads value codes; the paths
+                            # below would attend the (unused) factor instead.
+                            raise RuntimeError("DKV_VALUE_QUANT needs the fused "
+                                               "history tile (DKV_PREFILL_SDPA=1)")
                         if "kq_codes" not in kw:
                             return kw
                         from runtime.native_block_pool import dequantize_keys_per_channel
@@ -3566,9 +3577,11 @@ def apply_dkv_attention_patch(model, kv_manager):
                             history_attend_block_tiled, history_attend_sdpa_tile)
                         _kqb = int(getattr(pool, "key_quant_bits", 0) or 0)
                         _kqg = int(getattr(pool, "kq_group", 32) or 32)
+                        _vqb = int(getattr(pool, "value_quant_bits", 0) or 0)
+                        _vqg = int(getattr(pool, "vq_group", 32) or 32)
                         result = history_attend_block_tiled(
                             lambda kw: history_attend_sdpa_tile(
-                                q, kw, num_key_value_groups, _kqb, _kqg),
+                                q, kw, num_key_value_groups, _kqb, _kqg, _vqb, _vqg),
                             _hist_kw, int(os.environ.get("DKV_PREFILL_SDPA_TILE", "64")),
                             q.dtype)
                     elif os.environ.get("DKV_PREFILL_LOWMEM", "1") != "0":

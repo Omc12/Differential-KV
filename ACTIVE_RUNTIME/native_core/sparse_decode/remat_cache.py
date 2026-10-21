@@ -211,6 +211,7 @@ def reconstruct_blocks(
     res_v: Optional[torch.Tensor] = None,       # [N, MAX_RES, H, D]
     res_pos_v: Optional[torch.Tensor] = None,   # [N, MAX_RES]  -1 padded
     k_delta: Optional[torch.Tensor] = None,     # [N, S, H, D] hybrid store keys
+    v_delta: Optional[torch.Tensor] = None,     # [N, S, H, D] codes store values
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Materialise routed blocks to dense K/V.
 
@@ -256,11 +257,15 @@ def reconstruct_blocks(
         # (exact rows replace their twins), so there is no small-delta-on-large-
         # anchor addition for half precision to round away.
         dt = V_V.dtype
-        Uh = U[:, :, :r].to(dt)
-        if U_scale is not None:
-            Uh = Uh * U_scale.view(N, 1, 1).to(dt)
-        V = torch.bmm(Uh, V_V[:, :r].reshape(N, r, H * D)).view(N, S, H, D)
-        V = torch.addcmul(anchors_V.unsqueeze(1).to(dt), V, scales.view(N, 1, 1, 1).to(dt))
+        if v_delta is not None:
+            # Codes store: values come from their codes too; no factor is read.
+            V = v_delta[:, :S].to(dt) + anchors_V.unsqueeze(1).to(dt)
+        else:
+            Uh = U[:, :, :r].to(dt)
+            if U_scale is not None:
+                Uh = Uh * U_scale.view(N, 1, 1).to(dt)
+            V = torch.bmm(Uh, V_V[:, :r].reshape(N, r, H * D)).view(N, S, H, D)
+            V = torch.addcmul(anchors_V.unsqueeze(1).to(dt), V, scales.view(N, 1, 1, 1).to(dt))
         K = k_delta[:, :S].to(dt) + anchors_K.unsqueeze(1).to(dt)
         K = _scatter_residuals(K, res_k, res_pos, anchors_K.to(dt))
         V = _scatter_residuals(V, res_v, res_pos_v, anchors_V.to(dt))

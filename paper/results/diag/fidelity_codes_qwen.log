@@ -1,0 +1,476 @@
+[dense] building control -> C:\Users\USER\Desktop\Differential KV\paper\results\diag\fidelity\dense_Qwen3.5-4B_2638f8357f.pt
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:01<07:31,  1.06s/it]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   2%|▏         | 9/426 [00:01<00:40, 10.19it/s]Loading weights:   3%|▎         | 14/426 [00:01<00:27, 15.12it/s]Loading weights:   6%|▌         | 26/426 [00:01<00:12, 31.65it/s]Loading weights:   8%|▊         | 36/426 [00:01<00:09, 42.78it/s]Loading weights:  10%|█         | 44/426 [00:01<00:08, 44.70it/s]Loading weights:  12%|█▏        | 51/426 [00:01<00:08, 45.38it/s]Loading weights:  15%|█▌        | 64/426 [00:01<00:05, 61.06it/s]Loading weights:  17%|█▋        | 72/426 [00:02<00:05, 61.54it/s]Loading weights:  19%|█▉        | 80/426 [00:02<00:05, 58.01it/s]Loading weights:  22%|██▏       | 92/426 [00:02<00:04, 70.18it/s]Loading weights:  23%|██▎       | 100/426 [00:02<00:06, 54.19it/s]Loading weights:  27%|██▋       | 115/426 [00:02<00:04, 71.60it/s]Loading weights:  29%|██▉       | 124/426 [00:02<00:04, 70.29it/s]Loading weights:  31%|███       | 132/426 [00:02<00:04, 70.59it/s]Loading weights:  33%|███▎      | 142/426 [00:03<00:03, 74.40it/s]Loading weights:  35%|███▌      | 150/426 [00:03<00:04, 67.29it/s]Loading weights:  37%|███▋      | 158/426 [00:03<00:04, 64.08it/s]Loading weights:  40%|███▉      | 170/426 [00:03<00:03, 75.95it/s]Loading weights:  42%|████▏     | 179/426 [00:03<00:03, 75.35it/s]Loading weights:  44%|████▍     | 187/426 [00:03<00:03, 63.07it/s]Loading weights:  47%|████▋     | 199/426 [00:03<00:03, 72.98it/s]Loading weights:  49%|████▊     | 207/426 [00:04<00:03, 61.03it/s]Loading weights:  52%|█████▏    | 221/426 [00:04<00:02, 75.31it/s]Loading weights:  54%|█████▍    | 230/426 [00:04<00:02, 71.14it/s]Loading weights:  56%|█████▌    | 238/426 [00:04<00:02, 71.71it/s]Loading weights:  58%|█████▊    | 248/426 [00:04<00:02, 76.11it/s]Loading weights:  60%|██████    | 256/426 [00:04<00:02, 67.33it/s]Loading weights:  62%|██████▏   | 264/426 [00:04<00:02, 64.26it/s]Loading weights:  64%|██████▍   | 274/426 [00:05<00:02, 69.77it/s]Loading weights:  66%|██████▌   | 282/426 [00:05<00:02, 65.83it/s]Loading weights:  68%|██████▊   | 291/426 [00:05<00:01, 69.64it/s]Loading weights:  71%|███████   | 301/426 [00:05<00:01, 75.01it/s]Loading weights:  73%|███████▎  | 309/426 [00:05<00:01, 65.09it/s]Loading weights:  74%|███████▍  | 316/426 [00:05<00:01, 59.84it/s]Loading weights:  77%|███████▋  | 329/426 [00:05<00:01, 74.14it/s]Loading weights:  79%|███████▉  | 337/426 [00:05<00:01, 70.96it/s]Loading weights:  81%|████████  | 345/426 [00:06<00:01, 64.12it/s]Loading weights:  84%|████████▍ | 357/426 [00:06<00:00, 74.73it/s]Loading weights:  86%|████████▌ | 365/426 [00:06<00:01, 56.08it/s]Loading weights:  89%|████████▉ | 379/426 [00:06<00:00, 73.03it/s]Loading weights:  91%|█████████ | 388/426 [00:06<00:00, 66.62it/s]Loading weights:  93%|█████████▎| 397/426 [00:06<00:00, 67.34it/s]Loading weights:  96%|█████████▌| 407/426 [00:06<00:00, 69.99it/s]Loading weights:  97%|█████████▋| 415/426 [00:07<00:00, 62.16it/s]Loading weights:  99%|█████████▉| 422/426 [00:07<00:00, 57.08it/s]Loading weights: 100%|██████████| 426/426 [00:07<00:00, 58.09it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  dense lb/qasper#15: 12012 prompt tokens, 16 answer tokens
+  dense lb/multifieldqa_en#3: 12012 prompt tokens, 16 answer tokens
+  dense lb/hotpotqa#1: 12012 prompt tokens, 5 answer tokens
+  dense ruler/16384/niah_multikey_2#0: 15689 prompt tokens, 16 answer tokens
+  dense ruler/16384/niah_multikey_3#0: 16082 prompt tokens, 16 answer tokens
+  dense ruler/16384/qa_1#0: 16002 prompt tokens, 2 answer tokens
+[arm base] (shipped defaults)
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:10,  3.26it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   5%|▍         | 21/426 [00:00<00:06, 65.71it/s]Loading weights:  10%|▉         | 41/426 [00:00<00:03, 106.22it/s]Loading weights:  15%|█▌        | 65/426 [00:00<00:02, 143.23it/s]Loading weights:  21%|██        | 90/426 [00:00<00:01, 172.73it/s]Loading weights:  27%|██▋       | 114/426 [00:00<00:01, 187.54it/s]Loading weights:  32%|███▏      | 135/426 [00:00<00:01, 188.13it/s]Loading weights:  37%|███▋      | 157/426 [00:01<00:01, 196.27it/s]Loading weights:  43%|████▎     | 185/426 [00:01<00:01, 218.06it/s]Loading weights:  49%|████▉     | 208/426 [00:01<00:01, 209.45it/s]Loading weights:  56%|█████▌    | 238/426 [00:01<00:00, 227.23it/s]Loading weights:  62%|██████▏   | 262/426 [00:01<00:00, 217.81it/s]Loading weights:  68%|██████▊   | 290/426 [00:01<00:00, 231.99it/s]Loading weights:  74%|███████▎  | 314/426 [00:01<00:00, 211.60it/s]Loading weights:  81%|████████  | 343/426 [00:01<00:00, 229.19it/s]Loading weights:  86%|████████▌ | 367/426 [00:02<00:00, 203.23it/s]Loading weights:  92%|█████████▏| 394/426 [00:02<00:00, 217.05it/s]Loading weights:  98%|█████████▊| 417/426 [00:02<00:00, 200.60it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 186.72it/s]
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV] Heap trimmed. RSS: 1168 MB → 1168 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=3 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1582 MB → 1582 MB (saved 0 MB)
+[Pool] Lazy-allocated 104 slots for ~12011 tokens = 44.3 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) is running on layer 3.
+[DKV] ROUTE PROBE layer=7 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  lb/qasper#15: kl 1.4470  top1 0.73  kv 0.120980224  peak 4.17
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+  lb/multifieldqa_en#3: kl 0.6170  top1 0.87  kv 0.120980224  peak 4.17
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+  lb/hotpotqa#1: kl 1.7167  top1 0.25  kv 0.130417408  peak 4.16
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+  ruler/16384/niah_multikey_2#0: kl 0.6352  top1 0.80  kv 0.143131648  peak 4.62
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+  ruler/16384/niah_multikey_3#0: kl 0.0004  top1 1.00  kv 0.154141696  peak 4.64
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+  ruler/16384/qa_1#0: kl 0.0001  top1 1.00  kv 0.155190272  peak 4.63
+[arm hybrid] DKV_STORE=hybrid
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:14,  3.17it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   5%|▌         | 22/426 [00:00<00:06, 66.21it/s]Loading weights:  10%|▉         | 42/426 [00:00<00:03, 105.56it/s]Loading weights:  15%|█▌        | 66/426 [00:00<00:02, 144.86it/s]Loading weights:  22%|██▏       | 93/426 [00:00<00:01, 179.59it/s]Loading weights:  27%|██▋       | 117/426 [00:00<00:01, 196.42it/s]Loading weights:  33%|███▎      | 142/426 [00:00<00:01, 207.27it/s]Loading weights:  39%|███▊      | 165/426 [00:01<00:01, 213.37it/s]Loading weights:  44%|████▍     | 188/426 [00:01<00:01, 207.50it/s]Loading weights:  49%|████▉     | 210/426 [00:01<00:01, 209.84it/s]Loading weights:  56%|█████▌    | 238/426 [00:01<00:00, 225.22it/s]Loading weights:  61%|██████▏   | 261/426 [00:01<00:00, 212.26it/s]Loading weights:  68%|██████▊   | 290/426 [00:01<00:00, 230.42it/s]Loading weights:  74%|███████▎  | 314/426 [00:01<00:00, 211.61it/s]Loading weights:  80%|████████  | 341/426 [00:01<00:00, 225.69it/s]Loading weights:  86%|████████▌ | 365/426 [00:01<00:00, 203.48it/s]Loading weights:  92%|█████████▏| 394/426 [00:02<00:00, 223.05it/s]Loading weights:  98%|█████████▊| 418/426 [00:02<00:00, 198.73it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 187.91it/s]
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV] Heap trimmed. RSS: 1165 MB → 1165 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=3 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1581 MB → 1581 MB (saved 0 MB)
+[Pool] Lazy-allocated 104 slots for ~12011 tokens = 89.0 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) is running on layer 3.
+[DKV] ROUTE PROBE layer=7 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  lb/qasper#15: kl 0.5274  top1 0.87  kv 0.15872896  peak 4.16
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+  lb/multifieldqa_en#3: kl 0.1171  top1 0.93  kv 0.15872896  peak 4.16
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+  lb/hotpotqa#1: kl 2.6606  top1 0.75  kv 0.163447552  peak 4.16
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+  ruler/16384/niah_multikey_2#0: kl 0.0008  top1 1.00  kv 0.191366144  peak 4.94
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+  ruler/16384/niah_multikey_3#0: kl 0.0001  top1 1.00  kv 0.196871168  peak 4.95
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+  ruler/16384/qa_1#0: kl 0.0000  top1 1.00  kv 0.197395456  peak 4.96
+[arm codes4] DKV_STORE=codes,DKV_QUANT_BITS=4
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:14,  3.15it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   5%|▌         | 22/426 [00:00<00:06, 66.10it/s]Loading weights:  10%|▉         | 42/426 [00:00<00:03, 104.61it/s]Loading weights:  15%|█▌        | 66/426 [00:00<00:02, 143.16it/s]Loading weights:  22%|██▏       | 93/426 [00:00<00:01, 175.12it/s]Loading weights:  27%|██▋       | 117/426 [00:00<00:01, 192.42it/s]Loading weights:  33%|███▎      | 142/426 [00:00<00:01, 206.65it/s]Loading weights:  39%|███▊      | 165/426 [00:01<00:01, 207.16it/s]Loading weights:  44%|████▍     | 187/426 [00:01<00:01, 201.19it/s]Loading weights:  49%|████▉     | 210/426 [00:01<00:01, 206.37it/s]Loading weights:  56%|█████▌    | 238/426 [00:01<00:00, 221.29it/s]Loading weights:  61%|██████▏   | 261/426 [00:01<00:00, 209.74it/s]Loading weights:  68%|██████▊   | 288/426 [00:01<00:00, 224.78it/s]Loading weights:  73%|███████▎  | 311/426 [00:01<00:00, 209.11it/s]Loading weights:  80%|███████▉  | 340/426 [00:01<00:00, 225.29it/s]Loading weights:  85%|████████▌ | 363/426 [00:01<00:00, 212.36it/s]Loading weights:  90%|█████████ | 385/426 [00:02<00:00, 205.90it/s]Loading weights:  96%|█████████▋| 411/426 [00:02<00:00, 217.85it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 186.22it/s]
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV] Heap trimmed. RSS: 1167 MB → 1167 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=3 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1583 MB → 1583 MB (saved 0 MB)
+[Pool] Lazy-allocated 104 slots for ~12011 tokens = 130.8 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) is running on layer 3.
+[DKV] ROUTE PROBE layer=7 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  lb/qasper#15: kl 0.0007  top1 1.00  kv 0.19362688  peak 4.21
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+  lb/multifieldqa_en#3: kl 0.0003  top1 1.00  kv 0.19362688  peak 4.21
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+  lb/hotpotqa#1: kl 0.0002  top1 1.00  kv 0.19362688  peak 4.21
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+  ruler/16384/niah_multikey_2#0: kl 0.0001  top1 1.00  kv 0.235799552  peak 5.19
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+  ruler/16384/niah_multikey_3#0: kl 0.0000  top1 1.00  kv 0.235799552  peak 5.21
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+  ruler/16384/qa_1#0: kl 0.0000  top1 1.00  kv 0.235799552  peak 5.21
+[arm codes2] DKV_STORE=codes,DKV_QUANT_BITS=2
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:15,  3.14it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   5%|▌         | 22/426 [00:00<00:06, 65.01it/s]Loading weights:  10%|▉         | 42/426 [00:00<00:03, 104.59it/s]Loading weights:  15%|█▌        | 66/426 [00:00<00:02, 143.96it/s]Loading weights:  22%|██▏       | 93/426 [00:00<00:01, 176.12it/s]Loading weights:  27%|██▋       | 117/426 [00:00<00:01, 194.73it/s]Loading weights:  33%|███▎      | 139/426 [00:00<00:01, 200.79it/s]Loading weights:  38%|███▊      | 161/426 [00:01<00:01, 199.35it/s]Loading weights:  44%|████▎     | 186/426 [00:01<00:01, 209.23it/s]Loading weights:  49%|████▉     | 208/426 [00:01<00:01, 198.77it/s]Loading weights:  55%|█████▌    | 235/426 [00:01<00:00, 216.82it/s]Loading weights:  61%|██████    | 258/426 [00:01<00:00, 204.60it/s]Loading weights:  67%|██████▋   | 287/426 [00:01<00:00, 224.44it/s]Loading weights:  73%|███████▎  | 310/426 [00:01<00:00, 213.37it/s]Loading weights:  78%|███████▊  | 332/426 [00:01<00:00, 212.30it/s]Loading weights:  84%|████████▍ | 359/426 [00:01<00:00, 221.05it/s]Loading weights:  90%|████████▉ | 383/426 [00:02<00:00, 219.10it/s]Loading weights:  96%|█████████▌| 407/426 [00:02<00:00, 223.50it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 185.28it/s]
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV] Heap trimmed. RSS: 1167 MB → 1167 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.7 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=3 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1581 MB → 1581 MB (saved 0 MB)
+[Pool] Lazy-allocated 104 slots for ~12011 tokens = 78.8 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) is running on layer 3.
+[DKV] ROUTE PROBE layer=7 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-8d918c07 candidates=9 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  lb/qasper#15: kl 0.0272  top1 1.00  kv 0.143295232  peak 4.15
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-b8406ef1 candidates=9 router=residual ROUTING RUNS
+  lb/multifieldqa_en#3: kl 0.0033  top1 1.00  kv 0.143295232  peak 4.15
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-ba20afbb candidates=9 router=residual ROUTING RUNS
+  lb/hotpotqa#1: kl 0.0188  top1 1.00  kv 0.143295232  peak 4.15
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-dd6bfba0 candidates=13 router=residual ROUTING RUNS
+  ruler/16384/niah_multikey_2#0: kl 0.0171  top1 0.93  kv 0.168690688  peak 4.88
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-5591385f candidates=13 router=residual ROUTING RUNS
+  ruler/16384/niah_multikey_3#0: kl 0.0027  top1 1.00  kv 0.168690688  peak 4.89
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=df-7be5c708 candidates=13 router=residual ROUTING RUNS
+  ruler/16384/qa_1#0: kl 0.0001  top1 1.00  kv 0.168690688  peak 4.89
+
+arm           steps       KL    KLmed   top1    dNLL   kvGB    cmp    peak   dec/s
+base             65   0.7286   0.0016  0.815  +0.769  0.137   3.32    4.64    12.4
+hybrid           65   0.3127   0.0007  0.938  +0.368  0.178   2.56    4.96    12.6
+               resid-attn weighted blocks: 528
+codes4           65   0.0003   0.0000  1.000  +0.000  0.215   2.12    5.21    13.1
+               resid-attn weighted blocks: 528
+codes2           65   0.0127   0.0001  0.985  +0.011  0.156   2.92    4.89    12.4
+               resid-attn weighted blocks: 528
+
+paired vs base (bootstrap 10k, 95%)
+arm               n               dKL [CI]    KL>0.5   ref>0.5    dtop1
+hybrid           65  -0.4160 [-0.8034,-0.0437]         7        16   +0.123
+codes4           65  -0.7284 [-1.1630,-0.3774]         0        16   +0.185
+codes2           65  -0.7159 [-1.1500,-0.3660]         0        16   +0.169

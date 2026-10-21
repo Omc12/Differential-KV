@@ -1517,7 +1517,7 @@ def history_attend_block_tiled(attend_fn, kw, tile, out_dtype):
                        dim=0)
 
 
-def history_attend_sdpa_tile(q, kw, groups, kq_bits=0, kq_group=32):
+def history_attend_sdpa_tile(q, kw, groups, kq_bits=0, kq_group=32, vq_bits=0, vq_group=32):
     """Prefill history attention for one block tile through a fused attention
     kernel (DKV_PREFILL_SDPA=1, default off). Same inputs and the same stacked
     [out, lse] result as _prefill_fused_history_attend, same arithmetic up to
@@ -1546,7 +1546,13 @@ def history_attend_sdpa_tile(q, kw, groups, kq_bits=0, kq_group=32):
     def _lowrank(VX):                             # [N, R, H, D] -> [N, S, Hk, D]
         return torch.bmm(Us, VX[:, :, sl].reshape(N, R, Hk * D).to(dt)).view(N, S, Hk, D) * sc
 
-    dv = _lowrank(kw["V_V"])
+    if "vq_codes" in kw:
+        # Codes store: values from their per-token codes; the factor is unused.
+        from runtime.native_block_pool import dequantize_values_per_token
+        dv = dequantize_values_per_token(kw["vq_codes"], kw["vq_scale"], kw["vq_zero"],
+                                         vq_bits, vq_group, dt)[:, :S]
+    else:
+        dv = _lowrank(kw["V_V"])
     if "kq_codes" in kw:
         from runtime.native_block_pool import dequantize_keys_per_channel
         dk = dequantize_keys_per_channel(kw["kq_codes"], kw["kq_scale"], kw["kq_zero"],
@@ -2143,6 +2149,10 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     if _kd is not None and do_rot:
         _kd = _partial_rope_apply(_kd, cos_anc.to(_kd.dtype), sin_anc.to(_kd.dtype))
     g["k_delta"] = _kd
+    # Codes store (DKV_VALUE_QUANT): the routed blocks' anchor-relative values.
+    # Values carry no RoPE, so no frame applies. None when the store is off.
+    g["v_delta"] = (base_pool.get_value_deltas(indices)
+                    if getattr(base_pool, "vq_codes", None) is not None else None)
 
     res_pos = getattr(base_pool, "residual_K_positions", None)
     res_pos_v = getattr(base_pool, "residual_V_positions", None)

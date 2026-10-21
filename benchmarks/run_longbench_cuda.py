@@ -329,6 +329,14 @@ def dkv_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
         _g = int(getattr(pool, "kq_group", 32) or 32)
         lowrank_block += B * Hkv * d * _kqb // 8 + ((B + _g - 1) // _g) * Hkv * d * fp16 * 2
         res_tok = kv_tok // 2
+    # Codes store (DKV_STORE=codes): values per-token quantized as well, one
+    # fp16 scale and zero per token per group of channels; no value residual is
+    # stored, so a residual row costs nothing beyond its position.
+    _vqb = int(getattr(pool, "value_quant_bits", 0) or 0)
+    if _vqb:
+        _vg = int(getattr(pool, "vq_group", 32) or 32)
+        lowrank_block += B * Hkv * d * _vqb // 8 + B * Hkv * (d // _vg) * fp16 * 2
+        res_tok = 0
 
     s0 = mgr.sessions.get(sid) or {}
     # KV-HOLDING LAYERS ONLY (accounting v2, 2026-10-17). This used to read
@@ -753,7 +761,7 @@ def main():
                         "DKV_DECODE_RESIDUALS", "DKV_STREAM_AUTO_TOKENS",
                         "DKV_STREAM_PROFILE",
                         # store / schedule switches (2026-10-04)
-                        "DKV_STORE", "DKV_KEY_QUANT", "DKV_RESID_ATTN",
+                        "DKV_STORE", "DKV_KEY_QUANT", "DKV_VALUE_QUANT", "DKV_QUANT_BITS", "DKV_RESID_ATTN",
                         "DKV_STREAM_ELASTIC", "DKV_PREFILL_SDPA", "DKV_EXACT_LEAN", "DKV_REMAT_GATE")
                        if k in os.environ} or None,
            "decode_defaults": "serving" if args.arm == "dkv" else None,
