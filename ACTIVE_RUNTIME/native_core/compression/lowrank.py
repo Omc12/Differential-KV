@@ -2155,7 +2155,15 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                             # scores 3/12 on the 8k natural sweep, because it
                             # points everywhere and so reserves nothing.
                             _q_eff = _q_ids if usable_query(_q_ids, _total) else None
-                            if _q_eff is None and _all is not None:
+                            # DKV_RESIDUAL_NO_QUERY=1: residual rows chosen with
+                            # no question information at all -- neither the
+                            # extracted question span nor the prompt's tail
+                            # orders the runs (the equal-information control
+                            # against eviction that never sees the question).
+                            _no_query = os.environ.get("DKV_RESIDUAL_NO_QUERY", "0") == "1"
+                            if _no_query:
+                                _q_eff = None
+                            if _q_eff is None and _all is not None and not _no_query:
                                 # TAIL-OF-PROMPT FALLBACK. When no short
                                 # question span can be pinned -- either nothing
                                 # was supplied, or the request is one huge user

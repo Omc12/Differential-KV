@@ -340,7 +340,7 @@ KV_TRANSFORMS = {
 # Methods whose reported KV bytes are actually allocated (see module docstring).
 _REALIZED = {"dense", "streamingllm", "keynorm_hh", "snapkv", "h2o",
              "streamingllm_chunked", "h2o_chunked", "kivi4_chunked", "kivi4_tiled",
-             "kivi2_tiled"}
+             "kivi2_tiled", "dense_tiled", "snapkv_chunked_q"}
 
 
 def attn_by_cache_layer(pkv, atts) -> Dict[int, torch.Tensor]:
@@ -595,6 +595,92 @@ def _h2o_chunked(model, ids: List[int], device: str, chunk: int,
     return past, last, _cache_bytes(past), max_len
 
 
+# ── Question-aware chunk-wise eviction (snapkv_chunked_q) ───────────────────
+# The equal-information control for DKV, whose low-rank store orders residual
+# rows by the prompt's last tokens -- the question in every template evaluated
+# -- and so knows the question while it compresses. This arm gets the same
+# look-ahead: the prompt's last `question_tail` tokens are run once, alone, at
+# their true positions, and each attention layer's post-RoPE queries are kept.
+# The prompt is then read in chunks; after every chunk each KV layer keeps its
+# `recency_window` newest tokens plus the older ones those queries attend to
+# most (SnapKV's scoring: softmax over the cache, summed over the question's
+# queries, query heads pooled per KV head, max-pooled over 7 positions).
+_QCAP = {"q": None}
+
+
+def _qcapture_attention(module, query, key, value, attention_mask, **kwargs):
+    from transformers.integrations.sdpa_attention import sdpa_attention_forward
+    if _QCAP["q"] is not None:
+        _QCAP["q"].append((module.layer_idx, query.detach()))
+    return sdpa_attention_forward(module, query, key, value, attention_mask, **kwargs)
+
+
+def _question_queries(model, ids: List[int], device: str, tail: int):
+    """Post-RoPE queries of the prompt's last `tail` tokens, per attention
+    layer, in call order (one entry per attention layer)."""
+    from transformers import AttentionInterface, DynamicCache
+    from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS, sdpa_mask
+    AttentionInterface.register("qcapture", _qcapture_attention)
+    ALL_MASK_ATTENTION_FUNCTIONS.register("qcapture", sdpa_mask)
+    prev = model.config._attn_implementation
+    q_ids = ids[-tail:]
+    pos = torch.tensor([list(range(len(ids) - len(q_ids), len(ids)))], device=device)
+    _QCAP["q"] = []
+    try:
+        model.set_attn_implementation("qcapture")
+        with torch.no_grad():
+            model(input_ids=torch.tensor([q_ids], device=device), position_ids=pos,
+                  past_key_values=DynamicCache(config=model.config), use_cache=True)
+        caps = sorted(_QCAP["q"], key=lambda t: t[0])
+    finally:
+        _QCAP["q"] = None
+        model.set_attn_implementation(prev)
+    return [q for _, q in caps]
+
+
+def _snapkv_chunked_q(model, ids: List[int], device: str, chunk: int,
+                      budget: int, recency_window: int, question_tail: int,
+                      pool_kernel: int = 7):
+    if not 0 <= recency_window < budget:
+        raise ValueError("snapkv_chunked_q needs 0 <= recency_window < budget")
+    qs = _question_queries(model, ids, device, question_tail)
+    past, last, max_len, qmap = None, None, 0, None
+    with torch.no_grad():
+        for cs in range(0, len(ids), chunk):
+            ch = ids[cs:cs + chunk]
+            pos = torch.tensor([list(range(cs, cs + len(ch)))], device=device)
+            out = model(input_ids=torch.tensor([ch], device=device),
+                        position_ids=pos, past_key_values=past, use_cache=True)
+            past = out.past_key_values
+            last = out.logits[0, -1].float()
+            del out
+            if qmap is None:
+                qmap = attn_by_cache_layer(past, qs)
+            for l in range(cache_num_layers(past)):
+                K, V = cache_get_kv(past, l)
+                if K is None:
+                    continue
+                S = K.shape[2]
+                max_len = max(max_len, S)
+                if S <= budget:
+                    continue
+                q = qmap[l]                                     # [B, Hq, T, D]
+                B, Hq, T, D = q.shape
+                Hk = K.shape[1]
+                qg = q.reshape(B, Hk, (Hq // Hk) * T, D).float()
+                n_old = S - recency_window
+                sc = torch.softmax(qg @ K[:, :, :n_old].float().transpose(-1, -2)
+                                   * D ** -0.5, dim=-1).sum(dim=2)   # [B, Hk, n_old]
+                top = _select_by_attention(sc, budget - recency_window, pool_kernel)
+                recent = torch.arange(n_old, S, device=K.device).expand(
+                    top.shape[0], top.shape[1], recency_window)
+                idx = torch.cat([top, recent], dim=-1)
+                gi = idx.unsqueeze(-1).expand(-1, -1, -1, K.shape[-1])
+                cache_set_kv(past, l, torch.gather(K, 2, gi), torch.gather(V, 2, gi))
+            torch.cuda.empty_cache()
+    return past, last, _cache_bytes(past), max_len
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Chunk-wise KIVI: quantize the cache AS IT IS BUILT
 # ─────────────────────────────────────────────────────────────────────────────
@@ -680,7 +766,9 @@ class _KiviLayerMixin:
             return 0
         tot = 0
         for p, s, z in st["k"] + st["v"]:
-            tot += p.numel() * p.element_size() + 2 * s.numel() * s.element_size()
+            tot += p.numel() * p.element_size()
+            if s is not None:
+                tot += 2 * s.numel() * s.element_size()
         for t in (st["rk"], st["rv"]):
             if t is not None:
                 tot += t.numel() * t.element_size()
@@ -709,11 +797,20 @@ _KIVI_TILED_CACHE = {"cache": None}
 def _kivi_quantize_into(st, rk, rv, G, R, keep_tail, bits=4):
     """Quantize whole groups of the 16-bit window older than the last
     max(R, keep_tail) tokens; return the remaining window."""
-    lv = float(2 ** bits - 1)
-    pack = _PACK[bits][0]
     n_res = rk.shape[-2]
     hold = max(R, keep_tail)
     n_q = ((n_res - hold) // G) * G if n_res > hold else 0
+    if bits == 16:
+        # dense_tiled: the same history store and tiled read, without the
+        # quantizer -- a 16-bit cache held as chunks (never concatenated, so
+        # it does not reallocate as it grows) and read a tile at a time.
+        if n_q > 0:
+            st["k"].append((rk[..., :n_q, :].contiguous(), None, None))
+            st["v"].append((rv[..., :n_q, :].contiguous(), None, None))
+            rk, rv = rk[..., n_q:, :].contiguous(), rv[..., n_q:, :].contiguous()
+        return rk, rv
+    lv = float(2 ** bits - 1)
+    pack = _PACK[bits][0]
     if n_q > 0:
         k, v = rk[..., :n_q, :].float(), rv[..., :n_q, :].float()
         B, H, _, Dk = k.shape
@@ -756,7 +853,8 @@ def _kivi_tiled_attention(module, query, key, value, attention_mask,
     cache = _KIVI_TILED_CACHE["cache"]
     lyr = cache.layers[module.layer_idx]
     st = lyr.__dict__.get("_kivi")
-    unpack = _PACK[getattr(lyr, "kivi_bits", 4)][1]
+    _bits = getattr(lyr, "kivi_bits", 4)
+    unpack = None if _bits == 16 else _PACK[_bits][1]
     B, H, Q, D = query.shape
     Hk = key.shape[1]
     g = H // Hk
@@ -792,9 +890,9 @@ def _kivi_tiled_attention(module, query, key, value, attention_mask,
             ks, vs, n = [], [], 0
             while i < n_entries and (n == 0 or n < KIVI_TILE_TOKENS):
                 p, sc, z = st["k"][i]
-                ks.append((unpack(p).to(dt) * sc + z).flatten(2, 3))
+                ks.append(p if unpack is None else (unpack(p).to(dt) * sc + z).flatten(2, 3))
                 p, sc, z = st["v"][i]
-                vs.append(unpack(p).to(dt) * sc + z)
+                vs.append(p if unpack is None else unpack(p).to(dt) * sc + z)
                 n += vs[-1].shape[-2]
                 i += 1
             Kt = torch.cat(ks, -2).contiguous()
@@ -876,8 +974,14 @@ CHUNKED_DEFAULTS = {
     # KIVI-2 as published: per-channel keys in groups of 32, per-token values,
     # a 128-token 16-bit window, read tile by tile like kivi4_tiled.
     "kivi2_tiled": {"group": 32, "residual": 128, "bits": 2},
+    # A dense cache read the way DKV and tiled KIVI read history: 16-bit,
+    # stored in chunks, attended a tile at a time with log-sum-exp merging.
+    # The fair dense ceiling for a tiled read path.
+    "dense_tiled": {"group": 32, "residual": 128, "bits": 16},
+    # Question-aware chunk-wise eviction (see _snapkv_chunked_q).
+    "snapkv_chunked_q": {"budget": 2048, "recency_window": 512, "question_tail": 64},
 }
-KIVI_TILED = ("kivi4_tiled", "kivi2_tiled")
+KIVI_TILED = ("kivi4_tiled", "kivi2_tiled", "dense_tiled")
 
 
 def prefill_attn(method: str) -> str:
@@ -945,6 +1049,10 @@ def run_baseline(model, tokenizer, ids: List[int], method: str, device: str,
             past, last_logits, phys_gb, max_cache = _streamingllm_chunked(
                 model, ids, device, chunk, params["n_sink"],
                 params["recency_window"])
+        elif method == "snapkv_chunked_q":
+            past, last_logits, phys_gb, max_cache = _snapkv_chunked_q(
+                model, ids, device, chunk, params["budget"], params["recency_window"],
+                params["question_tail"])
         elif method in ("kivi4_chunked",) + KIVI_TILED:
             past, last_logits, phys_gb, max_cache = _kivi_chunked(
                 model, ids, device, chunk, params["group"], params["residual"],

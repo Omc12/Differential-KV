@@ -4556,6 +4556,8 @@ class KVRuntimeManager:
                                     _runs = atomic_runs(tok_strs)
                                     _pq = getattr(self, "_pending_query", None) or {}
                                     _qi = _pq.get(_sid) if isinstance(_pq, dict) else None
+                                    if os.environ.get("DKV_RESIDUAL_NO_QUERY", "0") == "1":
+                                        _qi = None
                                     if _runs and usable_query(_qi, _total):
                                         _runs = rank_runs_by_query(
                                             tok_strs, block_token_ids, _qi, _runs)
