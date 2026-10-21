@@ -505,6 +505,23 @@ cache. Unverified lead: the codes store still runs the low-rank encoder's full
 factorization and residual pass (only rank 1 is kept), whose fp32 temporaries the
 low-rank store's smaller pool leaves room for. Open.
 
+## Fairness controls (V6, 2026-10-21)
+
+`benchmarks/run_v6_fairness.cmd`. p1: a 16-bit cache read through DKV's tiled,
+LSE-merged history attention (`dense_tiled`), ladders, 128-token answers.
+
+| model | dense_tiled clean to | spills at | peak there (alloc / reserved, prefill) | streaming DKV past it | preallocated dense |
+|---|---|---|---|---|---|
+| granite-4.2-8b | 28,672 | 32,768 (12.12 GB reserved) | 10.97 / 11.44 | 4.6x (131,072) | 20,480 |
+| Qwen3.5-4B | 196,608 | 229,376 (12.13 GB reserved) | 10.36 / 10.95 | 1.3x (262,144) | 122,880 |
+
+The read path alone lifts dense 1.4x (granite) and 1.6x (Qwen) past preallocated dense;
+DKV's store adds 4.6x and 1.3x. The paper's earlier bound ("at most 5.3x and 2.0x",
+from exact DKV's ceiling) overstated the hybrid: on Qwen3.5-4B, where 8 of 32 layers
+cache, most of DKV's reach is the read path's; on granite, where all 40 do, most is the
+store's. p2 (DKV without question-ordered residuals) and p3 (question-aware chunk-wise
+eviction at 1.5x DKV's bytes), RULER 131k on Qwen: running.
+
 ## Batch E: prefill speed and baseline fairness (2026-10-04)
 
 **E2 larger prefill chunks -- no code.** `DKV_PREFILL_CHUNK_SIZE` already sets it

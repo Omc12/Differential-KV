@@ -1,0 +1,62 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V6_granite_dense_tiled.jsonl
+[ckpt] 0 points already recorded
+  running dense_tiled@16384 ...
+    dense_tiled@16384: ok peak=8.597206528 (74s)
+  running dense_tiled@20480 ...
+    dense_tiled@20480: ok peak=9.272489472 (46s)
+  running dense_tiled@24576 ...
+    dense_tiled@24576: ok peak=9.947510272 (51s)
+  running dense_tiled@28672 ...
+    dense_tiled@28672: ok peak=10.622793216 (55s)
+  running dense_tiled@32768 ...
+    dense_tiled@32768: spilled peak=11.298338304 (68s)
+  dense_tiled: stopping, ceiling found below 36864
+  dense_tiled: stopping, ceiling found below 40960
+
+
+=== V6_granite_dense_tiled.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+dense_tiled    16384    16384      8.60     20.9    2.684       ok
+dense_tiled    20480    20480      9.27     25.3    3.355       ok
+dense_tiled    24576    24576      9.95     29.1    4.027       ok
+dense_tiled    28672    28672     10.62     34.5    4.698       ok
+dense_tiled    32768    32768     11.30     45.4    5.369  spilled
+dense_tiled    36864        -         -        -        - skipped_after_oom
+dense_tiled    40960        -         -        -        - skipped_after_oom
+  dense_tiled: 0.1649 GB per 1k tokens, floor 5.90 GB  (max OK 28672 tok @ 10.62 GB)
+         predicted ceiling ~37,665 tok on a 12.9 GB card
+         first spill at 32768 tok (11.30 GB) -- timings at and above this length are host-memory bound, not compute
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V6_Qwen3.5-4B_dense_tiled.jsonl
+[ckpt] 0 points already recorded
+  running dense_tiled@98304 ...
+    dense_tiled@98304: ok peak=6.460203008 (90s)
+  running dense_tiled@122880 ...
+    dense_tiled@122880: ok peak=7.265509376 (105s)
+  running dense_tiled@131072 ...
+    dense_tiled@131072: ok peak=7.533944832 (112s)
+  running dense_tiled@163840 ...
+    dense_tiled@163840: ok peak=8.607686656 (146s)
+  running dense_tiled@196608 ...
+    dense_tiled@196608: ok peak=9.68142848 (184s)
+  running dense_tiled@229376 ...
+    dense_tiled@229376: spilled peak=10.755170304 (229s)
+  dense_tiled: stopping, ceiling found below 262144
+
+
+=== V6_Qwen3.5-4B_dense_tiled.jsonl ===
+Qwen/Qwen3.5-4B  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+dense_tiled    98304    98304      6.46     67.8    3.221       ok
+dense_tiled   122880   122880      7.27     89.2    4.027       ok
+dense_tiled   131072   131072      7.53     96.0    4.295       ok
+dense_tiled   163840   163840      8.61    130.1    5.369       ok
+dense_tiled   196608   196608      9.68    167.8    6.442       ok
+dense_tiled   229376   229376     10.76    212.2    7.516  spilled
+dense_tiled   262144        -         -        -        - skipped_after_oom
+  dense_tiled: 0.0328 GB per 1k tokens, floor 3.24 GB  (max OK 196608 tok @ 9.68 GB)
+         predicted ceiling ~270,582 tok on a 12.9 GB card
+         first spill at 229376 tok (10.76 GB) -- timings at and above this length are host-memory bound, not compute
+V6 P1 COMPLETE
