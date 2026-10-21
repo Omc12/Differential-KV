@@ -1,0 +1,17 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ladder\V5_granite_codes4_tile16_auto.jsonl
+[ckpt] 0 points already recorded
+  running dkv@65536 ...
+    dkv@65536: spilled peak=12.23826432 (536s)
+  dkv: stopping, ceiling found below 98304
+  dkv: stopping, ceiling found below 114688
+
+
+=== V5_granite_codes4_tile16_auto.jsonl ===
+ibm-granite/granite-4.2-8b  quant=nf4  preset=mid
+   arm      ctx   actual   peak GB   wall s    KV GB   status
+   dkv    65536    65536     12.24    499.0    3.678  spilled
+   dkv    98304        -         -        -        - skipped_after_oom
+   dkv   114688        -         -        -        - skipped_after_oom
+         first spill at 65536 tok (12.24 GB) -- timings at and above this length are host-memory bound, not compute
+V5D COMPLETE

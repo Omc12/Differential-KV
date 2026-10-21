@@ -53,3 +53,20 @@ def test_ratio_independent_of_linear_layers():
     b = dkv_kv_bytes(_mgr([0, 0, 0, 31] * 8, 100, 32), 32768, "s")
     assert abs(a["kv_physical_gb"] - b["kv_physical_gb"]) < 1e-12
     assert abs(a["kv_compression_x"] - b["kv_compression_x"]) < 1e-9
+
+
+def test_int8_residual_rows_cost_their_stored_width():
+    """Residual rows are charged at what the pool stores: int8 codes packed in
+    32-bit words plus an fp16 scale and offset per 64 channels, not 16 bits."""
+    from run_longbench_cuda import dkv_kv_bytes
+    L, seq, H, D = 40, 16384, 8, 128
+    m16 = _mgr([15] * L, 128, L, Hkv=H, D=D)
+    m8 = _mgr([15] * L, 128, L, Hkv=H, D=D)
+    m8.native_pool.residual_quant = "int8"
+    m8.native_pool.residual_quant_bits = 8
+    m8.native_pool.residual_quant_group_size = 64
+    a = dkv_kv_bytes(m16, seq, "s")["kv_physical_gb"]
+    b = dkv_kv_bytes(m8, seq, "s")["kv_physical_gb"]
+    rows = L * 15 * 128
+    row16, row8 = 2 * H * D * 2, 2 * H * (D + (D // 64) * 4)
+    assert abs((a - b) - rows * (row16 - row8) / 1e9) < 1e-12

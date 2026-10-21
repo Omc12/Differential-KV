@@ -317,6 +317,18 @@ def dkv_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
     r = int(getattr(pool, "rank", None) or mgr.rank)
 
     kv_tok = Hkv * d * fp16 * 2
+    # A residual row costs what the pool stores for it: int4/int8 codes packed in
+    # 32-bit words plus an fp16 scale and offset per group of channels when the
+    # residuals are quantized (the presets' default, int8), else 16 bits. Rows
+    # recorded before 2026-10-21 charged 16 bits regardless, overstating DKV's
+    # store (the paper's loader corrects them exactly; see paperdata.py).
+    _rq = str(getattr(pool, "residual_quant", "none") or "none")
+    if _rq in ("int4", "int8"):
+        _rb = int(getattr(pool, "residual_quant_bits", 8) or 8)
+        _rg = int(getattr(pool, "residual_quant_group_size", 64) or 64)
+        _row_half = Hkv * (((d * _rb + 31) // 32) * 4 + (d // _rg) * 4)
+    else:
+        _row_half = Hkv * d * fp16
     _halves = int(getattr(pool, "_vkv_halves", 2) or 2)
     lowrank_block = (B * r * 1 + _halves * Hkv * r * d * fp16 + 2 * Hkv * d * fp16 + 8)
     # Hybrid store (DKV_KEY_QUANT): every key's per-channel codes plus one fp16
@@ -324,11 +336,11 @@ def dkv_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
     # (_halves == 1) and K residual values are read from the codes, so a
     # residual row costs only its V half.
     _kqb = int(getattr(pool, "key_quant_bits", 0) or 0)
-    res_tok = kv_tok
+    res_tok = 2 * _row_half
     if _kqb:
         _g = int(getattr(pool, "kq_group", 32) or 32)
         lowrank_block += B * Hkv * d * _kqb // 8 + ((B + _g - 1) // _g) * Hkv * d * fp16 * 2
-        res_tok = kv_tok // 2
+        res_tok = _row_half
     # Codes store (DKV_STORE=codes): values per-token quantized as well, one
     # fp16 scale and zero per token per group of channels; no value residual is
     # stored, so a residual row costs nothing beyond its position.
