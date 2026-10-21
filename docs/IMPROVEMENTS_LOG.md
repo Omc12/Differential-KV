@@ -495,6 +495,16 @@ dequantizes 64 blocks of key AND value codes in fp32 per layer call. V5-D re-run
 granite ladder with `DKV_PREFILL_SDPA_TILE=16`. V5-C: codes4 attending every block at
 131k on the three tasks where it trails tiled KIVI-4.
 
+V5-C: attending every block with the same codes scores 100 on all three (15 items),
++51.67 [+28.33, +75.00] over top-16 and identical to tiled KIVI-4: at 131k the gap is
+the router. Granite codes4 reach, 128-token answers, every run spills at 65,536 near
+12.2 GB allocated where tiled KIVI-4 fits (9.11): 16-block tile (V5-D; first token
+133 s, decode 0.35 tok/s), fixed window (V5-E; 131 s, 0.53), decode cache held off
+(V5-F, DKV_REMAT_RESERVE_GB=30; 192 s, 2.86). Not the tile, the scheduler or the decode
+cache. Unverified lead: the codes store still runs the low-rank encoder's full
+factorization and residual pass (only rank 1 is kept), whose fp32 temporaries the
+low-rank store's smaller pool leaves room for. Open.
+
 ## Batch E: prefill speed and baseline fairness (2026-10-04)
 
 **E2 larger prefill chunks -- no code.** `DKV_PREFILL_CHUNK_SIZE` already sets it
