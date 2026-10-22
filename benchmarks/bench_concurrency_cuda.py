@@ -179,6 +179,9 @@ def main():
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--arm", default="")
     ap.add_argument("--point-json", default="")
+    ap.add_argument("--timeout", type=float, default=7200,
+                    help="seconds per arm; at 131k on an 80 GB card one arm can "
+                         "hold 100+ sessions, each a full prefill")
     args = ap.parse_args()
     out = args.out or os.path.join(REPO, "paper", "results", "concurrency",
                                    f"{args.model.split('/')[-1]}_ctx{args.ctx}.jsonl")
@@ -205,7 +208,7 @@ def main():
                             "--model", args.model, "--ctx", str(args.ctx),
                             "--n-max", str(args.n_max), "--gen", str(args.gen),
                             "--dkv-pool-gb", str(args.dkv_pool_gb),
-                            "--point-json", pj], cwd=REPO, timeout=7200)
+                            "--point-json", pj], cwd=REPO, timeout=args.timeout)
         except subprocess.TimeoutExpired:
             pass
         if os.path.exists(pj):

@@ -72,7 +72,10 @@ def build_items(tok, model_id, lb_specs, ruler_specs, max_length):
                           build_prompt(tok, rows[i], ds, prompts[ds], max_length)))
     if ruler_specs:
         tag = model_id.split("/")[-1]
-        gen = load_generated(os.path.join(REPO, "paper", "results", "ruler_data", tag))
+        # DKV_RULER_DATA: where a cloud worker generated the same items
+        root = os.environ.get("DKV_RULER_DATA") or os.path.join(REPO, "paper", "results",
+                                                               "ruler_data")
+        gen = load_generated(os.path.join(root, tag))
         for spec in ruler_specs:
             lt, rng = spec.split(":")
             L, task = lt.split("/")

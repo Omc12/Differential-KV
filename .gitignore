@@ -173,3 +173,6 @@ paper/mlsys2026/
 paper/results/diag/tier1*/*.pt
 paper/results/diag/fidelity*/dense_*.pt
 *.lock
+
+# cloud campaign worker logs (benchmarks/cloud/worker.py)
+.cloud_logs/
