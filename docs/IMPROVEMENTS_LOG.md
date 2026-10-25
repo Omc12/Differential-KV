@@ -519,8 +519,25 @@ The read path alone lifts dense 1.4x (granite) and 1.6x (Qwen) past preallocated
 DKV's store adds 4.6x and 1.3x. The paper's earlier bound ("at most 5.3x and 2.0x",
 from exact DKV's ceiling) overstated the hybrid: on Qwen3.5-4B, where 8 of 32 layers
 cache, most of DKV's reach is the read path's; on granite, where all 40 do, most is the
-store's. p2 (DKV without question-ordered residuals) and p3 (question-aware chunk-wise
-eviction at 1.5x DKV's bytes), RULER 131k on Qwen: running.
+store's.
+
+p2/p3, RULER 131k on Qwen3.5-4B, 5 items per task, the V3_BEYOND items (60 paired):
+
+| arm | RULER | KV GB | paired |
+|---|---|---|---|
+| DKV/mid as shipped (V3_BEYOND) | 66.7 | 0.52 | ref. |
+| DKV/mid, residuals ordered with no question information (`DKV_RESIDUAL_NO_QUERY=1`) | 66.9 | 0.52 | +0.17 [-2.33, +2.67] vs shipped |
+| chunk-wise StreamingLLM, 23,808 tokens (V4S) | 29.4 | 0.78 | |
+| chunk-wise SnapKV ranking told the question (`snapkv_chunked_q`), 23,808 tokens | 75.9 | 0.78 | +46.56 [+32.81, +59.67] vs StreamingLLM; +9.25 [+3.19, +16.61] vs DKV; -0.67 [-4.86, +4.19] vs DKV codes4 |
+
+DKV's lead over eviction does not come from seeing the question (no change without
+it). Eviction recovers once its ranking knows the question before the prompt is read,
+and then what it keeps serves that question alone; DKV's records are built without it.
+
+Paper audit (2026-10-25, not a code change): the `mid` preset exports
+`DKV_SVD_ENERGY=0.9999` at config load (`config.py`, setdefault), so every run kept
+99.99% of a block's energy (rank capped at 32), not the 99.9% default in `lowrank.py`
+that the paper had quoted; the ladder rows record 0.9999.
 
 ## Batch E: prefill speed and baseline fairness (2026-10-04)
 

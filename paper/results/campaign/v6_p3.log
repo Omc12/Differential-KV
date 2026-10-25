@@ -1,0 +1,95 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+[ckpt] paper\results\ruler\V6_Qwen3.5-4B_snapkv_chunked_q_eqbytes_131k.jsonl
+[ckpt] 0 recorded, 65 pending (of 65 generated)
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<02:13,  3.18it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   5%|▌         | 22/426 [00:00<00:06, 66.72it/s]Loading weights:  10%|▉         | 42/426 [00:00<00:03, 106.12it/s]Loading weights:  15%|█▌        | 66/426 [00:00<00:02, 141.96it/s]Loading weights:  22%|██▏       | 93/426 [00:00<00:01, 178.01it/s]Loading weights:  28%|██▊       | 118/426 [00:00<00:01, 193.18it/s]Loading weights:  34%|███▍      | 145/426 [00:00<00:01, 213.16it/s]Loading weights:  39%|███▉      | 168/426 [00:01<00:01, 216.10it/s]Loading weights:  46%|████▌     | 195/426 [00:01<00:01, 226.67it/s]Loading weights:  51%|█████▏    | 219/426 [00:01<00:00, 230.49it/s]Loading weights:  57%|█████▋    | 243/426 [00:01<00:00, 225.64it/s]Loading weights:  62%|██████▏   | 266/426 [00:01<00:00, 220.52it/s]Loading weights:  69%|██████▊   | 292/426 [00:01<00:00, 224.05it/s]Loading weights:  74%|███████▍  | 315/426 [00:01<00:00, 221.36it/s]Loading weights:  81%|████████  | 344/426 [00:01<00:00, 235.15it/s]Loading weights:  86%|████████▋ | 368/426 [00:01<00:00, 223.50it/s]Loading weights:  93%|█████████▎| 396/426 [00:02<00:00, 236.45it/s]Loading weights:  99%|█████████▊| 420/426 [00:02<00:00, 212.86it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 193.80it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/65] 131072/cwe#0 -> 'Based on a frequency analysis of the provided list' (72.4s/item, ~77 min left)
+  [2/65] 131072/cwe#1 -> 'Based on a frequency analysis of the provided list' (72.7s/item, ~76 min left)
+  [3/65] 131072/cwe#2 -> 'Based on an analysis of the provided list of words' (72.9s/item, ~75 min left)
+  [4/65] 131072/cwe#3 -> 'Based on a frequency analysis of the provided list' (72.7s/item, ~74 min left)
+  [5/65] 131072/cwe#4 -> 'Based on a frequency analysis of the provided list' (72.8s/item, ~73 min left)
+  [6/65] 131072/fwe#0 -> 'pmqysy, zhtlig, blpxps' (70.4s/item, ~69 min left)
+  [7/65] 131072/fwe#1 -> 'pnesyg, zitagf, ytkyqv' (68.8s/item, ~67 min left)
+  [8/65] 131072/fwe#2 -> 'pnvgbi, zkcezm, bsyqzp' (67.7s/item, ~64 min left)
+  [9/65] 131072/fwe#3 -> 'polfxt, ziiyjl, bpnuky' (67.1s/item, ~63 min left)
+  [10/65] 131072/fwe#4 -> 'pvnctf, zkukak, bmgpbw' (66.3s/item, ~61 min left)
+  [11/65] 131072/niah_multikey_1#0 -> 'The special magic number for abaft-placode is **75' (66.1s/item, ~59 min left)
+  [12/65] 131072/niah_multikey_1#1 -> 'The special magic number for hurried-tensor is **1' (65.8s/item, ~58 min left)
+  [13/65] 131072/niah_multikey_1#2 -> 'The special magic number for big-river mentioned i' (65.7s/item, ~57 min left)
+  [14/65] 131072/niah_multikey_1#3 -> 'The special magic number for excellent-pence menti' (65.5s/item, ~56 min left)
+  [15/65] 131072/niah_multikey_1#4 -> 'The special magic number for handsome-lap is **364' (65.3s/item, ~54 min left)
+  [16/65] 131072/niah_multikey_2#0 -> 'The special magic number for tasty-constant is **3' (65.2s/item, ~53 min left)
+  [17/65] 131072/niah_multikey_2#1 -> 'The special magic number for loutish-honor is **41' (65.1s/item, ~52 min left)
+  [18/65] 131072/niah_multikey_2#2 -> 'The special magic number for scandalous-tow-truck ' (65.0s/item, ~51 min left)
+  [19/65] 131072/niah_multikey_2#3 -> 'The special magic number for plausible-tab is **37' (64.9s/item, ~50 min left)
+  [20/65] 131072/niah_multikey_2#4 -> 'The special magic number for wealthy-frequency is ' (64.8s/item, ~49 min left)
+  [21/65] 131072/niah_multikey_3#0 -> 'The special magic uuid for `48ae3ff6-b546-4718-ba4' (64.9s/item, ~48 min left)
+  [22/65] 131072/niah_multikey_3#1 -> 'The special magic uuid for `a4eb9dba-59f4-45d4-91f' (65.2s/item, ~47 min left)
+  [23/65] 131072/niah_multikey_3#2 -> 'The special magic uuid for `f14ba25a-e36b-4636-ba2' (65.3s/item, ~46 min left)
+  [24/65] 131072/niah_multikey_3#3 -> 'The special magic uuid for `df80846e-d9ad-4a5f-a38' (65.7s/item, ~45 min left)
+  [25/65] 131072/niah_multikey_3#4 -> 'The special magic uuid for `545d740a-d63e-4059-864' (66.0s/item, ~44 min left)
+  [26/65] 131072/niah_multiquery#0 -> 'Based on the text provided, here are the special m' (66.1s/item, ~43 min left)
+  [27/65] 131072/niah_multiquery#1 -> 'Based on the text provided, here are the special m' (66.2s/item, ~42 min left)
+  [28/65] 131072/niah_multiquery#2 -> 'Based on the text provided, here are the special m' (66.3s/item, ~41 min left)
+  [29/65] 131072/niah_multiquery#3 -> 'Based on the text provided, here are the special m' (66.4s/item, ~40 min left)
+  [30/65] 131072/niah_multiquery#4 -> 'Based on the text provided, here are the special m' (66.5s/item, ~39 min left)
+  [31/65] 131072/niah_multivalue#0 -> 'Based on the text provided, here are the special m' (66.5s/item, ~38 min left)
+  [32/65] 131072/niah_multivalue#1 -> 'Based on the text provided, here are the special m' (66.6s/item, ~37 min left)
+  [33/65] 131072/niah_multivalue#2 -> 'Based on the text provided, here are the special m' (66.6s/item, ~36 min left)
+  [34/65] 131072/niah_multivalue#3 -> 'Based on the text provided, here are the special m' (66.8s/item, ~35 min left)
+  [35/65] 131072/niah_multivalue#4 -> 'Based on the text provided, here are the special m' (66.8s/item, ~33 min left)
+  [36/65] 131072/niah_single_1#0 -> 'The special magic number for weak-jeweller mention' (66.8s/item, ~32 min left)
+  [37/65] 131072/niah_single_1#1 -> 'The special magic number for harmonious-uniform me' (66.7s/item, ~31 min left)
+  [38/65] 131072/niah_single_1#2 -> 'The special magic number for loving-cockroach ment' (66.6s/item, ~30 min left)
+  [39/65] 131072/niah_single_1#3 -> 'The special magic number for discreet-commodity me' (66.5s/item, ~29 min left)
+  [40/65] 131072/niah_single_1#4 -> 'The special magic number for uncovered-turkey ment' (66.4s/item, ~28 min left)
+  [41/65] 131072/niah_single_2#0 -> 'The special magic number for vague-shear mentioned' (66.4s/item, ~27 min left)
+  [42/65] 131072/niah_single_2#1 -> 'The special magic number for berserk-suitcase ment' (66.3s/item, ~25 min left)
+  [43/65] 131072/niah_single_2#2 -> 'The special magic number for deafening-radish ment' (66.2s/item, ~24 min left)
+  [44/65] 131072/niah_single_2#3 -> 'The special magic number for solid-sanction mentio' (66.2s/item, ~23 min left)
+  [45/65] 131072/niah_single_2#4 -> 'The special magic number for dark-boyhood mentione' (66.2s/item, ~22 min left)
+  [46/65] 131072/niah_single_3#0 -> 'The special magic uuid for dark-boyhood mentioned ' (66.4s/item, ~21 min left)
+  [47/65] 131072/niah_single_3#1 -> 'The special magic uuid for lush-tornado mentioned ' (66.5s/item, ~20 min left)
+  [48/65] 131072/niah_single_3#2 -> 'The special magic uuid for tested-shout mentioned ' (66.5s/item, ~19 min left)
+  [49/65] 131072/niah_single_3#3 -> 'The special magic uuid for quick-vane mentioned in' (66.5s/item, ~18 min left)
+  [50/65] 131072/niah_single_3#4 -> 'The special magic uuid for stale-spaghetti mention' (66.6s/item, ~17 min left)
+  [51/65] 131072/qa_1#0 -> 'France' (66.5s/item, ~16 min left)
+  [52/65] 131072/qa_1#1 -> 'In the 10th and 11th centuries.' (66.5s/item, ~14 min left)
+  [53/65] 131072/qa_1#2 -> 'Denmark, Iceland, and Norway' (66.3s/item, ~13 min left)
+  [54/65] 131072/qa_1#3 -> 'Rollo' (66.3s/item, ~12 min left)
+  [55/65] 131072/qa_1#4 -> '10th' (66.2s/item, ~11 min left)
+  [56/65] 131072/qa_2#0 -> 'No' (66.1s/item, ~10 min left)
+  [57/65] 131072/qa_2#1 -> 'Lieutenant\n\n(Note: The woman who portrayed Corliss' (66.0s/item, ~9 min left)
+  [58/65] 131072/qa_2#2 -> 'The Animorphs' (66.0s/item, ~8 min left)
+  [59/65] 131072/qa_2#3 -> 'No' (65.8s/item, ~7 min left)
+  [60/65] 131072/qa_2#4 -> 'New York City' (65.8s/item, ~5 min left)
+  [61/65] 131072/vt#0 -> 'Based on the chain of variable assignments hidden ' (65.7s/item, ~4 min left)
+  [62/65] 131072/vt#1 -> 'Based on the chain of variable assignments hidden ' (65.7s/item, ~3 min left)
+  [63/65] 131072/vt#2 -> 'Based on the chain of variable assignments hidden ' (65.7s/item, ~2 min left)
+  [64/65] 131072/vt#3 -> 'Based on the chain of variable assignments hidden ' (65.7s/item, ~1 min left)
+  [65/65] 131072/vt#4 -> 'Based on the chain of variable assignments hidden ' (65.7s/item, ~0 min left)
+
+
+=== V6_Qwen3.5-4B_snapkv_chunked_q_eqbytes_131k.jsonl ===
+Qwen/Qwen3.5-4B arm=snapkv_chunked_q preset=None quant=nf4
+              task   131072
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2     40.0
+   niah_multikey_3      0.0
+   niah_multivalue    100.0
+   niah_multiquery    100.0
+                vt      0.0
+               cwe     58.0
+               fwe     93.3
+              qa_1     80.0
+              qa_2     40.0
+         RULER avg     70.1
+  ttft 60.88s | decode 10.5 tok/s | peak 5.34 GB | KV 0.780 GB (5.5x)
+V6 P3 COMPLETE
