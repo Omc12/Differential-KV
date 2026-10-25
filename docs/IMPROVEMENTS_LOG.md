@@ -534,6 +534,18 @@ DKV's lead over eviction does not come from seeing the question (no change witho
 it). Eviction recovers once its ranking knows the question before the prompt is read,
 and then what it keeps serves that question alone; DKV's records are built without it.
 
+V7 (`benchmarks/run_v7_fill.cmd`), the dense reference past dense's preallocated
+ceiling and DKV on granite from 4k, RULER on the paper's prompt:
+
+| run | RULER | paired |
+|---|---|---|
+| dense on DKV's tiled read path, Qwen3.5-4B 131k, 5/task | 87.1 | DKV/mid streaming -20.42 [-31.67, -9.83]; codes4 -11.83 [-21.08, -3.08]; tiled KIVI-4 -0.42 [-1.25, +0.00]; question-aware eviction -11.17 [-21.17, -1.94] |
+| dense on DKV's tiled read path, granite 24k, 10/task | 66.6 | DKV/mid streaming -16.21 [-24.46, -8.22]; tiled KIVI-4 +1.53 [-2.50, +5.83] |
+| DKV/mid on granite 4k / 8k / 16k, 20/task | 72.5 / 58.4 / 56.6 | vs dense (72.7 / 73.1 / 70.9) -9.75 [-12.11, -7.48] |
+
+Tiled KIVI-4 is at dense quality at long context; the low-rank store pays 16-20
+points there for the fewest bytes.
+
 Paper audit (2026-10-25, not a code change): the `mid` preset exports
 `DKV_SVD_ENERGY=0.9999` at config load (`config.py`, setdefault), so every run kept
 99.99% of a block's energy (rank capped at 32), not the 99.9% default in `lowrank.py`
