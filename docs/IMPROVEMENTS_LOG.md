@@ -561,6 +561,24 @@ On granite every cache that fits loses ground past 32k (DKV 49.0 -> 41.7 -> 28.2
 32k / 65k / 114k; tiled KIVI-4 63.1 -> 45.3), and within dense's limit DKV and SnapKV
 tie at about 9.7 points below dense.
 
+V9 (`benchmarks/run_v9_noquery.cmd`, 2026-10-26), DKV's question look-ahead
+(`DKV_RESIDUAL_NO_QUERY=1`) off on granite, current code:
+
+| run | score | paired (off - on) |
+|---|---|---|
+| LongBench 12k, look-ahead on (control, 120 items) | 38.74 | vs the paper's 2026-10 store -0.07 [-0.86, +0.57] |
+| LongBench 12k, look-ahead off | 38.48 | -0.25 [-1.20, +0.89] |
+| RULER 4k / 8k / 16k, look-ahead off, 10/task | 72.0 / 57.7 / 57.0 | +0.61 [-0.92, +2.17] vs V7 (360 items) |
+
+With Qwen3.5-4B at 131k (+0.17 [-2.33, +2.67]), turning the look-ahead off moves
+no measured score. V10 (`benchmarks/run_v10_prefix.cmd`) re-runs the past-the-limit
+comparisons with RULER's answer prefix at 10 items per task.
+
+Paper-side finding (2026-10-26, not a code change): dense on DKV's tiled read path
+decodes faster than streaming DKV where it fits (Qwen3.5-4B ladder: 10.34 vs 7.00
+tok/s at 131k, 7.76 vs 7.11 at 196k); the router's decode gain is over dequantizing
+codes in PyTorch, not over 16-bit attention.
+
 Paper audit (2026-10-25, not a code change): the `mid` preset exports
 `DKV_SVD_ENERGY=0.9999` at config load (`config.py`, setdefault), so every run kept
 99.99% of a block's energy (rank capped at 32), not the 99.9% default in `lowrank.py`
