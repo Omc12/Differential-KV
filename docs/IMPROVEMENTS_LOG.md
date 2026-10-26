@@ -546,6 +546,21 @@ ceiling and DKV on granite from 4k, RULER on the paper's prompt:
 Tiled KIVI-4 is at dense quality at long context; the low-rank store pays 16-20
 points there for the fewest bytes.
 
+V8 (`benchmarks/run_v8_fill.cmd`, 2026-10-26), granite between 32k and 114k and its
+eviction arms at dense's lengths (RULER items generated at 65,536, 5/task):
+
+| run | RULER | paired |
+|---|---|---|
+| DKV/mid streaming, granite 65k, 5/task | 41.7 | tiled KIVI-4 - DKV +3.61 [-7.08, +14.44] |
+| tiled KIVI-4, granite 65k, 5/task | 45.3 | |
+| SnapKV, granite 4k / 8k / 16k, 10/task | 69.4 / 63.8 / 55.1 | vs dense -9.70 [-13.04, -6.60]; DKV/mid - SnapKV -1.12 [-5.00, +2.85] |
+| StreamingLLM chunk-wise, granite 4k / 8k / 16k, 10/task | 40.9 / 32.3 / 18.0 | vs dense -42.06 [-47.49, -36.46]; DKV/mid +31.24 [+25.90, +36.50] |
+| H2O chunk-wise, granite 4k / 8k / 16k, 10/task | 37.6 / 21.1 / 19.0 | vs dense -46.56 [-51.82, -41.14]; DKV/mid +35.74 [+30.42, +41.01] |
+
+On granite every cache that fits loses ground past 32k (DKV 49.0 -> 41.7 -> 28.2 at
+32k / 65k / 114k; tiled KIVI-4 63.1 -> 45.3), and within dense's limit DKV and SnapKV
+tie at about 9.7 points below dense.
+
 Paper audit (2026-10-25, not a code change): the `mid` preset exports
 `DKV_SVD_ENERGY=0.9999` at config load (`config.py`, setdefault), so every run kept
 99.99% of a block's energy (rank capped at 32), not the 99.9% default in `lowrank.py`
