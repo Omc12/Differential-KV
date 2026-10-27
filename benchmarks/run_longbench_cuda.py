@@ -418,8 +418,10 @@ def dkv_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
         "kv_compression_x": (dense_equiv / store_used) if store_used else 0.0,
         "kv_footprint_realized": True,
         # v2 = KV-holding layers only; rows without this field used every layer
-        # (4x high on Qwen3.5-4B, exact on models where every layer is attention)
-        "kv_acct": 2,
+        # (4x high on Qwen3.5-4B, exact on models where every layer is attention).
+        # v3 = also residual rows at their stored width (1b3773c9); v2 rows
+        # written after that commit already count them so, but do not say it
+        "kv_acct": 3,
         "kv_layers": L,
         "blocks_layer0": nb,             # first KV-holding layer, despite the name
         "residual_tokens_layer0": res_used,

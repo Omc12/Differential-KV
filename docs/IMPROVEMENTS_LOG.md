@@ -574,6 +574,34 @@ With Qwen3.5-4B at 131k (+0.17 [-2.33, +2.67]), turning the look-ahead off moves
 no measured score. V10 (`benchmarks/run_v10_prefix.cmd`) re-runs the past-the-limit
 comparisons with RULER's answer prefix at 10 items per task.
 
+V10 (2026-10-27, three power cuts, resumed by `run_v10_prefix.cmd resume`): RULER
+with the answer prefix, all 13 tasks (vt now scores 98-100), 10 items per task,
+130 per arm, same items for every arm.
+
+| arm | Qwen3.5-4B 131k | vs dense, tiled | granite 24k | vs dense, tiled |
+|---|---|---|---|---|
+| dense on DKV's tiled read path | 93.5 | ref. | 81.6 | ref. |
+| tiled KIVI-4 | 94.2 | +0.69 [-0.23, +2.31] | 82.6 | +0.97 [-0.78, +2.85] |
+| DKV, codes store (4-bit) | 87.2 | -6.27 [-11.27, -1.62] | | |
+| SnapKV chunk-wise, told the question, 1.5x bytes | 77.7 | -15.77 [-22.54, -9.62] | | |
+| DKV/mid, low-rank store, streaming | 73.3 | -20.19 [-27.69, -13.23] | 63.7 | -17.88 [-25.14, -11.04] |
+| DKV/mid, no look-ahead | 72.5 | -21.00 [-28.62, -13.77] | | |
+| StreamingLLM chunk-wise, 1.5x bytes | 32.7 | -60.86 [-68.20, -53.50] | | |
+| StreamingLLM chunk-wise, 2k | 12.7 | -80.78 [-87.21, -73.76] | | |
+
+Every comparison resolved on the old prompt (12 tasks, 5 per task) keeps its sign
+and stays resolved. Two change resolution: the codes store now beats question-told
+eviction, +9.50 [+4.12, +15.54] (was -0.67 ns), and DKV without look-ahead is no
+longer resolved below it, -5.23 [-10.54, +0.19] (was -9.08). The low-rank store's
+loss stays in mk2/mk3 (0 and 0 vs 100) and cwe (56 vs 99).
+
+Loader fix found while adding V10: `paperdata._correct_dkv_bytes` corrected every
+DKV row to int8 residual width, including rows written after 1b3773c9 that already
+counted it (both carry `kv_acct: 2`), so V6-V10 low-rank stores read low (V9
+LongBench 0.335 GB, true 0.427). The loader now skips campaigns run after the fix,
+and the harness writes `kv_acct: 3`, which the loader also skips. No paper number
+used the affected bytes.
+
 Paper-side finding (2026-10-26, not a code change): dense on DKV's tiled read path
 decodes faster than streaming DKV where it fits (Qwen3.5-4B ladder: 10.34 vs 7.00
 tok/s at 131k, 7.76 vs 7.11 at 196k); the router's decode gain is over dequantizing

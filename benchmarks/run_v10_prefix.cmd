@@ -29,6 +29,7 @@ set RULER_ANSWER_PREFIX=1
 set Q=--min-length 131072 --max-length 131072 --per-task 10
 set G=--min-length 24576 --max-length 24576 --per-task 10
 
+if "%1"=="resume" goto resume
 if not "%1"=="" goto %1
 
 :p1
@@ -113,3 +114,10 @@ if not "%1"=="" goto :eof
 :p11
 "%PY%" benchmarks\run_ruler_cuda.py --model %QW% --arm streamingllm_chunked %Q% --baseline-params "{\"n_sink\": 4, \"recency_window\": 2044}" --out %R%\ruler\V10P_Qwen3.5-4B_sl_chunked_131k.jsonl
 echo V10 P11 COMPLETE
+goto :eof
+
+rem After a power cut: run every phase in order; each skips the items already
+rem in its store, so finished phases cost only a model load.
+:resume
+for %%P in (p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11) do call "%~f0" %%P
+echo V10 RESUME COMPLETE
