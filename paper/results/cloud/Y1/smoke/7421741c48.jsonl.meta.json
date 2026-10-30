@@ -1,0 +1,21 @@
+{
+  "arm": "dkv",
+  "baseline_params": {},
+  "decode_defaults": "serving",
+  "dkv_decode_rev": "9992edc0a1c6",
+  "dkv_env": {
+    "DKV_PREFILL_SDPA": "1",
+    "DKV_STORE": "hybrid",
+    "DKV_STREAMING_COMPRESS": "1",
+    "DKV_STREAM_ELASTIC": "1"
+  },
+  "max_length": 4000,
+  "model": "ibm-granite/granite-4.2-8b",
+  "num_samples": 1,
+  "prefill_attn": "sdpa",
+  "preset": "mid",
+  "protocol": "longbench-official-v1",
+  "quant": "nf4",
+  "query_first": false,
+  "thinking": false
+}

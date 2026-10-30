@@ -1,0 +1,20 @@
+{
+  "arm": "h2o",
+  "baseline_params": {
+    "budget": 2048,
+    "recency_window": 512,
+    "window": 32
+  },
+  "decode_defaults": null,
+  "dkv_decode_rev": null,
+  "dkv_env": null,
+  "max_length": 4000,
+  "model": "ibm-granite/granite-4.2-8b",
+  "num_samples": 1,
+  "prefill_attn": "sdpa",
+  "preset": null,
+  "protocol": "longbench-official-v1",
+  "quant": "nf4",
+  "query_first": false,
+  "thinking": false
+}

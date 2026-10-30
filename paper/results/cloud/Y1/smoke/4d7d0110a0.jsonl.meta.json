@@ -1,0 +1,25 @@
+{
+  "answer_prefix": "separate-field",
+  "arm": "dkv",
+  "baseline_params": {},
+  "data_dir": "C:\\Users\\USER\\Desktop\\Differential KV\\paper\\results\\ruler_data\\Qwen3.5-4B",
+  "decode_defaults": "serving",
+  "dkv_decode_rev": "9992edc0a1c6",
+  "dkv_env": {
+    "DKV_PREFILL_SDPA": "1",
+    "DKV_STORE": "lowrank",
+    "DKV_STREAMING_COMPRESS": "auto",
+    "DKV_STREAM_AUTO_TOKENS": "4096",
+    "DKV_STREAM_ELASTIC": "1",
+    "DKV_TOPK_BLOCKS": "0"
+  },
+  "min_length": 8192,
+  "model": "Qwen/Qwen3.5-4B",
+  "per_task": 1,
+  "prefill_attn": "sdpa",
+  "preset": "mid",
+  "prompt_template": "model-chat-template",
+  "protocol": "ruler-official-generators",
+  "quant": "nf4",
+  "thinking": false
+}

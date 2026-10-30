@@ -1,0 +1,114 @@
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V4P_Qwen3.5-4B_dense_prefix_max32768.jsonl
+[ckpt] 0 recorded, 260 pending (of 260 generated)
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 1213.63it/s]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:01<07:48,  1.10s/it]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   2%|▏         | 9/426 [00:01<00:42,  9.87it/s]Loading weights:   3%|▎         | 14/426 [00:01<00:28, 14.66it/s]Loading weights:   6%|▌         | 26/426 [00:01<00:13, 30.63it/s]Loading weights:   8%|▊         | 36/426 [00:01<00:09, 41.02it/s]Loading weights:  10%|█         | 43/426 [00:01<00:09, 41.01it/s]Loading weights:  12%|█▏        | 49/426 [00:01<00:08, 42.52it/s]Loading weights:  14%|█▍        | 61/426 [00:02<00:06, 57.01it/s]Loading weights:  16%|█▌        | 69/426 [00:02<00:06, 54.12it/s]Loading weights:  19%|█▊        | 79/426 [00:02<00:05, 62.12it/s]Loading weights:  21%|██        | 89/426 [00:02<00:04, 67.48it/s]Loading weights:  23%|██▎       | 97/426 [00:02<00:05, 60.91it/s]Loading weights:  24%|██▍       | 104/426 [00:02<00:05, 56.72it/s]Loading weights:  27%|██▋       | 117/426 [00:02<00:04, 70.94it/s]Loading weights:  29%|██▉       | 125/426 [00:02<00:04, 69.46it/s]Loading weights:  31%|███       | 133/426 [00:03<00:04, 62.80it/s]Loading weights:  34%|███▎      | 143/426 [00:03<00:04, 70.66it/s]Loading weights:  35%|███▌      | 151/426 [00:03<00:04, 60.66it/s]Loading weights:  37%|███▋      | 158/426 [00:03<00:04, 62.19it/s]Loading weights:  40%|███▉      | 170/426 [00:03<00:03, 73.46it/s]Loading weights:  42%|████▏     | 178/426 [00:03<00:03, 70.67it/s]Loading weights:  44%|████▎     | 186/426 [00:03<00:03, 64.32it/s]Loading weights:  46%|████▋     | 198/426 [00:04<00:03, 74.69it/s]Loading weights:  48%|████▊     | 206/426 [00:04<00:03, 55.98it/s]Loading weights:  52%|█████▏    | 220/426 [00:04<00:02, 72.69it/s]Loading weights:  54%|█████▍    | 229/426 [00:04<00:02, 67.66it/s]Loading weights:  56%|█████▌    | 238/426 [00:04<00:02, 69.80it/s]Loading weights:  58%|█████▊    | 248/426 [00:04<00:02, 73.21it/s]Loading weights:  60%|██████    | 256/426 [00:04<00:02, 65.19it/s]Loading weights:  62%|██████▏   | 263/426 [00:05<00:02, 59.76it/s]Loading weights:  64%|██████▍   | 274/426 [00:05<00:02, 71.11it/s]Loading weights:  66%|██████▌   | 282/426 [00:05<00:02, 65.89it/s]Loading weights:  68%|██████▊   | 291/426 [00:05<00:01, 69.38it/s]Loading weights:  71%|███████   | 301/426 [00:05<00:01, 74.25it/s]Loading weights:  73%|███████▎  | 309/426 [00:05<00:01, 65.53it/s]Loading weights:  74%|███████▍  | 316/426 [00:05<00:01, 59.87it/s]Loading weights:  77%|███████▋  | 329/426 [00:05<00:01, 73.20it/s]Loading weights:  79%|███████▉  | 337/426 [00:06<00:01, 70.53it/s]Loading weights:  81%|████████  | 345/426 [00:06<00:01, 63.96it/s]Loading weights:  84%|████████▍ | 357/426 [00:06<00:00, 74.16it/s]Loading weights:  86%|████████▌ | 365/426 [00:06<00:01, 54.84it/s]Loading weights:  89%|████████▉ | 379/426 [00:06<00:00, 70.54it/s]Loading weights:  91%|█████████ | 388/426 [00:06<00:00, 65.51it/s]Loading weights:  93%|█████████▎| 397/426 [00:07<00:00, 67.40it/s]Loading weights:  96%|█████████▌| 407/426 [00:07<00:00, 70.06it/s]Loading weights:  97%|█████████▋| 415/426 [00:07<00:00, 62.54it/s]Loading weights:  99%|█████████▉| 422/426 [00:07<00:00, 57.94it/s]Loading weights: 100%|██████████| 426/426 [00:07<00:00, 56.62it/s]
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/260] 4096/cwe#0 -> ' 1. stonework 2. bloomer 3. train 4. association 5' (4.8s/item, ~21 min left)
+  [2/260] 4096/cwe#1 -> '\n1. **wet-bar** (appears 24 times)\n2. **pigpen** (' (6.9s/item, ~29 min left)
+  [3/260] 4096/cwe#2 -> ' 1. modeling 2. chemistry 3. suffocation 4. pick 5' (6.0s/item, ~26 min left)
+  [4/260] 4096/cwe#3 -> '\n1. **tunic** (appears 28 times)\n2. **vinyl** (app' (6.7s/item, ~29 min left)
+  [5/260] 4096/cwe#4 -> ' 1. margin 2. innervation 3. summarize 4. small 5.' (6.2s/item, ~26 min left)
+  [6/260] 4096/fwe#0 -> '\n\n1. **umvpig**\n2. **hwumbt**\n3. **qgcgoe**' (5.7s/item, ~24 min left)
+  [7/260] 4096/fwe#1 -> '\n\n1. uggzux\n2. fubqnf\n3. qbsznp' (5.2s/item, ~22 min left)
+  [8/260] 4096/fwe#2 -> '\n1. szvzzr\n2. ihlsel\n3. pogjgr' (4.9s/item, ~21 min left)
+  [9/260] 4096/fwe#3 -> '\n1. **tjdoex**\n2. **iagafb**\n3. **tjdoex** (Note: ' (4.9s/item, ~20 min left)
+  [10/260] 4096/fwe#4 -> '\n1. uoumno\n2. gozott\n3. plquvu' (4.6s/item, ~19 min left)
+  [11/260] 4096/niah_multikey_1#0 -> ' **9683481**.' (4.4s/item, ~18 min left)
+  [12/260] 4096/niah_multikey_1#1 -> ' **2191066**.' (4.2s/item, ~17 min left)
+  [13/260] 4096/niah_multikey_1#2 -> ' **8930103**.' (4.0s/item, ~16 min left)
+  [14/260] 4096/niah_multikey_1#3 -> ' **1908841**.' (3.9s/item, ~16 min left)
+  [15/260] 4096/niah_multikey_1#4 -> ' **9075854**.' (3.7s/item, ~15 min left)
+  [16/260] 4096/niah_multikey_2#0 -> ' **9381604**.' (3.6s/item, ~15 min left)
+  [17/260] 4096/niah_multikey_2#1 -> ' **7516648**.' (3.5s/item, ~14 min left)
+  [18/260] 4096/niah_multikey_2#2 -> ' **9200480**.' (3.4s/item, ~14 min left)
+  [19/260] 4096/niah_multikey_2#3 -> ' **7371160**.' (3.3s/item, ~13 min left)
+  [20/260] 4096/niah_multikey_2#4 -> ' **4819259**.' (3.3s/item, ~13 min left)
+  [21/260] 4096/niah_multikey_3#0 -> ':\n\n**c2baf0e0-2179-43f0-a612-4ab4f9b21e6e**' (3.3s/item, ~13 min left)
+  [22/260] 4096/niah_multikey_3#1 -> ':\n\n**dfa59722-0a1f-49df-9a59-19749adf4709**' (3.3s/item, ~13 min left)
+  [23/260] 4096/niah_multikey_3#2 -> ':\n\n**b27e1442-fd7f-4973-be42-df5b90a3fbbf**' (3.3s/item, ~13 min left)
+  [24/260] 4096/niah_multikey_3#3 -> ':\n\n**eba900e1-6a7d-4d96-8ba1-72331ac3bf31**' (3.3s/item, ~13 min left)
+  [25/260] 4096/niah_multikey_3#4 -> ':\n\n**b0478ea4-fee5-4e69-b3cb-202e6d84414d**' (3.3s/item, ~13 min left)
+  [26/260] 4096/niah_multiquery#0 -> ':\n\n- **nappy-softball**: 4078418\n- **obsolete-tank' (3.4s/item, ~13 min left)
+  [27/260] 4096/niah_multiquery#1 -> ':\n\n*   **onerous-shine**: 5785687\n*   **helpless-y' (3.5s/item, ~14 min left)
+  [28/260] 4096/niah_multiquery#2 -> ':\n\n- **available-floodplain**: 9519948\n- **big-riv' (3.5s/item, ~14 min left)
+  [29/260] 4096/niah_multiquery#3 -> ':\n\n- **excellent-pence**: 6271130\n- **tricky-bowle' (3.6s/item, ~14 min left)
+  [30/260] 4096/niah_multiquery#4 -> ':\n\n*   **ugly-map**: 2737893\n*   **damaged-bread**' (3.7s/item, ~14 min left)
+  [31/260] 4096/niah_multivalue#0 -> ':\n\n*   **9897858**\n*   **3710343**\n*   **1009594**' (3.7s/item, ~14 min left)
+  [32/260] 4096/niah_multivalue#1 -> ':\n\n*   **1971823**\n*   **5017343**\n*   **5041154**' (3.7s/item, ~14 min left)
+  [33/260] 4096/niah_multivalue#2 -> ':\n\n*   **5446912**\n*   **3770370**\n*   **9852897**' (3.8s/item, ~14 min left)
+  [34/260] 4096/niah_multivalue#3 -> ':\n\n*   **7264956**\n*   **7693979**\n*   **8350099**' (3.8s/item, ~14 min left)
+  [35/260] 4096/niah_multivalue#4 -> ':\n\n*   **4860684**\n*   **1352896**\n*   **4694634**' (3.8s/item, ~14 min left)
+  [36/260] 4096/niah_single_1#0 -> ' **5437923**.' (3.7s/item, ~14 min left)
+  [37/260] 4096/niah_single_1#1 -> ' **3094235**.\n\nIt appears in the sentence: "One of' (3.7s/item, ~14 min left)
+  [38/260] 4096/niah_single_1#2 -> ' **5918715**.' (3.7s/item, ~14 min left)
+  [39/260] 4096/niah_single_1#3 -> ' **2166941**.' (3.6s/item, ~13 min left)
+  [40/260] 4096/niah_single_1#4 -> ' **2338687**.' (3.6s/item, ~13 min left)
+  [41/260] 4096/niah_single_2#0 -> ' **5663623**.\n\nIt appears in the section discussin' (3.6s/item, ~13 min left)
+  [42/260] 4096/niah_single_2#1 -> ' **5479144**.' (3.6s/item, ~13 min left)
+  [43/260] 4096/niah_single_2#2 -> ' **5528972**.\n\nIt appears in the section discussin' (3.6s/item, ~13 min left)
+  [44/260] 4096/niah_single_2#3 -> ' **6292423**.' (3.5s/item, ~13 min left)
+  [45/260] 4096/niah_single_2#4 -> ' **9375710**.' (3.5s/item, ~13 min left)
+  [46/260] 4096/niah_single_3#0 -> ':\n\n**c6a7ee39-c4b0-42cc-97c5-24a55304317f**' (3.5s/item, ~13 min left)
+  [47/260] 4096/niah_single_3#1 -> ':\n\n**448aaa9e-66b2-4c5b-90c1-87fcce177b4e**' (3.5s/item, ~12 min left)
+  [48/260] 4096/niah_single_3#2 -> ':\n\n**366eb16f-508e-4ad7-b7c9-3acfe059a0ee**' (3.5s/item, ~12 min left)
+  [49/260] 4096/niah_single_3#3 -> ':\n\n**23bed01d-43cf-4fde-a493-3b83757750a9**' (3.5s/item, ~12 min left)
+  [50/260] 4096/niah_single_3#4 -> ':\n\n**c17af08a-1745-46d8-be57-0ddf827050a8**' (3.5s/item, ~12 min left)
+  [51/260] 4096/qa_1#0 -> ' France' (3.5s/item, ~12 min left)
+  [52/260] 4096/qa_1#1 -> ' In the 10th and 11th centuries.' (3.4s/item, ~12 min left)
+  [53/260] 4096/qa_1#2 -> ' Denmark, Iceland, and Norway.' (3.4s/item, ~12 min left)
+  [54/260] 4096/qa_1#3 -> ' Rollo' (3.4s/item, ~12 min left)
+  [55/260] 4096/qa_1#4 -> ' 10th century' (3.3s/item, ~11 min left)
+  [56/260] 4096/qa_2#0 -> ' No' (3.3s/item, ~11 min left)
+  [57/260] 4096/qa_2#1 -> ' United States ambassador to Ghana and to Czechosl' (3.3s/item, ~11 min left)
+  [58/260] 4096/qa_2#2 -> ' Animorphs' (3.2s/item, ~11 min left)
+  [59/260] 4096/qa_2#3 -> ' No' (3.2s/item, ~11 min left)
+  [60/260] 4096/qa_2#4 -> ' New York City' (3.2s/item, ~11 min left)
+  [61/260] 4096/vt#0 -> ' FUPIL RNUYT RHRQC YGIUD BZPTL' (3.2s/item, ~11 min left)
+  [62/260] 4096/vt#1 -> ' NOITL VXLXL EWLTV HUMGL SGIXC' (3.2s/item, ~10 min left)
+  [63/260] 4096/vt#2 -> ' WYKTO PFFLA IRKEM DQAKO AQDMB' (3.2s/item, ~10 min left)
+  [64/260] 4096/vt#3 -> ' FADDR OFSTE PTCVZ CAIRY KSBRQ' (3.1s/item, ~10 min left)
+  [65/260] 4096/vt#4 -> ' QXUMV PIGYH LTORI MIMJG HPWON' (3.1s/item, ~10 min left)
+  [66/260] 8192/cwe#0 -> '\n1. **stucco** (appears 24 times)\n2. **neonate** (' (3.3s/item, ~11 min left)
+  [67/260] 8192/cwe#1 -> '\n1. **intentionality** (appears 23 times)\n2. **juv' (3.4s/item, ~11 min left)
+  [68/260] 8192/cwe#2 -> '\n1. rawhide\n2. head\n3. loutish\n4. supporter\n5. ine' (3.4s/item, ~11 min left)
+  [69/260] 8192/cwe#3 -> '\n1. **happiness** (appears 20+ times)\n2. **qualifi' (3.5s/item, ~11 min left)
+  [70/260] 8192/cwe#4 -> '\n1. **wick** (appears 26 times)\n2. **primary** (ap' (3.6s/item, ~11 min left)
+  [71/260] 8192/fwe#0 -> '\n1. mqupjb\n2. qaxoqh\n3. guklre' (3.6s/item, ~11 min left)
+  [72/260] 8192/fwe#1 -> '\n1. okmnxy\n2. qgpshy\n3. gjuekj' (3.6s/item, ~11 min left)
+  [73/260] 8192/fwe#2 -> '\n1. qsxwqv\n2. sxqlzg\n3. iztaka' (3.6s/item, ~11 min left)
+  [74/260] 8192/fwe#3 -> '\n\n1. **ottors**\n2. **rjrzch**\n3. **jencmi**' (3.6s/item, ~11 min left)
+  [75/260] 8192/fwe#4 -> '\n1. ozncsp\n2. qxvcpv\n3. flamts' (3.6s/item, ~11 min left)
+  [76/260] 8192/niah_multikey_1#0 -> ' **8930103**.' (3.6s/item, ~11 min left)
+  [77/260] 8192/niah_multikey_1#1 -> ' **8526486**.' (3.6s/item, ~11 min left)
+  [78/260] 8192/niah_multikey_1#2 -> ' **7550190**.' (3.6s/item, ~11 min left)
+  [79/260] 8192/niah_multikey_1#3 -> ' **1959074**.' (3.6s/item, ~11 min left)
+  [80/260] 8192/niah_multikey_1#4 -> ' **2140194**.' (3.6s/item, ~11 min left)
+  [81/260] 8192/niah_multikey_2#0 -> ' **2542796**.' (3.6s/item, ~11 min left)
+  [82/260] 8192/niah_multikey_2#1 -> ' **6730290**.' (3.6s/item, ~11 min left)
+  [83/260] 8192/niah_multikey_2#2 -> ' **9628834**.' (3.6s/item, ~11 min left)
+  [84/260] 8192/niah_multikey_2#3 -> ' **8089856**.' (3.6s/item, ~11 min left)
+  [85/260] 8192/niah_multikey_2#4 -> ' **1155332**.' (3.6s/item, ~11 min left)
+  [86/260] 8192/niah_multikey_3#0 -> ':\n\n**ff2f6883-163b-4481-a84e-4cd4f9c3ee05**' (3.6s/item, ~10 min left)
+  [87/260] 8192/niah_multikey_3#1 -> ':\n\n**4005353d-d76f-4e65-a54c-87393133839e**' (3.6s/item, ~10 min left)
+  [88/260] 8192/niah_multikey_3#2 -> ':\n\n**7800e27a-9ace-43cc-989c-83f68098580d**' (3.6s/item, ~10 min left)
+  [89/260] 8192/niah_multikey_3#3 -> ':\n\n**5821b9f8-ea45-4afd-bb8a-61ebb7c12a4c**' (3.7s/item, ~10 min left)
+  [90/260] 8192/niah_multikey_3#4 -> ':\n\n**e523e8a9-1223-4906-9db6-710183d0bae7**' (3.7s/item, ~10 min left)
+  [91/260] 8192/niah_multiquery#0 -> ':\n\n*   **onerous-shine**: 5785687\n*   **helpless-y' (3.7s/item, ~10 min left)
+  [92/260] 8192/niah_multiquery#1 -> ':\n\n- **available-floodplain**: 9519948\n- **big-riv' (3.7s/item, ~10 min left)
+  [93/260] 8192/niah_multiquery#2 -> ':\n\n- **excellent-pence**: 6271130\n- **tricky-bowle' (3.8s/item, ~11 min left)
+  [94/260] 8192/niah_multiquery#3 -> ':\n\n*   **ugly-map**: 2737893\n*   **damaged-bread**' (3.8s/item, ~11 min left)
+  [95/260] 8192/niah_multiquery#4 -> ':\n\n*   **sharp-season**: 1162230\n*   **vigorous-ra' (3.9s/item, ~11 min left)
+  [96/260] 8192/niah_multivalue#0 -> ':\n\n*   **1971823**\n*   **5017343**\n*   **5041154**' (3.9s/item, ~11 min left)
+  [97/260] 8192/niah_multivalue#1 -> ':\n\n*   5446912\n*   3770370\n*   9852897\n*   8973915' (3.9s/item, ~11 min left)
+  [98/260] 8192/niah_multivalue#2 -> ':\n\n*   **7264956**\n*   **7693979**\n*   **8350099**' (3.9s/item, ~11 min left)
+  [99/260] 8192/niah_multivalue#3 -> ':\n\n*   **4860684**\n*   **1352896**\n*   **4694634**' (3.9s/item, ~11 min left)
+  [100/260] 8192/niah_multivalue#4 -> ':\n\n*   **8935169**\n*   **5076817**\n*   **7829332**' (3.9s/item, ~11 min left)
+  [101/260] 8192/niah_single_1#0 -> ' **5437923**.' (3.9s/item, ~10 min left)
+  [102/260] 8192/niah_single_1#1 -> ' **3094235**.\n\nIt appears embedded within the repe' (4.0s/item, ~10 min left)
+  [103/260] 8192/niah_single_1#2 -> ' **4226067**.' (4.0s/item, ~10 min left)
+  [104/260] 8192/niah_single_1#3 -> ' **4823498**.' (4.0s/item, ~10 min left)

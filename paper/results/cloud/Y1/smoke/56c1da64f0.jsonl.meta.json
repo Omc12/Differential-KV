@@ -1,0 +1,18 @@
+{
+  "baseline_params": {
+    "budget": 2048,
+    "prefill_chunk": 256,
+    "recency_window": 512
+  },
+  "chunk": 1024,
+  "dkv_decode_rev": "9992edc0a1c6",
+  "dkv_env": {
+    "DKV_TRITON_STRICT": "1"
+  },
+  "gen": 8,
+  "model": "ibm-granite/granite-4.2-8b",
+  "preset": "mid",
+  "protocol": "systems-v2",
+  "quant": "nf4",
+  "reps": 1
+}

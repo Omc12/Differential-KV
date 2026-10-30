@@ -1,0 +1,19 @@
+{
+  "baseline_params": {},
+  "chunk": 1024,
+  "dkv_decode_rev": "9992edc0a1c6",
+  "dkv_env": {
+    "DKV_EXACT_LEAN": "1",
+    "DKV_PREFILL_SDPA": "1",
+    "DKV_STORE": "lowrank",
+    "DKV_STREAMING_COMPRESS": "0",
+    "DKV_STREAM_ELASTIC": "1",
+    "DKV_TRITON_STRICT": "1"
+  },
+  "gen": 8,
+  "model": "ibm-granite/granite-4.2-8b",
+  "preset": "mid",
+  "protocol": "systems-v2",
+  "quant": "nf4",
+  "reps": 1
+}

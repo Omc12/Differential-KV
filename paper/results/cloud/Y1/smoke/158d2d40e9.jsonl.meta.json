@@ -1,0 +1,7 @@
+{
+  "ctx": 4096,
+  "dkv_pool_gb": 9.6,
+  "gen": 8,
+  "model": "ibm-granite/granite-4.2-8b",
+  "n_max": 2
+}

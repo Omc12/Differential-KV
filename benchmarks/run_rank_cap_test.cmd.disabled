@@ -1,0 +1,15 @@
+@echo off
+rem Is the rank-32 pool cap what costs Qwen mid its RULER quality?
+rem Qwen3.5-4B mid declares rank 96; the pool caps it to 32 (cuSOLVER batched
+rem Jacobi limit). DKV_RSVD_MAX_RPROJ=0 lifts the cap: rank 96, residuals 128
+rem unchanged. Read against the committed mid (32/128) and high (192/256) runs
+rem on the SAME items, which separates rank from residual budget.
+rem Default DKV mode (not streaming), so only rank changes. Resumable.
+set PYTHONIOENCODING=utf-8
+set PYTHONUTF8=1
+cd /d "%~dp0.."
+set PY=C:\Users\USER\AppData\Local\Programs\Python\Python313\python.exe
+set DKV_RSVD_MAX_RPROJ=0
+set DKV_TRITON_STRICT=1
+"%PY%" benchmarks\run_ruler_cuda.py --model Qwen/Qwen3.5-4B --arm dkv --preset mid --min-length 8192 --max-length 32768 --out paper\results\ruler\RANK_Qwen3.5-4B_dkv_mid_rank96_max32768.jsonl
+echo RANK TEST COMPLETE

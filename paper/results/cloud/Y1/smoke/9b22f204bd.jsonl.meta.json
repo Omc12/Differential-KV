@@ -1,0 +1,7 @@
+{
+  "chunk": 1024,
+  "gen": 8,
+  "model": "ibm-granite/granite-4.2-8b",
+  "preset": "mid",
+  "quant": "nf4"
+}
