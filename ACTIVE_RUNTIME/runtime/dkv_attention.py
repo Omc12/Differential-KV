@@ -1205,12 +1205,20 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
                 dense_k = _prerot
             else:
                 _wsr = kv_manager.decode_workspace.setdefault(sid, {})
+                # ONE scratch buffer shared by every layer, not one per layer:
+                # the rotated window is consumed by this layer's attend before
+                # the next layer runs, and per-layer buffers held a second copy
+                # of the whole dense window (0.29 GB on granite-8B).
+                # DKV_DENSE_ROT_PER_LAYER=1 restores the per-layer buffers.
                 _rbuf_d = _wsr.setdefault("_dense_rot_buf", {})
-                _rbuf = _rbuf_d.get(captured_layer_idx)
+                _rkey_d = (captured_layer_idx
+                           if os.environ.get("DKV_DENSE_ROT_PER_LAYER", "0") == "1"
+                           else "shared")
+                _rbuf = _rbuf_d.get(_rkey_d)
                 if (_rbuf is None or _rbuf.shape != dense_k.shape
                         or _rbuf.dtype != dense_k.dtype):
                     _rbuf = torch.empty_like(dense_k)
-                    _rbuf_d[captured_layer_idx] = _rbuf
+                    _rbuf_d[_rkey_d] = _rbuf
                 _rbuf.copy_(dense_k)
                 _dp = torch.as_tensor(_pos[:_vlen], dtype=torch.long,
                                       device=dense_k.device)
@@ -1232,7 +1240,10 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
 
     from native_core.sparse_decode.remat_cache import (
         RematCache as _RC, reconstruct_blocks as _rb, attend_with_remat as _awr,
+        attend_fast as _afast, to_head_major as _thm,
+        fast_attend_enabled as _fast_on,
     )
+    from native_core.sparse_decode.block_arena import arena_enabled as _arena_on
     # Lives in triton_fused_decode, not this module.
     from native_core.sparse_decode.triton_fused_decode import (
         _gather_routed_blocks_for_kernel as _grb,
@@ -1253,18 +1264,33 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
     _poolgen = (_smgr2._metadata_versions.get(sid, {}).get(captured_layer_idx, 0)
                 if _smgr2 is not None else 0)
     _rkey = _RC.make_key(captured_layer_idx, current_version, _poolgen, _step)
+    # DKV_FAST_ATTEND: keep the entry head-major and attend it with batched
+    # matmuls (remat_cache.attend_fast), 6-12x less attention time per layer.
+    # The paths it does not cover keep the [N, S, H, D] entry and SDPA: CUDA
+    # graph capture (fixed-address pins, device dense mask), dual-scale's second
+    # block width, and the per-row mass trace. The layout is part of the key so
+    # an entry is never read in the other layout.
+    _fast = (_fast_on() and not _MUTATION_OUT_ACTIVE and dense_mask is None
+             and q.dim() == 4 and q.shape[0] == 1 and q.shape[2] == 1
+             and not os.environ.get("DKV_ROUTE_TRACE_TOKEN")
+             and not (getattr(kv_manager, "dual_scale", False)
+                      and os.environ.get("DKV_DUAL_SCALE_ATTEND", "1") == "1"))
+    if _fast:
+        _rkey = _rkey + ("head_major",)
     # Always LOOK UP: an entry kept earlier is reused whatever memory is now;
     # only keeping a new one depends on room. A stale entry that cannot be
     # refreshed is dropped, not left holding memory.
     _hit = _rc.get(_rkey)
     if _hit is None and _nostore:
         _rc.invalidate_layer(captured_layer_idx)
-    if _hit is None:
-        # RAW on an unrotated pool -- see the rotation right after _rb below, and
-        # the `raw_k` note in _gather_routed_blocks_for_kernel. On a rotated pool
-        # the pool already holds post-RoPE keys and nothing rotates either way,
-        # so this flag is inert there.
-        _raw = (not _psr()) and _EXACT_ROPE_REMAT
+    # RAW on an unrotated pool -- see the rotation right after _rb below, and
+    # the `raw_k` note in _gather_routed_blocks_for_kernel. On a rotated pool
+    # the pool already holds post-RoPE keys and nothing rotates either way,
+    # so this flag is inert there.
+    _raw = (not _psr()) and _EXACT_ROPE_REMAT
+
+    def _materialise(block_indices, anchor_indices):
+        """Gather + reconstruct + rotate the given blocks -> (K, V, gather)."""
         _g = _grb(pool, block_indices, anchor_indices, cos_all, sin_all,
                   raw_k=_raw)
         # The residuals are a CORRECTNESS requirement, not a refinement: they
@@ -1331,6 +1357,54 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
                     res_v=_g2["res_v"] if _g2.get("has_res") else None,
                     res_pos_v=_g2["res_pos_v"] if _g2.get("has_res") else None,
                     k_delta=_g2.get("k_delta"), v_delta=_g2.get("v_delta"))
+        return _Km, _Vm, _g
+
+    # ── Incremental refresh (DKV_REMAT_ARENA, fast path only) ───────────────
+    # A refresh used to rebuild every routed block. Between two refreshes the
+    # routed set barely changes, so the arena keeps each block's materialised
+    # rows across refreshes and rebuilds only blocks that are new to the set or
+    # whose pool slot was rewritten since (per-slot write epochs). Refresh cost
+    # then follows routing churn rather than K, which is what lets K grow.
+    if _fast and not _nostore and _arena_on():
+        from native_core.sparse_decode.block_arena import BlockArena as _BA
+        _ar = _ws.get(("_arena", captured_layer_idx))
+        if _ar is None:
+            _ar = _BA()
+            _ws[("_arena", captured_layer_idx)] = _ar
+        if _ar.key == _rkey:
+            _rc.misses -= 1                  # the lookup above counted a miss
+            _rc.hits += 1
+            _ok = True
+        else:
+            _rc.invalidate_layer(captured_layer_idx)
+            try:
+                _ok = _ar.refresh(pool, block_indices, anchor_indices,
+                                  layer_active_rank, _materialise)
+            except Exception as _ar_err:                         # noqa: BLE001
+                # Never fatal: drop the arena and take the full rebuild below.
+                _remat_why("arena", f"{type(_ar_err).__name__}: {_ar_err}")
+                _ar.reset()
+                _ok = False
+            _ar.key = _rkey if _ok else None
+        if _ok:
+            _Kv, _Vv, _valv = _ar.view()
+            _scale = getattr(pool, "dkv_attn_scale", None)
+            if _scale is None:
+                _scale = getattr(kv_manager, "dkv_attn_scale", None)
+            out = _afast(q, _Kv, _Vv, _valv, dense_k, dense_v, dense_len,
+                         num_key_value_groups, curr_kv=curr_kv, attn_scale=_scale)
+            _remat_advance_step(_ws, _mid, captured_layer_idx, _step)
+            return out
+        _ws.pop(("_arena", captured_layer_idx), None)
+    elif _ws.get(("_arena", captured_layer_idx)) is not None:
+        _ws.pop(("_arena", captured_layer_idx), None)        # free it under pressure
+
+    if _hit is None:
+        _Km, _Vm, _g = _materialise(block_indices, anchor_indices)
+        _has_res = _g.get("has_res", False)
+        if _fast:
+            _Km, _Vm, _valid = _thm(_Km, _Vm, _g["seq_lens"])
+            _ws[("_remat_valid", captured_layer_idx)] = _valid
         if not _nostore:
             _rc.put(_rkey, _Km, _Vm)
         # clone: under DKV_STATIC_GATHER the gather returns a PERSISTENT buffer
@@ -1346,6 +1420,16 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
     else:
         _Km, _Vm = _hit
         _seq_cached = _ws[("_remat_seq", captured_layer_idx)]
+        if _fast:
+            _valid = _ws[("_remat_valid", captured_layer_idx)]
+    if _fast:
+        _scale = getattr(pool, "dkv_attn_scale", None)
+        if _scale is None:
+            _scale = getattr(kv_manager, "dkv_attn_scale", None)
+        out = _afast(q, _Km, _Vm, _valid, dense_k, dense_v, dense_len,
+                     num_key_value_groups, curr_kv=curr_kv, attn_scale=_scale)
+        _remat_advance_step(_ws, _mid, captured_layer_idx, _step)
+        return out
     # ── Locate the traced token's ROW, if asked ──────────────────────────────
     # _Km is [N, 1+S, H, D] flattened to N*(1+S) rows, so the token at absolute
     # position p inside routed block n sits at row n*(1+S) + (p - anchor[n]);
@@ -1491,6 +1575,108 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
                # Opt-in hybrid store first; DKV_REMAT_GQA_FOLD=1 extends it to
                # every materialise step once measured there too.
                fold_gqa=(_hybrid or os.environ.get("DKV_REMAT_GQA_FOLD", "0") == "1"))
+    _remat_advance_step(_ws, _mid, captured_layer_idx, _step)
+    return out
+
+
+
+def _sliced_rope_tables(kv_manager, sid, captured_layer_idx, anchor_indices, pool,
+                        cos_all, sin_all, head_dim, query_states):
+    """Per-layer RoPE tables gathered at every routed row's position.
+
+    Returns (cos_sliced, sin_sliced, cos_anc_2d, sin_anc_2d, cos_anc_2d_true,
+    sin_anc_2d_true). Only the non-materialise decode kernels read these
+    (the Triton project-then-attend fallback and the ATen/Metal branches); the
+    materialise path rotates inside its cache entry. They are K x (1 + block)
+    x D per layer -- 0.34 GB at granite 32k with K=16, growing with K -- so the
+    decode forward builds them lazily (DKV_LAZY_SLICED_ROPE, default on, CUDA),
+    only when one of those branches actually runs.
+    """
+    cos_sliced_arg = None
+    sin_sliced_arg = None
+    if anchor_indices is not None and anchor_indices.numel() > 0 and pool is not None:
+        session_dict = kv_manager.decode_workspace.setdefault(sid, {})
+        current_version = session_dict.get("routing_version", 0)
+        cos_sliced_cache = session_dict.setdefault("decode_cos_sliced", {})
+        sin_sliced_cache = session_dict.setdefault("decode_sin_sliced", {})
+        
+        cos_cached_val = cos_sliced_cache.get(captured_layer_idx)
+        sin_cached_val = sin_sliced_cache.get(captured_layer_idx)
+        
+        if cos_cached_val is not None and cos_cached_val[0] == current_version:
+            cos_sliced_cached = cos_cached_val[1]
+        else:
+            cos_sliced_cached = None
+        
+        if sin_cached_val is not None and sin_cached_val[0] == current_version:
+            sin_sliced_cached = sin_cached_val[1]
+        else:
+            sin_sliced_cached = None
+
+        if cos_sliced_cached is None or sin_sliced_cached is None:
+            N_blocks = anchor_indices.shape[0]
+            max_seq_len = pool.U.shape[1]
+            positions = anchor_indices.view(N_blocks, 1) + torch.arange(1 + max_seq_len, device=query_states.device).view(1, 1 + max_seq_len)
+            positions_flat = positions.view(-1)
+            
+            cos_flat = cos_all.squeeze(0) if cos_all.dim() == 3 else cos_all
+            sin_flat = sin_all.squeeze(0) if sin_all.dim() == 3 else sin_all
+
+            seq_len_limit = cos_flat.shape[0]
+            positions_flat = positions_flat.clamp(min=0, max=seq_len_limit - 1).clone()
+            cos_gathered = cos_flat[positions_flat]
+            sin_gathered = sin_flat[positions_flat]
+            rotary_dim = cos_gathered.shape[-1]
+            if rotary_dim < head_dim:
+                # Partial RoPE (Qwen3.5-style partial_rotary_factor<1.0): the
+                # C++/ATen and Metal anchor-rotation kernels below always
+                # rotate the full head_dim (no rotary_dim concept, fixed
+                # head_dim//2 pairing) and read this buffer as [K, head_dim]
+                # -- passing the true [K, rotary_dim] tensor would read past
+                # its real width. Pad the tail with cos=1/sin=0 so those
+                # dims come out unrotated (raw*1 + partner*0 == raw) instead
+                # of reading out of bounds. The rotary sub-range itself still
+                # uses the kernels' head_dim//2 pairing rather than the
+                # mathematically-correct rotary_dim//2 one -- a known,
+                # narrower approximation pending a native-kernel fix.
+                _pad_shape = cos_gathered.shape[:-1] + (head_dim - rotary_dim,)
+                cos_gathered = torch.cat(
+                    [cos_gathered, torch.ones(_pad_shape, device=cos_gathered.device, dtype=cos_gathered.dtype)], dim=-1)
+                sin_gathered = torch.cat(
+                    [sin_gathered, torch.zeros(_pad_shape, device=sin_gathered.device, dtype=sin_gathered.dtype)], dim=-1)
+            cos_sliced_cached = cos_gathered.view(N_blocks, 1 + max_seq_len, 1, head_dim)
+            sin_sliced_cached = sin_gathered.view(N_blocks, 1 + max_seq_len, 1, head_dim)
+            
+            cos_sliced_cache[captured_layer_idx] = (current_version, cos_sliced_cached)
+            sin_sliced_cache[captured_layer_idx] = (current_version, sin_sliced_cached)
+
+        cos_sliced_arg = cos_sliced_cached
+        sin_sliced_arg = sin_sliced_cached
+
+
+    # Compute per-slot anchor cos/sin for C++/Metal on-the-fly RoPE rotation.
+    # cos_sliced_arg shape: [K, 1+max_seq_len, 1, D] — index 0 on dim1 is the anchor,
+    # already padded to full D width (see its construction above) so the
+    # fixed-buffer Metal kernel never reads out of bounds. We need [K, D]
+    # float32 for the C++/Metal kernel, PLUS the true (pre-padding) rotary
+    # width for the shader's rotary_dim param (it can't infer width from a
+    # buffer size the way a shaped tensor can).
+    _cos_anc_2d = None
+    _sin_anc_2d = None
+    _anchor_rotary_dim = cos_all.shape[-1]
+    if cos_sliced_arg is not None and cos_sliced_arg.numel() > 0:
+        _cos_anc_2d = cos_sliced_arg[:, 0, 0, :].to(torch.float32).contiguous()  # [K, D]
+        _sin_anc_2d = sin_sliced_arg[:, 0, 0, :].to(torch.float32).contiguous()  # [K, D]
+    # ATen kernels (decode_attention_aten*) derive rotary_dim from the cos/sin
+    # tensor's own last-dim size rather than a separate param, so they need
+    # the TRUE unpadded width, not the Metal-oriented padded buffer above --
+    # recover it by slicing the padding back off.
+    _cos_anc_2d_true = _cos_anc_2d[:, :_anchor_rotary_dim] if _cos_anc_2d is not None else None
+    _sin_anc_2d_true = _sin_anc_2d[:, :_anchor_rotary_dim] if _sin_anc_2d is not None else None
+    return (cos_sliced_arg, sin_sliced_arg, _cos_anc_2d, _sin_anc_2d,
+            _cos_anc_2d_true, _sin_anc_2d_true)
+
+def _remat_advance_step(_ws, _mid, captured_layer_idx, _step):
     # Advance once per token, on the LAST DKV layer. _LAST_DKV_LAYER learns the
     # max layer index by watching layers go by, so on the FIRST token it equals
     # the current layer at every layer; only advance once it has stopped growing.
@@ -1501,9 +1687,8 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
         _ws["_remat_saw_last"] = True
     if not getattr(_remat_attend, "_logged", False):
         _remat_attend._logged = True
-        print("[DKV] REMAT ACTIVE — materialise-then-SDPA (MLX's decode form) "
+        print("[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) "
               f"is running on layer {captured_layer_idx}.", flush=True)
-    return out
 
 # ── Sparse LSE Bias Configuration ─────────────────────────────────────────────
 # Parsing lives in resolve_sparse_bias (triton_fused_decode.py), which both merge
@@ -4611,86 +4796,23 @@ def apply_dkv_attention_patch(model, kv_manager):
                             session_dict["rope_cos"] = cos_all
                             session_dict["rope_sin"] = sin_all
 
-                        cos_sliced_arg = None
-                        sin_sliced_arg = None
                         if anchor_indices is not None and anchor_indices.numel() > 0 and pool is not None:
                             session_dict = kv_manager.decode_workspace.setdefault(sid, {})
                             current_version = session_dict.get("routing_version", 0)
-                            cos_sliced_cache = session_dict.setdefault("decode_cos_sliced", {})
-                            sin_sliced_cache = session_dict.setdefault("decode_sin_sliced", {})
-                            
-                            cos_cached_val = cos_sliced_cache.get(captured_layer_idx)
-                            sin_cached_val = sin_sliced_cache.get(captured_layer_idx)
-                            
-                            if cos_cached_val is not None and cos_cached_val[0] == current_version:
-                                cos_sliced_cached = cos_cached_val[1]
-                            else:
-                                cos_sliced_cached = None
-                            
-                            if sin_cached_val is not None and sin_cached_val[0] == current_version:
-                                sin_sliced_cached = sin_cached_val[1]
-                            else:
-                                sin_sliced_cached = None
-
-                            if cos_sliced_cached is None or sin_sliced_cached is None:
-                                N_blocks = anchor_indices.shape[0]
-                                max_seq_len = pool.U.shape[1]
-                                positions = anchor_indices.view(N_blocks, 1) + torch.arange(1 + max_seq_len, device=query_states.device).view(1, 1 + max_seq_len)
-                                positions_flat = positions.view(-1)
-                                
-                                cos_flat = cos_all.squeeze(0) if cos_all.dim() == 3 else cos_all
-                                sin_flat = sin_all.squeeze(0) if sin_all.dim() == 3 else sin_all
-
-                                seq_len_limit = cos_flat.shape[0]
-                                positions_flat = positions_flat.clamp(min=0, max=seq_len_limit - 1).clone()
-                                cos_gathered = cos_flat[positions_flat]
-                                sin_gathered = sin_flat[positions_flat]
-                                rotary_dim = cos_gathered.shape[-1]
-                                if rotary_dim < head_dim:
-                                    # Partial RoPE (Qwen3.5-style partial_rotary_factor<1.0): the
-                                    # C++/ATen and Metal anchor-rotation kernels below always
-                                    # rotate the full head_dim (no rotary_dim concept, fixed
-                                    # head_dim//2 pairing) and read this buffer as [K, head_dim]
-                                    # -- passing the true [K, rotary_dim] tensor would read past
-                                    # its real width. Pad the tail with cos=1/sin=0 so those
-                                    # dims come out unrotated (raw*1 + partner*0 == raw) instead
-                                    # of reading out of bounds. The rotary sub-range itself still
-                                    # uses the kernels' head_dim//2 pairing rather than the
-                                    # mathematically-correct rotary_dim//2 one -- a known,
-                                    # narrower approximation pending a native-kernel fix.
-                                    _pad_shape = cos_gathered.shape[:-1] + (head_dim - rotary_dim,)
-                                    cos_gathered = torch.cat(
-                                        [cos_gathered, torch.ones(_pad_shape, device=cos_gathered.device, dtype=cos_gathered.dtype)], dim=-1)
-                                    sin_gathered = torch.cat(
-                                        [sin_gathered, torch.zeros(_pad_shape, device=sin_gathered.device, dtype=sin_gathered.dtype)], dim=-1)
-                                cos_sliced_cached = cos_gathered.view(N_blocks, 1 + max_seq_len, 1, head_dim)
-                                sin_sliced_cached = sin_gathered.view(N_blocks, 1 + max_seq_len, 1, head_dim)
-                                
-                                cos_sliced_cache[captured_layer_idx] = (current_version, cos_sliced_cached)
-                                sin_sliced_cache[captured_layer_idx] = (current_version, sin_sliced_cached)
-
-                            cos_sliced_arg = cos_sliced_cached
-                            sin_sliced_arg = sin_sliced_cached
-
-                        # Compute per-slot anchor cos/sin for C++/Metal on-the-fly RoPE rotation.
-                        # cos_sliced_arg shape: [K, 1+max_seq_len, 1, D] — index 0 on dim1 is the anchor,
-                        # already padded to full D width (see its construction above) so the
-                        # fixed-buffer Metal kernel never reads out of bounds. We need [K, D]
-                        # float32 for the C++/Metal kernel, PLUS the true (pre-padding) rotary
-                        # width for the shader's rotary_dim param (it can't infer width from a
-                        # buffer size the way a shaped tensor can).
-                        _cos_anc_2d = None
-                        _sin_anc_2d = None
+                        # Lazy on CUDA: built only if a branch that reads them runs
+                        # (see _sliced_rope_tables). The materialise path does not.
+                        _lazy_sliced = (query_states.is_cuda and
+                                        os.environ.get("DKV_LAZY_SLICED_ROPE", "1") == "1")
+                        _sliced_args = (kv_manager, sid, captured_layer_idx, anchor_indices,
+                                        pool, cos_all, sin_all, head_dim, query_states)
                         _anchor_rotary_dim = cos_all.shape[-1]
-                        if cos_sliced_arg is not None and cos_sliced_arg.numel() > 0:
-                            _cos_anc_2d = cos_sliced_arg[:, 0, 0, :].to(torch.float32).contiguous()  # [K, D]
-                            _sin_anc_2d = sin_sliced_arg[:, 0, 0, :].to(torch.float32).contiguous()  # [K, D]
-                        # ATen kernels (decode_attention_aten*) derive rotary_dim from the cos/sin
-                        # tensor's own last-dim size rather than a separate param, so they need
-                        # the TRUE unpadded width, not the Metal-oriented padded buffer above --
-                        # recover it by slicing the padding back off.
-                        _cos_anc_2d_true = _cos_anc_2d[:, :_anchor_rotary_dim] if _cos_anc_2d is not None else None
-                        _sin_anc_2d_true = _sin_anc_2d[:, :_anchor_rotary_dim] if _sin_anc_2d is not None else None
+                        if _lazy_sliced:
+                            cos_sliced_arg = sin_sliced_arg = None
+                            _cos_anc_2d = _sin_anc_2d = None
+                            _cos_anc_2d_true = _sin_anc_2d_true = None
+                        else:
+                            (cos_sliced_arg, sin_sliced_arg, _cos_anc_2d, _sin_anc_2d,
+                             _cos_anc_2d_true, _sin_anc_2d_true) = _sliced_rope_tables(*_sliced_args)
 
                         # ── Query Factual Store (Solution 4) ──
                         # Descriptors are built from layer-0 K vectors (factual_store.py:200,
@@ -5262,6 +5384,9 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _sin = torch.empty(0, device=query_states.device, dtype=torch.float32)
 
                                 _slots = block_indices if block_indices is not None else torch.empty(0, device=query_states.device, dtype=torch.int32)
+                                if _lazy_sliced and cos_sliced_arg is None:
+                                    (cos_sliced_arg, sin_sliced_arg, _cos_anc_2d, _sin_anc_2d,
+                                     _cos_anc_2d_true, _sin_anc_2d_true) = _sliced_rope_tables(*_sliced_args)
                                 _ca = _cos_anc_2d if _cos_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
                                 _sa = _sin_anc_2d if _sin_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
 
@@ -5446,6 +5571,9 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     # Phase 2: Custom Metal compute shader path (macOS).
                                     # Falls back to Phase 1 C++ ATen or Python.
                                     _Q_sq = query_states[b_idx, :, 0, :]  # [H_q, D]
+                                    if _lazy_sliced and cos_sliced_arg is None:
+                                        (cos_sliced_arg, sin_sliced_arg, _cos_anc_2d, _sin_anc_2d,
+                                         _cos_anc_2d_true, _sin_anc_2d_true) = _sliced_rope_tables(*_sliced_args)
                                     _ca = _cos_anc_2d if _cos_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
                                     _sa = _sin_anc_2d if _sin_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
                                     # ATen kernel derives rotary_dim from tensor shape (not a
@@ -5572,6 +5700,9 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     # Phase 2: Custom Metal compute shader path (macOS).
                                     # Falls back to Phase 1 C++ ATen or Python.
                                     _Q_sq = query_states[b_idx, :, 0, :]
+                                    if _lazy_sliced and cos_sliced_arg is None:
+                                        (cos_sliced_arg, sin_sliced_arg, _cos_anc_2d, _sin_anc_2d,
+                                         _cos_anc_2d_true, _sin_anc_2d_true) = _sliced_rope_tables(*_sliced_args)
                                     _ca = _cos_anc_2d if _cos_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
                                     _sa = _sin_anc_2d if _sin_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
                                     # ATen kernel derives rotary_dim from tensor shape (not a
@@ -6101,6 +6232,10 @@ def apply_dkv_attention_patch(model, kv_manager):
                                              if _MUTATION_OUT_ACTIVE and q_len == 1 else None),
                                     dense_mask=_dense_mask,
                                     dense_blocks=dense_blocks)
+                                if (_remat_out is None and _lazy_sliced
+                                        and cos_sliced_arg is None):
+                                    (cos_sliced_arg, sin_sliced_arg, _cos_anc_2d, _sin_anc_2d,
+                                     _cos_anc_2d_true, _sin_anc_2d_true) = _sliced_rope_tables(*_sliced_args)
                                 attn_out_b = _remat_out if _remat_out is not None else \
                                     native_triton_sparse_attn_decode(
                                     q=query_states[b_idx:b_idx+1],

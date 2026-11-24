@@ -45,6 +45,9 @@ _DECODE_SOURCES = (
     "ACTIVE_RUNTIME/native_core/srl/query_router.py",
     "ACTIVE_RUNTIME/native_core/srl/key_box.py",
     "ACTIVE_RUNTIME/native_core/compression/residual_capture.py",
+    # Added 2026-11-24: the incremental decode arena decides which materialised
+    # rows a step reads.
+    "ACTIVE_RUNTIME/native_core/sparse_decode/block_arena.py",
 )
 
 

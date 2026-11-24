@@ -427,6 +427,8 @@ def main():
                         # when set, so default stores keep matching
                         "DKV_STORE", "DKV_KEY_QUANT", "DKV_VALUE_QUANT", "DKV_QUANT_BITS", "DKV_RESIDUAL_NO_QUERY", "DKV_RESIDUAL_QUERY", "DKV_RESID_ATTN",
                         "DKV_ROUTE_BOX", "DKV_STREAM_ELASTIC_POLICY", "DKV_STREAM_EXACT_TOKENS",
+                        "DKV_ROUTE_ADAPTIVE", "DKV_ROUTE_ADAPTIVE_P", "DKV_ROUTE_ADAPTIVE_KMAX", "DKV_ROUTE_ADAPTIVE_MIN_BLOCKS",
+                        "DKV_FAST_ATTEND", "DKV_REMAT_ARENA", "DKV_LAZY_SLICED_ROPE",
                         "DKV_STREAM_ELASTIC", "DKV_PREFILL_SDPA", "DKV_EXACT_LEAN",
                         "DKV_REMAT_GATE",
                         # routing ablation (attend-all is DKV_TOPK_BLOCKS=0)

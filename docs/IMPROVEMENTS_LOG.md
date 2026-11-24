@@ -10,6 +10,95 @@ Tiers: **T1** offline screen on captured KV (`benchmarks/tier1_screen.py`),
 **T3** batch confirmation. Guardrails a change must not trade away: store bytes,
 reach (peak memory), decode speed, query-agnosticism, exact prefill = dense.
 
+## Adaptive block count and a faster decode read (2026-11-24)
+
+Short tests only (unit tests, offline screens on captured KV, 32k logit
+fidelity, paired decode timing); the long-context quality run is V11 below.
+
+**Why K was stuck at 16.** The 2026-08-30 adaptive-K audit found K=16 to be a
+cost knee: each routed block above 16 cost ~1.67 ms/token against ~0.3 below.
+Profiling the materialise path found the cause in the attend, not the
+attention: every step re-concatenated all routed rows with the dense window,
+GQA-expanded them, and ran a masked memory-efficient SDPA, which does not split
+along keys and so ran one thread block per KV head. Per layer, Qwen2.5-1.5B
+shapes (2 KV x 6 query heads, D=128, 3.5k window), RTX 4070 SUPER:
+
+| routed blocks | 16 | 32 | 64 | 128 |
+|---|---|---|---|---|
+| SDPA path (before) | 1.37 ms | 2.48 | 4.81 | 10.37 |
+| `attend_fast` | 0.22 | 0.27 | 0.50 | 0.94 |
+
+| Change | Switch | Default | Verification | Notes |
+|---|---|---|---|---|
+| Head-major remat entries + batched-matmul attend (`remat_cache.attend_fast`) | `DKV_FAST_ATTEND=0` restores SDPA | **on** | Output vs SDPA path: max diff 9.8e-4 (fp16 rounding), mean error vs an fp32 reference 1.04e-4 vs SDPA's 0.95e-4; 32k fidelity decode-step KL 0.00411 vs 0.00410; unit tests incl. padding garbage and a bf16 model over an fp16 pool (granite NF4, which the first version rejected) | Scores in fp32 per segment (KV head = batch, its query group = rows), one softmax, fp32 value accumulation; no K/V copy, no mask kernel. Deterministic run to run (cuBLAS bmm). Not used under CUDA-graph capture, dual-scale or the row trace |
+| Incremental refresh: the block arena (`sparse_decode/block_arena.py`) | `DKV_REMAT_ARENA=0` | **on** | Unit tests: reuses kept blocks, rebuilds only new ones, rebuilds a rewritten slot, masks departed blocks, grows, declines duplicates | Per-slot write epochs on the pool (bumped where key boxes are invalidated, and all on `reset`) so a recycled slot is never read as its old content. Any failure falls back to the full rebuild |
+| Grow-only adaptive block count (`srl/key_box.select_adaptive`) | `DKV_ROUTE_ADAPTIVE=0`; `_P` (0.80), `_KMAX` (64), `_MIN_BLOCKS` (2K = 32) | **on** past 32 candidate blocks | Offline (below); 32k logit fidelity (below); V11 at 131k | The fixed router's box top-16 (after edge propagation) is always routed; blocks are added by estimated mass until the routed set holds P of it. Estimate: per-block mean and per-channel variance of the exact post-RoPE keys, recorded with the key box, clipped to the two bounds every block satisfies. Off when `DKV_TOPK_BLOCKS` is set. Gated to >32 candidates because at 32k growth bought nothing in real decode |
+| Lazy routed-row RoPE tables | `DKV_LAZY_SLICED_ROPE=0` | **on** | granite 32k codes store: 0.336 GB -> 0 (below) | K x (1 + block) x D per layer (0.34 GB at granite 32k, growing with K) built only when a non-materialise kernel runs |
+| One shared rotated-window scratch instead of one per layer | `DKV_DENSE_ROT_PER_LAYER=1` | **on** | granite 32k codes store: 0.294 GB -> 0.007 (below) | The unrotated-pool remat path rotates the dense window into a buffer every step; per-layer buffers held a second copy of every layer's window (0.29 GB on granite) |
+| `benchmarks/route_adaptive_screen.py`, `colab/bench_k_ladder.py`, `colab/profile_decode_generate.py` | - | - | - | Offline routing screen on tier1 captures; in-process K ladder; generate()-loop profiler |
+
+**Offline routing screen** (`route_adaptive_screen.py`, Qwen3.5-4B RULER
+captures, exact keys, so routing error alone; mass = share of the true
+attention mass the routed set plus window covers):
+
+| rule | 32k mass | blocks | 64k mass | blocks |
+|---|---|---|---|---|
+| box top-16 (shipped) | 0.935 | 16 | 0.788 | 16 |
+| box top-32 | 1.000 | 26.3 | 0.877 | 32 |
+| oracle top-16 | 0.962 | 16 | 0.855 | 16 |
+| estimate top-16 (diag. variance) | 0.955 | 16 | 0.837 | 16 |
+| grow-only P=0.80 (default) | 0.950 | 16.9 | 0.924 | 32.9 |
+| grow-only P=0.90 | 0.975 | 19.7 | 0.961 | 42.6 |
+
+The moment estimate ranks blocks nearly as well as the oracle (8 principal
+directions or the full covariance add ~1 point over the diagonal and need an
+eigendecomposition per block, 217 ms per 16 blocks). At equal blocks the
+estimate adds the right ones (0.924 vs 0.877 at ~32).
+
+**32k real decode** (`colab/logit_fidelity.py`, Qwen2.5-1.5B fp16, 5 prompts,
+dense_true self-check 0; prefill-step KL 0.00019 for every arm):
+
+| arm | mean blocks | decode-step KL |
+|---|---|---|
+| fixed box top-16 | 16 | 0.00411 |
+| grow-only P=0.80 (before the gate) | 17.8 | 0.00517 |
+| estimate-ranked, P=0.80 | ~17 | 0.00521 |
+| estimate-ranked, P=0.90 | 20.4 | 0.00553 |
+| estimate-ranked, P=0.95 | 23.7 | 0.00561 |
+| all 31 blocks | 31 | 0.00582 |
+
+At 32k the routed 16 already hold most of the mass and each extra compressed
+block adds its reconstruction error, so growth is gated to >32 candidates and
+32k now routes exactly as before. Top-1 agreed 5/5 in every arm.
+
+**Decode is host-bound.** Profiling generate() at 32k (Qwen2.5-1.5B): ~2,900
+kernel launches per token, ~100 per layer; with `attend_fast` the routed
+attention is ~5 ms of a ~95 ms token. The remaining cost of a larger K is the
+refresh (every 4th token rebuilt every routed block), which the arena removes.
+
+**Decode speed, in generate()** (`colab/bench_k_ladder.py`, Qwen2.5-1.5B 32k, 3
+interleaved rounds, best token of each run; medians sit at ~90-100 ms on every
+arm, set by host jitter):
+
+| | fixed 16 blocks | all 31 blocks |
+|---|---|---|
+| before (SDPA, full refresh, eager tables) | 67.3 ms | 93.0 ms, peak 5.04 GB |
+| after | 69.6 ms (no change resolvable) | 64.3 ms, peak 4.61-4.79 GB |
+
+So routing all 31 blocks now costs what 16 did. At 16 the step is host-bound
+and the attend was never the limit.
+
+**granite codes store, 32k** (`benchmarks/diag_store_memory.py`, NF4, streaming):
+allocated 10.45 -> 9.96 GB, peak 10.74 -> 10.21. The rotated-window buffers fell
+0.294 -> 0.007 GB and the RoPE tables 0.336 -> 0. The memory-gated decode cache
+takes part of the room back by design (0.81 -> 0.94 GB, more layers kept), so
+the store's reach past 65k is checked directly in V11 p3.
+
+**V11** (`benchmarks/campaigns/run_v11_adaptive.cmd`): Qwen3.5-4B RULER at 131k,
+5 items per task, adaptive vs fixed K on identical code; granite codes store at
+65k. Results below when run.
+
+
 ## Review fixes (2026-11-24, code-first after the MLSys desk rejection)
 
 Verified with short tests only (unit tests + one 32k logit-fidelity run); nothing here
@@ -63,7 +152,7 @@ Not changed, with the evidence that decided it:
 | Block-size sweep (256/512 vs 1024) | A quality measurement at long context; needs long runs. Block size is `DKV_MICRO_BLOCK_SIZE` |
 | Streaming prefill cost (routes 25% of history per chunk) | Sparse prefill routing is already on (`DKV_SPARSE_PREFILL`, now scoring compressed blocks by their exact box). A constant cap on routed blocks only changes anything past 128k, where checking prefill quality is a long run |
 | Fixed-rank record buckets for vLLM | Planned with the vLLM integration, not before |
-| Adaptive K (top-p) as default | Built (`DKV_ROUTE_TOPP`); at 32k it scored equal to fixed K with fewer blocks. Raising K past 64k costs decode speed (granite all-blocks 5.5 -> 2.4 tok/s) and needs a long run to set |
+| ~~Adaptive K (top-p) as default~~ | Done differently, same day: grow-only adaptive block count with a mass estimate, plus a 6-12x faster attend and incremental refresh so extra blocks are cheap (section above). Top-p over box scores stays off |
 
 | Date | Change | Switch | Default | T1 | T2 | T3 | Notes |
 |---|---|---|---|---|---|---|---|

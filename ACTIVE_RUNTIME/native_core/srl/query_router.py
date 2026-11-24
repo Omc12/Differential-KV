@@ -1197,6 +1197,34 @@ def route_blocks_relevance(
                 _ROUTE_DIST_HOOK(relevance, layer_idx)
             except Exception:                                    # noqa: BLE001
                 pass
+        # ADAPTIVE BLOCK COUNT (DKV_ROUTE_ADAPTIVE, default on), GROW-ONLY: the
+        # fixed router's top-k_eff (this same propagated box score) is always
+        # routed; blocks are then added by an estimate of the softmax mass each
+        # would receive until the set holds DKV_ROUTE_ADAPTIVE_P of it, up to
+        # DKV_ROUTE_ADAPTIVE_KMAX. See key_box.py.
+        try:
+            from native_core.srl.key_box import (
+                adaptive_routing_enabled, estimate_block_lse, select_adaptive)
+            _mom = _kbt.gather_moments(slots_long) if adaptive_routing_enabled() else None
+        except Exception:                                        # noqa: BLE001
+            _mom = None
+        # Only where the fixed K covers less than half the candidates: at 32k
+        # (31 blocks) growth measured no gain in real decode (logit fidelity,
+        # decode-step KL 0.0041 fixed vs 0.0052 grown to 17.8 blocks), while at
+        # 64k (59 blocks) it covers 0.92 of the attention mass against 0.79.
+        try:
+            _ada_min = int(os.environ.get("DKV_ROUTE_ADAPTIVE_MIN_BLOCKS", str(2 * k_eff)))
+        except ValueError:
+            _ada_min = 2 * k_eff
+        if (_mom is not None and _topk_env in (None, "") and N > _ada_min
+                and _ROUTE_TOPP <= 0.0):
+            _mu, _var, _logn, _mok = _mom
+            _ok = _mok & _bvalid
+            _est = estimate_block_lse(Q, _bmn, _bmx, _mu, _var, _logn, scale)
+            sel = select_adaptive(_est, relevance, _ok, k_eff)
+            if _ROUTE_TOPP_STATS:
+                _ROUTE_TOPP_K_LOG.append(int(sel.numel()))
+            return block_indices[sel].to(torch.int32)
         if _ROUTE_TOPP > 0.0:
             # softmax(+inf) is NaN; a box-less slot only needs to rank first.
             sel = select_by_mass(torch.nan_to_num(relevance.float(), posinf=1e30),

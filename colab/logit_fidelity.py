@@ -63,6 +63,19 @@ ARMS = {
     "allblocks":  {"DKV_TOPK_BLOCKS": "0", "DKV_BLOCKS_PER_CHUNK": "256"},
     # The residual-key router that router-owned key boxes replaced (2026-11-24).
     "routebox0":  {"DKV_ROUTE_BOX": "0"},
+    # The SDPA materialise path that remat_cache.attend_fast replaced (2026-11-24).
+    "fastattend0": {"DKV_FAST_ATTEND": "0"},
+    # Fixed routed-block budgets, for the adaptive-K comparison.
+    "k32":        {"DKV_TOPK_BLOCKS": "32"},
+    "k64":        {"DKV_TOPK_BLOCKS": "64"},
+    # Adaptive block count (2026-11-24): off = the fixed-K box router; P sweep.
+    "ada0":       {"DKV_ROUTE_ADAPTIVE": "0"},
+    "adap80":     {"DKV_ROUTE_ADAPTIVE_P": "0.80"},
+    "adap95":     {"DKV_ROUTE_ADAPTIVE_P": "0.95"},
+    "arena0":     {"DKV_REMAT_ARENA": "0"},
+    # Block-size sweep (wrapper config, below): 1024 is the shipped width.
+    "bs512":      {},
+    "bs256":      {},
     # Capacity sweep. A correct low-rank reconstruction gets BETTER with more
     # rank and with more exact residual rows. Reading, decided first: if the
     # decode gap shrinks with capacity it is approximation error and the
@@ -104,13 +117,17 @@ ARMS = {
 
 # Arms that change the WRAPPER CONFIG rather than the environment.
 ARM_CONFIG = {
+    "bs512":   {"micro_block_size": 512},
+    "bs256":   {"micro_block_size": 256},
     "rank96":  {"rank": 96},
     "rank128": {"rank": 128},
 }
 _ARM_KEYS = ("DKV_SHARED_BASIS", "DKV_SHARED_BASIS_FRAC", "DKV_COMPRESSED_DECODE",
              "DKV_TOPK_BLOCKS", "DKV_BLOCKS_PER_CHUNK", "DKV_MAX_RESIDUAL",
              "DKV_REMAT_CACHE", "DKV_ROTATED_POOL", "DKV_DECODE_CACHE",
-             "DKV_REMAT_FP32", "DKV_STREAMING_COMPRESS", "DKV_PREFILL_LOWMEM")
+             "DKV_REMAT_FP32", "DKV_STREAMING_COMPRESS", "DKV_PREFILL_LOWMEM",
+             "DKV_FAST_ATTEND", "DKV_ROUTE_ADAPTIVE", "DKV_ROUTE_ADAPTIVE_P",
+             "DKV_REMAT_ARENA")
 
 
 def _run_dense_true(args):

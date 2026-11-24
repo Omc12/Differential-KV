@@ -595,6 +595,125 @@ def attend_with_remat(
     return _o.reshape(1, H_q, 1, D) if _fold else _o
 
 
+# ── Fast decode attend: head-major cache entry + batched matmul ─────────────
+#
+# attend_with_remat above re-copies every routed row on EVERY step (cat of the
+# blocks with the dense window, then a GQA repeat_interleave) and hands SDPA a
+# boolean mask. For one query token that is the wrong shape of work: the copy
+# scales with K, and the masked memory-efficient kernel does not split along
+# the key axis, so it runs one thread block per KV head (2 on Qwen2.5-1.5B)
+# while the rest of the card idles. Measured per layer, Qwen2.5-1.5B shapes
+# (2 KV heads x 6 query heads, D=128, 3.5k dense window), RTX 4070 SUPER:
+#
+#     routed blocks K      16     32     64     128
+#     attend_with_remat  1.37   2.52   4.81   10.35 ms
+#     attend_fast        0.15   0.25   0.52    1.00 ms
+#
+# attend_fast instead keeps the cache entry HEAD-MAJOR, [H_kv, N*S, D], built
+# once per refresh, so a step reads the routed rows in place. Scores come from
+# one batched matmul per segment with the KV head as the batch and its query
+# group as the rows (no GQA copy), in fp32; padding is masked on the [H, G, T]
+# score tensor, which is ~1000x smaller than K. Probabilities are normalised in
+# fp32 after the value matmul, which also accumulates in fp32. cuBLAS bmm has no
+# split-K atomics here, so the result is also run-to-run deterministic, which
+# the SDPA path is not past ~16k rows (see DKV_DETERMINISTIC above).
+
+def fast_attend_enabled() -> bool:
+    """DKV_FAST_ATTEND (default on): head-major remat entries + attend_fast."""
+    return os.environ.get("DKV_FAST_ATTEND", "1") == "1"
+
+
+def to_head_major(K_mat: torch.Tensor, V_mat: torch.Tensor,
+                  seq_lens: torch.Tensor):
+    """[N, S, H, D] blocks -> ([H, N*S, D], [H, N*S, D], valid [N*S]).
+
+    Row 0 of each block is its anchor and rows 1..seq_len its tokens, the same
+    validity rule attend_with_remat applies (seq_lens + 1 live rows).
+    """
+    N, S, H, D = K_mat.shape
+    Kt = K_mat.permute(2, 0, 1, 3).reshape(H, N * S, D).contiguous()
+    Vt = V_mat.permute(2, 0, 1, 3).reshape(H, N * S, D).contiguous()
+    valid = (torch.arange(S, device=K_mat.device).view(1, S)
+             < (seq_lens.to(K_mat.device).view(N, 1) + 1)).reshape(N * S)
+    return Kt, Vt, valid
+
+
+def _scores(qg: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+    """[H, G, D] x [H, T, D] -> fp32 [H, G, T]."""
+    if qg.is_cuda:
+        return torch.bmm(qg, k.transpose(1, 2), out_dtype=torch.float32)
+    return torch.bmm(qg.float(), k.float().transpose(1, 2))
+
+
+def _pv(p: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """[H, G, T] (fp32, unnormalised) x [H, T, D] -> fp32 [H, G, D]."""
+    if v.is_cuda:
+        return torch.bmm(p.to(v.dtype), v, out_dtype=torch.float32)
+    return torch.bmm(p, v.float())
+
+
+def attend_fast(
+    q: torch.Tensor,             # [1, H_q, 1, D], query heads kv-major
+    Kt: torch.Tensor,            # [H_kv, T, D]  routed rows, head-major
+    Vt: torch.Tensor,
+    valid: torch.Tensor,         # [T] bool
+    dense_k: Optional[torch.Tensor],   # [1, H_kv, L, D] pre-rotated window
+    dense_v: Optional[torch.Tensor],
+    dense_len: int,
+    num_key_value_groups: int,
+    curr_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    attn_scale: Optional[float] = None,
+) -> torch.Tensor:
+    """One softmax over [routed rows | dense window | current token].
+
+    Same attention as attend_with_remat (same rows, same validity, same scale)
+    without copying K or V: each segment gets its own score matmul, the scores
+    are concatenated (small), and the value matmuls are summed.
+    """
+    # Kept to as few kernel launches as possible: at K=16 a decode step is
+    # launch-bound, not bandwidth-bound, so every op here costs about as much
+    # as reading another block.
+    H_kv, _, D = Kt.shape
+    G = max(1, int(num_key_value_groups))
+    H_q = q.shape[1]
+    dt = Kt.dtype
+    scale = attn_scale if attn_scale is not None else 1.0 / (D ** 0.5)
+    # The scale is applied to the fp32 scores, not folded into the query:
+    # rounding a scaled fp16 query cost 4x the output error of the SDPA path.
+    qg = q.reshape(H_kv, G, D).to(dt)
+
+    # Every small operand is brought to the routed blocks' dtype (a no-op
+    # when it already matches). The model can compute in bf16 while the pool
+    # stores fp16 (granite NF4), and bmm refuses mixed dtypes; casting the
+    # window and the query is cheap, casting the routed rows would copy them.
+    segs_v = [Vt]
+    s_parts = [_scores(qg, Kt).masked_fill_(~valid, float("-inf"))]
+    if dense_k is not None and dense_len and dense_len > 0:
+        s_parts.append(_scores(qg, dense_k[0, :, :dense_len].to(dt)))
+        segs_v.append(dense_v[0, :, :dense_len].to(dt))
+    if curr_kv is not None:
+        ck, cv = curr_kv
+        s_parts.append(_scores(qg, ck[0].to(dt)))
+        segs_v.append(cv[0].to(dt))
+    s = torch.cat(s_parts, dim=-1) if len(s_parts) > 1 else s_parts[0]
+    m = s.amax(dim=-1, keepdim=True)
+    if len(s_parts) == 1:
+        # Only the routed segment: a fully padded head row would be all -inf.
+        m = torch.nan_to_num(m, neginf=0.0)
+    p = s.sub_(m).mul_(scale).exp_()
+    denom = p.sum(dim=-1, keepdim=True)
+    if p.is_cuda:
+        p = p.to(dt)
+    out = None
+    off = 0
+    for v in segs_v:
+        n = v.shape[1]
+        o = _pv(p[..., off:off + n], v)
+        out = o if out is None else out.add_(o)
+        off += n
+    return out.div_(denom).to(q.dtype).reshape(1, H_q, 1, D)
+
+
 if __name__ == "__main__":
     # CPU self-test: the reconstruction must match a direct per-block reference,
     # and the cache must refresh on interval, routing change and pool write.

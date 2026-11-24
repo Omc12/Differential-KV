@@ -22,6 +22,16 @@ import os
 import torch
 from typing import Optional, List, Union, Tuple
 
+
+def _bump_slot_epoch(pool, slots):
+    """Per-slot write epoch for the decode arena (native_core/sparse_decode/
+    block_arena.py): a materialised block is reused only while its slot's
+    epoch is unchanged. A no-op until an arena has read this pool."""
+    if getattr(pool, "slot_epoch", None) is None:
+        return
+    from native_core.sparse_decode.block_arena import bump_slot_epoch
+    bump_slot_epoch(pool, slots)
+
 # SRL descriptor dimension — must match native_core/srl/chunk_descriptor.py
 _SRL_DESC_DIM = 64
 
@@ -1416,6 +1426,7 @@ class NativeBlockPool:
                 _kbt = getattr(self, "key_box_table", None)
                 if _kbt is not None:
                     _kbt.invalidate(int(pool_idx))
+                _bump_slot_epoch(self, int(pool_idx))   # decode arena (block_arena.py)
                 # seq_lens is the pool's OCCUPANCY SIGNAL, not just kernel
                 # metadata. Freeing a slot without clearing it made occupancy a
                 # HIGH-WATER MARK that never came back down:
@@ -1513,6 +1524,7 @@ class NativeBlockPool:
         _kbt = getattr(self, "key_box_table", None)
         if _kbt is not None:
             _kbt.invalidate(int(pool_idx))     # stale router box (srl/key_box.py)
+        _bump_slot_epoch(self, int(pool_idx))  # stale decode arena rows
         if getattr(self, "kq_codes", None) is not None:
             # The hybrid store's keys arrive only through the batched GPU path
             # (write_blocks_batched(key_deltas=...)). A slot written here would
@@ -1746,6 +1758,7 @@ class NativeBlockPool:
         _kbt = getattr(self, "key_box_table", None)
         if _kbt is not None:
             _kbt.invalidate(pool_indices)
+        _bump_slot_epoch(self, pool_indices)    # stale decode arena rows
         N = int(pool_indices.shape[0])
         if N == 0:
             return
@@ -1974,6 +1987,9 @@ class NativeBlockPool:
 
     def reset(self):
         """Completely reset the pool to its initial lightweight state, releasing all grown VRAM."""
+        # Every slot's content is gone: no decode-arena row may be reused.
+        if getattr(self, "slot_epoch", None) is not None:
+            self.slot_epoch += 1
         # Free old tensors before re-allocating
         attrs = ("U", "U_scale", "V_KV", "anchors_KV", "scales", "seq_lens", "desc",
                  "residual_K_positions", "residual_K_values", "residual_V_positions", "residual_V_values",
