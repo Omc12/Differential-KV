@@ -1159,6 +1159,51 @@ def route_blocks_relevance(
         Q = Q.unsqueeze(1)  # [H, 1, D]
 
     slots_long = block_indices.long()
+
+    # ── ROUTER-OWNED KEY BOXES (default; DKV_ROUTE_BOX=0 restores the below) ──
+    # Score each block by an upper bound over its EXACT post-RoPE keys, recorded
+    # at compression (native_core/srl/key_box.py), instead of by the anchor and
+    # residual rows the store kept. Decouples routing from the store and reads
+    # 2 vectors per block rather than 1 + R. Falls back to the residual router
+    # only when no box was ever recorded in this pool (host-side check, no sync).
+    try:
+        from native_core.srl.key_box import box_routing_enabled, table_for, box_relevance
+        _kbt = table_for(pool) if box_routing_enabled() else None
+        _kbg = _kbt.gather(slots_long) if _kbt is not None else None
+    except Exception:                                            # noqa: BLE001
+        _kbg = None
+    if _kbg is not None:
+        _bmn, _bmx, _bvalid = _kbg
+        relevance = box_relevance(Q, _bmn, _bmx, _bvalid, scale)            # [N]
+        # Edge propagation, with the box centre as the block's similarity vector
+        # (router-owned too). Same rule as the residual path below.
+        _er_on_b = os.environ.get("DKV_EDGE_ROUTING", "1").strip().lower() not in (
+            "0", "", "false", "off")
+        try:
+            _er_beta_b = float(os.environ.get("DKV_EDGE_ROUTE_BETA", "0.25"))
+            _er_maxnb_b = int(os.environ.get("DKV_EDGE_ROUTE_MAXNB", "512"))
+        except ValueError:
+            _er_beta_b, _er_maxnb_b = 0.25, 512
+        if _er_on_b and _er_beta_b > 0.0 and 3 <= N <= _er_maxnb_b:
+            _fin = torch.isfinite(relevance)
+            _relf = torch.where(_fin, relevance.float(), torch.zeros_like(relevance.float()))
+            _c = ((_bmn.float() + _bmx.float()) * 0.5).reshape(N, -1)
+            _cn = _c / (_c.norm(dim=-1, keepdim=True) + 1e-6)
+            _A = torch.clamp(_cn @ _cn.t() - torch.eye(N, device=_c.device), min=0.0)
+            _A = _A / (_A.sum(dim=-1, keepdim=True) + 1e-6)
+            relevance = torch.where(_fin, _relf + _er_beta_b * (_A @ _relf), relevance.float())
+        if _ROUTE_DIST_HOOK is not None:
+            try:
+                _ROUTE_DIST_HOOK(relevance, layer_idx)
+            except Exception:                                    # noqa: BLE001
+                pass
+        if _ROUTE_TOPP > 0.0:
+            # softmax(+inf) is NaN; a box-less slot only needs to rank first.
+            sel = select_by_mass(torch.nan_to_num(relevance.float(), posinf=1e30),
+                                 _ROUTE_TOPP, _ROUTE_TOPP_KMIN, k_eff)
+        else:
+            sel = torch.topk(relevance, k=k_eff).indices
+        return block_indices[sel].to(torch.int32)
     anc = pool.anchors_K[slots_long].clone()                    # [N, H_kv, D] fp16
     # The UNROTATED anchor, kept before `anc` is rotated in place below. The
     # residual score needs it in the residual row's OWN frame, not the anchor's

@@ -40,6 +40,11 @@ _DECODE_SOURCES = (
     "ACTIVE_RUNTIME/native_core/streaming_sparse_ingest.py",
     "ACTIVE_RUNTIME/native_core/compression/lowrank.py",
     "ACTIVE_RUNTIME/runtime/native_block_pool.py",
+    # Added 2026-11-24: the decode router (key boxes) and residual-row ordering
+    # decide which blocks and rows decode reads, and were outside the hash.
+    "ACTIVE_RUNTIME/native_core/srl/query_router.py",
+    "ACTIVE_RUNTIME/native_core/srl/key_box.py",
+    "ACTIVE_RUNTIME/native_core/compression/residual_capture.py",
 )
 
 

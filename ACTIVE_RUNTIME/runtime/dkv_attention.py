@@ -1627,6 +1627,20 @@ def _prefill_block_key_boxes(blocks, device, rope=None):
         if cached is not None and cached[0] == probe and cached[1].device == device:
             mins[i], maxs[i] = cached[1], cached[2]
             continue
+        # A compressed block whose EXACT post-RoPE box was recorded at
+        # compression (native_core/srl/key_box.py) needs no residual gather: that
+        # box covers every key, not just the residual rows. Post-RoPE is the
+        # frame this function returns in both pool conventions.
+        _xb = getattr(b, "_exact_key_box", None) if probe[0] == "cmp" else None
+        if _xb is not None:
+            _xdt = b.anchor_kv.dtype            # stacked with the other boxes below
+            mins[i] = _xb[0].to(device=device, dtype=_xdt)
+            maxs[i] = _xb[1].to(device=device, dtype=_xdt)
+            try:
+                b._sp_key_box = (probe, mins[i], maxs[i])
+            except Exception:                                      # noqa: BLE001
+                pass
+            continue
 
         # GROWTH: measure only the rows that are NEW since the cached box.
         #

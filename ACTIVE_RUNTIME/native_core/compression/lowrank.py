@@ -1401,6 +1401,19 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     gpu_device = blocks_list[0].active_k.device
     N_blocks = len(blocks_list)
 
+    # Router-owned summary, measured from the EXACT keys before the store sees
+    # them (native_core/srl/key_box.py). Recorded on the slots after the pool
+    # write below; a failure here only means the router falls back.
+    _key_boxes = None
+    try:
+        from native_core.srl.key_box import box_routing_enabled, exact_key_boxes
+        if box_routing_enabled():
+            _key_boxes = exact_key_boxes(blocks_list, manager)
+    except Exception as _kbe:                                    # noqa: BLE001
+        _key_boxes = None
+        if os.environ.get("DKV_ROUTE_BOX_VERBOSE") == "1":
+            print(f"[DKV] key box failed: {_kbe}", flush=True)
+
     # 1. Properly concatenate K and V along feat dimension [N, T, 2*H*D]
     stacked_k = torch.cat([b.active_k.permute(0, 2, 1, 3).reshape(1, T_active, -1) for b in blocks_list], dim=0)
     stacked_v = torch.cat([b.active_v.permute(0, 2, 1, 3).reshape(1, T_active, -1) for b in blocks_list], dim=0)
@@ -2155,12 +2168,14 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                             # scores 3/12 on the 8k natural sweep, because it
                             # points everywhere and so reserves nothing.
                             _q_eff = _q_ids if usable_query(_q_ids, _total) else None
-                            # DKV_RESIDUAL_NO_QUERY=1: residual rows chosen with
-                            # no question information at all -- neither the
-                            # extracted question span nor the prompt's tail
-                            # orders the runs (the equal-information control
-                            # against eviction that never sees the question).
-                            _no_query = os.environ.get("DKV_RESIDUAL_NO_QUERY", "0") == "1"
+                            # Question-free by default: neither the extracted
+                            # question span nor the prompt's tail orders the
+                            # runs, so a compressed block serves every later
+                            # question equally. DKV_RESIDUAL_QUERY=1 opts in.
+                            from native_core.compression.residual_capture import (
+                                residual_query_enabled as _rq_on,
+                            )
+                            _no_query = not _rq_on()
                             if _no_query:
                                 _q_eff = None
                             if _q_eff is None and _all is not None and not _no_query:
@@ -2683,6 +2698,9 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                                               pool.V_KV.shape[4])
                           if int(getattr(pool, "value_quant_bits", 0) or 0) else None),
         )
+        if _key_boxes is not None:
+            from native_core.srl.key_box import record as _kb_record
+            _kb_record(pool, blocks_list, _key_boxes)
         # Clear local GPU tensors on blocks to prevent VRAM leak.
         for _b in blocks_list:
             _b.U = None

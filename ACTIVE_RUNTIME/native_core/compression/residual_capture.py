@@ -521,6 +521,34 @@ def atomic_runs(tok_strs, max_len=None):
     return [(lo, hi) for lo, hi in merged if 0 < hi - lo <= max_len]
 
 
+def residual_query_enabled():
+    """Does the question order a block's residual rows? OFF by default.
+
+    Residual rows are written once, when a block is compressed, and never
+    re-chosen. Ordering them by the current question (or the prompt's last 64
+    tokens) therefore bakes the FIRST question into the cache, and every later
+    question reads rows picked for someone else -- the same flaw DKV holds
+    against SnapKV, and it contradicts "records persist across questions".
+
+    Turning it off moved no measured score on either model: granite LongBench
+    12k -0.25 [-1.20, +0.89], granite RULER 4k-16k +0.61 [-0.92, +2.17],
+    Qwen3.5-4B RULER 131k +0.17 [-2.33, +2.67] (IMPROVEMENTS_LOG, V6/V9). So the
+    question-free order (reconstruction error, rarity boost, atomic runs) is the
+    default and the look-ahead is opt-in.
+
+        DKV_RESIDUAL_QUERY=1     opt in (question span, else the prompt tail)
+        DKV_RESIDUAL_NO_QUERY    legacy spelling, still honoured if set:
+                                 "1" -> off, anything else -> on
+    """
+    v = os.environ.get("DKV_RESIDUAL_QUERY")
+    if v is not None:
+        return v.strip() == "1"
+    legacy = os.environ.get("DKV_RESIDUAL_NO_QUERY")
+    if legacy is not None:
+        return legacy.strip() != "1"
+    return False
+
+
 def usable_query(query_ids, total_tokens):
     """Is this pin a QUESTION, or the whole prompt wearing a question's name?
 

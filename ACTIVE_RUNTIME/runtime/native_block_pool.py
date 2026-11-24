@@ -1412,6 +1412,10 @@ class NativeBlockPool:
             if self._ref_counts[pool_idx] <= 0:
                 self._ref_counts[pool_idx] = 0
                 self._last_used[pool_idx] = _time.time() # Mark freed time as last used
+                # The router's key box described the old content.
+                _kbt = getattr(self, "key_box_table", None)
+                if _kbt is not None:
+                    _kbt.invalidate(int(pool_idx))
                 # seq_lens is the pool's OCCUPANCY SIGNAL, not just kernel
                 # metadata. Freeing a slot without clearing it made occupancy a
                 # HIGH-WATER MARK that never came back down:
@@ -1506,6 +1510,9 @@ class NativeBlockPool:
         exceeds the pool's allocated rank dimension.
         """
         self._ensure()  # Trigger lazy allocation if pool not yet created
+        _kbt = getattr(self, "key_box_table", None)
+        if _kbt is not None:
+            _kbt.invalidate(int(pool_idx))     # stale router box (srl/key_box.py)
         if getattr(self, "kq_codes", None) is not None:
             # The hybrid store's keys arrive only through the batched GPU path
             # (write_blocks_batched(key_deltas=...)). A slot written here would
@@ -1734,6 +1741,11 @@ class NativeBlockPool:
         so padding to a uniform R changes nothing stored.
         """
         self._ensure()
+        # New content: any router key box on these slots is stale until the
+        # caller records a fresh one (native_core/srl/key_box.py).
+        _kbt = getattr(self, "key_box_table", None)
+        if _kbt is not None:
+            _kbt.invalidate(pool_indices)
         N = int(pool_indices.shape[0])
         if N == 0:
             return

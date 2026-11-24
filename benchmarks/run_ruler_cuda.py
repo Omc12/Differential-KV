@@ -425,7 +425,8 @@ def main():
                         "DKV_STREAM_PROFILE",
                         # store / schedule switches (2026-10-04); recorded only
                         # when set, so default stores keep matching
-                        "DKV_STORE", "DKV_KEY_QUANT", "DKV_VALUE_QUANT", "DKV_QUANT_BITS", "DKV_RESIDUAL_NO_QUERY", "DKV_RESID_ATTN",
+                        "DKV_STORE", "DKV_KEY_QUANT", "DKV_VALUE_QUANT", "DKV_QUANT_BITS", "DKV_RESIDUAL_NO_QUERY", "DKV_RESIDUAL_QUERY", "DKV_RESID_ATTN",
+                        "DKV_ROUTE_BOX", "DKV_STREAM_ELASTIC_POLICY", "DKV_STREAM_EXACT_TOKENS",
                         "DKV_STREAM_ELASTIC", "DKV_PREFILL_SDPA", "DKV_EXACT_LEAN",
                         "DKV_REMAT_GATE",
                         # routing ablation (attend-all is DKV_TOPK_BLOCKS=0)

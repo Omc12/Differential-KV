@@ -4552,11 +4552,12 @@ class KVRuntimeManager:
                                 if _ra_on():
                                     from native_core.compression.residual_capture import (
                                         atomic_runs, rank_runs_by_query, usable_query,
+                                        residual_query_enabled,
                                     )
                                     _runs = atomic_runs(tok_strs)
                                     _pq = getattr(self, "_pending_query", None) or {}
                                     _qi = _pq.get(_sid) if isinstance(_pq, dict) else None
-                                    if os.environ.get("DKV_RESIDUAL_NO_QUERY", "0") == "1":
+                                    if not residual_query_enabled():
                                         _qi = None
                                     if _runs and usable_query(_qi, _total):
                                         _runs = rank_runs_by_query(

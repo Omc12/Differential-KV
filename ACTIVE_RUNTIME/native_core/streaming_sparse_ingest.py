@@ -637,6 +637,49 @@ def _elastic_room() -> bool:
         return False
 
 
+def _elastic_exact_tokens() -> int:
+    """DKV_STREAM_EXACT_TOKENS: newest history held exact during prefill (8192).
+
+    8192, not more: exact KV costs ~164 KB/token on granite-4.2-8b (40 attention
+    layers), so 16384 would hold ~2.7 GB through prefill -- enough to push the
+    131k granite point into the memory guard (diag_store_memory.py, 2026-11-24).
+    """
+    try:
+        return max(0, int(os.environ.get("DKV_STREAM_EXACT_TOKENS", "8192")))
+    except ValueError:
+        return 8192
+
+
+def _elastic_due(blocks, total_seq_len) -> int:
+    """How many of `blocks` (oldest first) end before the exact-token window.
+
+    Pure in token positions: a block is due when its last token is older than
+    the newest DKV_STREAM_EXACT_TOKENS tokens. Nothing here reads the device.
+    """
+    cutoff = int(total_seq_len) - _elastic_exact_tokens()
+    n = 0
+    for b in blocks:
+        if int(b.anchor_idx) + int(b.token_count()) <= cutoff:
+            n += 1
+        else:
+            break
+    return n
+
+
+_ELASTIC_GUARD_WARNED = False
+
+
+def _warn_elastic_guard(total_seq_len) -> None:
+    global _ELASTIC_GUARD_WARNED
+    if _ELASTIC_GUARD_WARNED:
+        return
+    _ELASTIC_GUARD_WARNED = True
+    print(f"[DKV] elastic memory guard compressed early at {total_seq_len} tokens: "
+          f"DKV_STREAM_EXACT_TOKENS={_elastic_exact_tokens()} does not fit this "
+          f"card, so output now depends on free VRAM. Lower the budget for "
+          f"card-independent results.", flush=True)
+
+
 def _is_block_compression_eligible(block: StreamingKVBlock, is_last_block: bool = False,
                                    ignore_skip_compression: bool = False) -> bool:
     # protect_block_zero exists to keep a "sink" region out of LOSSY SVD
@@ -1986,9 +2029,16 @@ class StreamingSparseIngestManager:
                         _b.state = "ACCUMULATING"
 
     def _elastic_hold(self, session_id, layer_idx, blocks_to_compress, total_seq_len):
-        """ELASTIC WINDOW (DKV_STREAM_ELASTIC=1, default off).
+        """ELASTIC WINDOW (DKV_STREAM_ELASTIC, default on).
 
-        Compress only as far as memory forces: while allocated memory plus a
+        Default policy (DKV_STREAM_ELASTIC_POLICY=tokens): history stays exact
+        while it is among the newest DKV_STREAM_EXACT_TOKENS tokens; older
+        eligible blocks are compressed, at most DKV_STREAM_ELASTIC_BATCH per
+        layer per chunk. Device memory only ever forces EARLIER compression
+        (and warns once).
+
+        Legacy policy (=memory), described below. Compress only as far as
+        memory forces: while allocated memory plus a
         headroom (DKV_STREAM_ELASTIC_RESERVE_GB, default 3.5 -- it must cover a
         compression batch's transients and the chunk's attention) stays under
         94% of the card, history stays EXACT and later chunks attend it as
@@ -2010,11 +2060,29 @@ class StreamingSparseIngestManager:
         if not blocks_to_compress or os.environ.get("DKV_STREAM_ELASTIC", "1") != "1":
             return blocks_to_compress
         # blocks_to_compress is in block order, i.e. OLDEST first.
-        n_now = 0 if _elastic_room() else max(1, int(os.environ.get(
-            "DKV_STREAM_ELASTIC_BATCH", "4")))
+        batch = max(1, int(os.environ.get("DKV_STREAM_ELASTIC_BATCH", "4")))
+        policy = os.environ.get("DKV_STREAM_ELASTIC_POLICY", "tokens").strip().lower()
+        if policy == "memory":
+            # Legacy: hold exact while the card has room. Output then depends on
+            # the card and on whatever else is resident -- opt-in only.
+            n_now = 0 if _elastic_room() else batch
+        else:
+            # TOKENS (default since 2026-11-24): history older than the newest
+            # DKV_STREAM_EXACT_TOKENS tokens is due for compression, wherever it
+            # runs. The same prompt compresses the same blocks on a 12 GB card
+            # and an 80 GB one, and a batched request's store no longer depends
+            # on its neighbours.
+            n_now = min(_elastic_due(blocks_to_compress, total_seq_len), batch)
+            if n_now < batch and not _elastic_room():
+                # Memory guard: compressing MORE is the only direction it moves,
+                # and it means the budget is too large for this card. Say so,
+                # since it reintroduces the card dependence this policy removes.
+                n_now = batch
+                _warn_elastic_guard(total_seq_len)
         if os.environ.get("DKV_DBG_ELASTIC") == "1":
             import torch as _t
             print(f"[ELASTIC] seq={total_seq_len} layer={layer_idx} "
+                  f"policy={policy} "
                   f"eligible={len(blocks_to_compress)} compress_now={n_now} "
                   f"alloc={_t.cuda.memory_allocated() / 1e9:.2f} "
                   f"resv={_t.cuda.memory_reserved() / 1e9:.2f}", flush=True)

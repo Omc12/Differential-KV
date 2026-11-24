@@ -10,7 +10,59 @@ Tiers: **T1** offline screen on captured KV (`benchmarks/tier1_screen.py`),
 **T3** batch confirmation. Guardrails a change must not trade away: store bytes,
 reach (peak memory), decode speed, query-agnosticism, exact prefill = dense.
 
-## Batch A: store quality (exact and streaming)
+## Review fixes (2026-11-24, code-first after the MLSys desk rejection)
+
+Verified with short tests only (unit tests + one 32k logit-fidelity run); nothing here
+has a long-context benchmark yet. `benchmarks/code_fingerprint.py` now also hashes
+`query_router.py`, `key_box.py` and `residual_capture.py`, so stores written before
+these changes cannot be resumed into.
+
+| Change | Switch | Default | Verification | Notes |
+|---|---|---|---|---|
+| Residual rows ordered without the question (no span pin, no 64-token prompt tail) | `DKV_RESIDUAL_QUERY=1` opts in; legacy `DKV_RESIDUAL_NO_QUERY` still honoured | **off** (was on) | V9/V6 already measured it: granite LongBench 12k -0.25 [-1.20, +0.89], RULER 4k-16k +0.61 [-0.92, +2.17]; Qwen3.5-4B RULER 131k +0.17 [-2.33, +2.67]. Unit test of the switch | A compressed block's rows were picked for the first question and never redone, so later questions read a cache shaped by someone else's. `residual_capture.residual_query_enabled` is the one reader |
+| Elastic window by token position, not free VRAM | `DKV_STREAM_ELASTIC_POLICY=tokens\|memory`, `DKV_STREAM_EXACT_TOKENS` (8192) | **tokens** (was memory) | Unit tests: same blocks compressed regardless of `_elastic_room`; legacy policy still holds | The same prompt compressed different blocks on a 12 GB card vs 80 GB, or under different co-resident load. Memory now only forces EARLIER compression, with a one-time warning that output has become card-dependent. Pool *capacity* is still sized from free VRAM; it only limits how many slots exist, not which blocks are compressed |
+| Router-owned key boxes at decode (Quest-style bound) | `DKV_ROUTE_BOX=0` restores the residual-key router | **on** | 32k logit fidelity, Qwen2.5-1.5B fp16, 5 prompts, self-check 0: decode-step KL box 0.00410, residual router 0.00510, all blocks 0.00579; prefill-step 0.00019 for all. Unit tests: bound never under-scores q.k; needle block ranks first; unboxed slots route first | Min/max of each block's EXACT post-RoPE keys per KV head, recorded by the GPU compressor before the store drops them (`native_core/srl/key_box.py`), invalidated on any pool write/free. Scoring reads 2 vectors per block instead of anchor + R residual rows, and no longer depends on which rows the store kept. The prefill router uses the same exact box for compressed blocks instead of residual rows. n=5 means "no regression", not a measured gain |
+| Logit-fidelity arm `routebox0` | - | - | - | A/B arm for the row above |
+| `benchmarks/diag_store_memory.py`: attributes allocated memory after a prefill to weights, pool fields, block tensors, decode workspace keys, module globals and unowned tensors (`--trace-shape` names the holder) | - | - | Ran on granite 32k, both stores (below) | Built for the codes-store spill |
+
+**Granite codes-store spill (V5): diagnosed, not a leak.** granite-4.2-8b NF4, 32k, streaming,
+1-token generate, GB allocated above the 5.78 GB of weights:
+
+| | codes4 | lowrank |
+|---|---|---|
+| store (pool) | 2.13 | 0.72 |
+| dense recency buffers (fixed per layer, ~3.5k tokens) | 0.59 | 0.59* |
+| rotated dense buffer | 0.29 | 0.29* |
+| gathered RoPE tables (per layer, routed set, reused for 16 tokens) | 0.34 | 0.34* |
+| decode remat cache (fp16 K/V of routed blocks; budget = free memory minus `DKV_REMAT_RESERVE_GB`) | 0.81 | - |
+| exact active blocks | 0.33 | 0.33 |
+| total | 4.67 | 2.06 |
+
+(*lowrank's workspace was measured as one total, 0.95 GB.) Nothing is unowned: every
+tensor has a holder. The codes store is 3x the low-rank store's bytes, the same as KIVI-4
+plus anchors and scales, and DKV adds ~1.2 GB of fixed decode buffers plus a remat cache
+that fills whatever headroom is left. Scaled to 65k, the store alone is ~4.3 GB, and with
+weights and fixed buffers it sits at the 94% line before any prefill transient: that is
+the spill, not a component. V5-F (remat cache held off) still spilling is consistent with
+this. Fixing it means making the fixed decode buffers smaller or optional under the codes
+store; not attempted here (it needs a 65k granite run to verify, which is long). The
+exact-token default above is 8192, not 16384, for the same budget reason: 16384 would
+hold ~2.7 GB of exact KV through a granite prefill.
+
+
+Not changed, with the evidence that decided it:
+
+| Review item | Why left |
+|---|---|
+| Keys compressed after RoPE | Already pre-RoPE: `mid`/`high`/`ultra` set `rotated_pool=False`; keys are re-rotated at their own positions on reconstruction (`DKV_EXACT_ROPE_REMAT`) |
+| Separate K and V factors | Tried 2026-10-03 (`DKV_KV_SPLIT`, Batch A): 1.29-1.52x more error at equal bytes. Dropped |
+| Oracle router / recall diagnostic | Done in Batch C: oracle-16 keeps 0.85 of attention mass at 64k vs 0.80 for the router; tier 2 found routing is not the bottleneck to 64k on either model. Past 64k the lever is K (V5-C: all blocks +51.67 at 131k), not a cleverer 16 |
+| Per-KV-head selection | Batch C: per-head top-16 0.83 vs 0.80 mass. Needs per-head block sets in the read path and kernels; small measured gain |
+| Codes store as the default | It wins on quality (V5-C/V10), but on granite it reaches less than half of low-rank's context on a 12.9 GB card (spill from 65k, diagnosed above; low-rank reaches 131k). Flip after the fixed decode buffers shrink under it. Select with `DKV_STORE=codes` |
+| Block-size sweep (256/512 vs 1024) | A quality measurement at long context; needs long runs. Block size is `DKV_MICRO_BLOCK_SIZE` |
+| Streaming prefill cost (routes 25% of history per chunk) | Sparse prefill routing is already on (`DKV_SPARSE_PREFILL`, now scoring compressed blocks by their exact box). A constant cap on routed blocks only changes anything past 128k, where checking prefill quality is a long run |
+| Fixed-rank record buckets for vLLM | Planned with the vLLM integration, not before |
+| Adaptive K (top-p) as default | Built (`DKV_ROUTE_TOPP`); at 32k it scored equal to fixed K with fewer blocks. Raising K past 64k costs decode speed (granite all-blocks 5.5 -> 2.4 tok/s) and needs a long run to set |
 
 | Date | Change | Switch | Default | T1 | T2 | T3 | Notes |
 |---|---|---|---|---|---|---|---|
@@ -731,4 +783,4 @@ packed hybrid + `DKV_RESID_ATTN` on granite and on Qwen2.5-7B.
 
 - Paper says the factorization is per head; the code factors all KV heads of a layer jointly (`feat_dim = 2*H*D`). Correct the paper.
 - On short contexts CUDA uses adaptive (smaller) blocks; the paper's "1024-token blocks, 1,536-token window" describes long contexts only. Verify and state.
-- Residual selection falls back to the last 64 prompt tokens as a query (`DKV_RESIDUAL_QUERY_TAIL`); within equal information, but not strictly query-agnostic. State in the paper or replace with resid-attn.
+- ~~Residual selection falls back to the last 64 prompt tokens as a query (`DKV_RESIDUAL_QUERY_TAIL`); within equal information, but not strictly query-agnostic.~~ Resolved 2026-11-24: residual ordering is question-free by default (`DKV_RESIDUAL_QUERY=1` opts back in); see "Review fixes" below.

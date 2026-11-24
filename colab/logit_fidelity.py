@@ -61,6 +61,8 @@ ARMS = {
     # routing; if it stays near baseline/dec the defect is the reconstruction
     # math on compressed blocks and routing is exonerated.
     "allblocks":  {"DKV_TOPK_BLOCKS": "0", "DKV_BLOCKS_PER_CHUNK": "256"},
+    # The residual-key router that router-owned key boxes replaced (2026-11-24).
+    "routebox0":  {"DKV_ROUTE_BOX": "0"},
     # Capacity sweep. A correct low-rank reconstruction gets BETTER with more
     # rank and with more exact residual rows. Reading, decided first: if the
     # decode gap shrinks with capacity it is approximation error and the
