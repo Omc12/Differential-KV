@@ -271,7 +271,7 @@ character when the prompt is a literal prefix.
 
 ### 4a. The "~12% slower decode" cannot be salvaged: both numbers are impossible
 
-`HANDOFF_CUDA_PREFILL.md` §8 records decode 259.8 tok/s (HEAD) vs 229.4 (fixed)
+`docs/HANDOFF_CUDA_PREFILL.md` §8 records decode 259.8 tok/s (HEAD) vs 229.4 (fixed)
 at 8k on Qwen3.5-2B, "**-11.7%** ... and that is NOT explained", alongside a
 dense arm at 309.0. All three come from
 

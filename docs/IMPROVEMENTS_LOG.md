@@ -406,7 +406,7 @@ Fix: the incremental branch uses the same tiled raw-history attention
 (`_dense_history_attend_tiled`) under DKV_EXACT_LEAN (default on, CUDA). Same
 arithmetic. Unit tests 27/27.
 
-Check (benchmarks/run_inc_tiled_check.cmd): Qwen auto streaming 131,072 ok **10.10 GB**,
+Check (benchmarks/campaigns/run_inc_tiled_check.cmd): Qwen auto streaming 131,072 ok **10.10 GB**,
 196,608 ok **10.37 GB** (were: spill at 131k, 18.58 GB). Elastic now borrows up to
 ~3.5 GB of headroom by design, so the peak sits above the pre-elastic 6.7 GB but under
 the spill line.
@@ -440,7 +440,7 @@ width, rotates per tile, folds the GQA group into the query axis, attends with t
 efficient kernel and merges tiles by log-sum-exp; and turns on the decode-cache memory
 gate (`DKV_REMAT_GATE`). Same arithmetic up to rounding. Expected: exact ceiling close
 to the preallocated dense one; it cannot pass it (exact prefill must hold the raw KV).
-Tests written (tests/test_exact_lean.py, 5) and benchmarks/run_exact_lean.cmd (unit
+Tests written (tests/test_exact_lean.py, 5) and benchmarks/campaigns/run_exact_lean.cmd (unit
 tests, tier 2 vs default exact, exact ladders granite 16k-28k, Qwen 98k-131k).
 
 Results (2026-10-11):
@@ -530,7 +530,7 @@ T2, Qwen3.5-4B, 6 prompts / 65 forced steps (`paper/results/diag/fidelity_codes_
 | codes, 2 bits | **0.0127** | **0.985** | 0.156 | 2.92 | 4.89 | 12.4 |
 
 Paired vs lowrank: codes4 dKL -0.728 [-1.163, -0.377], codes2 -0.716 [-1.150, -0.366];
-neither has a step with KL > 0.5 (lowrank: 16). V5 campaign: `benchmarks/run_v5_codes.cmd`.
+neither has a step with KL > 0.5 (lowrank: 16). V5 campaign: `benchmarks/campaigns/run_v5_codes.cmd`.
 
 V5 results (RULER on the paper's prompt, no answer prefix; 12-task averages, vt excluded):
 
@@ -559,7 +559,7 @@ low-rank store's smaller pool leaves room for. Open.
 
 ## Fairness controls (V6, 2026-10-21)
 
-`benchmarks/run_v6_fairness.cmd`. p1: a 16-bit cache read through DKV's tiled,
+`benchmarks/campaigns/run_v6_fairness.cmd`. p1: a 16-bit cache read through DKV's tiled,
 LSE-merged history attention (`dense_tiled`), ladders, 128-token answers.
 
 | model | dense_tiled clean to | spills at | peak there (alloc / reserved, prefill) | streaming DKV past it | preallocated dense |
@@ -586,7 +586,7 @@ DKV's lead over eviction does not come from seeing the question (no change witho
 it). Eviction recovers once its ranking knows the question before the prompt is read,
 and then what it keeps serves that question alone; DKV's records are built without it.
 
-V7 (`benchmarks/run_v7_fill.cmd`), the dense reference past dense's preallocated
+V7 (`benchmarks/campaigns/run_v7_fill.cmd`), the dense reference past dense's preallocated
 ceiling and DKV on granite from 4k, RULER on the paper's prompt:
 
 | run | RULER | paired |
@@ -598,7 +598,7 @@ ceiling and DKV on granite from 4k, RULER on the paper's prompt:
 Tiled KIVI-4 is at dense quality at long context; the low-rank store pays 16-20
 points there for the fewest bytes.
 
-V8 (`benchmarks/run_v8_fill.cmd`, 2026-10-26), granite between 32k and 114k and its
+V8 (`benchmarks/campaigns/run_v8_fill.cmd`, 2026-10-26), granite between 32k and 114k and its
 eviction arms at dense's lengths (RULER items generated at 65,536, 5/task):
 
 | run | RULER | paired |
@@ -613,7 +613,7 @@ On granite every cache that fits loses ground past 32k (DKV 49.0 -> 41.7 -> 28.2
 32k / 65k / 114k; tiled KIVI-4 63.1 -> 45.3), and within dense's limit DKV and SnapKV
 tie at about 9.7 points below dense.
 
-V9 (`benchmarks/run_v9_noquery.cmd`, 2026-10-26), DKV's question look-ahead
+V9 (`benchmarks/campaigns/run_v9_noquery.cmd`, 2026-10-26), DKV's question look-ahead
 (`DKV_RESIDUAL_NO_QUERY=1`) off on granite, current code:
 
 | run | score | paired (off - on) |
@@ -623,7 +623,7 @@ V9 (`benchmarks/run_v9_noquery.cmd`, 2026-10-26), DKV's question look-ahead
 | RULER 4k / 8k / 16k, look-ahead off, 10/task | 72.0 / 57.7 / 57.0 | +0.61 [-0.92, +2.17] vs V7 (360 items) |
 
 With Qwen3.5-4B at 131k (+0.17 [-2.33, +2.67]), turning the look-ahead off moves
-no measured score. V10 (`benchmarks/run_v10_prefix.cmd`) re-runs the past-the-limit
+no measured score. V10 (`benchmarks/campaigns/run_v10_prefix.cmd`) re-runs the past-the-limit
 comparisons with RULER's answer prefix at 10 items per task.
 
 V10 (2026-10-27, three power cuts, resumed by `run_v10_prefix.cmd resume`): RULER
@@ -668,7 +668,7 @@ that the paper had quoted; the ladder rows record 0.9999.
 
 **E2 larger prefill chunks -- no code.** `DKV_PREFILL_CHUNK_SIZE` already sets it
 (rounded up to whole blocks: 2048 -> 2050 = 2 blocks per chunk). Measurement queued
-(benchmarks/run_e2_chunks.cmd): tier 2 at 2048/4096 exact and streaming, and 32k prefill
+(benchmarks/campaigns/run_e2_chunks.cmd): tier 2 at 2048/4096 exact and streaming, and 32k prefill
 time. An older single-seed note in config.py links chunk 2048 to a lower score; tier 2
 decides.
 - Result (granite hybrid, 374 steps; paired vs chunk 1024): exact 2k +0.026 [-0.002,
@@ -765,7 +765,7 @@ packed hybrid + `DKV_RESID_ATTN` on granite and on Qwen2.5-7B.
 | Date | Fix | Why |
 |---|---|---|
 | 2026-10-22 | **Cloud campaign Y1** (`benchmarks/cloud/`, runbook `docs/CLOUD_CAMPAIGN.md`): 1,123 jobs (140 smoke configs + 983 real, ~734 GPU-h estimated; every series paperdata.py reads has a cloud twin with the recipe its .meta.json recorded, plus dense past 65k, 262k, Qwen3.5-9B, concurrency) across many GPU machines, coordinated only by the orphan branch `cloud-results` (claim = atomic push). Each worker runs a logit-fidelity preflight per model, pushes outputs every 10 min, and resumes a dead machine's job from its pushed rows. RULER data is generated per machine and hash-checked against the paper's items. Quality DKV arms set `DKV_STREAM_ELASTIC_RESERVE_GB` so the elastic window's line falls at the 12.878 GB card's 8.605 GB (`dkv_native` keeps the big card's own line). `bench_concurrency_cuda.py --timeout` (was a hardcoded 2 h per arm); `decode_fidelity.py` reads RULER items from `DKV_RULER_DATA` when set | The sponsored GPUs answer the limitations section: n of 5-10 per task beyond the exact limit, no dense reference past 65k, no datacenter-GPU systems numbers, no serving concurrency, two models. Without the reserve, DKV's elastic window on 80 GB would keep nearly everything exact and measure something other than the paper's method. Regenerated Qwen3.5-4B 4k data was byte-identical to the paper's. tests/test_cloud_queue.py (9, CPU) |
-| 2026-10-21 | **Fairness controls (V6, `benchmarks/run_v6_fairness.cmd`)**: `dense_tiled` arm (a 16-bit cache held in chunks, read by the tiled LSE-merged attention tiled KIVI uses: the dense ceiling with no history-sized transient); `snapkv_chunked_q` arm (chunk-wise eviction scored by the post-RoPE queries of the prompt's last 64 tokens, captured once at their true positions: the same look-ahead DKV's residual ordering has); `DKV_RESIDUAL_NO_QUERY=1` (residual runs ordered with no question information, neither the extracted span nor the tail) | Blind review: the reach ratios used a dense baseline that still had a history-sized transient, and DKV's store sees the question while the eviction arms do not. tests/test_dense_tiled.py (3, equals plain attention, 16-bit bytes); CPU check of `snapkv_chunked_q`: holds every layer at the budget, equals dense when nothing is evicted |
+| 2026-10-21 | **Fairness controls (V6, `benchmarks/campaigns/run_v6_fairness.cmd`)**: `dense_tiled` arm (a 16-bit cache held in chunks, read by the tiled LSE-merged attention tiled KIVI uses: the dense ceiling with no history-sized transient); `snapkv_chunked_q` arm (chunk-wise eviction scored by the post-RoPE queries of the prompt's last 64 tokens, captured once at their true positions: the same look-ahead DKV's residual ordering has); `DKV_RESIDUAL_NO_QUERY=1` (residual runs ordered with no question information, neither the extracted span nor the tail) | Blind review: the reach ratios used a dense baseline that still had a history-sized transient, and DKV's store sees the question while the eviction arms do not. tests/test_dense_tiled.py (3, equals plain attention, 16-bit bytes); CPU check of `snapkv_chunked_q`: holds every layer at the budget, equals dense when nothing is evicted |
 | 2026-10-21 | **KV accounting v3: residual rows at their stored width** (`dkv_kv_bytes`) | It charged every residual row at 16 bits (K+V; V for the hybrid) while the pool stores them int8 with an fp16 scale and offset per 64 channels (`DKVConfig.residual_quant` default int8): 4,096 vs 2,176 B per row on granite, 4,096 vs 2,176 on Qwen3.5-4B. Every recorded DKV byte count was high: LongBench DKV/mid 0.525 -> 0.431 GB, Qwen3.5-4B 131k 0.772 -> 0.524, granite 114k 3.32 -> 2.24; store growth on granite 0.029 -> 0.019 GB per 1k tokens. Recorded totals rebuild exactly from each row's own fields, so the paper's loader (`paperdata._correct_dkv_bytes`) corrects old rows exactly. Found by a blind reviewer recomputing the 676 KB record (true: 436 KB at the full 128-row budget). tests/test_kv_accounting.py gains an int8 case |
 | 2026-10-20 | **RULER answer prefix attached** (`run_ruler_cuda.build_ruler_prompt`; switch `RULER_ANSWER_PREFIX`, default 1, 0 restores the old prompt; stores record `answer_prefix`, so old and new rows cannot merge) | RULER's generator stores the answer prefix BESIDE the input, and the harness only re-attached it when the input ended with it, so no task ever got one. Models opened with a preamble ("Based on the text provided, here is...") that spent variable tracking's 30-token budget: vt scored ~0 for every arm, dense included. With the prefix, dense answers vt exactly (pilot, Qwen3.5-4B 4k). Every RULER store before 2026-10-20 is on the old prompt; the V4 campaign re-runs all of them. Paired deltas between old stores stay valid (same prompt for every arm) but absolute scores and averages were depressed |
 | 2026-10-20 | New baseline options: `kivi2_tiled` arm (KIVI-2 as published: per-channel keys in groups of 32, per-token values, 128-token 16-bit window, tiled attention like `kivi4_tiled`; 4-bit path bit-identical); dense `{"offload": true}` (exact KV in host memory, transformers' offloaded DynamicCache); SnapKV/H2O post-hoc `{"defrag": true}` (the allocator fix dense gets) | Review asked for a properly configured 2-bit baseline, an offloading baseline, and SnapKV given the same allocator treatment as dense. Smoke-tested on both models (`run_v4_z_smoke.cmd`): correct answers, 2-bit packing round-trips |

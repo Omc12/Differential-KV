@@ -3,7 +3,7 @@
 
 WHY THIS EXISTS
 ---------------
-`HANDOFF_CUDA_PREFILL.md` §8 records "decode is ~12% slower after the §0.5
+`docs/HANDOFF_CUDA_PREFILL.md` §8 records "decode is ~12% slower after the §0.5
 prefill fixes and it is NOT explained", from
 
     decode_tok_s = (GEN - 1) / (total_s - ttft_s)
