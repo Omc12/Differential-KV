@@ -656,13 +656,20 @@ _AUTO_EXACT_BYTES = None
 def record_exact_budget_at_load() -> int:
     """Fix the card-derived exact-history budget, once, right after model load.
 
-    budget = 94% of the card - memory allocated now (the weights) -
+    budget = (94% of the card - memory reserved now (weights, pool) -
     DKV_STREAM_ELASTIC_RESERVE_GB (3.5, the headroom the memory policy used for
-    compression transients and the chunk's attention). Read ONCE, so the window
-    no longer moves with co-resident load or with other sessions' KV the way the
-    per-chunk memory policy did; it still differs between card sizes (a bigger
-    card holds more history exact). The memory guard still forces earlier
-    compression if the store and buffers later leave less room than this.
+    compression transients and the chunk's attention)) x (1 - DKV_STREAM_AUTO_SLACK).
+    Read ONCE, so the window does not move with co-resident load or with what
+    earlier requests left in the allocator; it still differs between card sizes.
+
+    The slack (0.40) is there so the memory guard, which reads LIVE memory, does
+    not fire in normal use: when it fires, the blocks it compresses depend on
+    allocator state, so the same prompt answered differently depending on what
+    ran before it in the process (V12: niah_multikey_2#0 at 131k, a 70 MB
+    difference in allocated memory moved one layer's compression by a chunk).
+    At 0.00 the window reached the guard line at ~125k on Qwen3.5-4B (reserved
+    ran ~1.7 GB above weights + exact KV: activations and fragmentation); at
+    0.30 peak reserved came within 0.01 GB of it; 0.40 leaves ~0.35 GB.
     """
     global _AUTO_EXACT_BYTES
     try:
@@ -672,7 +679,12 @@ def record_exact_budget_at_load() -> int:
             return 0
         total = _t.cuda.get_device_properties(_t.cuda.current_device()).total_memory
         reserve = float(os.environ.get("DKV_STREAM_ELASTIC_RESERVE_GB", "3.5")) * 1e9
-        _AUTO_EXACT_BYTES = int(max(0.0, 0.94 * total - _t.cuda.memory_allocated() - reserve))
+        try:
+            slack = min(0.95, max(0.0, float(os.environ.get("DKV_STREAM_AUTO_SLACK", "0.40"))))
+        except ValueError:
+            slack = 0.40
+        resident = max(_t.cuda.memory_allocated(), _t.cuda.memory_reserved())
+        _AUTO_EXACT_BYTES = int(max(0.0, (0.94 * total - resident - reserve) * (1.0 - slack)))
     except Exception:                                            # noqa: BLE001
         _AUTO_EXACT_BYTES = 0
     if os.environ.get("DKV_DBG_ELASTIC") == "1":
@@ -687,7 +699,40 @@ def _auto_exact_bytes() -> int:
     return _AUTO_EXACT_BYTES
 
 
-def _elastic_exact_tokens(bytes_per_token: int = 0, auto: bool = False) -> int:
+def _session_store_bytes(layers, pool) -> int:
+    """Bytes this session's compressed blocks occupy in the pool, from its own
+    block count (deterministic for a prompt), never from allocator readings."""
+    per = int(getattr(pool, "_bytes_per_block", 0) or 0) if pool is not None else 0
+    if per <= 0:
+        return 0
+    n = 0
+    for blocks in layers.values():
+        for b in blocks:
+            if getattr(b, "state", None) == "COMPRESSED":
+                n += 1
+    return n * per
+
+
+def _projected_store_bytes(layers, pool, prefill_len, block_size) -> int:
+    """Bytes the session's store will occupy once the WHOLE prompt is compressed:
+    every block-holding layer x ceil(prompt / block) x slot bytes. Fixed for a
+    prompt, so the exact window it leaves is the same at every chunk.
+
+    Without it the window shrank as the store grew, and on a model whose store
+    outgrows the budget (granite-4.2-8b at 114k: 1.97 GB store vs a 1.56 GB
+    budget) the window closed only as memory ran out, so the live-memory guard
+    fired in that last stretch (V12 g2, at 68674 tokens). An over-count (block
+    zero and the final window stay exact) only compresses earlier.
+    """
+    per = int(getattr(pool, "_bytes_per_block", 0) or 0) if pool is not None else 0
+    if per <= 0 or prefill_len <= 0 or block_size <= 0:
+        return 0
+    n_layers = sum(1 for blocks in layers.values() if blocks)
+    return n_layers * (-(-int(prefill_len) // int(block_size))) * per
+
+
+def _elastic_exact_tokens(bytes_per_token: int = 0, auto: bool = False,
+                          store_bytes: int = 0) -> int:
     """Newest history held exact during prefill, in tokens.
 
     In order: DKV_STREAM_EXACT_TOKENS when set; DKV_STREAM_EXACT_GB divided by
@@ -706,7 +751,8 @@ def _elastic_exact_tokens(bytes_per_token: int = 0, auto: bool = False) -> int:
     if gb > 0 and bytes_per_token > 0:
         return int(gb * 1e9 // bytes_per_token)
     if auto and bytes_per_token > 0:
-        return int(_auto_exact_bytes() // bytes_per_token)
+        # The session's compressed store grows into the same room.
+        return int(max(0, _auto_exact_bytes() - int(store_bytes)) // bytes_per_token)
     return 8192
 
 
@@ -759,9 +805,10 @@ def _warn_elastic_guard(total_seq_len) -> None:
         return
     _ELASTIC_GUARD_WARNED = True
     print(f"[DKV] elastic memory guard compressed early at {total_seq_len} tokens: "
-          f"the exact-history budget (DKV_STREAM_EXACT_TOKENS / _GB) does not fit this "
-          f"card, so output now depends on free VRAM. Lower the budget for "
-          f"card-independent results.", flush=True)
+          f"the exact-history budget does not fit what is free now, so output "
+          f"depends on memory state (other processes, earlier requests). Raise "
+          f"DKV_STREAM_AUTO_SLACK, or set a smaller fixed budget "
+          f"(DKV_STREAM_EXACT_TOKENS / _GB), for repeatable results.", flush=True)
 
 
 def _is_block_compression_eligible(block: StreamingKVBlock, is_last_block: bool = False,
@@ -2161,21 +2208,33 @@ class StreamingSparseIngestManager:
             # DKV_STREAM_EXACT_TOKENS or DKV_STREAM_EXACT_GB, so the same prompt
             # compresses the same blocks on any card -- for reproducible runs.
             auto = policy != "tokens"
-            bpt = 0
+            bpt, store = 0, 0
+            layers = getattr(self, "session_blocks", {}).get(session_id, {})
             if auto or _elastic_exact_gb() > 0:
-                bpt = _exact_bytes_per_token(
-                    getattr(self, "session_blocks", {}).get(session_id, {}))
-            window = _elastic_exact_tokens(bpt, auto=auto)
+                bpt = _exact_bytes_per_token(layers)
+            if auto:
+                pool = getattr(self, "native_pool", None)
+                store = max(
+                    _session_store_bytes(layers, pool),
+                    _projected_store_bytes(
+                        layers, pool,
+                        getattr(self, "session_prefill_lens", {}).get(session_id, 0),
+                        getattr(self, "session_micro_block_sizes", {}).get(
+                            session_id, getattr(self, "micro_block_size", 0)),
+                    ),
+                )
+            window = _elastic_exact_tokens(bpt, auto=auto, store_bytes=store)
             n_now = min(_elastic_due(blocks_to_compress, total_seq_len, window), batch)
             if os.environ.get("DKV_DBG_ELASTIC") == "1":
-                print(f"[ELASTIC] window={window} bytes/token={bpt}", flush=True)
-            if n_now < batch and not _elastic_room():
+                print(f"[ELASTIC] window={window} bytes/token={bpt} store={store}", flush=True)
+            if n_now < min(batch, len(blocks_to_compress)) and not _elastic_room():
                 # Memory guard: compressing MORE is the only direction it moves.
-                # Under the fixed policy it means the budget is too large for
-                # this card; say so, since it brings back card dependence.
+                # It reads live memory, so what it compresses depends on the
+                # allocator's state (what ran before, other processes): say so.
+                # Only consulted when it could change the decision (the window
+                # holds a block back), so it warns only when output is affected.
                 n_now = batch
-                if not auto:
-                    _warn_elastic_guard(total_seq_len)
+                _warn_elastic_guard(total_seq_len)
         if os.environ.get("DKV_DBG_ELASTIC") == "1":
             import torch as _t
             print(f"[ELASTIC] seq={total_seq_len} layer={layer_idx} "

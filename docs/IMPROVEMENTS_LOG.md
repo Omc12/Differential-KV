@@ -55,7 +55,8 @@ attend compressed history through the router. V12 p1 measures its quality.
 | `benchmarks/diag_key_box_frame.py` | - | - | Ran (above) | Recorded box vs true post-RoPE box per block and layer |
 
 **V12** (`benchmarks/campaigns/run_v12_router.cmd`, `run_v12b_fixedk.cmd`,
-`run_v12c_auto.cmd`; Qwen3.5-4B, RULER 131k with the answer prefix, paired
+`run_v12c_auto.cmd`, `run_v12d_repeatable.cmd`, `run_v12e_projected.cmd`;
+Qwen3.5-4B, RULER 131k with the answer prefix, paired
 bootstrap over shared items):
 
 | arm | items | score | paired against | difference | wall/item (median) | decode peak |
@@ -70,6 +71,16 @@ bootstrap over shared items):
 | p2 | 65 | | V11 fixed K (key box) | +14.95 [+6.41, +24.00] | | |
 | p4 p1 with no policy set (card-derived `auto`) | 39 | 64.9 | p1 (memory window) | -5.77 [-13.46, +0.00] | 92 s | 8.62 GB |
 | p4 | 39 | | p2 (token window, shared 39) | +1.41 [-3.85, +8.08] | | |
+| p5 auto, slack 0.40, store so far | 39 | 69.4 | p1 (memory window) | -1.28 [-7.69, +3.08] | 94 s | 10.00 GB |
+| p6 auto, slack 0.40, projected store (**shipped**) | 39 | 71.0 | p1 (memory window) | +0.38 [-7.31, +8.08] | 95 s | 9.65 GB |
+| p6 | 39 | | p4 (auto, guard-driven) | +6.15 [+0.00, +14.36] | | |
+| p6 | 39 | | p5 | +1.67 [-2.05, +7.44] | | |
+
+p5 and p6 printed no memory-guard warning on any of the 39 items, so their
+answers do not depend on what ran earlier in the process (p4 and p1 do, at
+~125k). Wall is ~3 s/item above p1: the window now compresses earlier, at
+roughly 85k tokens (budget arithmetic: 3.29 GB less a 0.52 GB projected store
+at 32 KB/token; not traced), where the guard used to cut in at ~125k.
 
 **p4 is not a policy difference.** On this card the auto budget is 5.49 GB
 (12.88 x 0.94 - 3.12 resident - 3.5 reserve), a 167k-token window at Qwen3.5-4B's
@@ -79,18 +90,33 @@ trace shows the only mid-prefill compression is the memory guard at ~125k
 policy shares. With adaptive off, auto and the memory window answered 5 of 6
 `niah_multikey_2` / `niah_multiquery` items identically (the sixth is wrong
 both ways). p4 differs from p1 on 3 items (2 multikey_2, 1 multiquery), the
-same fragile items adaptive vs fixed moved in p1 vs p3. **The adaptive path is
-not run-to-run deterministic:** the same config on `niah_multikey_2#0` answered
-`8143511` in p4 and `8143507` in the trace, while fixed K reproduced V10's
-answers exactly. Unresolved: the source (estimate ties, a reduction order, or
-the guard's dependence on reserved memory interacting with adaptive's extra
-buffers) is not found.
+same fragile items adaptive vs fixed moved in p1 vs p3.
+
+**Answers depended on what ran earlier in the process (found 2026-11-25).** The
+same config on `niah_multikey_2#0` answered `8143511` in p4 and `8143507` in a
+fresh process. Not adaptive-specific and not randomness: fresh-process repeats
+were bit-identical (64k: all 64 routing calls; 131k: every elastic decision),
+and running `niah_multikey_1#0-2` first reproduced p4's six answers exactly.
+The fixed-K arm moves the same way (`multikey_2#0` changed when run first). Cause:
+the memory guard reads LIVE memory, and at ~125k (whole prompt held exact) the
+card is at its line; after earlier requests allocated memory differed by 70 MB,
+so the guard compressed layer 15's oldest blocks one chunk later
+(`DKV_DBG_ELASTIC=1` traces, first difference at seq 125049) and every routing
+input downstream differed (`DKV_DBG_ROUTE_DUMP`, new). The memory policy has the
+same dependence. Fix below: the auto window is sized so the guard does not fire.
 
 **Granite reach under auto** (granite-4.2-8b, `niah_single_1` at 114,688, the
 longest generated granite length): budget 2.82 GB = a 17,241-token window at
 164 KB/token, set with nothing configured; answered correctly, decode peak
 10.46 GB, reserved at most 9.09 GB in prefill (under the 12.1 GB spill line),
-398 s.
+398 s. With slack 0.40 (g2) the budget is 1.56 GB and the guard fired at 68,674
+tokens: granite's compressed store (1.97 GB by then, 2.23 GB at the end)
+outgrows the budget, and since the window was budget minus the store SO FAR it
+closed only as memory ran out, so the guard cut in on the last few blocks
+(`DKV_DBG_ELASTIC=1` trace: window 2,643 tokens, 2 blocks eligible, reserved
+8.74 GB vs the 8.61 line). Sizing the window against the PROJECTED store (whole
+prompt compressed) closes it from the start on granite (g3): no guard warning,
+answered correctly, decode peak 10.46 GB, 332 s (was 384-398 s).
 
 **Block size** (`colab/logit_fidelity.py`, Qwen3.5-4B nf4, 32k, 5 prompts;
 table in `paper/results/campaign/v12.log`): decode-step KL vs dense 0.00180 at
@@ -117,6 +143,7 @@ from it is not shown.
 
 | Change | Switch | Default | Verification | Notes |
 |---|---|---|---|---|
+| Auto window sized so the live-memory guard stays out of normal runs | `DKV_STREAM_AUTO_SLACK` (0.40) | on | Fresh vs after-history `multikey_2#0`: same answer, guard never fired (at slack 0.30; peak reserved 8.60 vs the 8.61 line, hence 0.40); unit tests; V12 p6 (39 items, no guard warning, 71.0, +0.38 vs memory window) and g3 (granite 114k, no warning, correct) | Budget = (94% card - reserved at load - 3.5 GB) x (1 - slack), minus the store the whole prompt will occupy once compressed (layers x ceil(prompt / block) x slot bytes, from the session's prompt length -- not an allocator reading, and fixed per prompt). Minus the store so far (p5) was not enough on granite, whose store outgrows the budget. The guard still protects against spill and warns only when it changes a decision, since then output depends on memory state. `DKV_DBG_ROUTE_DUMP=<path>` logs each routing call's inputs and selection for diffing runs |
 | Exact-history budget read from the card once at load | `DKV_STREAM_ELASTIC_POLICY=auto\|tokens\|memory`; fixed budgets `DKV_STREAM_EXACT_TOKENS` / `DKV_STREAM_EXACT_GB` | **auto** (was tokens, 8192) | Unit tests (budget converted per model from live blocks; fixed budgets still win; roomy card holds all); V12 p4 + trace (same decisions as the memory window on this card) | Plug-and-play: nothing to set for any model. Budget = 94% of the card - resident memory after load - 3.5 GB reserve, recorded once (`record_exact_budget_at_load`), so co-resident load and other sessions no longer move it (the memory policy re-read it every chunk). Bytes per token are read from the blocks, so one budget gives a 4B hybrid ~5x the tokens of granite. Output differs between card sizes; `tokens` stays for reproducible runs |
 
 ## Adaptive block count and a faster decode read (2026-11-24)

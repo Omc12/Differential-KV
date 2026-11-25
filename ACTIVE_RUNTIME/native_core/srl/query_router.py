@@ -1012,6 +1012,34 @@ def select_by_mass(relevance, topp, k_min, k_floor):
     return pi[:k]
 
 
+# DKV_DBG_ROUTE_DUMP=<path>: one JSON line per residual-router call (layer, N,
+# checksums of the query, relevance and adaptive estimate, the selected
+# positions). Two runs of the same prompt diff line by line to find the first
+# routing decision that differs and which input moved first. Debug only: it
+# syncs the device on every call.
+_ROUTE_DUMP = os.environ.get("DKV_DBG_ROUTE_DUMP") or None
+_DBG_LAST_EST = None
+
+
+def _cks(t):
+    if t is None:
+        return None
+    x = t.detach().double().flatten()
+    w = torch.arange(1, x.numel() + 1, device=x.device, dtype=torch.float64)
+    return [float(x.sum()), float((x * w).sum())]
+
+
+def _route_dump(layer_idx, N, k_eff, Q, relevance, sel):
+    global _DBG_LAST_EST
+    import json
+    rec = {"l": layer_idx, "N": int(N), "k": int(k_eff), "q": _cks(Q),
+           "rel": _cks(relevance), "est": _DBG_LAST_EST,
+           "sel": sorted(int(i) for i in sel.tolist())}
+    _DBG_LAST_EST = None
+    with open(_ROUTE_DUMP, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
 def _adaptive_select(Q, kbt, slots_long, relevance, k_eff, N, topk_env, scale):
     """GROW-ONLY ADAPTIVE BLOCK COUNT (DKV_ROUTE_ADAPTIVE, default on).
 
@@ -1050,6 +1078,9 @@ def _adaptive_select(Q, kbt, slots_long, relevance, k_eff, N, topk_env, scale):
         mu, var, logn, mok = mom
         Q3 = Q if Q.dim() == 3 else Q.unsqueeze(1)
         est = estimate_block_lse(Q3, bmn, bmx, mu, var, logn, scale)
+        if _ROUTE_DUMP is not None:
+            global _DBG_LAST_EST
+            _DBG_LAST_EST = _cks(est)
         sel = select_adaptive(est, relevance, mok & bvalid, k_eff)
     except Exception:                                            # noqa: BLE001
         return None
@@ -1634,6 +1665,8 @@ def route_blocks_relevance(
         sel = select_by_mass(relevance, _ROUTE_TOPP, _ROUTE_TOPP_KMIN, k_eff)
     else:
         sel = torch.topk(relevance, k=k_eff).indices
+    if _ROUTE_DUMP is not None:
+        _route_dump(layer_idx, N, k_eff, Q, relevance, sel)
 
     # ── DKV_ROUTE_TRACE_TOKEN — does the needle's block survive routing AT THE
     # TOKEN THAT PRODUCES THE ANSWER? ────────────────────────────────────────

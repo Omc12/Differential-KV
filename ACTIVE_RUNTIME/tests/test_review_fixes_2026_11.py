@@ -113,6 +113,19 @@ def test_auto_policy_reads_the_card_once_and_needs_no_setting(monkeypatch):
     monkeypatch.setattr(ssi, "_elastic_room", lambda: True)
     assert ssi._elastic_exact_tokens(32768, auto=True) == 4096
     assert ssi._elastic_exact_tokens(163840, auto=True) == 819   # same bytes, bigger KV
+    # The session's own compressed store comes out of the same room.
+    assert ssi._elastic_exact_tokens(32768, auto=True, store_bytes=32768 * 1024) == 3072
+    pool = types.SimpleNamespace(_bytes_per_block=1000)
+    lay = {0: [types.SimpleNamespace(state="COMPRESSED"), types.SimpleNamespace(state="ACCUMULATING")],
+           1: [], 2: [types.SimpleNamespace(state="COMPRESSED")]}
+    assert ssi._session_store_bytes(lay, pool) == 2000
+    assert ssi._session_store_bytes(lay, None) == 0
+    # Projected store: the whole prompt compressed, fixed per prompt, so the
+    # window it leaves does not shrink chunk by chunk toward the guard.
+    # 2 block-holding layers (empty layer 1 is not counted) x ceil(2500/1024)=3.
+    assert ssi._projected_store_bytes(lay, pool, 2500, 1024) == 2 * 3 * 1000
+    assert ssi._projected_store_bytes(lay, pool, 0, 1024) == 0
+    assert ssi._projected_store_bytes(lay, None, 2500, 1024) == 0
 
     def blocks():
         return [types.SimpleNamespace(anchor_idx=i * 1024, state="SUBMITTED",
