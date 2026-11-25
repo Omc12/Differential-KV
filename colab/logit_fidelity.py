@@ -84,6 +84,14 @@ ARMS = {
     "rank96":     {},
     "rank128":    {},
     "resid200":   {"DKV_MAX_RESIDUAL": "200"},
+    "resid0":     {"DKV_MAX_RESIDUAL": "0"},
+    # Rotated pool (keys stored post-RoPE, never re-rotated at read) under the
+    # shipped mid preset, which is unrotated -- isolates read-time rotation.
+    "rot1":       {"DKV_ROTATED_POOL": "1"},
+    "colscale":   {"DKV_U_COLSCALE": "1"},           # per-column U scale before int8
+    "kvsplit":    {"DKV_KV_SPLIT": "16,16"},          # separate K and V factors
+    "energy1":    {"DKV_SVD_ENERGY": "1.0"},          # joint factor, no energy truncation
+    "rot1_dense": {"DKV_ROTATED_POOL": "1", "DKV_COMPRESSED_DECODE": "0"},
     # Two INDEPENDENT implementations of the same compressed read: `noremat`
     # takes the Triton project-then-attend kernel (s = s_anchor + (q.V_K).U.scale)
     # instead of materialise-then-SDPA. Reading, decided first: if both land at

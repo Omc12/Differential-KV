@@ -58,27 +58,51 @@ preset, 5 needle depths), KL(plain transformers || DKV) on the first generated t
    "gap": every decoder layer matched dense to bf16 noise at 8k (e4b) and 32k
    (e2b). The harness now applies the model's own softcap. ad2b88d3's gemma
    numbers (0.29 / 0.91 / 1.15 at 8k) carried both errors.
-4. **Phi-4-mini compressed decode is wrong (open).** The prefill is clean
-   (0.008). Bisect at 32k (`run_v13d_phi4_bisect.cmd`, `run_v13e_phi4_capacity.cmd`),
-   second-token KL:
+4. **Phi-4-mini compressed decode is wrong with the low-rank store (open).**
+   The prefill is clean (0.008), and no block is compressed before decode at
+   32k (its 3.29 GB budget holds the whole prompt exact). Bisect at 32k
+   (`run_v13d` .. `run_v13n` under `benchmarks/campaigns/`), second-token KL:
 
    | arm | KL | top-1 |
    |---|---|---|
-   | baseline | 0.679 | 4/5 |
+   | baseline (lowrank, joint K\|V factor) | 0.679 | 4/5 |
    | compressed decode off (`dense_arm`) | 0.047 | 5/5 |
+   | **codes store** (`DKV_STORE=codes`) | **0.0017** | 5/5 |
+   | **separate K and V factors, same rank 16+16** (`kvsplit`) | **0.095** | 5/5 |
+   | U column scale before int8 (`colscale`) | 0.471 | 5/5 |
    | every block attended (`allblocks`) | 1.049 | 3/5 |
    | no remat cache | 0.548 | 4/5 |
-   | unrotated pool (`unrot`) | 0.679 | 4/5 |
-   | more residual rows (`resid200`) | 1.165 | 2/5 |
-   | rank 128 | 0.807 | 2/5 |
+   | residual rows 0 / 200 | 0.893 / 1.165 | 3/5 / 2/5 |
+   | rank 128 (64 stored) | 0.807 | 2/5 |
+   | energy truncation off (`energy1`) | 0.672 | 4/5 |
+   | attention-ranked residual rows (`DKV_RESID_ATTN=1`) | 0.799 | 3/5 |
+   | rotated pool (`rot1`) | 16.07 | 0/5 |
 
-   It is reconstruction, not routing, and MORE exact capacity makes it WORSE.
-   That is a defect, not a capacity limit. Leading hypothesis (unverified):
-   LongRoPE switches frequency sets at 4096 tokens, so chunked prefill rotates
-   early keys with the short set while a 32k table uses the long one; partial
-   rotary 0.75 is the other candidate. Separately, `unrot` measured
-   bit-identical to baseline although its env was set, so that switch looks
-   inert on this path; not investigated.
+   Decode-step per-layer diff (`--at decode`): layer 9 is at 104% relative
+   error with the store and 8.9% with exact history. Ruled out with a run each:
+   LongRoPE (Phi-4-mini's long and short factor lists are identical; tables
+   are call-length independent), its rope `attention_scaling` 1.19 (forced
+   to 1 in both arms: layer 9 still 142%), K/V outliers (smaller than
+   granite's), the rotary base (the `mid` preset stores keys UNROTATED, so
+   `unrot` equals baseline, which is why it measured identical), routing,
+   rank, residual budget and truncation. The rotated pool is far worse here:
+   at rotary base 10k a block of ROTATED keys is high-rank (control: the same
+   arm is clean on Qwen2.5-7B, base 1M).
+
+   A per-layer chooser that picks joint or split by measured reconstruction
+   error was built and NOT shipped (its per-layer measurements are in
+   `paper/results/campaign/v13o.log`, a run stopped after Phi-4): joint has the
+   LOWER Frobenius error on all 32 layers (layer 9: K 0.195 / V 0.253 joint vs 0.307 / 0.386 split), yet
+   split decodes far better. So what breaks decode is not reconstruction error.
+   The 2026-10-03 screen that dropped the split measured the same quantity.
+   Next: an attention-space criterion (error in q.k under sampled prompt
+   queries) and the int8 U one-scale-per-block, which `colscale` implicates in
+   part. Workaround today: `DKV_STORE=codes` (0.0017 on Phi-4; only Phi-4 was
+   run with it in V13) or `DKV_KV_SPLIT=16,16` (0.095).
+
+   Also found: Phi-3-mini-4k sets `sliding_window=2047` in its config, but its
+   attention module exposes no `is_sliding` / `layer_type`, so DKV would treat
+   it as full attention. Not on the panel; untested.
 
 Also measured on the way: gemma's chunking noise floor (plain transformers,
 chunk 512 vs 1024 / 1026 / 2048) is KL 0.0005-0.004, so gemma results here are
@@ -90,6 +114,30 @@ not chunk-size sensitive once the kernel bug is guarded.
 | Guard torch's efficient-SDPA stride-0 K/V defect | none | on (installed at load) | gemma-4-e2b 8k per-layer: first DKV layer 7.6% → 1.8% rel err (noise); 32k first token 2.57 → 0.96 before the harness fix; unit test against the math kernel | Makes K/V contiguous only when a mask is given and the head axis has stride 0; every other call untouched. Upstream fix in torch 2.14. Plain transformers chunk 2050 also broke and does not fit the L % 32 == 1 rule; unexplained |
 | Fidelity harness applies the model's final logit softcap to the DKV arm | none | on | gemma-4 e2b / e4b first token 0.96 / 1.29 → 0.0014 / 0.0044 | Instrument fix; uncapped models unchanged |
 | `benchmarks/diag_prefill_layer_diff.py` | `--chunk --dkv-chunk --unpatch --attn --sdpa-backend` | - | Found defects 2 and 3 | Per-decoder-layer last-position hidden state, plain transformers vs DKV |
+
+**V14 RULER smoke test at 32k** (`benchmarks/campaigns/run_v14_ruler_panel.cmd`,
+data newly generated per tokenizer with `generate_ruler_data.sh`, 1 item per
+task; SmolLM3 all 13 tasks, the rest 4 tasks: `niah_multikey_2`,
+`niah_multivalue`, `vt`, `qa_1`; paired against dense on shared items):
+
+| model | DKV | dense | difference | tasks DKV lost |
+|---|---|---|---|---|
+| SmolLM3-3B (13 tasks) | 71.7 | 84.6 | -12.95 [-30.13, -1.54] | multikey_3, fwe, multivalue, cwe |
+| Qwen2.5-7B | 63.8 | 95.0 | -31.25 [-75.00, +0.00] | multikey_2, multivalue (-25) |
+| Qwen3.5-2B | 100.0 | 100.0 | 0 | - |
+| gemma-4-e2b | 88.8 | 88.8 | 0 | - |
+| gemma-4-e4b | 100.0 | 100.0 | 0 | - |
+| gemma-4-12B | 75.0 | 100.0 | -25.00 [-75.00, +0.00] | multikey_2 |
+| Ministral-3-8B | 75.0 | 100.0 | -25.00 [-75.00, +0.00] | multikey_2 |
+| Phi-4-mini | 68.8 | 70.0 | -1.25 [-18.75, +15.00] | multivalue -25, vt +20 |
+
+No architecture fails outright. Nothing was set per model, and every model ran
+end to end. The losses are retrieval. `niah_multikey_2` (one key among many
+near-duplicate distractor keys) was missed by DKV on 3 of 7 models and by
+dense on none, the low-rank store's known weak spot (it trails dense by ~20
+on RULER, V10). n = 4 per model is a smoke test, not an estimate: every
+interval spans 0 except SmolLM3's. Phi-4-mini, despite its open decode
+defect (second-token KL 0.68), is level with dense on these four items.
 
 ## The key-box router cost 22 points at 131k; residual router restored (2026-11-25)
 

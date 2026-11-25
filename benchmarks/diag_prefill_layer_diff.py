@@ -27,7 +27,20 @@ BENCH = os.path.join(ROOT, "benchmarks")
 
 def _out(args, mode):
     tag = args.model.replace("/", "_")
-    return os.path.join(args.out_dir, f"prefill_diff_{tag}_{args.ctx}_{mode}.pt")
+    at = "" if args.at == "prefill" else f"_{args.at}"
+    return os.path.join(args.out_dir, f"prefill_diff_{tag}_{args.ctx}{at}_{mode}.pt")
+
+
+def _set_rope_unit_scale(model):
+    """Force every rotary module's attention_scaling to 1.0 (LongRoPE / YaRN set
+    it != 1, so their cos/sin are not a pure rotation). Changes the model, so it
+    is applied to BOTH arms; isolates paths that assume orthogonal tables."""
+    n = 0
+    for mod in model.modules():
+        if "rotary" in type(mod).__name__.lower() and hasattr(mod, "attention_scaling"):
+            mod.attention_scaling = 1.0
+            n += 1
+    print(f"[diag] rope attention_scaling forced to 1.0 on {n} module(s)", flush=True)
 
 
 def _layer_out(o):
@@ -36,9 +49,13 @@ def _layer_out(o):
 
 def _hook_layers(layers, store, cur):
     hs = []
+    at = cur.get("at", "prefill")
     for i, layer in enumerate(layers):
         def _h(_m, _inp, out, i=i):
-            if cur["L"] > 1:                       # prefill call: keep the last
+            if at == "prefill" and cur["L"] > 1:       # prefill call: keep the last
+                store[i] = _layer_out(out)[0, -1].detach().float().cpu()
+            elif at == "decode" and cur["L"] == 1 and i not in store:
+                # first decode step only: the first COMPRESSED-decode step
                 store[i] = _layer_out(out)[0, -1].detach().float().cpu()
         hs.append(layer.register_forward_hook(_h))
     return hs
@@ -74,8 +91,10 @@ def run_dense(args):
         from transformers import AutoModelForImageTextToText
         model = AutoModelForImageTextToText.from_pretrained(args.model, **kw)
     model.eval()
+    if args.rope_unit_scale:
+        _set_rope_unit_scale(model)
     layers = resolve_decoder_layers(model)
-    store, cur = {}, {"L": 2}
+    store, cur = {}, {"L": 2, "at": args.at}
     hs = _hook_layers(layers, store, cur)
     ids = tok(build_prompt(tok, args.ctx, args.depth), return_tensors="pt").input_ids[0].tolist()
     try:
@@ -86,9 +105,16 @@ def run_dense(args):
         for i in range(0, len(ids), args.chunk):
             ch = ids[i:i + args.chunk]
             cur["L"] = len(ch) if len(ch) > 1 else 2
-            model(input_ids=torch.tensor([ch], device="cuda"),
-                  position_ids=torch.arange(i, i + len(ch), device="cuda").unsqueeze(0),
-                  past_key_values=cache, use_cache=True, logits_to_keep=1)
+            out = model(input_ids=torch.tensor([ch], device="cuda"),
+                        position_ids=torch.arange(i, i + len(ch), device="cuda").unsqueeze(0),
+                        past_key_values=cache, use_cache=True, logits_to_keep=1)
+        if args.at == "decode":
+            # One greedy decode step, the same token DKV's own decode feeds.
+            cur["L"] = 1
+            t1 = int(out.logits[0, -1].argmax())
+            model(input_ids=torch.tensor([[t1]], device="cuda"),
+                  position_ids=torch.tensor([[len(ids)]], device="cuda"),
+                  past_key_values=cache, use_cache=True)
     for h in hs:
         h.remove()
     torch.save({"layers": store, "n_tok": len(ids), "patched": []}, _out(args, "dense"))
@@ -109,6 +135,8 @@ def run_dkv(args):
 
     w = DKVHFWrapper(model_id=args.model, config={"quantization": "nf4", "preset": "mid"})
     w.ensure_loaded()
+    if args.rope_unit_scale:
+        _set_rope_unit_scale(w.model)
     if args.dkv_chunk:
         # One chunk = no prior-chunk history path; splits a defect between the
         # within-chunk attention and the attend-earlier-chunks path.
@@ -123,7 +151,7 @@ def run_dkv(args):
         del a._original_forward
     patched = [i for i, l in enumerate(layers)
                if hasattr(getattr(l, "self_attn", None), "_original_forward")]
-    store, cur, calls = {}, {"L": 0}, []
+    store, cur, calls = {}, {"L": 0, "at": args.at}, []
 
     def _pre(_m, _a, kw):
         ii = kw.get("input_ids")
@@ -185,6 +213,11 @@ def main():
     ap.add_argument("--sdpa-backend", default="",
                     choices=["", "math", "efficient", "flash", "cudnn"],
                     help="dense only: allow a single torch SDPA backend")
+    ap.add_argument("--at", default="prefill", choices=["prefill", "decode"],
+                    help="last prefill position, or the first decode step (the "
+                         "first one that reads the COMPRESSED store)")
+    ap.add_argument("--rope-unit-scale", action="store_true",
+                    help="both arms: force rotary attention_scaling to 1.0")
     ap.add_argument("--tol", type=float, default=0.02)
     ap.add_argument("--out-dir", default=os.environ.get("TEMP", "."))
     args = ap.parse_args()
