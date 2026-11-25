@@ -103,3 +103,49 @@ def test_table_moments_follow_slot_validity():
     assert t.gather_moments(torch.tensor([3, 5]))[3].tolist() == [True, False]
     t.set([3], mn[:1], mn[:1] + 1)                # box without moments
     assert t.gather_moments(torch.tensor([3]))[3].tolist() == [False]
+
+
+# ── 2026-11-25: residual router is the default floor; the box router is opt-in ──
+
+def test_box_router_off_but_boxes_recorded_by_default(monkeypatch):
+    from native_core.srl import key_box as kb
+    for k in ("DKV_ROUTE_BOX", "DKV_ROUTE_ADAPTIVE"):
+        monkeypatch.delenv(k, raising=False)
+    assert not kb.box_routing_enabled()
+    assert kb.boxes_recorded()                    # adaptive needs the moments
+    monkeypatch.setenv("DKV_ROUTE_ADAPTIVE", "0")
+    assert not kb.boxes_recorded()
+    monkeypatch.setenv("DKV_ROUTE_BOX", "1")
+    assert kb.box_routing_enabled() and kb.boxes_recorded()
+
+
+def _table(K):
+    mn, mx, mu, var, logn = _stats(K)
+    t = KeyBoxTable(torch.device("cpu"))
+    t.set(list(range(K.shape[0])), mn, mx, (mu, var, logn))
+    return t
+
+
+def test_adaptive_select_keeps_the_callers_floor(monkeypatch):
+    """The floor is the CALLER's top-k (here a residual-router score), not the box."""
+    from native_core.srl import query_router as qr
+    for k in ("DKV_TOPK_BLOCKS", "DKV_ROUTE_ADAPTIVE", "DKV_ROUTE_ADAPTIVE_MIN_BLOCKS"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(qr, "_ROUTE_TOPP", 0.0)
+    N, k = 40, 4
+    K = _blocks(N=N)
+    t = _table(K)
+    Q = torch.randn(4, 1, 16)
+    rel = torch.zeros(N)
+    floor = [5, 17, 29, 33]
+    rel[floor] = 10.0                                 # the caller's choice
+    sel = qr._adaptive_select(Q, t, torch.arange(N), rel, k, N, None, 0.25)
+    assert sel is not None
+    assert set(floor) <= set(sel.tolist())
+    assert len(set(sel.tolist())) == sel.numel() >= k
+    # Not enough candidates, an explicit K, or no table: the fixed top-k applies.
+    assert qr._adaptive_select(Q, t, torch.arange(N), rel, k, 2 * k, None, 0.25) is None
+    assert qr._adaptive_select(Q, t, torch.arange(N), rel, k, N, "16", 0.25) is None
+    assert qr._adaptive_select(Q, None, torch.arange(N), rel, k, N, None, 0.25) is None
+    monkeypatch.setenv("DKV_ROUTE_ADAPTIVE", "0")
+    assert qr._adaptive_select(Q, t, torch.arange(N), rel, k, N, None, 0.25) is None

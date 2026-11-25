@@ -32,7 +32,7 @@ def test_hybrid_layout_counts_attention_layers_only():
     nb = [31 if l % 4 == 3 else 0 for l in range(L)]     # 8 attention layers
     r = dkv_kv_bytes(_mgr(nb, 100, L), seq, "s")
     kv_tok = 4 * 256 * 2 * 2
-    assert r["kv_layers"] == 8 and r["kv_acct"] == 2
+    assert r["kv_layers"] == 8 and r["kv_acct"] == 3     # v3 since 0545a0a9
     assert abs(r["kv_dense_equiv_gb"] - 8 * seq * kv_tok / 1e9) < 1e-9
     assert r["blocks_layer0"] == 31                      # first KV layer, not layer 0
 

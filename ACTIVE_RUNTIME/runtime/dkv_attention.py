@@ -1816,7 +1816,16 @@ def _prefill_block_key_boxes(blocks, device, rope=None):
         # compression (native_core/srl/key_box.py) needs no residual gather: that
         # box covers every key, not just the residual rows. Post-RoPE is the
         # frame this function returns in both pool conventions.
-        _xb = getattr(b, "_exact_key_box", None) if probe[0] == "cmp" else None
+        # Only under the box router (DKV_ROUTE_BOX=1): the boxes are also recorded
+        # for the adaptive block count, and the default prefill keeps its
+        # anchor + residual box.
+        try:
+            from native_core.srl.key_box import box_routing_enabled as _kb_on
+            _kb_prefill = _kb_on()
+        except Exception:                                          # noqa: BLE001
+            _kb_prefill = False
+        _xb = (getattr(b, "_exact_key_box", None)
+               if probe[0] == "cmp" and _kb_prefill else None)
         if _xb is not None:
             _xdt = b.anchor_kv.dtype            # stacked with the other boxes below
             mins[i] = _xb[0].to(device=device, dtype=_xdt)

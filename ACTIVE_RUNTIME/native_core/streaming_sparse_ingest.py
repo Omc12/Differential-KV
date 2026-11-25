@@ -637,26 +637,110 @@ def _elastic_room() -> bool:
         return False
 
 
-def _elastic_exact_tokens() -> int:
-    """DKV_STREAM_EXACT_TOKENS: newest history held exact during prefill (8192).
+def _elastic_exact_gb() -> float:
+    """DKV_STREAM_EXACT_GB: a fixed exact-history budget in GB (opt-in).
 
-    8192, not more: exact KV costs ~164 KB/token on granite-4.2-8b (40 attention
-    layers), so 16384 would hold ~2.7 GB through prefill -- enough to push the
-    131k granite point into the memory guard (diag_store_memory.py, 2026-11-24).
+    0 (or unset) means "no fixed budget". Set it for output that is identical on
+    every card (reproducible benchmarks); the default instead reads the budget
+    from the card once at load (_auto_exact_bytes).
     """
     try:
-        return max(0, int(os.environ.get("DKV_STREAM_EXACT_TOKENS", "8192")))
+        return max(0.0, float(os.environ.get("DKV_STREAM_EXACT_GB", "0")))
     except ValueError:
-        return 8192
+        return 0.0
 
 
-def _elastic_due(blocks, total_seq_len) -> int:
-    """How many of `blocks` (oldest first) end before the exact-token window.
+_AUTO_EXACT_BYTES = None
+
+
+def record_exact_budget_at_load() -> int:
+    """Fix the card-derived exact-history budget, once, right after model load.
+
+    budget = 94% of the card - memory allocated now (the weights) -
+    DKV_STREAM_ELASTIC_RESERVE_GB (3.5, the headroom the memory policy used for
+    compression transients and the chunk's attention). Read ONCE, so the window
+    no longer moves with co-resident load or with other sessions' KV the way the
+    per-chunk memory policy did; it still differs between card sizes (a bigger
+    card holds more history exact). The memory guard still forces earlier
+    compression if the store and buffers later leave less room than this.
+    """
+    global _AUTO_EXACT_BYTES
+    try:
+        import torch as _t
+        if not _t.cuda.is_available():
+            _AUTO_EXACT_BYTES = 0
+            return 0
+        total = _t.cuda.get_device_properties(_t.cuda.current_device()).total_memory
+        reserve = float(os.environ.get("DKV_STREAM_ELASTIC_RESERVE_GB", "3.5")) * 1e9
+        _AUTO_EXACT_BYTES = int(max(0.0, 0.94 * total - _t.cuda.memory_allocated() - reserve))
+    except Exception:                                            # noqa: BLE001
+        _AUTO_EXACT_BYTES = 0
+    if os.environ.get("DKV_DBG_ELASTIC") == "1":
+        print(f"[ELASTIC] card-derived exact budget {_AUTO_EXACT_BYTES / 1e9:.2f} GB", flush=True)
+    return _AUTO_EXACT_BYTES
+
+
+def _auto_exact_bytes() -> int:
+    """The load-time budget; measured now if no loader recorded it."""
+    if _AUTO_EXACT_BYTES is None:
+        return record_exact_budget_at_load()
+    return _AUTO_EXACT_BYTES
+
+
+def _elastic_exact_tokens(bytes_per_token: int = 0, auto: bool = False) -> int:
+    """Newest history held exact during prefill, in tokens.
+
+    In order: DKV_STREAM_EXACT_TOKENS when set; DKV_STREAM_EXACT_GB divided by
+    the model's exact KV bytes per token; with `auto` (the default policy) the
+    card-derived budget divided by the same. Bytes per token come from the live
+    blocks (_exact_bytes_per_token), so no model needs its own setting.
+    Fallback 8192 tokens (the fixed-token policy's old default).
+    """
+    raw = os.environ.get("DKV_STREAM_EXACT_TOKENS")
+    if raw is not None and raw.strip() != "":
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return 8192
+    gb = _elastic_exact_gb()
+    if gb > 0 and bytes_per_token > 0:
+        return int(gb * 1e9 // bytes_per_token)
+    if auto and bytes_per_token > 0:
+        return int(_auto_exact_bytes() // bytes_per_token)
+    return 8192
+
+
+def _exact_bytes_per_token(layers) -> int:
+    """Exact K+V bytes one token costs across the layers that hold blocks.
+
+    `layers` is a session's {layer_idx: [blocks]}; linear-attention layers of a
+    hybrid model never get blocks and are not counted. 0 when nothing is known
+    yet (the caller then falls back to the token budget).
+    """
+    per_layer, n = 0, 0
+    for blocks in layers.values():
+        if not blocks:
+            continue
+        n += 1
+        if per_layer == 0:
+            for b in blocks:
+                k = getattr(b, "active_k", None)
+                if k is not None and k.dim() == 4:
+                    per_layer = 2 * k.shape[1] * k.shape[3] * k.element_size()
+                    break
+    return per_layer * n
+
+
+def _elastic_due(blocks, total_seq_len, window=None) -> int:
+    """How many of `blocks` (oldest first) end before the exact window.
 
     Pure in token positions: a block is due when its last token is older than
-    the newest DKV_STREAM_EXACT_TOKENS tokens. Nothing here reads the device.
+    the newest `window` tokens (default _elastic_exact_tokens()). Nothing here
+    reads the device.
     """
-    cutoff = int(total_seq_len) - _elastic_exact_tokens()
+    if window is None:
+        window = _elastic_exact_tokens()
+    cutoff = int(total_seq_len) - int(window)
     n = 0
     for b in blocks:
         if int(b.anchor_idx) + int(b.token_count()) <= cutoff:
@@ -675,7 +759,7 @@ def _warn_elastic_guard(total_seq_len) -> None:
         return
     _ELASTIC_GUARD_WARNED = True
     print(f"[DKV] elastic memory guard compressed early at {total_seq_len} tokens: "
-          f"DKV_STREAM_EXACT_TOKENS={_elastic_exact_tokens()} does not fit this "
+          f"the exact-history budget (DKV_STREAM_EXACT_TOKENS / _GB) does not fit this "
           f"card, so output now depends on free VRAM. Lower the budget for "
           f"card-independent results.", flush=True)
 
@@ -2031,11 +2115,12 @@ class StreamingSparseIngestManager:
     def _elastic_hold(self, session_id, layer_idx, blocks_to_compress, total_seq_len):
         """ELASTIC WINDOW (DKV_STREAM_ELASTIC, default on).
 
-        Default policy (DKV_STREAM_ELASTIC_POLICY=tokens): history stays exact
-        while it is among the newest DKV_STREAM_EXACT_TOKENS tokens; older
-        eligible blocks are compressed, at most DKV_STREAM_ELASTIC_BATCH per
-        layer per chunk. Device memory only ever forces EARLIER compression
-        (and warns once).
+        Default policy (DKV_STREAM_ELASTIC_POLICY=auto): history stays exact
+        while it is among the newest tokens that fit the card-derived budget
+        (record_exact_budget_at_load); older eligible blocks are compressed, at
+        most DKV_STREAM_ELASTIC_BATCH per layer per chunk. =tokens uses a fixed
+        budget instead (DKV_STREAM_EXACT_TOKENS, or DKV_STREAM_EXACT_GB). Device
+        memory only ever forces EARLIER compression (the fixed policy warns once).
 
         Legacy policy (=memory), described below. Compress only as far as
         memory forces: while allocated memory plus a
@@ -2061,24 +2146,36 @@ class StreamingSparseIngestManager:
             return blocks_to_compress
         # blocks_to_compress is in block order, i.e. OLDEST first.
         batch = max(1, int(os.environ.get("DKV_STREAM_ELASTIC_BATCH", "4")))
-        policy = os.environ.get("DKV_STREAM_ELASTIC_POLICY", "tokens").strip().lower()
+        policy = os.environ.get("DKV_STREAM_ELASTIC_POLICY", "auto").strip().lower()
         if policy == "memory":
-            # Legacy: hold exact while the card has room. Output then depends on
-            # the card and on whatever else is resident -- opt-in only.
+            # Legacy: hold exact while the card has room, re-read every chunk.
+            # Output then depends on whatever else is resident -- opt-in only.
             n_now = 0 if _elastic_room() else batch
         else:
-            # TOKENS (default since 2026-11-24): history older than the newest
-            # DKV_STREAM_EXACT_TOKENS tokens is due for compression, wherever it
-            # runs. The same prompt compresses the same blocks on a 12 GB card
-            # and an 80 GB one, and a batched request's store no longer depends
-            # on its neighbours.
-            n_now = min(_elastic_due(blocks_to_compress, total_seq_len), batch)
+            # AUTO (default since 2026-11-25): the newest history that fits the
+            # budget read from the card once at load stays exact; nothing to set,
+            # any model (bytes per token come from the live blocks). On a 12.9 GB
+            # card it holds a whole 131k Qwen3.5-4B prompt, which V12 measured
+            # +7 RULER points and ~35% faster than the 8192-token window.
+            # TOKENS (default 2026-11-24..25, now opt-in): a fixed budget,
+            # DKV_STREAM_EXACT_TOKENS or DKV_STREAM_EXACT_GB, so the same prompt
+            # compresses the same blocks on any card -- for reproducible runs.
+            auto = policy != "tokens"
+            bpt = 0
+            if auto or _elastic_exact_gb() > 0:
+                bpt = _exact_bytes_per_token(
+                    getattr(self, "session_blocks", {}).get(session_id, {}))
+            window = _elastic_exact_tokens(bpt, auto=auto)
+            n_now = min(_elastic_due(blocks_to_compress, total_seq_len, window), batch)
+            if os.environ.get("DKV_DBG_ELASTIC") == "1":
+                print(f"[ELASTIC] window={window} bytes/token={bpt}", flush=True)
             if n_now < batch and not _elastic_room():
-                # Memory guard: compressing MORE is the only direction it moves,
-                # and it means the budget is too large for this card. Say so,
-                # since it reintroduces the card dependence this policy removes.
+                # Memory guard: compressing MORE is the only direction it moves.
+                # Under the fixed policy it means the budget is too large for
+                # this card; say so, since it brings back card dependence.
                 n_now = batch
-                _warn_elastic_guard(total_seq_len)
+                if not auto:
+                    _warn_elastic_guard(total_seq_len)
         if os.environ.get("DKV_DBG_ELASTIC") == "1":
             import torch as _t
             print(f"[ELASTIC] seq={total_seq_len} layer={layer_idx} "

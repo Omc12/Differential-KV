@@ -1012,6 +1012,52 @@ def select_by_mass(relevance, topp, k_min, k_floor):
     return pi[:k]
 
 
+def _adaptive_select(Q, kbt, slots_long, relevance, k_eff, N, topk_env, scale):
+    """GROW-ONLY ADAPTIVE BLOCK COUNT (DKV_ROUTE_ADAPTIVE, default on).
+
+    The active router's own top-k_eff (`relevance`, after edge propagation) is
+    always routed; blocks are then added by an estimate of the softmax mass each
+    would receive, from the key moments recorded at compression (key_box.py),
+    until the routed set holds DKV_ROUTE_ADAPTIVE_P of it, up to
+    DKV_ROUTE_ADAPTIVE_KMAX. Returns positions into the candidates, or None when
+    the fixed top-k applies: no moments recorded, DKV_TOPK_BLOCKS set, top-p on,
+    or N <= DKV_ROUTE_ADAPTIVE_MIN_BLOCKS (default 2 k_eff -- at 32k, 31 blocks,
+    growth measured no gain in real decode: decode-step KL 0.0041 fixed vs 0.0052
+    grown to 17.8 blocks; at 64k it covers 0.92 of the attention mass vs 0.79).
+
+    Router-agnostic on purpose. The floor came from the key-box router at first,
+    and at 131k that router lost niah items the residual router answers (its
+    bound over ~1k-token blocks is loose, while the residual rows hold the rare
+    tokens exactly), so the residual router is the floor by default now.
+    """
+    if kbt is None or topk_env not in (None, "") or _ROUTE_TOPP > 0.0:
+        return None
+    try:
+        from native_core.srl.key_box import (
+            adaptive_routing_enabled, estimate_block_lse, select_adaptive)
+        if not adaptive_routing_enabled():
+            return None
+        try:
+            ada_min = int(os.environ.get("DKV_ROUTE_ADAPTIVE_MIN_BLOCKS", str(2 * k_eff)))
+        except ValueError:
+            ada_min = 2 * k_eff
+        if N <= ada_min:
+            return None
+        mom = kbt.gather_moments(slots_long)
+        if mom is None:
+            return None
+        bmn, bmx, bvalid = kbt.gather(slots_long)
+        mu, var, logn, mok = mom
+        Q3 = Q if Q.dim() == 3 else Q.unsqueeze(1)
+        est = estimate_block_lse(Q3, bmn, bmx, mu, var, logn, scale)
+        sel = select_adaptive(est, relevance, mok & bvalid, k_eff)
+    except Exception:                                            # noqa: BLE001
+        return None
+    if _ROUTE_TOPP_STATS:
+        _ROUTE_TOPP_K_LOG.append(int(sel.numel()))
+    return sel
+
+
 def route_blocks_relevance(
     Q:              torch.Tensor,   # [H, D] current ROTATED query (all query heads)
     pool,                           # NativeBlockPool
@@ -1160,7 +1206,7 @@ def route_blocks_relevance(
 
     slots_long = block_indices.long()
 
-    # ── ROUTER-OWNED KEY BOXES (default; DKV_ROUTE_BOX=0 restores the below) ──
+    # ── ROUTER-OWNED KEY BOXES (opt-in, DKV_ROUTE_BOX=1; off since 2026-11-25) ──
     # Score each block by an upper bound over its EXACT post-RoPE keys, recorded
     # at compression (native_core/srl/key_box.py), instead of by the anchor and
     # residual rows the store kept. Decouples routing from the store and reads
@@ -1197,33 +1243,10 @@ def route_blocks_relevance(
                 _ROUTE_DIST_HOOK(relevance, layer_idx)
             except Exception:                                    # noqa: BLE001
                 pass
-        # ADAPTIVE BLOCK COUNT (DKV_ROUTE_ADAPTIVE, default on), GROW-ONLY: the
-        # fixed router's top-k_eff (this same propagated box score) is always
-        # routed; blocks are then added by an estimate of the softmax mass each
-        # would receive until the set holds DKV_ROUTE_ADAPTIVE_P of it, up to
-        # DKV_ROUTE_ADAPTIVE_KMAX. See key_box.py.
-        try:
-            from native_core.srl.key_box import (
-                adaptive_routing_enabled, estimate_block_lse, select_adaptive)
-            _mom = _kbt.gather_moments(slots_long) if adaptive_routing_enabled() else None
-        except Exception:                                        # noqa: BLE001
-            _mom = None
-        # Only where the fixed K covers less than half the candidates: at 32k
-        # (31 blocks) growth measured no gain in real decode (logit fidelity,
-        # decode-step KL 0.0041 fixed vs 0.0052 grown to 17.8 blocks), while at
-        # 64k (59 blocks) it covers 0.92 of the attention mass against 0.79.
-        try:
-            _ada_min = int(os.environ.get("DKV_ROUTE_ADAPTIVE_MIN_BLOCKS", str(2 * k_eff)))
-        except ValueError:
-            _ada_min = 2 * k_eff
-        if (_mom is not None and _topk_env in (None, "") and N > _ada_min
-                and _ROUTE_TOPP <= 0.0):
-            _mu, _var, _logn, _mok = _mom
-            _ok = _mok & _bvalid
-            _est = estimate_block_lse(Q, _bmn, _bmx, _mu, _var, _logn, scale)
-            sel = select_adaptive(_est, relevance, _ok, k_eff)
-            if _ROUTE_TOPP_STATS:
-                _ROUTE_TOPP_K_LOG.append(int(sel.numel()))
+        # ADAPTIVE BLOCK COUNT (DKV_ROUTE_ADAPTIVE): see _adaptive_select.
+        sel = _adaptive_select(Q, _kbt, slots_long, relevance, k_eff, N,
+                               _topk_env, scale)
+        if sel is not None:
             return block_indices[sel].to(torch.int32)
         if _ROUTE_TOPP > 0.0:
             # softmax(+inf) is NaN; a box-less slot only needs to rank first.
@@ -1596,7 +1619,18 @@ def route_blocks_relevance(
         except Exception:                                        # noqa: BLE001
             pass
 
-    if _ROUTE_TOPP > 0.0:
+    # ADAPTIVE BLOCK COUNT on the residual router (the default since
+    # 2026-11-25): its top-k_eff is the floor, the recorded key moments decide
+    # what is added. See _adaptive_select.
+    try:
+        from native_core.srl.key_box import table_for as _kb_table_for
+        _kbt_r = _kb_table_for(pool)
+    except Exception:                                            # noqa: BLE001
+        _kbt_r = None
+    sel = _adaptive_select(Q, _kbt_r, slots_long, relevance, k_eff, N, _topk_env, scale)
+    if sel is not None:
+        pass
+    elif _ROUTE_TOPP > 0.0:
         sel = select_by_mass(relevance, _ROUTE_TOPP, _ROUTE_TOPP_KMIN, k_eff)
     else:
         sel = torch.topk(relevance, k=k_eff).indices

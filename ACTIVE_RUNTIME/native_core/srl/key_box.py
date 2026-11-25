@@ -33,7 +33,9 @@ SLOTS
     path therefore has no box; the router treats it as always relevant (+inf),
     which can only attend more, never drop a block.
 
-    DKV_ROUTE_BOX=0 restores the residual-key router.
+    DKV_ROUTE_BOX=1 routes by the box (off by default since 2026-11-25; see
+    box_routing_enabled). The moments recorded with it drive the adaptive
+    block count on either router.
 """
 
 from __future__ import annotations
@@ -46,7 +48,23 @@ import torch
 
 
 def box_routing_enabled() -> bool:
-    return os.environ.get("DKV_ROUTE_BOX", "1").strip() != "0"
+    """DKV_ROUTE_BOX=1: rank blocks by the key box (Quest bound). OFF by default.
+
+    On 2026-11-25 it was found to be the cause of a 22-point RULER drop at 131k
+    on Qwen3.5-4B (V11 fixed-K 48.5 vs V10 70.5, same items and settings): with
+    the box off, the current code answered the niah_multiquery items V10 got
+    right (2/2) and with it on it did not (0/2); the boxes themselves match the
+    true post-RoPE boxes (benchmarks/diag_key_box_frame.py). Its 32k win was in
+    decode-step KL on natural text, which a loose bound over ~1k-token blocks
+    serves; retrieval needs the rare tokens the residual rows hold exactly.
+    """
+    return os.environ.get("DKV_ROUTE_BOX", "0").strip() == "1"
+
+
+def boxes_recorded() -> bool:
+    """Record key boxes and moments at compression: needed by the box router and
+    by the adaptive block count (which runs on either router)."""
+    return box_routing_enabled() or adaptive_routing_enabled()
 
 
 def adaptive_routing_enabled() -> bool:

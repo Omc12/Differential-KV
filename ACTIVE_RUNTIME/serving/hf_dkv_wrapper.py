@@ -1025,6 +1025,15 @@ class PyTorchDKVHFWrapper:
         except Exception:
             pass
 
+        # Card-derived exact-history budget for the elastic prefill window, read
+        # once now that the weights and pool are resident (streaming_sparse_ingest
+        # .record_exact_budget_at_load): later sessions do not move it.
+        try:
+            from native_core.streaming_sparse_ingest import record_exact_budget_at_load
+            record_exact_budget_at_load()
+        except Exception:
+            pass
+
         use_compile = "1" if self.manager.config.torch_compile else "0"
         if _is_apple_silicon():
             if use_compile == "auto":

@@ -1406,8 +1406,8 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     # write below; a failure here only means the router falls back.
     _key_boxes = None
     try:
-        from native_core.srl.key_box import box_routing_enabled, exact_key_boxes
-        if box_routing_enabled():
+        from native_core.srl.key_box import boxes_recorded, exact_key_boxes
+        if boxes_recorded():
             _key_boxes = exact_key_boxes(blocks_list, manager)
     except Exception as _kbe:                                    # noqa: BLE001
         _key_boxes = None

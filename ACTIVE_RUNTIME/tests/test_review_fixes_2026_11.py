@@ -58,7 +58,7 @@ def test_elastic_hold_is_device_independent(monkeypatch):
     monkeypatch.setenv("DKV_STREAM_ELASTIC", "1")
     monkeypatch.setenv("DKV_STREAM_EXACT_TOKENS", "4096")
     monkeypatch.setenv("DKV_STREAM_ELASTIC_BATCH", "4")
-    monkeypatch.delenv("DKV_STREAM_ELASTIC_POLICY", raising=False)
+    monkeypatch.setenv("DKV_STREAM_ELASTIC_POLICY", "tokens")
 
     class _Mgr:
         def update_metadata_state(self, *a):
@@ -78,6 +78,61 @@ def test_elastic_hold_is_device_independent(monkeypatch):
     assert run(5120) == [0]                                   # cutoff 1024
     monkeypatch.setenv("DKV_STREAM_ELASTIC_POLICY", "memory")
     assert run(10240) == []                                   # legacy: room -> hold
+
+
+def test_elastic_byte_budget_scales_with_the_model(monkeypatch):
+    """DKV_STREAM_EXACT_GB turns into tokens through the model's exact KV size."""
+    monkeypatch.delenv("DKV_STREAM_EXACT_TOKENS", raising=False)
+    monkeypatch.setenv("DKV_STREAM_EXACT_GB", "2")
+
+    def blk(h, d):
+        return types.SimpleNamespace(active_k=torch.zeros(1, h, 4, d, dtype=torch.bfloat16))
+    # Qwen3.5-4B-like: 8 attended layers of 32, 4 KV heads, head_dim 256.
+    qwen = {i: ([blk(4, 256)] if i % 4 == 3 else []) for i in range(32)}
+    # granite-like: 40 attended layers, 8 KV heads, head_dim 128.
+    gran = {i: [blk(8, 128)] for i in range(40)}
+    assert ssi._exact_bytes_per_token(qwen) == 32768
+    assert ssi._exact_bytes_per_token(gran) == 163840
+    assert ssi._elastic_exact_tokens(32768) == 61035
+    assert ssi._elastic_exact_tokens(163840) == 12207
+    assert ssi._elastic_exact_tokens(0) == 8192               # size unknown yet
+    monkeypatch.setenv("DKV_STREAM_EXACT_TOKENS", "4096")     # explicit tokens win
+    assert ssi._elastic_exact_tokens(32768) == 4096
+    monkeypatch.delenv("DKV_STREAM_EXACT_TOKENS")
+    monkeypatch.setenv("DKV_STREAM_EXACT_GB", "0")
+    assert ssi._elastic_exact_tokens(32768) == 8192
+
+
+def test_auto_policy_reads_the_card_once_and_needs_no_setting(monkeypatch):
+    """Default policy: budget fixed at load, converted per model from live blocks."""
+    for k in ("DKV_STREAM_ELASTIC_POLICY", "DKV_STREAM_EXACT_TOKENS", "DKV_STREAM_EXACT_GB"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("DKV_STREAM_ELASTIC", "1")
+    monkeypatch.setenv("DKV_STREAM_ELASTIC_BATCH", "4")
+    monkeypatch.setattr(ssi, "_AUTO_EXACT_BYTES", 4 * 32768 * 1024)   # 4096 Qwen tokens
+    monkeypatch.setattr(ssi, "_elastic_room", lambda: True)
+    assert ssi._elastic_exact_tokens(32768, auto=True) == 4096
+    assert ssi._elastic_exact_tokens(163840, auto=True) == 819   # same bytes, bigger KV
+
+    def blocks():
+        return [types.SimpleNamespace(anchor_idx=i * 1024, state="SUBMITTED",
+                                      token_count=lambda: 1024,
+                                      active_k=torch.zeros(1, 4, 2, 256, dtype=torch.bfloat16))
+                for i in range(10)]
+
+    class _Mgr:
+        def __init__(self):
+            self.session_blocks = {"s": {i: (blocks() if i % 4 == 3 else []) for i in range(32)}}
+
+        def update_metadata_state(self, *a):
+            pass
+
+    m = _Mgr()
+    out = ssi.StreamingSparseIngestManager._elastic_hold(m, "s", 3, m.session_blocks["s"][3], 10240)
+    assert [b.anchor_idx for b in out] == [0, 1024, 2048, 3072]   # 6 due, batch 4
+    monkeypatch.setattr(ssi, "_AUTO_EXACT_BYTES", 10 ** 12)          # roomy card: hold all
+    out = ssi.StreamingSparseIngestManager._elastic_hold(m, "s", 3, m.session_blocks["s"][3], 10240)
+    assert out == []
 
 
 # ── key boxes ────────────────────────────────────────────────────────────────

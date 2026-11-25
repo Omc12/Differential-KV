@@ -10,6 +10,115 @@ Tiers: **T1** offline screen on captured KV (`benchmarks/tier1_screen.py`),
 **T3** batch confirmation. Guardrails a change must not trade away: store bytes,
 reach (peak memory), decode speed, query-agnosticism, exact prefill = dense.
 
+## The key-box router cost 22 points at 131k; residual router restored (2026-11-25)
+
+V11 (below) measured the adaptive block count against fixed K on identical
+code, and both sat far under V10 on the same 65 items. Paired against V10's
+question-free arm (`V10P_..._dkv_mid_noquery_131k`, the like-for-like store,
+since 6db9743a made residual rows question-free):
+
+| V11 arm (same 65 items) | score | vs V10 noquery (70.5) |
+|---|---|---|
+| fixed K, key-box router | 48.5 | -22.00 [-31.38, -13.38] |
+| adaptive K, key-box router | 57.3 | -13.21 [-20.64, -6.51] |
+
+The run metadata differ only in the code revision. The wrong answers are
+confident and garbled (`ugly-map: 100`, repeated or truncated numbers), not
+refusals. Bisect on the two `niah_multiquery` items at 131k (V10 answers both),
+all arms on the memory window so wall time matches V10:
+
+| arm | answers | wall/item |
+|---|---|---|
+| V10-era code (6fb7e184), instrument check | 2/2 | 96-99 s |
+| current code, memory window, key-box router | 0/2 | 99 s |
+| current code, every 2026-11-24 decode switch off | 0/2 | 98 s |
+| current code, `DKV_ROUTE_BOX=0` | **2/2** | 98 s |
+
+The boxes are not mis-framed: `benchmarks/diag_key_box_frame.py` compares each
+recorded box with the true post-RoPE box from a plain forward of the same
+prompt (16k, streaming forced) and they agree to 0.2-0.7% of the box span on all
+8 attention layers (unrotated keys would be off by 2-5%). The box is the right
+bound and the wrong ranker: a per-channel min/max over ~1k-token blocks is
+loose, which still covers most of the attention MASS (what the offline screen
+and the 32k decode-step KL measured, on natural text) but loses the rare
+needle tokens that the residual rows score exactly.
+
+The token-budget elastic window is not the quality cause (the memory window
+alone did not fix the bisect items), but it is why V11 took 137 s per item
+against V10's 95 s: the newest 8,192 tokens exact means later prefill chunks
+attend compressed history through the router. V12 p1 measures its quality.
+
+| Change | Switch | Default | Verification | Notes |
+|---|---|---|---|---|
+| Residual router is the decode and prefill router again | `DKV_ROUTE_BOX=1` opts into the key box | **off** (was on since 6db9743a) | Bisect above; V12 | The prefill router's exact-box shortcut for compressed blocks is gated on the same switch, so the default prefill is V10's again |
+| Adaptive block count runs on either router | `DKV_ROUTE_ADAPTIVE` as before | **on** past 32 candidates | Unit tests (the caller's top-k is the floor; no table / explicit K / small N / switch off fall back); V12 | `query_router._adaptive_select`: the residual router's top-16 (after edge propagation) is always routed and the key moments add blocks by estimated mass. Key boxes and moments are recorded whenever either needs them (`key_box.boxes_recorded`) |
+| `benchmarks/diag_key_box_frame.py` | - | - | Ran (above) | Recorded box vs true post-RoPE box per block and layer |
+
+**V12** (`benchmarks/campaigns/run_v12_router.cmd`, `run_v12b_fixedk.cmd`,
+`run_v12c_auto.cmd`; Qwen3.5-4B, RULER 131k with the answer prefix, paired
+bootstrap over shared items):
+
+| arm | items | score | paired against | difference | wall/item (median) | decode peak |
+|---|---|---|---|---|---|---|
+| p1 residual router + adaptive, memory window | 39 | 70.6 | V10 noquery | -0.38 [-10.51, +10.26] | 91 s | 8.33 GB |
+| p1 | 39 | | V11 adaptive (key box) | +14.87 [+5.64, +25.38] | | |
+| p3 p1 with `DKV_ROUTE_ADAPTIVE=0` (fixed K=16) | 39 | 71.0 | V10 noquery | +0.00 (identical answers) | 89 s | 8.20 GB |
+| p1 (adaptive) | 39 | | p3 (fixed K) | -0.38 [-10.51, +10.26] | +2 s | +0.13 GB |
+| p2 same, token window (8192, as shipped by 6db9743a) | 65 | 63.4 | p1 (shared 39) | -7.18 [-17.05, +0.64] | 141 s | 5.77 GB |
+| p2 | 65 | | V10 noquery | -7.05 [-13.77, -1.21] | | |
+| p2 | 65 | | V11 adaptive (key box) | +6.15 [+2.31, +10.77] | | |
+| p2 | 65 | | V11 fixed K (key box) | +14.95 [+6.41, +24.00] | | |
+| p4 p1 with no policy set (card-derived `auto`) | 39 | 64.9 | p1 (memory window) | -5.77 [-13.46, +0.00] | 92 s | 8.62 GB |
+| p4 | 39 | | p2 (token window, shared 39) | +1.41 [-3.85, +8.08] | | |
+
+**p4 is not a policy difference.** On this card the auto budget is 5.49 GB
+(12.88 x 0.94 - 3.12 resident - 3.5 reserve), a 167k-token window at Qwen3.5-4B's
+32 KB/token, so it holds the whole 131k prompt exact; a `DKV_DBG_ELASTIC=1`
+trace shows the only mid-prefill compression is the memory guard at ~125k
+(reserved 8.6 GB + 3.5 reserve reaching 94% of the card), which the memory
+policy shares. With adaptive off, auto and the memory window answered 5 of 6
+`niah_multikey_2` / `niah_multiquery` items identically (the sixth is wrong
+both ways). p4 differs from p1 on 3 items (2 multikey_2, 1 multiquery), the
+same fragile items adaptive vs fixed moved in p1 vs p3. **The adaptive path is
+not run-to-run deterministic:** the same config on `niah_multikey_2#0` answered
+`8143511` in p4 and `8143507` in the trace, while fixed K reproduced V10's
+answers exactly. Unresolved: the source (estimate ties, a reduction order, or
+the guard's dependence on reserved memory interacting with adaptive's extra
+buffers) is not found.
+
+**Granite reach under auto** (granite-4.2-8b, `niah_single_1` at 114,688, the
+longest generated granite length): budget 2.82 GB = a 17,241-token window at
+164 KB/token, set with nothing configured; answered correctly, decode peak
+10.46 GB, reserved at most 9.09 GB in prefill (under the 12.1 GB spill line),
+398 s.
+
+**Block size** (`colab/logit_fidelity.py`, Qwen3.5-4B nf4, 32k, 5 prompts;
+table in `paper/results/campaign/v12.log`): decode-step KL vs dense 0.00180 at
+1024 (default), 0.00037 at 512, 0.00035 at 256; top-1 5/5 everywhere. Not a
+clean block-size effect: at 32k the default has 32 blocks per layer, so the
+adaptive count does not engage (K=16, 16k tokens), while 512 and 256 engage it
+(mean K 26 and 41). No default change: n=5 at 32k, and a block-size change
+needs a 131k RULER pair (KMAX=64 blocks of 512 is half the tokens of 64 of 1024).
+
+The router fix holds under either window. The 8192-token window costs ~7
+points and ~50% wall time: every later prefill chunk attends compressed
+history through the router, and the question at the end of the prompt is
+encoded against it. Adaptive K chose mean 54.6 / median 60 blocks (p1) and
+54.1 / 60 (p2) of a 64 ceiling.
+
+p3 answers every item exactly as V10 did, so the current decode code (fast
+attend, incremental refresh) reproduces V10 at fixed K. On the residual router
+the adaptive block count measured no RULER effect at 131k: -0.38 [-10.51,
++10.26], moving single items both ways (multikey_2 +2 items, qa_1 / qa_2 / cwe
+-1 each) for ~2% wall and 0.13 GB. Its +8.79 in V11 was compensation for the
+key-box ranker. It stays on: it raises the routed share of attention mass
+(0.79 -> 0.92 at 64k) at that small cost, and no measured harm; a RULER gain
+from it is not shown.
+
+| Change | Switch | Default | Verification | Notes |
+|---|---|---|---|---|
+| Exact-history budget read from the card once at load | `DKV_STREAM_ELASTIC_POLICY=auto\|tokens\|memory`; fixed budgets `DKV_STREAM_EXACT_TOKENS` / `DKV_STREAM_EXACT_GB` | **auto** (was tokens, 8192) | Unit tests (budget converted per model from live blocks; fixed budgets still win; roomy card holds all); V12 p4 + trace (same decisions as the memory window on this card) | Plug-and-play: nothing to set for any model. Budget = 94% of the card - resident memory after load - 3.5 GB reserve, recorded once (`record_exact_budget_at_load`), so co-resident load and other sessions no longer move it (the memory policy re-read it every chunk). Bytes per token are read from the blocks, so one budget gives a 4B hybrid ~5x the tokens of granite. Output differs between card sizes; `tokens` stays for reproducible runs |
+
 ## Adaptive block count and a faster decode read (2026-11-24)
 
 Short tests only (unit tests, offline screens on captured KV, 32k logit
@@ -32,7 +141,7 @@ shapes (2 KV x 6 query heads, D=128, 3.5k window), RTX 4070 SUPER:
 |---|---|---|---|---|
 | Head-major remat entries + batched-matmul attend (`remat_cache.attend_fast`) | `DKV_FAST_ATTEND=0` restores SDPA | **on** | Output vs SDPA path: max diff 9.8e-4 (fp16 rounding), mean error vs an fp32 reference 1.04e-4 vs SDPA's 0.95e-4; 32k fidelity decode-step KL 0.00411 vs 0.00410; unit tests incl. padding garbage and a bf16 model over an fp16 pool (granite NF4, which the first version rejected) | Scores in fp32 per segment (KV head = batch, its query group = rows), one softmax, fp32 value accumulation; no K/V copy, no mask kernel. Deterministic run to run (cuBLAS bmm). Not used under CUDA-graph capture, dual-scale or the row trace |
 | Incremental refresh: the block arena (`sparse_decode/block_arena.py`) | `DKV_REMAT_ARENA=0` | **on** | Unit tests: reuses kept blocks, rebuilds only new ones, rebuilds a rewritten slot, masks departed blocks, grows, declines duplicates | Per-slot write epochs on the pool (bumped where key boxes are invalidated, and all on `reset`) so a recycled slot is never read as its old content. Any failure falls back to the full rebuild |
-| Grow-only adaptive block count (`srl/key_box.select_adaptive`) | `DKV_ROUTE_ADAPTIVE=0`; `_P` (0.80), `_KMAX` (64), `_MIN_BLOCKS` (2K = 32) | **on** past 32 candidate blocks | Offline (below); 32k logit fidelity (below); V11 at 131k | The fixed router's box top-16 (after edge propagation) is always routed; blocks are added by estimated mass until the routed set holds P of it. Estimate: per-block mean and per-channel variance of the exact post-RoPE keys, recorded with the key box, clipped to the two bounds every block satisfies. Off when `DKV_TOPK_BLOCKS` is set. Gated to >32 candidates because at 32k growth bought nothing in real decode |
+| Grow-only adaptive block count (`srl/key_box.select_adaptive`) | `DKV_ROUTE_ADAPTIVE=0`; `_P` (0.80), `_KMAX` (64), `_MIN_BLOCKS` (2K = 32) | **on** past 32 candidate blocks | Offline (below); 32k logit fidelity (below); V11 at 131k: +8.79 [+1.82, +16.26] | (Since 2026-11-25 the floor is the residual router's top-16; top section.) The fixed router's box top-16 (after edge propagation) is always routed; blocks are added by estimated mass until the routed set holds P of it. Estimate: per-block mean and per-channel variance of the exact post-RoPE keys, recorded with the key box, clipped to the two bounds every block satisfies. Off when `DKV_TOPK_BLOCKS` is set. Gated to >32 candidates because at 32k growth bought nothing in real decode |
 | Lazy routed-row RoPE tables | `DKV_LAZY_SLICED_ROPE=0` | **on** | granite 32k codes store: 0.336 GB -> 0 (below) | K x (1 + block) x D per layer (0.34 GB at granite 32k, growing with K) built only when a non-materialise kernel runs |
 | One shared rotated-window scratch instead of one per layer | `DKV_DENSE_ROT_PER_LAYER=1` | **on** | granite 32k codes store: 0.294 GB -> 0.007 (below) | The unrotated-pool remat path rotates the dense window into a buffer every step; per-layer buffers held a second copy of every layer's window (0.29 GB on granite) |
 | `benchmarks/route_adaptive_screen.py`, `colab/bench_k_ladder.py`, `colab/profile_decode_generate.py` | - | - | - | Offline routing screen on tier1 captures; in-process K ladder; generate()-loop profiler |
@@ -95,8 +204,20 @@ takes part of the room back by design (0.81 -> 0.94 GB, more layers kept), so
 the store's reach past 65k is checked directly in V11 p3.
 
 **V11** (`benchmarks/campaigns/run_v11_adaptive.cmd`): Qwen3.5-4B RULER at 131k,
-5 items per task, adaptive vs fixed K on identical code; granite codes store at
-65k. Results below when run.
+5 items per task (65), adaptive vs fixed K on identical code, both on the
+key-box router; granite codes store at 65k.
+
+- Adaptive vs fixed: **+8.79 [+1.82, +16.26]** (57.3 vs 48.5). Gains on
+  niah_multiquery +40, niah_multivalue +35, niah_single_2 +40, niah_single_3
+  +20; qa_1 -20, fwe -6.7. Mean routed blocks 53.2 (median 59, p90 64, cap 64)
+  out of ~120 candidates.
+- Cost: none measurable. Wall 137 s/item in both arms, peak 5.80 GB in both.
+- Both arms are far under V10 on the same items: the router regression in the
+  section above.
+- granite codes store at 65k: 3/3 correct, peak 11.17-11.32 GB (under the
+  12.1 GB line), wall 134-163 s against the low-rank store's 127-162 s on the
+  same items in V8 (no spill). The decode-buffer cuts give the codes store
+  granite 65k; 131k is not measured, so it is still not the default.
 
 
 ## Review fixes (2026-11-24, code-first after the MLSys desk rejection)
@@ -109,8 +230,8 @@ these changes cannot be resumed into.
 | Change | Switch | Default | Verification | Notes |
 |---|---|---|---|---|
 | Residual rows ordered without the question (no span pin, no 64-token prompt tail) | `DKV_RESIDUAL_QUERY=1` opts in; legacy `DKV_RESIDUAL_NO_QUERY` still honoured | **off** (was on) | V9/V6 already measured it: granite LongBench 12k -0.25 [-1.20, +0.89], RULER 4k-16k +0.61 [-0.92, +2.17]; Qwen3.5-4B RULER 131k +0.17 [-2.33, +2.67]. Unit test of the switch | A compressed block's rows were picked for the first question and never redone, so later questions read a cache shaped by someone else's. `residual_capture.residual_query_enabled` is the one reader |
-| Elastic window by token position, not free VRAM | `DKV_STREAM_ELASTIC_POLICY=tokens\|memory`, `DKV_STREAM_EXACT_TOKENS` (8192) | **tokens** (was memory) | Unit tests: same blocks compressed regardless of `_elastic_room`; legacy policy still holds | The same prompt compressed different blocks on a 12 GB card vs 80 GB, or under different co-resident load. Memory now only forces EARLIER compression, with a one-time warning that output has become card-dependent. Pool *capacity* is still sized from free VRAM; it only limits how many slots exist, not which blocks are compressed |
-| Router-owned key boxes at decode (Quest-style bound) | `DKV_ROUTE_BOX=0` restores the residual-key router | **on** | 32k logit fidelity, Qwen2.5-1.5B fp16, 5 prompts, self-check 0: decode-step KL box 0.00410, residual router 0.00510, all blocks 0.00579; prefill-step 0.00019 for all. Unit tests: bound never under-scores q.k; needle block ranks first; unboxed slots route first | Min/max of each block's EXACT post-RoPE keys per KV head, recorded by the GPU compressor before the store drops them (`native_core/srl/key_box.py`), invalidated on any pool write/free. Scoring reads 2 vectors per block instead of anchor + R residual rows, and no longer depends on which rows the store kept. The prefill router uses the same exact box for compressed blocks instead of residual rows. n=5 means "no regression", not a measured gain |
+| Elastic window by token position, not free VRAM | `DKV_STREAM_ELASTIC_POLICY=tokens\|memory`, `DKV_STREAM_EXACT_TOKENS` (8192) | ~~**tokens** (was memory)~~ **auto since 2026-11-25** (V12: 8192 tokens cost 7 RULER points at 131k) | Unit tests: same blocks compressed regardless of `_elastic_room`; legacy policy still holds | The same prompt compressed different blocks on a 12 GB card vs 80 GB, or under different co-resident load. Memory now only forces EARLIER compression, with a one-time warning that output has become card-dependent. Pool *capacity* is still sized from free VRAM; it only limits how many slots exist, not which blocks are compressed |
+| Router-owned key boxes at decode (Quest-style bound) | `DKV_ROUTE_BOX=0` restores the residual-key router | ~~on~~ **off since 2026-11-25** (-22 points at 131k, top section) | 32k logit fidelity, Qwen2.5-1.5B fp16, 5 prompts, self-check 0: decode-step KL box 0.00410, residual router 0.00510, all blocks 0.00579; prefill-step 0.00019 for all. Unit tests: bound never under-scores q.k; needle block ranks first; unboxed slots route first | Min/max of each block's EXACT post-RoPE keys per KV head, recorded by the GPU compressor before the store drops them (`native_core/srl/key_box.py`), invalidated on any pool write/free. Scoring reads 2 vectors per block instead of anchor + R residual rows, and no longer depends on which rows the store kept. The prefill router uses the same exact box for compressed blocks instead of residual rows. n=5 means "no regression", not a measured gain |
 | Logit-fidelity arm `routebox0` | - | - | - | A/B arm for the row above |
 | `benchmarks/diag_store_memory.py`: attributes allocated memory after a prefill to weights, pool fields, block tensors, decode workspace keys, module globals and unowned tensors (`--trace-shape` names the holder) | - | - | Ran on granite 32k, both stores (below) | Built for the codes-store spill |
 | Repo tidy: campaign `.cmd` drivers to `benchmarks/campaigns/`; root notes to `docs/`; 36 one-off scripts nothing references (5 MLX benchmarks, 8 July A/B scripts, 4 probes, 11 colab hunts/notebooks, 8 native tools) to `archive/one_off_scripts_2026/` | - | - | `git grep` finds no reference to any moved script outside archives; unit tests pass | Moves only, nothing deleted; `keep_awake.py`, `run_v4_campaign.py`, `collect_results.py` stay since they are run by hand |
