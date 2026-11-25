@@ -1,0 +1,665 @@
+﻿cmd.exe : [transformers] This model config has set a `rope_parameters['original_max_position_embeddings']` field, to 
+be used together with `max_position_embeddings` to determine a scaling factor. Please set the `factor` field of 
+`rope_parameters`with this ratio instead -- we recommend the use of this field over 
+`original_max_position_embeddings`, as it is compatible with most model architectures.
+At line:1 char:535
++ ... \v13c.log"; & cmd /c "`"$R\benchmarks\campaigns\run_v13d_phi4_bisect. ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([transformers] ... architectures.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[dense control] 4-bit weights (nf4), bfloat16 compute
+
+Loading weights:   0%|          | 0/194 [00:00<?, ?it/s]
+Loading weights:   1%|          | 1/194 [00:01<03:26,  1.07s/it]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   2%|▏         | 4/194 [00:01<00:46,  4.05it/s]
+Loading weights:   5%|▌         | 10/194 [00:01<00:17, 10.62it/s]
+Loading weights:   8%|▊         | 16/194 [00:01<00:10, 16.23it/s]
+Loading weights:  11%|█▏        | 22/194 [00:01<00:08, 20.82it/s]
+Loading weights:  14%|█▍        | 28/194 [00:01<00:06, 24.76it/s]
+Loading weights:  18%|█▊        | 34/194 [00:02<00:05, 27.66it/s]
+Loading weights:  21%|██        | 40/194 [00:02<00:05, 29.96it/s]
+Loading weights:  24%|██▎       | 46/194 [00:02<00:04, 31.44it/s]
+Loading weights:  27%|██▋       | 52/194 [00:02<00:04, 32.73it/s]
+Loading weights:  30%|██▉       | 58/194 [00:02<00:04, 32.35it/s]
+Loading weights:  33%|███▎      | 64/194 [00:02<00:03, 32.97it/s]
+Loading weights:  36%|███▌      | 70/194 [00:03<00:03, 33.84it/s]
+Loading weights:  39%|███▉      | 76/194 [00:03<00:03, 34.38it/s]
+Loading weights:  42%|████▏     | 82/194 [00:03<00:03, 34.37it/s]
+Loading weights:  45%|████▌     | 88/194 [00:03<00:03, 34.99it/s]
+Loading weights:  48%|████▊     | 94/194 [00:03<00:02, 35.24it/s]
+Loading weights:  52%|█████▏    | 100/194 [00:03<00:02, 35.40it/s]
+Loading weights:  55%|█████▍    | 106/194 [00:04<00:02, 35.51it/s]
+Loading weights:  58%|█████▊    | 112/194 [00:04<00:02, 35.51it/s]
+Loading weights:  61%|██████    | 118/194 [00:04<00:02, 35.39it/s]
+Loading weights:  64%|██████▍   | 124/194 [00:04<00:01, 35.77it/s]
+Loading weights:  67%|██████▋   | 130/194 [00:04<00:01, 34.95it/s]
+Loading weights:  70%|███████   | 136/194 [00:04<00:01, 34.35it/s]
+Loading weights:  73%|███████▎  | 142/194 [00:05<00:01, 34.63it/s]
+Loading weights:  76%|███████▋  | 148/194 [00:05<00:01, 35.34it/s]
+Loading weights:  79%|███████▉  | 154/194 [00:05<00:01, 35.53it/s]
+Loading weights:  82%|████████▏ | 160/194 [00:05<00:00, 35.82it/s]
+Loading weights:  86%|████████▌ | 166/194 [00:05<00:00, 34.38it/s]
+Loading weights:  89%|████████▊ | 172/194 [00:06<00:00, 34.21it/s]
+Loading weights:  92%|█████████▏| 178/194 [00:06<00:00, 34.68it/s]
+Loading weights:  95%|█████████▍| 184/194 [00:06<00:00, 35.10it/s]
+Loading weights:  98%|█████████▊| 190/194 [00:06<00:00, 35.06it/s]
+Loading weights: 100%|██████████| 194/194 [00:06<00:00, 29.49it/s]
+[dense control] plain transformers, DKV NOT loaded (microsoft/Phi-4-mini-reasoning)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+dense_true d=0.1: 32114 tok, captured 200064 logits, top1=976, step2_top1=9910
+dense_true d=0.3: 32114 tok, captured 200064 logits, top1=976, step2_top1=9910
+dense_true d=0.5: 32114 tok, captured 200064 logits, top1=976, step2_top1=9910
+dense_true d=0.7: 32114 tok, captured 200064 logits, top1=976, step2_top1=9910
+dense_true d=0.9: 32114 tok, captured 200064 logits, top1=976, step2_top1=9910
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[arm baseline] config={'quantization': 'nf4', 'preset': 'mid'} env={'DKV_COMPRESSED_DECODE': '1'}
+[transformers] This model config has set a `rope_parameters['original_max_position_embeddings']` field, to be used 
+together with `max_position_embeddings` to determine a scaling factor. Please set the `factor` field of 
+`rope_parameters`with this ratio instead -- we recommend the use of this field over 
+`original_max_position_embeddings`, as it is compatible with most model architectures.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: 
+UserWarning: expandable_segments not supported on this platform (Triggered internally at 
+C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model microsoft/Phi-4-mini-reasoning...
+[DKV] Loading model weights on demand: microsoft/Phi-4-mini-reasoning (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+
+Loading weights:   0%|          | 0/194 [00:00<?, ?it/s]
+Loading weights:   1%|          | 1/194 [00:00<01:03,  3.02it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   5%|▌         | 10/194 [00:00<00:06, 27.36it/s]
+Loading weights:  11%|█▏        | 22/194 [00:00<00:03, 52.45it/s]
+Loading weights:  18%|█▊        | 34/194 [00:00<00:02, 70.11it/s]
+Loading weights:  24%|██▎       | 46/194 [00:00<00:01, 82.73it/s]
+Loading weights:  30%|██▉       | 58/194 [00:00<00:01, 91.73it/s]
+Loading weights:  36%|███▌      | 70/194 [00:00<00:01, 96.61it/s]
+Loading weights:  42%|████▏     | 82/194 [00:01<00:01, 101.31it/s]
+Loading weights:  48%|████▊     | 94/194 [00:01<00:00, 104.99it/s]
+Loading weights:  55%|█████▍    | 106/194 [00:01<00:00, 106.55it/s]
+Loading weights:  61%|██████    | 118/194 [00:01<00:00, 109.10it/s]
+Loading weights:  67%|██████▋   | 130/194 [00:01<00:00, 111.23it/s]
+Loading weights:  73%|███████▎  | 142/194 [00:01<00:00, 112.69it/s]
+Loading weights:  79%|███████▉  | 154/194 [00:01<00:00, 114.63it/s]
+Loading weights:  86%|████████▌ | 166/194 [00:01<00:00, 113.76it/s]
+Loading weights:  92%|█████████▏| 178/194 [00:01<00:00, 112.74it/s]
+Loading weights:  98%|█████████▊| 190/194 [00:02<00:00, 107.09it/s]
+Loading weights: 100%|██████████| 194/194 [00:02<00:00, 93.09it/s] 
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still 
+ABI-guarded).
+[DKV] Heap trimmed. RSS: 1009 MB → 1009 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2225.4M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (128/layer x 32 layers ~= 131,072 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=2.0 GB (ceiling: DKV_POOL_BUDGET_GB=2.0), worst-case 2.8 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=24, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] Heap trimmed. RSS: 1461 MB → 1461 MB (saved 0 MB)
+[Pool] Lazy-allocated 1056 slots for ~32113 tokens = 450.3 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 0.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.1: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.3: captured 200064 logits, top1=976, compressed_blocks=1024
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.5: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.7: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.9: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[arm dense_arm] config={'quantization': 'nf4', 'preset': 'mid'} env={'DKV_COMPRESSED_DECODE': '0'}
+[transformers] This model config has set a `rope_parameters['original_max_position_embeddings']` field, to be used 
+together with `max_position_embeddings` to determine a scaling factor. Please set the `factor` field of 
+`rope_parameters`with this ratio instead -- we recommend the use of this field over 
+`original_max_position_embeddings`, as it is compatible with most model architectures.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: 
+UserWarning: expandable_segments not supported on this platform (Triggered internally at 
+C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model microsoft/Phi-4-mini-reasoning...
+[DKV] Loading model weights on demand: microsoft/Phi-4-mini-reasoning (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Loading weights:   0%|          | 0/194 [00:00<?, ?it/s]
+Loading weights:   1%|          | 1/194 [00:00<01:04,  2.99it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   5%|▌         | 10/194 [00:00<00:06, 26.98it/s]
+Loading weights:  11%|█▏        | 22/194 [00:00<00:03, 52.27it/s]
+Loading weights:  18%|█▊        | 34/194 [00:00<00:02, 69.68it/s]
+Loading weights:  24%|██▎       | 46/194 [00:00<00:01, 82.19it/s]
+Loading weights:  30%|██▉       | 58/194 [00:00<00:01, 90.65it/s]
+Loading weights:  36%|███▌      | 70/194 [00:00<00:01, 97.30it/s]
+Loading weights:  42%|████▏     | 82/194 [00:01<00:01, 101.92it/s]
+Loading weights:  48%|████▊     | 94/194 [00:01<00:00, 104.45it/s]
+Loading weights:  55%|█████▍    | 106/194 [00:01<00:00, 106.59it/s]
+Loading weights:  61%|██████    | 118/194 [00:01<00:00, 109.33it/s]
+Loading weights:  67%|██████▋   | 130/194 [00:01<00:00, 110.87it/s]
+Loading weights:  73%|███████▎  | 142/194 [00:01<00:00, 110.41it/s]
+Loading weights:  79%|███████▉  | 154/194 [00:01<00:00, 110.27it/s]
+Loading weights:  86%|████████▌ | 166/194 [00:01<00:00, 111.54it/s]
+Loading weights:  92%|█████████▏| 178/194 [00:01<00:00, 111.71it/s]
+Loading weights:  98%|█████████▊| 190/194 [00:02<00:00, 111.93it/s]
+Loading weights: 100%|██████████| 194/194 [00:02<00:00, 93.18it/s] 
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still 
+ABI-guarded).
+[DKV] Heap trimmed. RSS: 1009 MB → 1009 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2225.4M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (128/layer x 32 layers ~= 131,072 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=2.0 GB (ceiling: DKV_POOL_BUDGET_GB=2.0), worst-case 2.8 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=24, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] Heap trimmed. RSS: 1460 MB → 1460 MB (saved 0 MB)
+[DKV] WARNING: dense window (32115 tokens) exceeds workspace (3072).  Trimming oldest blocks to fit.  Set DKV_MAX_DENSE_LEN=32179 to suppress.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+dense_arm d=0.1: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+dense_arm d=0.3: captured 200064 logits, top1=976, compressed_blocks=1024
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+dense_arm d=0.5: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+dense_arm d=0.7: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+dense_arm d=0.9: captured 200064 logits, top1=976, compressed_blocks=1024
+[Pool] Lazy-allocated 4096 slots for ~None tokens = 1746.5 MB (device=cuda)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[arm allblocks] config={'quantization': 'nf4', 'preset': 'mid'} env={'DKV_COMPRESSED_DECODE': '1', 'DKV_TOPK_BLOCKS': '0', 'DKV_BLOCKS_PER_CHUNK': '256'}
+[transformers] This model config has set a `rope_parameters['original_max_position_embeddings']` field, to be used 
+together with `max_position_embeddings` to determine a scaling factor. Please set the `factor` field of 
+`rope_parameters`with this ratio instead -- we recommend the use of this field over 
+`original_max_position_embeddings`, as it is compatible with most model architectures.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: 
+UserWarning: expandable_segments not supported on this platform (Triggered internally at 
+C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model microsoft/Phi-4-mini-reasoning...
+[DKV] Loading model weights on demand: microsoft/Phi-4-mini-reasoning (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+
+Loading weights:   0%|          | 0/194 [00:00<?, ?it/s]
+Loading weights:   1%|          | 1/194 [00:00<01:04,  2.99it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   5%|▌         | 10/194 [00:00<00:06, 27.01it/s]
+Loading weights:  11%|█▏        | 22/194 [00:00<00:03, 52.46it/s]
+Loading weights:  18%|█▊        | 34/194 [00:00<00:02, 70.48it/s]
+Loading weights:  24%|██▎       | 46/194 [00:00<00:01, 83.16it/s]
+Loading weights:  30%|██▉       | 58/194 [00:00<00:01, 91.61it/s]
+Loading weights:  36%|███▌      | 70/194 [00:00<00:01, 97.69it/s]
+Loading weights:  42%|████▏     | 82/194 [00:01<00:01, 101.69it/s]
+Loading weights:  48%|████▊     | 94/194 [00:01<00:00, 103.69it/s]
+Loading weights:  55%|█████▍    | 106/194 [00:01<00:00, 106.14it/s]
+Loading weights:  61%|██████    | 118/194 [00:01<00:00, 108.72it/s]
+Loading weights:  67%|██████▋   | 130/194 [00:01<00:00, 110.57it/s]
+Loading weights:  73%|███████▎  | 142/194 [00:01<00:00, 112.28it/s]
+Loading weights:  79%|███████▉  | 154/194 [00:01<00:00, 114.20it/s]
+Loading weights:  86%|████████▌ | 166/194 [00:01<00:00, 114.35it/s]
+Loading weights:  92%|█████████▏| 178/194 [00:01<00:00, 112.74it/s]
+Loading weights:  98%|█████████▊| 190/194 [00:02<00:00, 112.21it/s]
+Loading weights: 100%|██████████| 194/194 [00:02<00:00, 93.73it/s] 
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still 
+ABI-guarded).
+[DKV] Heap trimmed. RSS: 1016 MB → 1016 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2225.4M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (128/layer x 32 layers ~= 131,072 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=2.0 GB (ceiling: DKV_POOL_BUDGET_GB=2.0), worst-case 2.8 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=24, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=0), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] Heap trimmed. RSS: 1464 MB → 1464 MB (saved 0 MB)
+[Pool] Lazy-allocated 1056 slots for ~32113 tokens = 450.3 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 0.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+allblocks d=0.1: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=0), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+allblocks d=0.3: captured 200064 logits, top1=976, compressed_blocks=1024
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=0), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+allblocks d=0.5: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=0), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+allblocks d=0.7: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=0), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+allblocks d=0.9: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[arm noremat] config={'quantization': 'nf4', 'preset': 'mid'} env={'DKV_COMPRESSED_DECODE': '1', 'DKV_REMAT_CACHE': '0'}
+[transformers] This model config has set a `rope_parameters['original_max_position_embeddings']` field, to be used 
+together with `max_position_embeddings` to determine a scaling factor. Please set the `factor` field of 
+`rope_parameters`with this ratio instead -- we recommend the use of this field over 
+`original_max_position_embeddings`, as it is compatible with most model architectures.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: 
+UserWarning: expandable_segments not supported on this platform (Triggered internally at 
+C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model microsoft/Phi-4-mini-reasoning...
+[DKV] Loading model weights on demand: microsoft/Phi-4-mini-reasoning (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+
+Loading weights:   0%|          | 0/194 [00:00<?, ?it/s]
+Loading weights:   1%|          | 1/194 [00:00<01:04,  3.01it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   5%|▌         | 10/194 [00:00<00:06, 27.21it/s]
+Loading weights:  11%|█▏        | 22/194 [00:00<00:03, 51.87it/s]
+Loading weights:  18%|█▊        | 34/194 [00:00<00:02, 70.06it/s]
+Loading weights:  24%|██▎       | 46/194 [00:00<00:01, 83.12it/s]
+Loading weights:  30%|██▉       | 58/194 [00:00<00:01, 91.92it/s]
+Loading weights:  36%|███▌      | 70/194 [00:00<00:01, 97.63it/s]
+Loading weights:  42%|████▏     | 82/194 [00:01<00:01, 100.37it/s]
+Loading weights:  48%|████▊     | 94/194 [00:01<00:00, 103.92it/s]
+Loading weights:  55%|█████▍    | 106/194 [00:01<00:00, 106.84it/s]
+Loading weights:  61%|██████    | 118/194 [00:01<00:00, 109.18it/s]
+Loading weights:  67%|██████▋   | 130/194 [00:01<00:00, 111.13it/s]
+Loading weights:  73%|███████▎  | 142/194 [00:01<00:00, 112.11it/s]
+Loading weights:  80%|████████  | 156/194 [00:01<00:00, 118.89it/s]
+Loading weights:  87%|████████▋ | 168/194 [00:01<00:00, 118.00it/s]
+Loading weights:  93%|█████████▎| 180/194 [00:01<00:00, 116.29it/s]
+Loading weights:  99%|█████████▉| 192/194 [00:02<00:00, 112.68it/s]
+Loading weights: 100%|██████████| 194/194 [00:02<00:00, 93.73it/s] 
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still 
+ABI-guarded).
+[DKV] Heap trimmed. RSS: 1010 MB → 1010 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2225.4M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (128/layer x 32 layers ~= 131,072 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=2.0 GB (ceiling: DKV_POOL_BUDGET_GB=2.0), worst-case 2.8 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=24, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] Heap trimmed. RSS: 1459 MB → 1459 MB (saved 0 MB)
+[Pool] Lazy-allocated 1056 slots for ~32113 tokens = 450.3 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] Triton fused-decode COMBINED path ACTIVE (CUDA). N_sparse=16, L_dense=3072
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+noremat d=0.1: captured 200064 logits, top1=976, compressed_blocks=1024
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+noremat d=0.3: captured 200064 logits, top1=976, compressed_blocks=1024
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+noremat d=0.5: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+noremat d=0.7: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+noremat d=0.9: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[arm unrot] config={'quantization': 'nf4', 'preset': 'mid'} env={'DKV_COMPRESSED_DECODE': '1', 'DKV_ROTATED_POOL': '0', 'DKV_DECODE_CACHE': '1'}
+[transformers] This model config has set a `rope_parameters['original_max_position_embeddings']` field, to be used 
+together with `max_position_embeddings` to determine a scaling factor. Please set the `factor` field of 
+`rope_parameters`with this ratio instead -- we recommend the use of this field over 
+`original_max_position_embeddings`, as it is compatible with most model architectures.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: 
+UserWarning: expandable_segments not supported on this platform (Triggered internally at 
+C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model microsoft/Phi-4-mini-reasoning...
+[DKV] Loading model weights on demand: microsoft/Phi-4-mini-reasoning (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+
+Loading weights:   0%|          | 0/194 [00:00<?, ?it/s]
+Loading weights:   1%|          | 1/194 [00:00<01:05,  2.96it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   5%|▍         | 9/194 [00:00<00:07, 25.53it/s]
+Loading weights:  11%|█         | 21/194 [00:00<00:03, 52.71it/s]
+Loading weights:  17%|█▋        | 33/194 [00:00<00:02, 71.19it/s]
+Loading weights:  23%|██▎       | 45/194 [00:00<00:01, 84.01it/s]
+Loading weights:  29%|██▉       | 57/194 [00:00<00:01, 92.65it/s]
+Loading weights:  36%|███▌      | 69/194 [00:00<00:01, 98.16it/s]
+Loading weights:  42%|████▏     | 81/194 [00:01<00:01, 101.03it/s]
+Loading weights:  48%|████▊     | 93/194 [00:01<00:00, 103.98it/s]
+Loading weights:  54%|█████▍    | 105/194 [00:01<00:00, 106.43it/s]
+Loading weights:  60%|██████    | 117/194 [00:01<00:00, 108.61it/s]
+Loading weights:  66%|██████▋   | 129/194 [00:01<00:00, 109.32it/s]
+Loading weights:  73%|███████▎  | 141/194 [00:01<00:00, 111.36it/s]
+Loading weights:  79%|███████▉  | 153/194 [00:01<00:00, 113.82it/s]
+Loading weights:  85%|████████▌ | 165/194 [00:01<00:00, 114.23it/s]
+Loading weights:  91%|█████████ | 177/194 [00:01<00:00, 114.45it/s]
+Loading weights:  97%|█████████▋| 189/194 [00:02<00:00, 110.74it/s]
+Loading weights: 100%|██████████| 194/194 [00:02<00:00, 92.58it/s] 
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still 
+ABI-guarded).
+[DKV] Heap trimmed. RSS: 1010 MB → 1010 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2225.4M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (128/layer x 32 layers ~= 131,072 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=2.0 GB (ceiling: DKV_POOL_BUDGET_GB=2.0), worst-case 2.8 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=24, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] Heap trimmed. RSS: 1462 MB → 1462 MB (saved 0 MB)
+[Pool] Lazy-allocated 1056 slots for ~32113 tokens = 450.3 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 0.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+unrot d=0.1: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+unrot d=0.3: captured 200064 logits, top1=976, compressed_blocks=1024
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+unrot d=0.5: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+unrot d=0.7: captured 200064 logits, top1=976, compressed_blocks=1024
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+unrot d=0.9: captured 200064 logits, top1=976, compressed_blocks=1024
+
+== first-step logit fidelity vs DENSE (n=5 prompts, ctx=32768, preset=mid, quant=nf4) ==
+             arm  top1 agree  KL(dense||arm)  dense-top1 rank  top5 overlap   blocks
+      dense_true       5/5           0.00000             0.00          5.0/5        0
+  dense_true/dec       5/5           0.00000             0.00          5.0/5        0
+        baseline       5/5           0.00813             0.00          4.2/5     1024
+    baseline/dec       4/5           0.67863             0.20          1.0/5     1024
+       dense_arm       5/5           0.00813             0.00          4.2/5     1024
+   dense_arm/dec       5/5           0.04741             0.00          4.2/5     1024
+       allblocks       5/5           0.00813             0.00          4.2/5     1024
+   allblocks/dec       3/5           1.04944             0.60          1.0/5     1024
+         noremat       5/5           0.00813             0.00          4.2/5     1024
+     noremat/dec       4/5           0.54832             0.20          2.2/5     1024
+           unrot       5/5           0.00813             0.00          4.2/5     1024
+       unrot/dec       4/5           0.67863             0.20          1.0/5     1024
+
+Read every arm against BASELINE, not against dense: the
+baseline gap is what compression already costs and is not the
+feature's doing. An arm level with baseline has added nothing.
+
+The */dec rows are the SECOND token, scored against the dense
+control at that SAME position. dense_true/dec is the self-check:
+it has no compression in it anywhere, so it must read ~0. If it
+does not, the positions are misaligned and no row here means
+anything -- which is exactly how this harness reported KL 10.579
+for a defect that did not exist.
+V13D COMPLETE

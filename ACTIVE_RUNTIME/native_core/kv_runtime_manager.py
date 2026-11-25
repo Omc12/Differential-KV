@@ -1919,9 +1919,12 @@ class KVRuntimeManager:
             k_rot, v_buf = bufs[layer_idx]
             T = k_rot.shape[2]
             pos = torch.arange(T, device=k_rot.device).unsqueeze(0)
-            cos, sin = rotary(v_buf, pos)                 # [1, T, D] each
-            cos_u = cos.unsqueeze(1); sin_u = sin.unsqueeze(1)   # broadcast over heads
-            k_unrot = (k_rot * cos_u) - (rotate_half(k_rot) * sin_u)
+            if layer_idx in (getattr(self, "_nope_layers", None) or ()):
+                k_unrot = k_rot                           # NoPE layer: never rotated
+            else:
+                cos, sin = rotary(v_buf, pos)                 # [1, T, D] each
+                cos_u = cos.unsqueeze(1); sin_u = sin.unsqueeze(1)   # broadcast over heads
+                k_unrot = (k_rot * cos_u) - (rotate_half(k_rot) * sin_u)
             cs = 0
             for clen in chunk_lens:
                 ce = min(cs + clen, T)

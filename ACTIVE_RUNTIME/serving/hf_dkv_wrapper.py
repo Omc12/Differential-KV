@@ -1034,6 +1034,16 @@ class PyTorchDKVHFWrapper:
         except Exception:
             pass
 
+        # torch's efficient SDPA kernel is wrong on stride-0 (one-KV-head) K/V
+        # with a mask at some lengths, which corrupted gemma-4's NATIVE layers at
+        # DKV's 1025-token prefill chunk (runtime.dkv_attention
+        # .install_sdpa_expanded_kv_guard has the measurements).
+        try:
+            from runtime.dkv_attention import install_sdpa_expanded_kv_guard
+            install_sdpa_expanded_kv_guard()
+        except Exception:
+            pass
+
         use_compile = "1" if self.manager.config.torch_compile else "0"
         if _is_apple_silicon():
             if use_compile == "auto":

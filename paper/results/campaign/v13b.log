@@ -1,0 +1,1680 @@
+﻿=== V13 PANEL HuggingFaceTB/SmolLM3-3B ===
+[dense control] 4-bit weights (nf4), bfloat16 compute
+cmd.exe : 
+At line:1 char:302
++ ... tch {} } }; & cmd /c "`"C:\Users\USER\Desktop\Differential KV\benchma ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Loading weights:   0%|          | 0/326 [00:00<?, ?it/s]
+Loading weights:   0%|          | 1/326 [00:00<02:28,  2.19it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   1%|          | 4/326 [00:00<00:37,  8.51it/s]
+Loading weights:   4%|▎         | 12/326 [00:00<00:12, 25.57it/s]
+Loading weights:   6%|▌         | 18/326 [00:00<00:09, 34.07it/s]
+Loading weights:   7%|▋         | 23/326 [00:00<00:08, 35.73it/s]
+Loading weights:  10%|▉         | 31/326 [00:01<00:06, 46.76it/s]
+Loading weights:  12%|█▏        | 39/326 [00:01<00:05, 55.57it/s]
+Loading weights:  14%|█▍        | 46/326 [00:01<00:04, 58.96it/s]
+Loading weights:  16%|█▋        | 53/326 [00:01<00:04, 56.53it/s]
+Loading weights:  18%|█▊        | 60/326 [00:01<00:04, 55.44it/s]
+Loading weights:  21%|██        | 67/326 [00:01<00:04, 59.08it/s]
+Loading weights:  23%|██▎       | 76/326 [00:01<00:04, 61.08it/s]
+Loading weights:  26%|██▌       | 84/326 [00:01<00:03, 65.63it/s]
+Loading weights:  28%|██▊       | 91/326 [00:01<00:03, 66.80it/s]
+Loading weights:  30%|███       | 98/326 [00:02<00:03, 62.47it/s]
+Loading weights:  32%|███▏      | 105/326 [00:02<00:03, 58.29it/s]
+Loading weights:  35%|███▍      | 113/326 [00:02<00:03, 58.19it/s]
+Loading weights:  37%|███▋      | 121/326 [00:02<00:03, 63.53it/s]
+Loading weights:  40%|███▉      | 129/326 [00:02<00:02, 67.44it/s]
+Loading weights:  42%|████▏     | 138/326 [00:02<00:02, 66.99it/s]
+Loading weights:  45%|████▌     | 147/326 [00:02<00:02, 66.18it/s]
+Loading weights:  48%|████▊     | 156/326 [00:02<00:02, 65.56it/s]
+Loading weights:  50%|█████     | 163/326 [00:03<00:02, 66.54it/s]
+Loading weights:  52%|█████▏    | 170/326 [00:03<00:02, 61.92it/s]
+Loading weights:  54%|█████▍    | 177/326 [00:03<00:02, 60.34it/s]
+Loading weights:  56%|█████▋    | 184/326 [00:03<00:02, 62.17it/s]
+Loading weights:  59%|█████▉    | 193/326 [00:03<00:02, 63.93it/s]
+Loading weights:  62%|██████▏   | 202/326 [00:03<00:01, 65.06it/s]
+Loading weights:  65%|██████▍   | 211/326 [00:03<00:01, 64.88it/s]
+Loading weights:  67%|██████▋   | 220/326 [00:03<00:01, 65.04it/s]
+Loading weights:  70%|██████▉   | 228/326 [00:04<00:01, 68.11it/s]
+Loading weights:  73%|███████▎  | 237/326 [00:04<00:01, 66.94it/s]
+Loading weights:  75%|███████▌  | 246/326 [00:04<00:01, 66.73it/s]
+Loading weights:  78%|███████▊  | 255/326 [00:04<00:01, 65.88it/s]
+Loading weights:  80%|████████  | 262/326 [00:04<00:00, 66.67it/s]
+Loading weights:  83%|████████▎ | 269/326 [00:04<00:00, 63.74it/s]
+Loading weights:  85%|████████▍ | 276/326 [00:04<00:00, 61.20it/s]
+Loading weights:  87%|████████▋ | 284/326 [00:04<00:00, 60.38it/s]
+Loading weights:  90%|████████▉ | 293/326 [00:05<00:00, 62.12it/s]
+Loading weights:  93%|█████████▎| 302/326 [00:05<00:00, 62.08it/s]
+Loading weights:  95%|█████████▌| 311/326 [00:05<00:00, 62.86it/s]
+Loading weights:  98%|█████████▊| 319/326 [00:05<00:00, 66.54it/s]
+Loading weights: 100%|██████████| 326/326 [00:05<00:00, 58.67it/s]
+[dense control] plain transformers, DKV NOT loaded (HuggingFaceTB/SmolLM3-3B)
+[transformers] Ignoring clean_up_tokenization_spaces=True for BPE tokenizer TokenizersBackend. The 
+clean_up_tokenization post-processing step is designed for WordPiece tokenizers and is destructive for BPE (it strips 
+spaces before punctuation). Set clean_up_tokenization_spaces=False to suppress this warning, or set 
+clean_up_tokenization_spaces_for_bpe_even_though_it_will_corrupt_output=True to force cleanup anyway.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+dense_true d=0.1: 32093 tok, captured 128256 logits, top1=128002, step2_top1=271
+dense_true d=0.3: 32093 tok, captured 128256 logits, top1=128002, step2_top1=271
+dense_true d=0.5: 32093 tok, captured 128256 logits, top1=128002, step2_top1=271
+dense_true d=0.7: 32093 tok, captured 128256 logits, top1=128002, step2_top1=271
+dense_true d=0.9: 32093 tok, captured 128256 logits, top1=128002, step2_top1=271
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[arm baseline] config={'quantization': 'nf4', 'preset': 'mid'} env={'DKV_COMPRESSED_DECODE': '1'}
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: 
+UserWarning: expandable_segments not supported on this platform (Triggered internally at 
+C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model HuggingFaceTB/SmolLM3-3B...
+[DKV] Loading model weights on demand: HuggingFaceTB/SmolLM3-3B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+
+Loading weights:   0%|          | 0/326 [00:00<?, ?it/s]
+Loading weights:   0%|          | 1/326 [00:00<00:43,  7.49it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   4%|▍         | 14/326 [00:00<00:04, 67.19it/s]
+Loading weights:  12%|█▏        | 39/326 [00:00<00:02, 138.04it/s]
+Loading weights:  18%|█▊        | 59/326 [00:00<00:01, 154.30it/s]
+Loading weights:  26%|██▌       | 84/326 [00:00<00:01, 181.01it/s]
+Loading weights:  32%|███▏      | 103/326 [00:00<00:01, 183.33it/s]
+Loading weights:  37%|███▋      | 122/326 [00:00<00:01, 185.06it/s]
+Loading weights:  45%|████▌     | 147/326 [00:00<00:00, 199.92it/s]
+Loading weights:  52%|█████▏    | 168/326 [00:00<00:00, 195.45it/s]
+Loading weights:  59%|█████▉    | 192/326 [00:01<00:00, 205.15it/s]
+Loading weights:  65%|██████▌   | 213/326 [00:01<00:00, 199.14it/s]
+Loading weights:  73%|███████▎  | 237/326 [00:01<00:00, 206.42it/s]
+Loading weights:  79%|███████▉  | 258/326 [00:01<00:00, 200.31it/s]
+Loading weights:  87%|████████▋ | 282/326 [00:01<00:00, 208.75it/s]
+Loading weights:  93%|█████████▎| 303/326 [00:01<00:00, 203.74it/s]
+Loading weights: 100%|██████████| 326/326 [00:01<00:00, 187.13it/s]
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still 
+ABI-guarded).
+[DKV] Heap trimmed. RSS: 1012 MB → 1012 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 1669.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=5915 (164/layer x 36 layers ~= 167,936 tokens max context), rank=96 (pool_rank=32), max_residual=128, 355 KB/slot, budget=2.0 GB (ceiling: DKV_POOL_BUDGET_GB=2.0), worst-case 2.1 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=128, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[transformers] Ignoring clean_up_tokenization_spaces=True for BPE tokenizer TokenizersBackend. The 
+clean_up_tokenization post-processing step is designed for WordPiece tokenizers and is destructive for BPE (it strips 
+spaces before punctuation). Set clean_up_tokenization_spaces=False to suppress this warning, or set 
+clean_up_tokenization_spaces_for_bpe_even_though_it_will_corrupt_output=True to force cleanup anyway.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] Heap trimmed. RSS: 1465 MB → 1465 MB (saved 0 MB)
+[Pool] Lazy-allocated 1188 slots for ~32092 tokens = 272.2 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 0.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.1: captured 128256 logits, top1=791, compressed_blocks=1152
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.3: captured 128256 logits, top1=791, compressed_blocks=1152
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.5: captured 128256 logits, top1=791, compressed_blocks=1152
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.7: captured 128256 logits, top1=791, compressed_blocks=1152
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.9: captured 128256 logits, top1=791, compressed_blocks=1152
+
+== first-step logit fidelity vs DENSE (n=5 prompts, ctx=32768, preset=mid, quant=nf4) ==
+             arm  top1 agree  KL(dense||arm)  dense-top1 rank  top5 overlap   blocks
+      dense_true       5/5           0.00000             0.00          5.0/5        0
+  dense_true/dec       5/5           0.00000             0.00          5.0/5        0
+        baseline       0/5           9.20863           457.60          0.0/5     1152
+    baseline/dec   NOT COMPARABLE — step-1 token differs from dense_true at depths [0.1, 0.3, 0.5, 0.7, 0.9]; the prefixes are not the same.
+
+Read every arm against BASELINE, not against dense: the
+baseline gap is what compression already costs and is not the
+feature's doing. An arm level with baseline has added nothing.
+
+The */dec rows are the SECOND token, scored against the dense
+control at that SAME position. dense_true/dec is the self-check:
+it has no compression in it anywhere, so it must read ~0. If it
+does not, the positions are misaligned and no row here means
+anything -- which is exactly how this harness reported KL 10.579
+for a defect that did not exist.
+=== V13 PANEL HuggingFaceTB/SmolLM3-3B DONE ===
+=== V13 PANEL google/gemma-4-e2b-it ===
+[dense control] 4-bit weights (nf4), bfloat16 compute
+
+Loading weights:   0%|          | 0/1951 [00:00<?, 
+?it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   1%|▏         | 25/1951 [00:00<00:07, 249.66it/s]
+Loading weights:   6%|▌         | 111/1951 [00:00<00:03, 601.21it/s]
+Loading weights:   9%|▉         | 171/1951 [00:00<00:03, 558.27it/s]
+Loading weights:  12%|█▏        | 243/1951 [00:00<00:02, 610.87it/s]
+Loading weights:  16%|█▋        | 318/1951 [00:00<00:02, 649.16it/s]
+Loading weights:  22%|██▏       | 426/1951 [00:00<00:01, 788.74it/s]
+Loading weights:  26%|██▋       | 516/1951 [00:00<00:01, 814.63it/s]
+Loading weights:  32%|███▏      | 628/1951 [00:00<00:01, 890.65it/s]
+Loading weights:  37%|███▋      | 718/1951 [00:00<00:01, 787.29it/s]
+Loading weights:  41%|████      | 799/1951 [00:09<00:33, 34.53it/s] 
+Loading weights:  44%|████▍     | 856/1951 [00:09<00:26, 40.92it/s]
+Loading weights:  46%|████▌     | 899/1951 [00:09<00:22, 46.54it/s]
+Loading weights:  48%|████▊     | 932/1951 [00:10<00:19, 51.60it/s]
+Loading weights:  49%|████▉     | 959/1951 [00:10<00:16, 58.54it/s]
+Loading weights:  50%|█████     | 983/1951 [00:10<00:15, 63.45it/s]
+Loading weights:  51%|█████▏    | 1003/1951 [00:10<00:13, 70.47it/s]
+Loading weights:  52%|█████▏    | 1022/1951 [00:11<00:13, 71.40it/s]
+Loading weights:  53%|█████▎    | 1037/1951 [00:11<00:12, 73.80it/s]
+Loading weights:  54%|█████▍    | 1051/1951 [00:11<00:12, 73.95it/s]
+Loading weights:  54%|█████▍    | 1063/1951 [00:11<00:12, 70.75it/s]
+Loading weights:  55%|█████▍    | 1073/1951 [00:11<00:13, 63.46it/s]
+Loading weights:  56%|█████▌    | 1083/1951 [00:11<00:12, 68.51it/s]
+Loading weights:  56%|█████▌    | 1092/1951 [00:12<00:12, 67.35it/s]
+Loading weights:  56%|█████▋    | 1100/1951 [00:12<00:14, 57.97it/s]
+Loading weights:  57%|█████▋    | 1111/1951 [00:12<00:12, 67.31it/s]
+Loading weights:  57%|█████▋    | 1119/1951 [00:12<00:12, 64.59it/s]
+Loading weights:  58%|█████▊    | 1127/1951 [00:12<00:15, 52.78it/s]
+Loading weights:  58%|█████▊    | 1139/1951 [00:12<00:12, 65.16it/s]
+Loading weights:  59%|█████▉    | 1147/1951 [00:12<00:12, 64.08it/s]
+Loading weights:  59%|█████▉    | 1155/1951 [00:13<00:14, 53.95it/s]
+Loading weights:  60%|█████▉    | 1168/1951 [00:13<00:12, 62.17it/s]
+Loading weights:  61%|██████    | 1181/1951 [00:13<00:11, 67.22it/s]
+Loading weights:  61%|██████    | 1189/1951 [00:13<00:11, 66.26it/s]
+Loading weights:  61%|██████▏   | 1196/1951 [00:13<00:12, 60.05it/s]
+Loading weights:  62%|██████▏   | 1206/1951 [00:13<00:10, 67.79it/s]
+Loading weights:  62%|██████▏   | 1214/1951 [00:14<00:13, 56.39it/s]
+Loading weights:  63%|██████▎   | 1223/1951 [00:14<00:11, 62.70it/s]
+Loading weights:  63%|██████▎   | 1230/1951 [00:14<00:11, 62.60it/s]
+Loading weights:  63%|██████▎   | 1237/1951 [00:14<00:11, 62.73it/s]
+Loading weights:  64%|██████▍   | 1244/1951 [00:14<00:11, 59.88it/s]
+Loading weights:  64%|██████▍   | 1252/1951 [00:14<00:12, 58.11it/s]
+Loading weights:  65%|██████▍   | 1262/1951 [00:14<00:10, 67.05it/s]
+Loading weights:  65%|██████▌   | 1269/1951 [00:14<00:11, 59.38it/s]
+Loading weights:  66%|██████▌   | 1280/1951 [00:15<00:09, 67.46it/s]
+Loading weights:  66%|██████▌   | 1290/1951 [00:15<00:08, 74.78it/s]
+Loading weights:  70%|███████   | 1368/1951 [00:15<00:02, 255.35it/s]
+Loading weights:  75%|███████▌  | 1471/1951 [00:15<00:01, 461.95it/s]
+Loading weights:  81%|████████▏ | 1589/1951 [00:15<00:00, 654.18it/s]
+Loading weights:  87%|████████▋ | 1701/1951 [00:15<00:00, 781.60it/s]
+Loading weights:  92%|█████████▏| 1789/1951 [00:15<00:00, 802.19it/s]
+Loading weights:  96%|█████████▌| 1872/1951 [00:15<00:00, 716.09it/s]
+Loading weights: 100%|█████████▉| 1948/1951 [00:15<00:00, 703.42it/s]
+Loading weights: 100%|██████████| 1951/1951 [00:16<00:00, 121.93it/s]
+[dense control] plain transformers, DKV NOT loaded (google/gemma-4-e2b-it)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+dense_true d=0.1: 32128 tok, captured 262144 logits, top1=818, step2_top1=6789
+dense_true d=0.3: 32128 tok, captured 262144 logits, top1=818, step2_top1=6789
+dense_true d=0.5: 32128 tok, captured 262144 logits, top1=818, step2_top1=6789
+dense_true d=0.7: 32128 tok, captured 262144 logits, top1=818, step2_top1=6789
+dense_true d=0.9: 32128 tok, captured 262144 logits, top1=818, step2_top1=6789
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[arm baseline] config={'quantization': 'nf4', 'preset': 'mid'} env={'DKV_COMPRESSED_DECODE': '1'}
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: 
+UserWarning: expandable_segments not supported on this platform (Triggered internally at 
+C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model google/gemma-4-e2b-it...
+[DKV] Loading model weights on demand: google/gemma-4-e2b-it (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+
+Loading weights:   0%|          | 0/1951 [00:00<?, 
+?it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   9%|▉         | 178/1951 [00:00<00:01, 1771.40it/s]
+Loading weights:  23%|██▎       | 450/1951 [00:00<00:00, 2327.54it/s]
+Loading weights:  38%|███▊      | 746/1951 [00:00<00:00, 2601.33it/s]
+Loading weights:  52%|█████▏    | 1007/1951 [00:02<00:02, 341.43it/s]
+Loading weights:  60%|██████    | 1171/1951 [00:02<00:02, 344.67it/s]
+Loading weights:  66%|██████▌   | 1289/1951 [00:02<00:01, 352.36it/s]
+Loading weights:  83%|████████▎ | 1628/1951 [00:02<00:00, 603.91it/s]
+Loading weights: 100%|██████████| 1951/1951 [00:03<00:00, 639.73it/s]
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still 
+ABI-guarded).
+[DKV] Heap trimmed. RSS: 1218 MB → 1218 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 3936.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=5915 (169/layer x 35 layers ~= 173,056 tokens max context), rank=96 (pool_rank=32), max_residual=128, 355 KB/slot, budget=2.0 GB (ceiling: DKV_POOL_BUDGET_GB=2.0), worst-case 2.1 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 1 attended layers (model has 35); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=8, kv_H=1, D=512, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] Heap trimmed. RSS: 1649 MB → 1649 MB (saved 0 MB)
+[Pool] Lazy-allocated 64 slots for ~32127 tokens = 14.7 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 9.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.1: captured 262144 logits, top1=818, compressed_blocks=32
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.3: captured 262144 logits, top1=818, compressed_blocks=32
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.5: captured 262144 logits, top1=818, compressed_blocks=32
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.7: captured 262144 logits, top1=818, compressed_blocks=32
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.9: captured 262144 logits, top1=818, compressed_blocks=32
+
+== first-step logit fidelity vs DENSE (n=5 prompts, ctx=32768, preset=mid, quant=nf4) ==
+             arm  top1 agree  KL(dense||arm)  dense-top1 rank  top5 overlap   blocks
+      dense_true       5/5           0.00000             0.00          5.0/5        0
+  dense_true/dec       5/5           0.00000             0.00          5.0/5        0
+        baseline       5/5           2.56799             0.00          2.0/5       32
+    baseline/dec       3/5           0.45116             0.40          4.0/5       32
+
+Read every arm against BASELINE, not against dense: the
+baseline gap is what compression already costs and is not the
+feature's doing. An arm level with baseline has added nothing.
+
+The */dec rows are the SECOND token, scored against the dense
+control at that SAME position. dense_true/dec is the self-check:
+it has no compression in it anywhere, so it must read ~0. If it
+does not, the positions are misaligned and no row here means
+anything -- which is exactly how this harness reported KL 10.579
+for a defect that did not exist.
+=== V13 PANEL google/gemma-4-e2b-it DONE ===
+=== V13 PANEL google/gemma-4-e4b-it ===
+[dense control] 4-bit weights (nf4), bfloat16 compute
+
+Loading weights:   0%|          | 0/2076 [00:00<?, 
+?it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   3%|▎         | 69/2076 [00:00<00:02, 689.62it/s]
+Loading weights:   9%|▉         | 189/2076 [00:00<00:01, 978.85it/s]
+Loading weights:  15%|█▌        | 314/2076 [00:00<00:01, 1101.69it/s]
+Loading weights:  21%|██        | 437/2076 [00:00<00:01, 1142.87it/s]
+Loading weights:  27%|██▋       | 561/2076 [00:00<00:01, 1170.28it/s]
+Loading weights:  33%|███▎      | 685/2076 [00:00<00:01, 1191.45it/s]
+Loading weights:  39%|███▉      | 805/2076 [00:07<00:22, 55.49it/s]  
+Loading weights:  43%|████▎     | 886/2076 [00:07<00:19, 60.89it/s]
+Loading weights:  45%|████▌     | 944/2076 [00:08<00:16, 66.75it/s]
+Loading weights:  48%|████▊     | 988/2076 [00:08<00:15, 69.46it/s]
+Loading weights:  49%|████▉     | 1021/2076 [00:09<00:14, 72.30it/s]
+Loading weights:  50%|█████     | 1047/2076 [00:09<00:13, 75.72it/s]
+Loading weights:  51%|█████▏    | 1068/2076 [00:09<00:13, 74.77it/s]
+Loading weights:  52%|█████▏    | 1085/2076 [00:10<00:12, 76.51it/s]
+Loading weights:  53%|█████▎    | 1100/2076 [00:10<00:12, 78.10it/s]
+Loading weights:  54%|█████▍    | 1116/2076 [00:10<00:11, 84.11it/s]
+Loading weights:  55%|█████▍    | 1132/2076 [00:10<00:10, 90.37it/s]
+Loading weights:  55%|█████▌    | 1145/2076 [00:10<00:10, 92.38it/s]
+Loading weights:  56%|█████▌    | 1157/2076 [00:10<00:10, 89.09it/s]
+Loading weights:  56%|█████▋    | 1168/2076 [00:10<00:11, 79.09it/s]
+Loading weights:  57%|█████▋    | 1181/2076 [00:11<00:10, 83.88it/s]
+Loading weights:  58%|█████▊    | 1194/2076 [00:11<00:09, 88.47it/s]
+Loading weights:  58%|█████▊    | 1204/2076 [00:11<00:09, 87.34it/s]
+Loading weights:  58%|█████▊    | 1214/2076 [00:11<00:10, 79.06it/s]
+Loading weights:  59%|█████▉    | 1223/2076 [00:11<00:11, 76.20it/s]
+Loading weights:  60%|█████▉    | 1236/2076 [00:11<00:10, 80.48it/s]
+Loading weights:  60%|█████▉    | 1245/2076 [00:11<00:10, 76.38it/s]
+Loading weights:  60%|██████    | 1253/2076 [00:12<00:12, 64.83it/s]
+Loading weights:  61%|██████    | 1265/2076 [00:12<00:11, 71.79it/s]
+Loading weights:  62%|██████▏   | 1278/2076 [00:12<00:10, 77.45it/s]
+Loading weights:  62%|██████▏   | 1286/2076 [00:12<00:10, 75.87it/s]
+Loading weights:  62%|██████▏   | 1294/2076 [00:12<00:12, 63.17it/s]
+Loading weights:  63%|██████▎   | 1307/2076 [00:12<00:10, 70.76it/s]
+Loading weights:  64%|██████▎   | 1320/2076 [00:12<00:09, 77.03it/s]
+Loading weights:  64%|██████▍   | 1328/2076 [00:13<00:09, 76.12it/s]
+Loading weights:  64%|██████▍   | 1336/2076 [00:13<00:11, 61.71it/s]
+Loading weights:  65%|██████▍   | 1349/2076 [00:13<00:10, 70.81it/s]
+Loading weights:  66%|██████▌   | 1362/2076 [00:13<00:09, 77.34it/s]
+Loading weights:  66%|██████▌   | 1371/2076 [00:13<00:09, 74.53it/s]
+Loading weights:  66%|██████▋   | 1379/2076 [00:13<00:10, 63.53it/s]
+Loading weights:  67%|██████▋   | 1391/2076 [00:14<00:09, 71.07it/s]
+Loading weights:  68%|██████▊   | 1404/2076 [00:14<00:08, 79.13it/s]
+Loading weights:  68%|██████▊   | 1413/2076 [00:14<00:08, 77.07it/s]
+Loading weights:  70%|██████▉   | 1452/2076 [00:14<00:04, 151.30it/s]
+Loading weights:  78%|███████▊  | 1610/2076 [00:14<00:00, 511.88it/s]
+Loading weights:  85%|████████▍ | 1760/2076 [00:14<00:00, 762.10it/s]
+Loading weights:  92%|█████████▏| 1914/2076 [00:14<00:00, 967.55it/s]
+Loading weights: 100%|█████████▉| 2075/2076 [00:14<00:00, 1141.98it/s]
+Loading weights: 100%|██████████| 2076/2076 [00:14<00:00, 140.05it/s] 
+[dense control] plain transformers, DKV NOT loaded (google/gemma-4-e4b-it)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+dense_true d=0.1: 32128 tok, captured 262144 logits, top1=818, step2_top1=6789
+dense_true d=0.3: 32128 tok, captured 262144 logits, top1=818, step2_top1=6789
+dense_true d=0.5: 32128 tok, captured 262144 logits, top1=818, step2_top1=6789
+dense_true d=0.7: 32128 tok, captured 262144 logits, top1=818, step2_top1=6789
+dense_true d=0.9: 32128 tok, captured 262144 logits, top1=818, step2_top1=6789
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[arm baseline] config={'quantization': 'nf4', 'preset': 'mid'} env={'DKV_COMPRESSED_DECODE': '1'}
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: 
+UserWarning: expandable_segments not supported on this platform (Triggered internally at 
+C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model google/gemma-4-e4b-it...
+[DKV] Loading model weights on demand: google/gemma-4-e4b-it (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+
+Loading weights:   0%|          | 0/2076 [00:00<?, 
+?it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   9%|▉         | 189/2076 [00:00<00:01, 1860.47it/s]
+Loading weights:  22%|██▏       | 463/2076 [00:00<00:00, 2368.44it/s]
+Loading weights:  36%|███▌      | 746/2076 [00:00<00:00, 2574.50it/s]
+Loading weights:  48%|████▊     | 1004/2076 [00:02<00:04, 236.27it/s]
+Loading weights:  56%|█████▌    | 1164/2076 [00:03<00:03, 251.27it/s]
+Loading weights:  62%|██████▏   | 1278/2076 [00:03<00:03, 253.05it/s]
+Loading weights:  66%|██████▌   | 1362/2076 [00:04<00:02, 254.71it/s]
+Loading weights:  69%|██████▊   | 1427/2076 [00:04<00:02, 260.57it/s]
+Loading weights:  87%|████████▋ | 1796/2076 [00:04<00:00, 558.01it/s]
+Loading weights: 100%|██████████| 2076/2076 [00:04<00:00, 450.88it/s]
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still 
+ABI-guarded).
+[DKV] Heap trimmed. RSS: 1220 MB → 1220 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 5723.7M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (97/layer x 42 layers ~= 99,328 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=2.0 GB (ceiling: DKV_POOL_BUDGET_GB=2.0), worst-case 2.8 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 2 attended layers (model has 42); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=8, kv_H=2, D=512, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] Heap trimmed. RSS: 1652 MB → 1652 MB (saved 0 MB)
+[Pool] Lazy-allocated 66 slots for ~32127 tokens = 28.1 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 11.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.1: captured 262144 logits, top1=818, compressed_blocks=64
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.3: captured 262144 logits, top1=818, compressed_blocks=64
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.5: captured 262144 logits, top1=818, compressed_blocks=64
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.7: captured 262144 logits, top1=818, compressed_blocks=64
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.9: captured 262144 logits, top1=818, compressed_blocks=64
+
+== first-step logit fidelity vs DENSE (n=5 prompts, ctx=32768, preset=mid, quant=nf4) ==
+             arm  top1 agree  KL(dense||arm)  dense-top1 rank  top5 overlap   blocks
+      dense_true       5/5           0.00000             0.00          5.0/5        0
+  dense_true/dec       5/5           0.00000             0.00          5.0/5        0
+        baseline       5/5           1.28764             0.00          4.4/5       64
+    baseline/dec       5/5           0.10096             0.00          4.6/5       64
+
+Read every arm against BASELINE, not against dense: the
+baseline gap is what compression already costs and is not the
+feature's doing. An arm level with baseline has added nothing.
+
+The */dec rows are the SECOND token, scored against the dense
+control at that SAME position. dense_true/dec is the self-check:
+it has no compression in it anywhere, so it must read ~0. If it
+does not, the positions are misaligned and no row here means
+anything -- which is exactly how this harness reported KL 10.579
+for a defect that did not exist.
+=== V13 PANEL google/gemma-4-e4b-it DONE ===
+=== V13 PANEL google/gemma-4-12B-it ===
+[dense control] 4-bit weights (nf4), bfloat16 compute
+
+Loading weights:   0%|          | 0/677 [00:00<?, 
+?it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   0%|          | 3/677 [00:01<07:06,  1.58it/s]
+Loading weights:   1%|          | 7/677 [00:02<02:48,  3.98it/s]
+Loading weights:   1%|▏         | 9/677 [00:02<02:05,  5.33it/s]
+Loading weights:   3%|▎         | 20/677 [00:02<00:43, 15.15it/s]
+Loading weights:   4%|▎         | 24/677 [00:02<00:40, 16.18it/s]
+Loading weights:   5%|▌         | 34/677 [00:02<00:26, 24.57it/s]
+Loading weights:   6%|▌         | 38/677 [00:02<00:27, 23.31it/s]
+Loading weights:   7%|▋         | 48/677 [00:03<00:20, 30.89it/s]
+Loading weights:   8%|▊         | 52/677 [00:03<00:22, 27.25it/s]
+Loading weights:   9%|▉         | 62/677 [00:03<00:18, 33.95it/s]
+Loading weights:  10%|▉         | 66/677 [00:03<00:20, 29.84it/s]
+Loading weights:  11%|█         | 76/677 [00:03<00:16, 36.12it/s]
+Loading weights:  12%|█▏        | 80/677 [00:04<00:19, 30.84it/s]
+Loading weights:  13%|█▎        | 86/677 [00:04<00:16, 34.91it/s]
+Loading weights:  13%|█▎        | 90/677 [00:04<00:20, 29.33it/s]
+Loading weights:  14%|█▍        | 94/677 [00:04<00:18, 31.05it/s]
+Loading weights:  15%|█▌        | 103/677 [00:04<00:15, 36.50it/s]
+Loading weights:  16%|█▌        | 107/677 [00:05<00:18, 30.70it/s]
+Loading weights:  17%|█▋        | 117/677 [00:05<00:14, 37.79it/s]
+Loading weights:  18%|█▊        | 121/677 [00:05<00:17, 31.93it/s]
+Loading weights:  19%|█▉        | 131/677 [00:05<00:14, 38.66it/s]
+Loading weights:  20%|█▉        | 135/677 [00:05<00:16, 32.48it/s]
+Loading weights:  21%|██▏       | 145/677 [00:05<00:13, 38.19it/s]
+Loading weights:  22%|██▏       | 149/677 [00:06<00:16, 31.77it/s]
+Loading weights:  23%|██▎       | 159/677 [00:06<00:13, 37.54it/s]
+Loading weights:  24%|██▍       | 163/677 [00:06<00:16, 31.19it/s]
+Loading weights:  25%|██▍       | 169/677 [00:06<00:14, 35.13it/s]
+Loading weights:  26%|██▌       | 173/677 [00:06<00:17, 29.57it/s]
+Loading weights:  26%|██▌       | 177/677 [00:07<00:16, 30.82it/s]
+Loading weights:  27%|██▋       | 186/677 [00:07<00:13, 35.41it/s]
+Loading weights:  28%|██▊       | 190/677 [00:07<00:16, 29.28it/s]
+Loading weights:  30%|██▉       | 200/677 [00:07<00:13, 35.77it/s]
+Loading weights:  30%|███       | 204/677 [00:07<00:15, 30.05it/s]
+Loading weights:  32%|███▏      | 214/677 [00:08<00:12, 36.23it/s]
+Loading weights:  32%|███▏      | 218/677 [00:08<00:15, 30.11it/s]
+Loading weights:  34%|███▎      | 228/677 [00:08<00:12, 35.23it/s]
+Loading weights:  34%|███▍      | 232/677 [00:08<00:15, 29.19it/s]
+Loading weights:  36%|███▌      | 242/677 [00:09<00:12, 34.55it/s]
+Loading weights:  36%|███▋      | 246/677 [00:09<00:14, 29.30it/s]
+Loading weights:  37%|███▋      | 252/677 [00:09<00:12, 33.24it/s]
+Loading weights:  38%|███▊      | 256/677 [00:09<00:14, 28.86it/s]
+Loading weights:  38%|███▊      | 260/677 [00:09<00:13, 30.42it/s]
+Loading weights:  40%|███▉      | 269/677 [00:09<00:11, 34.59it/s]
+Loading weights:  40%|████      | 273/677 [00:10<00:13, 29.13it/s]
+Loading weights:  42%|████▏     | 283/677 [00:10<00:11, 35.51it/s]
+Loading weights:  42%|████▏     | 287/677 [00:10<00:13, 29.84it/s]
+Loading weights:  44%|████▍     | 297/677 [00:10<00:10, 36.24it/s]
+Loading weights:  44%|████▍     | 301/677 [00:10<00:12, 31.03it/s]
+Loading weights:  46%|████▌     | 311/677 [00:11<00:09, 36.90it/s]
+Loading weights:  47%|████▋     | 315/677 [00:11<00:11, 30.39it/s]
+Loading weights:  48%|████▊     | 322/677 [00:11<00:09, 36.52it/s]
+Loading weights:  48%|████▊     | 327/677 [00:11<00:13, 26.71it/s]
+Loading weights:  49%|████▉     | 335/677 [00:11<00:10, 33.76it/s]
+Loading weights:  50%|█████     | 340/677 [00:12<00:13, 25.68it/s]
+Loading weights:  52%|█████▏    | 352/677 [00:12<00:09, 33.55it/s]
+Loading weights:  53%|█████▎    | 356/677 [00:12<00:11, 28.86it/s]
+Loading weights:  54%|█████▍    | 366/677 [00:12<00:09, 33.98it/s]
+Loading weights:  55%|█████▍    | 370/677 [00:13<00:10, 28.99it/s]
+Loading weights:  56%|█████▌    | 380/677 [00:13<00:08, 34.79it/s]
+Loading weights:  57%|█████▋    | 384/677 [00:13<00:09, 29.83it/s]
+Loading weights:  58%|█████▊    | 394/677 [00:13<00:07, 35.48it/s]
+Loading weights:  59%|█████▉    | 398/677 [00:13<00:09, 30.38it/s]
+Loading weights:  60%|██████    | 408/677 [00:14<00:07, 36.00it/s]
+Loading weights:  61%|██████    | 412/677 [00:14<00:08, 30.04it/s]
+Loading weights:  62%|██████▏   | 418/677 [00:14<00:07, 33.72it/s]
+Loading weights:  62%|██████▏   | 422/677 [00:14<00:08, 28.98it/s]
+Loading weights:  63%|██████▎   | 426/677 [00:14<00:08, 30.63it/s]
+Loading weights:  64%|██████▍   | 435/677 [00:15<00:06, 34.90it/s]
+Loading weights:  65%|██████▍   | 439/677 [00:15<00:08, 28.60it/s]
+Loading weights:  66%|██████▌   | 446/677 [00:15<00:06, 35.78it/s]
+Loading weights:  67%|██████▋   | 451/677 [00:15<00:08, 25.79it/s]
+Loading weights:  68%|██████▊   | 463/677 [00:15<00:06, 34.71it/s]
+Loading weights:  69%|██████▉   | 468/677 [00:16<00:06, 30.37it/s]
+Loading weights:  70%|███████   | 474/677 [00:16<00:05, 34.99it/s]
+Loading weights:  71%|███████   | 479/677 [00:16<00:07, 24.98it/s]
+Loading weights:  72%|███████▏  | 487/677 [00:16<00:05, 32.26it/s]
+Loading weights:  73%|███████▎  | 492/677 [00:17<00:06, 27.73it/s]
+Loading weights:  73%|███████▎  | 496/677 [00:17<00:06, 29.21it/s]
+Loading weights:  74%|███████▍  | 501/677 [00:17<00:05, 31.55it/s]
+Loading weights:  75%|███████▍  | 505/677 [00:17<00:06, 26.92it/s]
+Loading weights:  75%|███████▌  | 509/677 [00:17<00:05, 28.90it/s]
+Loading weights:  77%|███████▋  | 518/677 [00:17<00:04, 34.46it/s]
+Loading weights:  77%|███████▋  | 522/677 [00:18<00:05, 28.70it/s]
+Loading weights:  79%|███████▊  | 532/677 [00:18<00:04, 35.47it/s]
+Loading weights:  79%|███████▉  | 536/677 [00:18<00:05, 26.87it/s]
+Loading weights:  81%|████████  | 546/677 [00:18<00:03, 33.19it/s]
+Loading weights:  81%|████████  | 550/677 [00:18<00:04, 27.61it/s]
+Loading weights:  82%|████████▏ | 557/677 [00:19<00:03, 34.22it/s]
+Loading weights:  83%|████████▎ | 562/677 [00:19<00:04, 24.86it/s]
+Loading weights:  84%|████████▍ | 571/677 [00:19<00:03, 34.36it/s]
+Loading weights:  85%|████████▌ | 576/677 [00:19<00:03, 25.71it/s]
+Loading weights:  86%|████████▋ | 584/677 [00:20<00:02, 32.05it/s]
+Loading weights:  87%|████████▋ | 589/677 [00:20<00:03, 24.08it/s]
+Loading weights:  88%|████████▊ | 598/677 [00:20<00:02, 33.08it/s]
+Loading weights:  89%|████████▉ | 603/677 [00:20<00:02, 25.02it/s]
+Loading weights:  91%|█████████ | 615/677 [00:21<00:01, 31.40it/s]
+Loading weights:  92%|█████████▏| 620/677 [00:21<00:02, 25.22it/s]
+Loading weights:  93%|█████████▎| 629/677 [00:21<00:01, 27.80it/s]
+Loading weights:  94%|█████████▎| 633/677 [00:21<00:01, 24.58it/s]
+Loading weights:  94%|█████████▍| 639/677 [00:22<00:01, 29.02it/s]
+Loading weights:  95%|█████████▍| 643/677 [00:22<00:01, 28.73it/s]
+Loading weights:  96%|█████████▌| 647/677 [00:22<00:01, 22.58it/s]
+Loading weights:  96%|█████████▋| 653/677 [00:22<00:00, 27.83it/s]
+Loading weights:  97%|█████████▋| 657/677 [00:22<00:00, 27.29it/s]
+Loading weights:  98%|█████████▊| 661/677 [00:24<00:01,  9.19it/s]
+Loading weights:  99%|█████████▊| 667/677 [00:24<00:00, 12.29it/s]
+Loading weights: 100%|██████████| 677/677 [00:24<00:00, 27.76it/s]
+[dense control] plain transformers, DKV NOT loaded (google/gemma-4-12B-it)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+dense_true d=0.1: 32128 tok, captured 262144 logits, top1=1, step2_top1=236764
+dense_true d=0.3: 32128 tok, captured 262144 logits, top1=100, step2_top1=236909
+dense_true d=0.5: 32128 tok, captured 262144 logits, top1=1, step2_top1=107
+dense_true d=0.7: 32128 tok, captured 262144 logits, top1=100, step2_top1=236909
+dense_true d=0.9: 32128 tok, captured 262144 logits, top1=100, step2_top1=236909
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[arm baseline] config={'quantization': 'nf4', 'preset': 'mid'} env={'DKV_COMPRESSED_DECODE': '1'}
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: 
+UserWarning: expandable_segments not supported on this platform (Triggered internally at 
+C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model google/gemma-4-12B-it...
+[DKV] Loading model weights on demand: google/gemma-4-12B-it (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+
+Loading weights:   0%|          | 0/677 [00:00<?, 
+?it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   0%|          | 3/677 [00:01<06:27,  1.74it/s]
+Loading weights:   1%|          | 7/677 [00:01<02:33,  4.36it/s]
+Loading weights:   2%|▏         | 13/677 [00:02<01:10,  9.42it/s]
+Loading weights:   3%|▎         | 20/677 [00:02<00:43, 15.26it/s]
+Loading weights:   4%|▎         | 24/677 [00:02<00:39, 16.45it/s]
+Loading weights:   5%|▌         | 34/677 [00:02<00:22, 28.04it/s]
+Loading weights:   7%|▋         | 48/677 [00:02<00:13, 45.41it/s]
+Loading weights:   9%|▉         | 62/677 [00:02<00:10, 61.07it/s]
+Loading weights:  11%|█         | 76/677 [00:02<00:08, 73.92it/s]
+Loading weights:  13%|█▎        | 89/677 [00:02<00:07, 80.85it/s]
+Loading weights:  15%|█▌        | 103/677 [00:03<00:06, 89.57it/s]
+Loading weights:  17%|█▋        | 117/677 [00:03<00:05, 95.37it/s]
+Loading weights:  19%|█▉        | 131/677 [00:03<00:05, 101.50it/s]
+Loading weights:  21%|██▏       | 145/677 [00:03<00:05, 91.41it/s] 
+Loading weights:  23%|██▎       | 155/677 [00:03<00:07, 68.65it/s]
+Loading weights:  24%|██▍       | 164/677 [00:04<00:09, 51.42it/s]
+Loading weights:  25%|██▌       | 171/677 [00:04<00:09, 54.02it/s]
+Loading weights:  26%|██▋       | 178/677 [00:04<00:12, 40.95it/s]
+Loading weights:  27%|██▋       | 186/677 [00:04<00:11, 41.80it/s]
+Loading weights:  28%|██▊       | 192/677 [00:04<00:12, 38.31it/s]
+Loading weights:  30%|██▉       | 200/677 [00:05<00:12, 38.97it/s]
+Loading weights:  30%|███       | 205/677 [00:05<00:13, 33.85it/s]
+Loading weights:  32%|███▏      | 214/677 [00:05<00:12, 38.29it/s]
+Loading weights:  32%|███▏      | 219/677 [00:05<00:13, 34.53it/s]
+Loading weights:  34%|███▎      | 228/677 [00:05<00:11, 38.91it/s]
+Loading weights:  34%|███▍      | 233/677 [00:06<00:12, 34.71it/s]
+Loading weights:  36%|███▌      | 242/677 [00:06<00:11, 38.20it/s]
+Loading weights:  36%|███▋      | 246/677 [00:06<00:13, 32.66it/s]
+Loading weights:  37%|███▋      | 252/677 [00:06<00:11, 36.67it/s]
+Loading weights:  38%|███▊      | 256/677 [00:06<00:13, 31.20it/s]
+Loading weights:  38%|███▊      | 260/677 [00:06<00:12, 32.85it/s]
+Loading weights:  40%|███▉      | 269/677 [00:07<00:10, 37.98it/s]
+Loading weights:  40%|████      | 273/677 [00:07<00:12, 31.37it/s]
+Loading weights:  42%|████▏     | 283/677 [00:07<00:10, 37.78it/s]
+Loading weights:  42%|████▏     | 287/677 [00:07<00:12, 31.89it/s]
+Loading weights:  44%|████▍     | 297/677 [00:07<00:09, 38.25it/s]
+Loading weights:  44%|████▍     | 301/677 [00:08<00:11, 32.03it/s]
+Loading weights:  46%|████▌     | 311/677 [00:08<00:09, 38.21it/s]
+Loading weights:  47%|████▋     | 315/677 [00:08<00:11, 32.34it/s]
+Loading weights:  48%|████▊     | 325/677 [00:08<00:09, 38.13it/s]
+Loading weights:  49%|████▊     | 329/677 [00:08<00:10, 32.31it/s]
+Loading weights:  49%|████▉     | 335/677 [00:09<00:09, 35.60it/s]
+Loading weights:  50%|█████     | 339/677 [00:09<00:11, 30.09it/s]
+Loading weights:  51%|█████     | 343/677 [00:09<00:10, 31.61it/s]
+Loading weights:  52%|█████▏    | 352/677 [00:09<00:08, 36.65it/s]
+Loading weights:  53%|█████▎    | 356/677 [00:09<00:10, 30.47it/s]
+Loading weights:  54%|█████▍    | 366/677 [00:09<00:08, 36.71it/s]
+Loading weights:  55%|█████▍    | 370/677 [00:10<00:10, 30.26it/s]
+Loading weights:  56%|█████▌    | 380/677 [00:10<00:08, 35.69it/s]
+Loading weights:  57%|█████▋    | 384/677 [00:10<00:09, 30.26it/s]
+Loading weights:  58%|█████▊    | 394/677 [00:10<00:07, 35.95it/s]
+Loading weights:  59%|█████▉    | 398/677 [00:11<00:09, 30.31it/s]
+Loading weights:  60%|██████    | 408/677 [00:11<00:07, 35.57it/s]
+Loading weights:  61%|██████    | 412/677 [00:11<00:08, 29.91it/s]
+Loading weights:  62%|██████▏   | 418/677 [00:11<00:07, 33.43it/s]
+Loading weights:  62%|██████▏   | 422/677 [00:11<00:09, 28.16it/s]
+Loading weights:  63%|██████▎   | 426/677 [00:11<00:08, 29.69it/s]
+Loading weights:  64%|██████▍   | 435/677 [00:12<00:07, 34.47it/s]
+Loading weights:  65%|██████▍   | 439/677 [00:12<00:08, 28.57it/s]
+Loading weights:  66%|██████▋   | 449/677 [00:12<00:06, 35.02it/s]
+Loading weights:  67%|██████▋   | 453/677 [00:12<00:07, 29.57it/s]
+Loading weights:  68%|██████▊   | 463/677 [00:12<00:06, 35.42it/s]
+Loading weights:  69%|██████▉   | 467/677 [00:13<00:07, 29.40it/s]
+Loading weights:  70%|███████   | 477/677 [00:13<00:05, 35.22it/s]
+Loading weights:  71%|███████   | 481/677 [00:13<00:06, 29.74it/s]
+Loading weights:  73%|███████▎  | 491/677 [00:13<00:05, 35.43it/s]
+Loading weights:  73%|███████▎  | 495/677 [00:14<00:06, 29.92it/s]
+Loading weights:  74%|███████▍  | 501/677 [00:14<00:05, 33.18it/s]
+Loading weights:  75%|███████▍  | 505/677 [00:14<00:06, 27.93it/s]
+Loading weights:  75%|███████▌  | 508/677 [00:14<00:06, 27.75it/s]
+Loading weights:  77%|███████▋  | 518/677 [00:14<00:04, 34.76it/s]
+Loading weights:  77%|███████▋  | 522/677 [00:14<00:05, 29.12it/s]
+Loading weights:  79%|███████▊  | 532/677 [00:15<00:04, 35.10it/s]
+Loading weights:  79%|███████▉  | 536/677 [00:15<00:04, 28.95it/s]
+Loading weights:  81%|████████  | 546/677 [00:15<00:03, 34.89it/s]
+Loading weights:  81%|████████  | 550/677 [00:15<00:04, 29.54it/s]
+Loading weights:  83%|████████▎ | 560/677 [00:16<00:03, 35.18it/s]
+Loading weights:  83%|████████▎ | 564/677 [00:16<00:03, 29.31it/s]
+Loading weights:  84%|████████▍ | 571/677 [00:16<00:02, 35.91it/s]
+Loading weights:  85%|████████▌ | 576/677 [00:16<00:03, 26.86it/s]
+Loading weights:  86%|████████▋ | 584/677 [00:16<00:02, 33.94it/s]
+Loading weights:  87%|████████▋ | 589/677 [00:17<00:03, 25.92it/s]
+Loading weights:  89%|████████▉ | 601/677 [00:17<00:02, 33.84it/s]
+Loading weights:  90%|████████▉ | 606/677 [00:17<00:02, 29.81it/s]
+Loading weights:  91%|█████████ | 615/677 [00:17<00:01, 33.17it/s]
+Loading weights:  91%|█████████▏| 619/677 [00:18<00:02, 28.36it/s]
+Loading weights:  93%|█████████▎| 629/677 [00:18<00:01, 33.48it/s]
+Loading weights:  94%|█████████▎| 633/677 [00:18<00:01, 27.94it/s]
+Loading weights:  95%|█████████▍| 643/677 [00:18<00:01, 33.57it/s]
+Loading weights:  96%|█████████▌| 647/677 [00:18<00:01, 28.86it/s]
+Loading weights:  97%|█████████▋| 657/677 [00:19<00:00, 31.18it/s]
+Loading weights:  98%|█████████▊| 661/677 [00:19<00:00, 26.58it/s]
+Loading weights:  99%|█████████▊| 667/677 [00:19<00:00, 30.01it/s]
+Loading weights: 100%|██████████| 677/677 [00:19<00:00, 34.37it/s]
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still 
+ABI-guarded).
+[DKV] Heap trimmed. RSS: 986 MB → 986 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 6487.9M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=5915 (123/layer x 48 layers ~= 125,952 tokens max context), rank=96 (pool_rank=32), max_residual=128, 355 KB/slot, budget=2.0 GB (ceiling: DKV_POOL_BUDGET_GB=2.0), worst-case 2.1 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 7 attended layers (model has 48); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=1, D=512, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] Heap trimmed. RSS: 1439 MB → 1439 MB (saved 0 MB)
+[Pool] Lazy-allocated 231 slots for ~32127 tokens = 52.9 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=32, prefill=32, decode=0)
+baseline d=0.1: captured 262144 logits, top1=1, compressed_blocks=224
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 11.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.3: captured 262144 logits, top1=100, compressed_blocks=224
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=32, prefill=32, decode=0)
+baseline d=0.5: captured 262144 logits, top1=1, compressed_blocks=224
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.7: captured 262144 logits, top1=100, compressed_blocks=224
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.9: captured 262144 logits, top1=100, compressed_blocks=224
+
+== first-step logit fidelity vs DENSE (n=5 prompts, ctx=32768, preset=mid, quant=nf4) ==
+             arm  top1 agree  KL(dense||arm)  dense-top1 rank  top5 overlap   blocks
+      dense_true       5/5           0.00000             0.00          5.0/5        0
+  dense_true/dec       5/5           0.00000             0.00          5.0/5        0
+        baseline       5/5           0.90299             0.00          4.8/5      224
+    baseline/dec       3/3           0.67367             0.00          4.7/5      224
+
+Read every arm against BASELINE, not against dense: the
+baseline gap is what compression already costs and is not the
+feature's doing. An arm level with baseline has added nothing.
+
+The */dec rows are the SECOND token, scored against the dense
+control at that SAME position. dense_true/dec is the self-check:
+it has no compression in it anywhere, so it must read ~0. If it
+does not, the positions are misaligned and no row here means
+anything -- which is exactly how this harness reported KL 10.579
+for a defect that did not exist.
+=== V13 PANEL google/gemma-4-12B-it DONE ===
+=== V13 PANEL mistralai/Ministral-3-8B-Instruct-2512-BF16 ===
+[transformers] The tokenizer you are loading from 'mistralai/Ministral-3-8B-Instruct-2512-BF16' with an incorrect 
+regex pattern: 
+https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This 
+will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to 
+fix this issue.
+[dense control] 4-bit weights (nf4), bfloat16 compute
+
+Loading weights:   0%|          | 0/531 [00:00<?, ?it/s]
+Loading weights:   0%|          | 1/531 [00:01<08:59,  1.02s/it]
+Loading weights:   0%|          | 2/531 [00:01<08:29,  1.04it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   1%|          | 4/531 [00:02<03:31,  2.49it/s]
+Loading weights:   1%|          | 6/531 [00:02<02:15,  3.87it/s]
+Loading weights:   2%|▏         | 13/531 [00:02<00:48, 10.64it/s]
+Loading weights:   3%|▎         | 16/531 [00:02<00:43, 11.71it/s]
+Loading weights:   4%|▍         | 22/531 [00:02<00:30, 16.88it/s]
+Loading weights:   5%|▍         | 25/531 [00:03<00:30, 16.42it/s]
+Loading weights:   6%|▌         | 31/531 [00:03<00:23, 21.17it/s]
+Loading weights:   6%|▋         | 34/531 [00:03<00:25, 19.39it/s]
+Loading weights:   8%|▊         | 40/531 [00:03<00:20, 23.68it/s]
+Loading weights:   8%|▊         | 43/531 [00:03<00:23, 20.86it/s]
+Loading weights:   9%|▉         | 49/531 [00:03<00:19, 24.50it/s]
+Loading weights:  10%|▉         | 52/531 [00:04<00:22, 21.70it/s]
+Loading weights:  11%|█         | 58/531 [00:04<00:18, 25.52it/s]
+Loading weights:  11%|█▏        | 61/531 [00:04<00:20, 22.39it/s]
+Loading weights:  13%|█▎        | 67/531 [00:04<00:17, 25.99it/s]
+Loading weights:  13%|█▎        | 70/531 [00:04<00:20, 22.41it/s]
+Loading weights:  14%|█▍        | 76/531 [00:05<00:17, 25.85it/s]
+Loading weights:  15%|█▍        | 79/531 [00:05<00:20, 22.35it/s]
+Loading weights:  16%|█▌        | 85/531 [00:05<00:17, 25.93it/s]
+Loading weights:  17%|█▋        | 88/531 [00:05<00:19, 22.35it/s]
+Loading weights:  18%|█▊        | 94/531 [00:05<00:17, 25.64it/s]
+Loading weights:  18%|█▊        | 97/531 [00:05<00:19, 22.43it/s]
+Loading weights:  19%|█▉        | 103/531 [00:06<00:16, 25.97it/s]
+Loading weights:  20%|█▉        | 106/531 [00:06<00:18, 22.58it/s]
+Loading weights:  21%|██        | 112/531 [00:06<00:15, 26.28it/s]
+Loading weights:  22%|██▏       | 115/531 [00:06<00:18, 22.70it/s]
+Loading weights:  23%|██▎       | 121/531 [00:06<00:16, 24.86it/s]
+Loading weights:  23%|██▎       | 124/531 [00:07<00:19, 21.38it/s]
+Loading weights:  24%|██▍       | 130/531 [00:07<00:16, 24.18it/s]
+Loading weights:  25%|██▌       | 133/531 [00:07<00:18, 21.13it/s]
+Loading weights:  26%|██▌       | 139/531 [00:07<00:15, 24.56it/s]
+Loading weights:  27%|██▋       | 142/531 [00:07<00:18, 21.27it/s]
+Loading weights:  28%|██▊       | 148/531 [00:08<00:15, 24.44it/s]
+Loading weights:  28%|██▊       | 151/531 [00:08<00:17, 21.41it/s]
+Loading weights:  30%|██▉       | 157/531 [00:08<00:15, 24.82it/s]
+Loading weights:  30%|███       | 160/531 [00:08<00:17, 21.61it/s]
+Loading weights:  31%|███▏      | 166/531 [00:08<00:14, 24.51it/s]
+Loading weights:  32%|███▏      | 169/531 [00:09<00:17, 21.04it/s]
+Loading weights:  33%|███▎      | 175/531 [00:09<00:14, 24.32it/s]
+Loading weights:  34%|███▎      | 178/531 [00:09<00:16, 21.40it/s]
+Loading weights:  35%|███▍      | 184/531 [00:09<00:14, 24.57it/s]
+Loading weights:  35%|███▌      | 187/531 [00:09<00:16, 20.52it/s]
+Loading weights:  36%|███▋      | 193/531 [00:10<00:14, 23.56it/s]
+Loading weights:  37%|███▋      | 196/531 [00:10<00:16, 20.38it/s]
+Loading weights:  38%|███▊      | 202/531 [00:10<00:14, 23.48it/s]
+Loading weights:  39%|███▊      | 205/531 [00:10<00:16, 20.02it/s]
+Loading weights:  40%|███▉      | 211/531 [00:10<00:13, 23.03it/s]
+Loading weights:  40%|████      | 214/531 [00:11<00:15, 19.93it/s]
+Loading weights:  41%|████▏     | 220/531 [00:11<00:13, 22.57it/s]
+Loading weights:  42%|████▏     | 223/531 [00:11<00:15, 19.48it/s]
+Loading weights:  43%|████▎     | 229/531 [00:11<00:13, 22.34it/s]
+Loading weights:  44%|████▎     | 232/531 [00:12<00:15, 19.33it/s]
+Loading weights:  45%|████▍     | 238/531 [00:12<00:13, 22.27it/s]
+Loading weights:  45%|████▌     | 241/531 [00:12<00:15, 18.71it/s]
+Loading weights:  47%|████▋     | 247/531 [00:12<00:13, 21.77it/s]
+Loading weights:  47%|████▋     | 250/531 [00:12<00:14, 18.78it/s]
+Loading weights:  48%|████▊     | 256/531 [00:13<00:12, 21.96it/s]
+Loading weights:  49%|████▉     | 259/531 [00:13<00:14, 19.09it/s]
+Loading weights:  50%|████▉     | 265/531 [00:13<00:12, 21.94it/s]
+Loading weights:  50%|█████     | 268/531 [00:13<00:13, 19.26it/s]
+Loading weights:  52%|█████▏    | 274/531 [00:14<00:11, 22.08it/s]
+Loading weights:  52%|█████▏    | 277/531 [00:14<00:12, 19.58it/s]
+Loading weights:  53%|█████▎    | 283/531 [00:14<00:10, 22.67it/s]
+Loading weights:  54%|█████▍    | 286/531 [00:14<00:12, 19.76it/s]
+Loading weights:  55%|█████▍    | 292/531 [00:14<00:10, 22.77it/s]
+Loading weights:  56%|█████▌    | 295/531 [00:15<00:12, 19.45it/s]
+Loading weights:  57%|█████▋    | 301/531 [00:15<00:10, 22.42it/s]
+Loading weights:  57%|█████▋    | 304/531 [00:15<00:11, 19.50it/s]
+Loading weights:  58%|█████▊    | 310/531 [00:15<00:08, 26.17it/s]
+Loading weights:  62%|██████▏   | 328/531 [00:15<00:03, 55.17it/s]
+Loading weights:  66%|██████▌   | 348/531 [00:15<00:02, 85.12it/s]
+Loading weights:  69%|██████▉   | 367/531 [00:15<00:01, 108.74it/s]
+Loading weights:  73%|███████▎  | 389/531 [00:16<00:01, 136.16it/s]
+Loading weights:  77%|███████▋  | 411/531 [00:16<00:00, 156.02it/s]
+Loading weights:  81%|████████  | 431/531 [00:16<00:00, 167.19it/s]
+Loading weights:  85%|████████▍ | 451/531 [00:16<00:00, 176.04it/s]
+Loading weights:  89%|████████▉ | 474/531 [00:16<00:00, 191.09it/s]
+Loading weights:  93%|█████████▎| 494/531 [00:16<00:00, 191.01it/s]
+Loading weights:  97%|█████████▋| 516/531 [00:16<00:00, 197.73it/s]
+Loading weights: 100%|██████████| 531/531 [00:16<00:00, 31.77it/s] 
+[dense control] plain transformers, DKV NOT loaded (mistralai/Ministral-3-8B-Instruct-2512-BF16)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+dense_true d=0.1: 32139 tok, captured 131072 logits, top1=1784, step2_top1=9452
+dense_true d=0.3: 32139 tok, captured 131072 logits, top1=1784, step2_top1=9452
+dense_true d=0.5: 32139 tok, captured 131072 logits, top1=1784, step2_top1=9452
+dense_true d=0.7: 32139 tok, captured 131072 logits, top1=1784, step2_top1=9452
+dense_true d=0.9: 32139 tok, captured 131072 logits, top1=1784, step2_top1=9452
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[arm baseline] config={'quantization': 'nf4', 'preset': 'mid'} env={'DKV_COMPRESSED_DECODE': '1'}
+[transformers] The tokenizer you are loading from 'mistralai/Ministral-3-8B-Instruct-2512-BF16' with an incorrect 
+regex pattern: 
+https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This 
+will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to 
+fix this issue.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: 
+UserWarning: expandable_segments not supported on this platform (Triggered internally at 
+C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model mistralai/Ministral-3-8B-Instruct-2512-BF16...
+[DKV] Loading model weights on demand: mistralai/Ministral-3-8B-Instruct-2512-BF16 (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] mistralai/Ministral-3-8B-Instruct-2512-BF16: not in the AutoModelForCausalLM mapping; loading via AutoModelForImageTextToText and using its text decoder.
+
+Loading weights:   0%|          | 0/531 [00:00<?, ?it/s]
+Loading weights:   0%|          | 1/531 [00:00<02:41,  3.29it/s]
+Loading weights:   0%|          | 2/531 [00:01<05:53,  1.50it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   1%|          | 4/531 [00:01<02:34,  3.40it/s]
+Loading weights:   1%|          | 5/531 [00:01<02:03,  4.26it/s]
+Loading weights:   1%|          | 6/531 [00:01<01:41,  5.16it/s]
+Loading weights:   2%|▏         | 13/531 [00:01<00:34, 15.00it/s]
+Loading weights:   3%|▎         | 15/531 [00:01<00:38, 13.28it/s]
+Loading weights:   4%|▍         | 22/531 [00:02<00:24, 20.98it/s]
+Loading weights:   5%|▍         | 25/531 [00:02<00:26, 19.16it/s]
+Loading weights:   6%|▌         | 31/531 [00:02<00:21, 23.51it/s]
+Loading weights:   6%|▋         | 34/531 [00:02<00:23, 20.91it/s]
+Loading weights:   8%|▊         | 40/531 [00:02<00:19, 24.87it/s]
+Loading weights:   8%|▊         | 43/531 [00:03<00:22, 21.91it/s]
+Loading weights:   9%|▉         | 49/531 [00:03<00:18, 25.75it/s]
+Loading weights:  10%|▉         | 52/531 [00:03<00:21, 22.47it/s]
+Loading weights:  11%|█         | 58/531 [00:03<00:18, 26.00it/s]
+Loading weights:  11%|█▏        | 61/531 [00:03<00:20, 22.57it/s]
+Loading weights:  13%|█▎        | 67/531 [00:03<00:15, 29.30it/s]
+Loading weights:  14%|█▍        | 76/531 [00:04<00:11, 40.24it/s]
+Loading weights:  16%|█▌        | 85/531 [00:04<00:08, 49.60it/s]
+Loading weights:  18%|█▊        | 94/531 [00:04<00:08, 49.34it/s]
+Loading weights:  19%|█▉        | 100/531 [00:04<00:11, 37.19it/s]
+Loading weights:  20%|█▉        | 105/531 [00:04<00:15, 28.09it/s]
+Loading weights:  21%|██        | 112/531 [00:05<00:13, 31.07it/s]
+Loading weights:  22%|██▏       | 116/531 [00:05<00:15, 27.60it/s]
+Loading weights:  23%|██▎       | 121/531 [00:05<00:14, 27.64it/s]
+Loading weights:  24%|██▎       | 125/531 [00:05<00:16, 25.00it/s]
+Loading weights:  24%|██▍       | 130/531 [00:05<00:15, 26.28it/s]
+Loading weights:  25%|██▌       | 133/531 [00:06<00:17, 22.14it/s]
+Loading weights:  26%|██▌       | 139/531 [00:06<00:15, 25.12it/s]
+Loading weights:  27%|██▋       | 142/531 [00:06<00:18, 21.44it/s]
+Loading weights:  28%|██▊       | 148/531 [00:06<00:16, 22.61it/s]
+Loading weights:  28%|██▊       | 151/531 [00:07<00:21, 18.04it/s]
+Loading weights:  29%|██▉       | 155/531 [00:07<00:17, 21.13it/s]
+Loading weights:  30%|██▉       | 158/531 [00:07<00:16, 22.38it/s]
+Loading weights:  31%|███▏      | 166/531 [00:07<00:11, 31.52it/s]
+Loading weights:  32%|███▏      | 170/531 [00:07<00:10, 33.25it/s]
+Loading weights:  33%|███▎      | 176/531 [00:07<00:10, 35.34it/s]
+Loading weights:  35%|███▍      | 184/531 [00:07<00:08, 41.37it/s]
+Loading weights:  36%|███▌      | 189/531 [00:07<00:08, 40.85it/s]
+Loading weights:  37%|███▋      | 194/531 [00:07<00:07, 42.23it/s]
+Loading weights:  38%|███▊      | 202/531 [00:08<00:06, 49.55it/s]
+Loading weights:  39%|███▉      | 208/531 [00:08<00:06, 50.27it/s]
+Loading weights:  40%|████      | 214/531 [00:08<00:06, 48.39it/s]
+Loading weights:  42%|████▏     | 221/531 [00:08<00:06, 51.16it/s]
+Loading weights:  43%|████▎     | 229/531 [00:08<00:05, 55.32it/s]
+Loading weights:  44%|████▍     | 235/531 [00:08<00:05, 55.85it/s]
+Loading weights:  45%|████▌     | 241/531 [00:08<00:05, 54.85it/s]
+Loading weights:  47%|████▋     | 248/531 [00:08<00:04, 58.39it/s]
+Loading weights:  48%|████▊     | 256/531 [00:09<00:04, 63.84it/s]
+Loading weights:  50%|████▉     | 263/531 [00:09<00:04, 64.26it/s]
+Loading weights:  51%|█████     | 270/531 [00:09<00:04, 61.97it/s]
+Loading weights:  52%|█████▏    | 277/531 [00:09<00:04, 57.65it/s]
+Loading weights:  53%|█████▎    | 284/531 [00:09<00:04, 59.32it/s]
+Loading weights:  55%|█████▍    | 292/531 [00:09<00:03, 61.76it/s]
+Loading weights:  56%|█████▋    | 299/531 [00:09<00:03, 62.55it/s]
+Loading weights:  58%|█████▊    | 306/531 [00:09<00:03, 58.91it/s]
+Loading weights:  61%|██████    | 322/531 [00:09<00:02, 83.00it/s]
+Loading weights:  64%|██████▍   | 341/531 [00:10<00:01, 109.92it/s]
+Loading weights:  68%|██████▊   | 363/531 [00:10<00:01, 139.49it/s]
+Loading weights:  72%|███████▏  | 384/531 [00:10<00:00, 154.72it/s]
+Loading weights:  76%|███████▌  | 403/531 [00:10<00:00, 159.71it/s]
+Loading weights:  80%|███████▉  | 424/531 [00:10<00:00, 173.73it/s]
+Loading weights:  84%|████████▎ | 444/531 [00:10<00:00, 179.91it/s]
+Loading weights:  87%|████████▋ | 463/531 [00:10<00:00, 182.74it/s]
+Loading weights:  91%|█████████ | 483/531 [00:10<00:00, 182.08it/s]
+Loading weights:  95%|█████████▍| 502/531 [00:10<00:00, 179.46it/s]
+Loading weights:  98%|█████████▊| 521/531 [00:11<00:00, 177.91it/s]
+Loading weights: 100%|██████████| 531/531 [00:11<00:00, 47.88it/s] 
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still 
+ABI-guarded).
+[DKV] Heap trimmed. RSS: 1065 MB → 1065 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 4996.4M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (120/layer x 34 layers ~= 122,880 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=2.0 GB (ceiling: DKV_POOL_BUDGET_GB=2.0), worst-case 2.8 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=32, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] Heap trimmed. RSS: 1520 MB → 1520 MB (saved 0 MB)
+[Pool] Lazy-allocated 1122 slots for ~32138 tokens = 478.4 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 0.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.1: captured 131072 logits, top1=1784, compressed_blocks=1088
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.3: captured 131072 logits, top1=1784, compressed_blocks=1088
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.5: captured 131072 logits, top1=1784, compressed_blocks=1088
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.7: captured 131072 logits, top1=1784, compressed_blocks=1088
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.9: captured 131072 logits, top1=1784, compressed_blocks=1088
+
+== first-step logit fidelity vs DENSE (n=5 prompts, ctx=32768, preset=mid, quant=nf4) ==
+             arm  top1 agree  KL(dense||arm)  dense-top1 rank  top5 overlap   blocks
+      dense_true       5/5           0.00000             0.00          5.0/5        0
+  dense_true/dec       5/5           0.00000             0.00          5.0/5        0
+        baseline       5/5           0.01480             0.00          5.0/5     1088
+    baseline/dec       5/5           0.01072             0.00          5.0/5     1088
+
+Read every arm against BASELINE, not against dense: the
+baseline gap is what compression already costs and is not the
+feature's doing. An arm level with baseline has added nothing.
+
+The */dec rows are the SECOND token, scored against the dense
+control at that SAME position. dense_true/dec is the self-check:
+it has no compression in it anywhere, so it must read ~0. If it
+does not, the positions are misaligned and no row here means
+anything -- which is exactly how this harness reported KL 10.579
+for a defect that did not exist.
+=== V13 PANEL mistralai/Ministral-3-8B-Instruct-2512-BF16 DONE ===
+=== V13 PANEL Qwen/Qwen3.5-4B ===
+[dense control] 4-bit weights (nf4), bfloat16 compute
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to 
+torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and 
+https://github.com/Dao-AILab/causal-conv1d
+
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]
+Loading weights:   0%|          | 1/426 [00:01<07:40,  1.08s/it]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   3%|▎         | 11/426 [00:01<00:33, 12.24it/s]
+Loading weights:   4%|▍         | 17/426 [00:01<00:22, 18.25it/s]
+Loading weights:   6%|▌         | 26/426 [00:01<00:14, 27.50it/s]
+Loading weights:   8%|▊         | 32/426 [00:01<00:12, 32.80it/s]
+Loading weights:   9%|▉         | 40/426 [00:01<00:09, 38.61it/s]
+Loading weights:  11%|█         | 46/426 [00:01<00:10, 35.37it/s]
+Loading weights:  12%|█▏        | 53/426 [00:02<00:09, 39.34it/s]
+Loading weights:  15%|█▌        | 64/426 [00:02<00:06, 52.57it/s]
+Loading weights:  17%|█▋        | 71/426 [00:02<00:07, 49.14it/s]
+Loading weights:  18%|█▊        | 78/426 [00:02<00:06, 53.36it/s]
+Loading weights:  20%|█▉        | 85/426 [00:02<00:06, 49.46it/s]
+Loading weights:  22%|██▏       | 93/426 [00:02<00:06, 51.46it/s]
+Loading weights:  23%|██▎       | 99/426 [00:02<00:07, 42.55it/s]
+Loading weights:  25%|██▍       | 106/426 [00:03<00:07, 45.34it/s]
+Loading weights:  27%|██▋       | 117/426 [00:03<00:05, 58.79it/s]
+Loading weights:  29%|██▉       | 124/426 [00:03<00:05, 54.09it/s]
+Loading weights:  31%|███       | 132/426 [00:03<00:05, 53.88it/s]
+Loading weights:  32%|███▏      | 138/426 [00:03<00:05, 54.31it/s]
+Loading weights:  34%|███▍      | 146/426 [00:03<00:05, 53.96it/s]
+Loading weights:  36%|███▌      | 152/426 [00:04<00:06, 42.98it/s]
+Loading weights:  37%|███▋      | 159/426 [00:04<00:05, 45.54it/s]
+Loading weights:  40%|███▉      | 170/426 [00:04<00:04, 59.26it/s]
+Loading weights:  42%|████▏     | 177/426 [00:04<00:04, 53.74it/s]
+Loading weights:  43%|████▎     | 185/426 [00:04<00:04, 57.14it/s]
+Loading weights:  46%|████▌     | 195/426 [00:04<00:03, 64.65it/s]
+Loading weights:  47%|████▋     | 202/426 [00:04<00:03, 56.84it/s]
+Loading weights:  49%|████▉     | 209/426 [00:04<00:03, 56.54it/s]
+Loading weights:  52%|█████▏    | 221/426 [00:05<00:02, 69.25it/s]
+Loading weights:  54%|█████▍    | 229/426 [00:05<00:02, 65.84it/s]
+Loading weights:  56%|█████▌    | 238/426 [00:05<00:02, 70.08it/s]
+Loading weights:  58%|█████▊    | 248/426 [00:05<00:02, 75.20it/s]
+Loading weights:  60%|██████    | 256/426 [00:05<00:02, 67.00it/s]
+Loading weights:  62%|██████▏   | 263/426 [00:05<00:02, 61.96it/s]
+Loading weights:  65%|██████▍   | 276/426 [00:05<00:01, 75.32it/s]
+Loading weights:  67%|██████▋   | 284/426 [00:05<00:01, 72.26it/s]
+Loading weights:  69%|██████▊   | 292/426 [00:06<00:02, 66.22it/s]
+Loading weights:  71%|███████▏  | 304/426 [00:06<00:01, 77.80it/s]
+Loading weights:  73%|███████▎  | 313/426 [00:06<00:01, 60.49it/s]
+Loading weights:  77%|███████▋  | 326/426 [00:06<00:01, 75.29it/s]
+Loading weights:  79%|███████▊  | 335/426 [00:06<00:01, 69.17it/s]
+Loading weights:  81%|████████  | 344/426 [00:06<00:01, 69.43it/s]
+Loading weights:  83%|████████▎ | 354/426 [00:06<00:00, 73.35it/s]
+Loading weights:  85%|████████▍ | 362/426 [00:07<00:00, 65.92it/s]
+Loading weights:  87%|████████▋ | 369/426 [00:07<00:00, 60.28it/s]
+Loading weights:  90%|████████▉ | 382/426 [00:07<00:00, 73.53it/s]
+Loading weights:  92%|█████████▏| 390/426 [00:07<00:00, 71.14it/s]
+Loading weights:  93%|█████████▎| 398/426 [00:07<00:00, 63.34it/s]
+Loading weights:  96%|█████████▌| 408/426 [00:07<00:00, 70.72it/s]
+Loading weights:  98%|█████████▊| 416/426 [00:07<00:00, 59.34it/s]
+Loading weights:  99%|█████████▉| 423/426 [00:08<00:00, 59.98it/s]
+Loading weights: 100%|██████████| 426/426 [00:08<00:00, 52.64it/s]
+[dense control] plain transformers, DKV NOT loaded (Qwen/Qwen3.5-4B)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+dense_true d=0.1: 32116 tok, captured 248320 logits, top1=248068, step2_top1=198
+dense_true d=0.3: 32116 tok, captured 248320 logits, top1=248068, step2_top1=198
+dense_true d=0.5: 32116 tok, captured 248320 logits, top1=248068, step2_top1=198
+dense_true d=0.7: 32116 tok, captured 248320 logits, top1=248068, step2_top1=198
+dense_true d=0.9: 32116 tok, captured 248320 logits, top1=248068, step2_top1=198
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[arm baseline] config={'quantization': 'nf4', 'preset': 'mid'} env={'DKV_COMPRESSED_DECODE': '1'}
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to 
+torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and 
+https://github.com/Dao-AILab/causal-conv1d
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: 
+UserWarning: expandable_segments not supported on this platform (Triggered internally at 
+C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-4B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-4B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]
+Loading weights:   0%|          | 1/426 [00:00<02:15,  3.15it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   5%|▌         | 22/426 [00:00<00:06, 66.60it/s]
+Loading weights:  10%|▉         | 42/426 [00:00<00:03, 104.29it/s]
+Loading weights:  15%|█▌        | 66/426 [00:00<00:02, 140.79it/s]
+Loading weights:  22%|██▏       | 93/426 [00:00<00:01, 172.68it/s]
+Loading weights:  27%|██▋       | 115/426 [00:00<00:01, 185.52it/s]
+Loading weights:  32%|███▏      | 136/426 [00:00<00:01, 189.69it/s]
+Loading weights:  37%|███▋      | 157/426 [00:01<00:01, 193.15it/s]
+Loading weights:  43%|████▎     | 185/426 [00:01<00:01, 212.95it/s]
+Loading weights:  49%|████▉     | 208/426 [00:01<00:01, 203.35it/s]
+Loading weights:  56%|█████▌    | 237/426 [00:01<00:00, 225.07it/s]
+Loading weights:  61%|██████▏   | 261/426 [00:01<00:00, 208.11it/s]
+Loading weights:  68%|██████▊   | 290/426 [00:01<00:00, 227.31it/s]
+Loading weights:  74%|███████▎  | 314/426 [00:01<00:00, 209.78it/s]
+Loading weights:  81%|████████  | 343/426 [00:01<00:00, 228.72it/s]
+Loading weights:  86%|████████▌ | 367/426 [00:02<00:00, 212.67it/s]
+Loading weights:  93%|█████████▎| 396/426 [00:02<00:00, 231.24it/s]
+Loading weights:  99%|█████████▊| 420/426 [00:02<00:00, 212.84it/s]
+Loading weights: 100%|██████████| 426/426 [00:02<00:00, 187.42it/s]
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still 
+ABI-guarded).
+[DKV] Heap trimmed. RSS: 1123 MB → 1123 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2421.2M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (128/layer x 32 layers ~= 131,072 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=2.0 GB (ceiling: DKV_POOL_BUDGET_GB=2.0), worst-case 2.8 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 8 attended layers (model has 32); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=256, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] Heap trimmed. RSS: 1582 MB → 1582 MB (saved 0 MB)
+[Pool] Lazy-allocated 264 slots for ~32115 tokens = 112.6 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 3.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.1: captured 248320 logits, top1=248068, compressed_blocks=256
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.3: captured 248320 logits, top1=248068, compressed_blocks=256
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.5: captured 248320 logits, top1=248068, compressed_blocks=256
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.7: captured 248320 logits, top1=248068, compressed_blocks=256
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be 
+captured, and deferring the forward's mutation would cost without buying anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.9: captured 248320 logits, top1=248068, compressed_blocks=256
+
+== first-step logit fidelity vs DENSE (n=5 prompts, ctx=32768, preset=mid, quant=nf4) ==
+             arm  top1 agree  KL(dense||arm)  dense-top1 rank  top5 overlap   blocks
+      dense_true       5/5           0.00000             0.00          5.0/5        0
+  dense_true/dec       5/5           0.00000             0.00          5.0/5        0
+        baseline       5/5           0.00000             0.00          5.0/5      256
+    baseline/dec       5/5           0.00180             0.00          4.8/5      256
+
+Read every arm against BASELINE, not against dense: the
+baseline gap is what compression already costs and is not the
+feature's doing. An arm level with baseline has added nothing.
+
+The */dec rows are the SECOND token, scored against the dense
+control at that SAME position. dense_true/dec is the self-check:
+it has no compression in it anywhere, so it must read ~0. If it
+does not, the positions are misaligned and no row here means
+anything -- which is exactly how this harness reported KL 10.579
+for a defect that did not exist.
+=== V13 PANEL Qwen/Qwen3.5-4B DONE ===
+=== V13 PANEL ibm-granite/granite-4.2-8b ===
+[dense control] 4-bit weights (nf4), bfloat16 compute
+
+Loading weights:   0%|          | 0/363 [00:00<?, ?it/s]
+Loading weights:   0%|          | 1/363 [00:00<04:29,  1.35it/s]
+Loading weights:   1%|          | 2/363 [00:01<04:25,  1.36it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   1%|          | 4/363 [00:01<01:53,  3.17it/s]
+Loading weights:   2%|▏         | 6/363 [00:01<01:14,  4.82it/s]
+Loading weights:   4%|▎         | 13/363 [00:01<00:27, 12.85it/s]
+Loading weights:   4%|▍         | 16/363 [00:02<00:24, 13.91it/s]
+Loading weights:   6%|▌         | 22/363 [00:02<00:17, 19.60it/s]
+Loading weights:   7%|▋         | 25/363 [00:02<00:17, 18.90it/s]
+Loading weights:   9%|▊         | 31/363 [00:02<00:14, 23.21it/s]
+Loading weights:   9%|▉         | 34/363 [00:02<00:15, 21.26it/s]
+Loading weights:  11%|█         | 40/363 [00:02<00:12, 24.98it/s]
+Loading weights:  12%|█▏        | 43/363 [00:03<00:14, 22.69it/s]
+Loading weights:  13%|█▎        | 49/363 [00:03<00:11, 26.85it/s]
+Loading weights:  14%|█▍        | 52/363 [00:03<00:13, 23.92it/s]
+Loading weights:  16%|█▌        | 58/363 [00:03<00:11, 27.72it/s]
+Loading weights:  17%|█▋        | 61/363 [00:03<00:12, 24.62it/s]
+Loading weights:  18%|█▊        | 67/363 [00:03<00:10, 28.45it/s]
+Loading weights:  19%|█▉        | 70/363 [00:04<00:11, 24.79it/s]
+Loading weights:  21%|██        | 76/363 [00:04<00:10, 28.51it/s]
+Loading weights:  22%|██▏       | 79/363 [00:04<00:11, 25.01it/s]
+Loading weights:  23%|██▎       | 85/363 [00:04<00:09, 27.83it/s]
+Loading weights:  24%|██▍       | 88/363 [00:04<00:11, 24.69it/s]
+Loading weights:  26%|██▌       | 94/363 [00:05<00:09, 27.99it/s]
+Loading weights:  27%|██▋       | 97/363 [00:05<00:10, 24.60it/s]
+Loading weights:  28%|██▊       | 103/363 [00:05<00:09, 28.35it/s]
+Loading weights:  29%|██▉       | 106/363 [00:05<00:10, 25.05it/s]
+Loading weights:  31%|███       | 112/363 [00:05<00:08, 28.26it/s]
+Loading weights:  32%|███▏      | 115/363 [00:05<00:09, 24.80it/s]
+Loading weights:  33%|███▎      | 121/363 [00:06<00:08, 28.68it/s]
+Loading weights:  34%|███▍      | 124/363 [00:06<00:09, 25.11it/s]
+Loading weights:  36%|███▌      | 130/363 [00:06<00:08, 28.54it/s]
+Loading weights:  37%|███▋      | 133/363 [00:06<00:09, 24.49it/s]
+Loading weights:  38%|███▊      | 139/363 [00:06<00:08, 27.41it/s]
+Loading weights:  39%|███▉      | 142/363 [00:06<00:09, 24.08it/s]
+Loading weights:  41%|████      | 148/363 [00:07<00:07, 27.67it/s]
+Loading weights:  42%|████▏     | 151/363 [00:07<00:08, 24.25it/s]
+Loading weights:  43%|████▎     | 157/363 [00:07<00:07, 27.57it/s]
+Loading weights:  44%|████▍     | 160/363 [00:07<00:08, 23.13it/s]
+Loading weights:  46%|████▌     | 166/363 [00:07<00:07, 26.87it/s]
+Loading weights:  47%|████▋     | 169/363 [00:07<00:08, 23.75it/s]
+Loading weights:  48%|████▊     | 175/363 [00:08<00:06, 27.24it/s]
+Loading weights:  49%|████▉     | 178/363 [00:08<00:07, 23.65it/s]
+Loading weights:  51%|█████     | 184/363 [00:08<00:06, 26.63it/s]
+Loading weights:  52%|█████▏    | 187/363 [00:08<00:07, 23.47it/s]
+Loading weights:  53%|█████▎    | 193/363 [00:08<00:06, 27.08it/s]
+Loading weights:  54%|█████▍    | 196/363 [00:09<00:07, 23.82it/s]
+Loading weights:  56%|█████▌    | 202/363 [00:09<00:05, 27.41it/s]
+Loading weights:  56%|█████▋    | 205/363 [00:09<00:06, 24.05it/s]
+Loading weights:  58%|█████▊    | 211/363 [00:09<00:05, 26.98it/s]
+Loading weights:  59%|█████▉    | 214/363 [00:09<00:06, 23.18it/s]
+Loading weights:  61%|██████    | 220/363 [00:09<00:05, 26.02it/s]
+Loading weights:  61%|██████▏   | 223/363 [00:10<00:06, 22.59it/s]
+Loading weights:  63%|██████▎   | 229/363 [00:10<00:05, 25.77it/s]
+Loading weights:  64%|██████▍   | 232/363 [00:10<00:05, 22.55it/s]
+Loading weights:  66%|██████▌   | 238/363 [00:10<00:04, 25.40it/s]
+Loading weights:  66%|██████▋   | 241/363 [00:10<00:05, 22.18it/s]
+Loading weights:  68%|██████▊   | 247/363 [00:11<00:04, 25.55it/s]
+Loading weights:  69%|██████▉   | 250/363 [00:11<00:05, 22.31it/s]
+Loading weights:  71%|███████   | 256/363 [00:11<00:04, 25.50it/s]
+Loading weights:  71%|███████▏  | 259/363 [00:11<00:04, 22.15it/s]
+Loading weights:  73%|███████▎  | 265/363 [00:11<00:03, 25.25it/s]
+Loading weights:  74%|███████▍  | 268/363 [00:12<00:04, 22.27it/s]
+Loading weights:  75%|███████▌  | 274/363 [00:12<00:03, 25.54it/s]
+Loading weights:  76%|███████▋  | 277/363 [00:12<00:03, 22.31it/s]
+Loading weights:  78%|███████▊  | 283/363 [00:12<00:03, 25.64it/s]
+Loading weights:  79%|███████▉  | 286/363 [00:12<00:03, 22.31it/s]
+Loading weights:  80%|████████  | 292/363 [00:12<00:02, 25.61it/s]
+Loading weights:  81%|████████▏ | 295/363 [00:13<00:03, 22.41it/s]
+Loading weights:  83%|████████▎ | 301/363 [00:13<00:02, 25.74it/s]
+Loading weights:  84%|████████▎ | 304/363 [00:13<00:02, 22.51it/s]
+Loading weights:  85%|████████▌ | 310/363 [00:13<00:02, 25.54it/s]
+Loading weights:  86%|████████▌ | 313/363 [00:13<00:02, 22.39it/s]
+Loading weights:  88%|████████▊ | 319/363 [00:14<00:01, 25.59it/s]
+Loading weights:  89%|████████▊ | 322/363 [00:14<00:01, 22.44it/s]
+Loading weights:  90%|█████████ | 328/363 [00:14<00:01, 25.61it/s]
+Loading weights:  91%|█████████ | 331/363 [00:14<00:01, 22.39it/s]
+Loading weights:  93%|█████████▎| 337/363 [00:14<00:01, 25.57it/s]
+Loading weights:  94%|█████████▎| 340/363 [00:15<00:01, 22.20it/s]
+Loading weights:  95%|█████████▌| 346/363 [00:15<00:00, 25.42it/s]
+Loading weights:  96%|█████████▌| 349/363 [00:15<00:00, 22.01it/s]
+Loading weights:  98%|█████████▊| 355/363 [00:15<00:00, 25.22it/s]
+Loading weights:  99%|█████████▊| 358/363 [00:15<00:00, 22.08it/s]
+Loading weights: 100%|██████████| 363/363 [00:15<00:00, 22.88it/s]
+[dense control] plain transformers, DKV NOT loaded (ibm-granite/granite-4.2-8b)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+dense_true d=0.1: 32094 tok, captured 100352 logits, top1=100274, step2_top1=100275
+dense_true d=0.3: 32094 tok, captured 100352 logits, top1=100274, step2_top1=100275
+dense_true d=0.5: 32094 tok, captured 100352 logits, top1=100274, step2_top1=100275
+dense_true d=0.7: 32094 tok, captured 100352 logits, top1=100274, step2_top1=100275
+dense_true d=0.9: 32094 tok, captured 100352 logits, top1=100274, step2_top1=100275
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[arm baseline] config={'quantization': 'nf4', 'preset': 'mid'} env={'DKV_COMPRESSED_DECODE': '1'}
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: 
+UserWarning: expandable_segments not supported on this platform (Triggered internally at 
+C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model ibm-granite/granite-4.2-8b...
+[DKV] Loading model weights on demand: ibm-granite/granite-4.2-8b (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+
+Loading weights:   0%|          | 0/363 [00:00<?, ?it/s]
+Loading weights:   0%|          | 1/363 [00:00<04:34,  1.32it/s]
+Loading weights:   1%|          | 2/363 [00:01<04:16,  1.41it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\L
+ib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future 
+PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+
+Loading weights:   1%|          | 4/363 [00:01<01:49,  3.29it/s]
+Loading weights:   2%|▏         | 6/363 [00:01<01:11,  4.97it/s]
+Loading weights:   4%|▎         | 13/363 [00:01<00:26, 13.18it/s]
+Loading weights:   4%|▍         | 16/363 [00:02<00:24, 14.18it/s]
+Loading weights:   6%|▌         | 22/363 [00:02<00:17, 19.90it/s]
+Loading weights:   7%|▋         | 25/363 [00:02<00:17, 19.10it/s]
+Loading weights:   9%|▉         | 32/363 [00:02<00:12, 27.27it/s]
+Loading weights:  11%|█▏        | 41/363 [00:02<00:08, 38.51it/s]
+Loading weights:  14%|█▍        | 50/363 [00:02<00:06, 49.02it/s]
+Loading weights:  16%|█▋        | 59/363 [00:02<00:05, 57.99it/s]
+Loading weights:  19%|█▊        | 68/363 [00:02<00:04, 65.50it/s]
+Loading weights:  21%|██        | 77/363 [00:03<00:04, 71.38it/s]
+Loading weights:  24%|██▎       | 86/363 [00:03<00:03, 75.89it/s]
+Loading weights:  26%|██▌       | 95/363 [00:03<00:04, 60.03it/s]
+Loading weights:  28%|██▊       | 102/363 [00:03<00:04, 53.95it/s]
+Loading weights:  30%|███       | 109/363 [00:03<00:06, 37.69it/s]
+Loading weights:  31%|███▏      | 114/363 [00:04<00:08, 30.88it/s]
+Loading weights:  33%|███▎      | 121/363 [00:04<00:07, 33.95it/s]
+Loading weights:  35%|███▍      | 126/363 [00:04<00:07, 30.74it/s]
+Loading weights:  36%|███▌      | 130/363 [00:04<00:07, 30.78it/s]
+Loading weights:  37%|███▋      | 134/363 [00:04<00:08, 28.17it/s]
+Loading weights:  38%|███▊      | 139/363 [00:04<00:07, 29.54it/s]
+Loading weights:  39%|███▉      | 143/363 [00:05<00:08, 27.12it/s]
+Loading weights:  41%|████      | 148/363 [00:05<00:07, 28.52it/s]
+Loading weights:  42%|████▏     | 151/363 [00:05<00:08, 24.41it/s]
+Loading weights:  43%|████▎     | 157/363 [00:05<00:07, 26.86it/s]
+Loading weights:  44%|████▍     | 160/363 [00:05<00:08, 23.41it/s]
+Loading weights:  46%|████▌     | 166/363 [00:06<00:07, 27.16it/s]
+Loading weights:  47%|████▋     | 169/363 [00:06<00:08, 23.78it/s]
+Loading weights:  48%|████▊     | 175/363 [00:06<00:06, 27.41it/s]
+Loading weights:  49%|████▉     | 178/363 [00:06<00:07, 23.14it/s]
+Loading weights:  51%|█████     | 184/363 [00:06<00:06, 26.36it/s]
+Loading weights:  52%|█████▏    | 187/363 [00:06<00:07, 22.77it/s]
+Loading weights:  53%|█████▎    | 193/363 [00:07<00:06, 25.72it/s]
+Loading weights:  54%|█████▍    | 196/363 [00:07<00:07, 22.30it/s]
+Loading weights:  56%|█████▌    | 202/363 [00:07<00:06, 25.29it/s]
+Loading weights:  56%|█████▋    | 205/363 [00:07<00:07, 21.40it/s]
+Loading weights:  58%|█████▊    | 212/363 [00:07<00:05, 27.51it/s]
+Loading weights:  60%|██████    | 218/363 [00:08<00:04, 33.60it/s]
+Loading weights:  61%|██████    | 222/363 [00:08<00:04, 31.20it/s]
+Loading weights:  63%|██████▎   | 230/363 [00:08<00:03, 37.53it/s]
+Loading weights:  65%|██████▌   | 236/363 [00:08<00:03, 42.23it/s]
+Loading weights:  66%|██████▋   | 241/363 [00:08<00:03, 37.53it/s]
+Loading weights:  68%|██████▊   | 248/363 [00:08<00:02, 40.39it/s]
+Loading weights:  71%|███████   | 256/363 [00:08<00:02, 44.10it/s]
+Loading weights:  72%|███████▏  | 261/363 [00:09<00:02, 42.87it/s]
+Loading weights:  73%|███████▎  | 266/363 [00:09<00:02, 41.22it/s]
+Loading weights:  75%|███████▍  | 271/363 [00:09<00:02, 42.80it/s]
+Loading weights:  76%|███████▌  | 276/363 [00:09<00:02, 38.06it/s]
+Loading weights:  78%|███████▊  | 283/363 [00:09<00:01, 44.99it/s]
+Loading weights:  79%|███████▉  | 288/363 [00:09<00:01, 43.51it/s]
+Loading weights:  81%|████████  | 293/363 [00:09<00:01, 41.55it/s]
+Loading weights:  82%|████████▏ | 299/363 [00:09<00:01, 45.56it/s]
+Loading weights:  84%|████████▎ | 304/363 [00:10<00:01, 39.09it/s]
+Loading weights:  85%|████████▌ | 310/363 [00:10<00:01, 43.95it/s]
+Loading weights:  87%|████████▋ | 315/363 [00:10<00:01, 41.81it/s]
+Loading weights:  88%|████████▊ | 320/363 [00:10<00:01, 40.60it/s]
+Loading weights:  90%|████████▉ | 325/363 [00:10<00:00, 42.65it/s]
+Loading weights:  91%|█████████ | 330/363 [00:10<00:00, 37.78it/s]
+Loading weights:  93%|█████████▎| 338/363 [00:10<00:00, 42.65it/s]
+Loading weights:  95%|█████████▌| 346/363 [00:11<00:00, 45.70it/s]
+Loading weights:  97%|█████████▋| 351/363 [00:11<00:00, 42.70it/s]
+Loading weights:  98%|█████████▊| 356/363 [00:11<00:00, 40.90it/s]
+Loading weights: 100%|█████████▉| 362/363 [00:11<00:00, 44.81it/s]
+Loading weights: 100%|██████████| 363/363 [00:11<00:00, 31.81it/s]
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still 
+ABI-guarded).
+[DKV] Heap trimmed. RSS: 1001 MB → 1001 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 4807.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (102/layer x 40 layers ~= 104,448 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=2.0 GB (ceiling: DKV_POOL_BUDGET_GB=2.0), worst-case 2.8 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=False)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=32, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] _reconstruct_and_score: backend failed at call time (backend='inductor' raised:
+RuntimeError: Compiler: cl is not found.
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+). Falling back to eager for the rest of the process.
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+[DKV JIT] Decode kernel warmup finished, but Inductor did NOT compile: _reconstruct_and_score fell back to eager for the rest of the process. Decode is correct but unfused; on Windows this is usually a missing cl.exe (MSVC Build Tools).
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] Heap trimmed. RSS: 1456 MB → 1456 MB (saved 0 MB)
+[Pool] Lazy-allocated 1320 slots for ~32093 tokens = 562.8 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 0.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.1: captured 100352 logits, top1=100274, compressed_blocks=1280
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: 
+FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use 
+_check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.3: captured 100352 logits, top1=100274, compressed_blocks=1280
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: 
+`torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see 
+`torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.5: captured 100352 logits, top1=100274, compressed_blocks=1280
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.7: captured 100352 logits, top1=100274, compressed_blocks=1280
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed 
+set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying 
+anything.
+    lm_head calls: [1025, 1025, 1025, 1025, 1025, 1025]... (n=33, prefill=32, decode=1)
+baseline d=0.9: captured 100352 logits, top1=100274, compressed_blocks=1280
+
+== first-step logit fidelity vs DENSE (n=5 prompts, ctx=32768, preset=mid, quant=nf4) ==
+             arm  top1 agree  KL(dense||arm)  dense-top1 rank  top5 overlap   blocks
+      dense_true       5/5           0.00000             0.00          5.0/5        0
+  dense_true/dec       5/5           0.00000             0.00          5.0/5        0
+        baseline       5/5           0.00000             0.00          4.4/5     1280
+    baseline/dec       5/5           0.00002             0.00          2.4/5     1280
+
+Read every arm against BASELINE, not against dense: the
+baseline gap is what compression already costs and is not the
+feature's doing. An arm level with baseline has added nothing.
+
+The */dec rows are the SECOND token, scored against the dense
+control at that SAME position. dense_true/dec is the self-check:
+it has no compression in it anywhere, so it must read ~0. If it
+does not, the positions are misaligned and no row here means
+anything -- which is exactly how this harness reported KL 10.579
+for a defect that did not exist.
+=== V13 PANEL ibm-granite/granite-4.2-8b DONE ===
+V13 PANEL COMPLETE

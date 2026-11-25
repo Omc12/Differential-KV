@@ -10,6 +10,87 @@ Tiers: **T1** offline screen on captured KV (`benchmarks/tier1_screen.py`),
 **T3** batch confirmation. Guardrails a change must not trade away: store bytes,
 reach (peak memory), decode speed, query-agnosticism, exact prefill = dense.
 
+## Cross-architecture fidelity panel: 10 models, nothing set per model (V13, 2026-11-25)
+
+Does the method run unchanged on attention layouts it was not developed on?
+`colab/logit_fidelity.py` on 10 cached models at 32k (nf4 both sides, shipped `mid`
+preset, 5 needle depths), KL(plain transformers || DKV) on the first generated token
+(prefill only) and the second (the first compressed-decode step). Campaign:
+`benchmarks/campaigns/run_v13_panel.cmd`; logs `v13*.log`.
+
+| model | what it tests | 1st token top-1 / KL | 2nd token top-1 / KL | status |
+|---|---|---|---|---|
+| SmolLM3-3B | Llama-style, NoPE on every 4th layer | 5/5 / 0.00000 (was 0/5, 9.21) | 5/5 / 0.110 | fixed (NoPE) |
+| Phi-4-mini | fused qkv_proj, partial rotary 0.75, LongRoPE | 5/5 / 0.0081 | 4/5 / **0.679** | **open defect** |
+| Qwen2.5-7B | dense GQA, qkv bias | 5/5 / 0.0017 | 5/5 / 0.0000 | pass |
+| Qwen3.5-2B | hybrid linear + full | 5/5 / 0.0000 | 5/5 / 0.034 | pass |
+| gemma-4-e2b | sliding + global, KV sharing, 1 KV head | 5/5 / 0.0014 (was 2.57) | 5/5 / 0.010 | fixed (torch + harness) |
+| gemma-4-e4b | same, 2 KV heads | 5/5 / 0.0044 (was 1.29) | 5/5 / 0.0001 | fixed (harness) |
+| gemma-4-12B | unified composite | 4/5 / 0.012 (was 0.90) | not comparable (step-1 near-tie at depth 0.3) | fixed (harness); pass |
+| Ministral-3-8B | composite mistral3 wrapper | 5/5 / 0.015 | 5/5 / 0.011 | pass |
+| Qwen3.5-4B | re-anchor (V12: 0.00180) | 5/5 / 0.0000 | 5/5 / 0.00180 | pass, reproduces V12 |
+| granite-4.2-8b | dense GQA, 40 full layers | 5/5 / 0.0000 | 5/5 / 0.00002 | pass |
+
+**Four defects found; three fixed, one open.**
+
+1. **NoPE layers were rotated (DKV bug).** SmolLM3 and Llama 4 set
+   `use_rope` on layers with no positional encoding. DKV never checked it and
+   rotated q/k and stored history on them. Now every rotary table a NoPE
+   layer's forward builds becomes the identity (`layer_uses_rope`,
+   `_nope_tables`), and `resid_attn_weight` plus the opt-in contiguous-unrotate
+   finalize skip those layers. The first version tested `is not False` and
+   missed SmolLM3's int `0`; the rerun measured the identical 9.21, which
+   caught it.
+2. **torch's efficient SDPA kernel is wrong on stride-0 K/V with a mask.**
+   transformers' `repeat_kv` makes those views for one-KV-head layers (gemma-4
+   sliding), and DKV's 1025-token prefill chunk is one of the bad lengths
+   (L % 32 == 1). This hit layers DKV leaves NATIVE, and plain transformers
+   reproduces it at chunk 1025. Isolated by a per-layer diff
+   (`benchmarks/diag_prefill_layer_diff.py`): putting DKV's layer back native
+   left the error unchanged; math backend and eager were correct; a pure-torch
+   repro gives 5.9e-2 vs 1.7e-3. Known upstream (pytorch/pytorch#191937, fixed
+   in torch 2.14). Guard: `install_sdpa_expanded_kv_guard` makes such K/V
+   contiguous, installed at load. Details: `docs/upstream/torch-sdpa-expanded-kv.md`.
+3. **The harness compared capped with uncapped logits (instrument bug).**
+   The DKV arm hooked `lm_head`, but gemma caps logits after it (softcap 30)
+   while the control read `model(...).logits`. One plain forward's capped vs
+   own `lm_head` output alone is KL 0.165 at 2k. That was the rest of gemma's
+   "gap": every decoder layer matched dense to bf16 noise at 8k (e4b) and 32k
+   (e2b). The harness now applies the model's own softcap. ad2b88d3's gemma
+   numbers (0.29 / 0.91 / 1.15 at 8k) carried both errors.
+4. **Phi-4-mini compressed decode is wrong (open).** The prefill is clean
+   (0.008). Bisect at 32k (`run_v13d_phi4_bisect.cmd`, `run_v13e_phi4_capacity.cmd`),
+   second-token KL:
+
+   | arm | KL | top-1 |
+   |---|---|---|
+   | baseline | 0.679 | 4/5 |
+   | compressed decode off (`dense_arm`) | 0.047 | 5/5 |
+   | every block attended (`allblocks`) | 1.049 | 3/5 |
+   | no remat cache | 0.548 | 4/5 |
+   | unrotated pool (`unrot`) | 0.679 | 4/5 |
+   | more residual rows (`resid200`) | 1.165 | 2/5 |
+   | rank 128 | 0.807 | 2/5 |
+
+   It is reconstruction, not routing, and MORE exact capacity makes it WORSE.
+   That is a defect, not a capacity limit. Leading hypothesis (unverified):
+   LongRoPE switches frequency sets at 4096 tokens, so chunked prefill rotates
+   early keys with the short set while a 32k table uses the long one; partial
+   rotary 0.75 is the other candidate. Separately, `unrot` measured
+   bit-identical to baseline although its env was set, so that switch looks
+   inert on this path; not investigated.
+
+Also measured on the way: gemma's chunking noise floor (plain transformers,
+chunk 512 vs 1024 / 1026 / 2048) is KL 0.0005-0.004, so gemma results here are
+not chunk-size sensitive once the kernel bug is guarded.
+
+| Change | Switch | Default | Verification | Notes |
+|---|---|---|---|---|
+| NoPE layers are not rotated | none (reads the layer's `use_rope`) | on | SmolLM3-3B 32k: first token 0/5 KL 9.21 → 5/5 0.00000; unit tests (`test_nope_layers.py`: int and bool flags, identity tables at partial rotary, residual ranking) | Covers SmolLM3 and Llama-4-style layers. The opt-in attention-interface path (`DKV_USE_ATTENTION_INTERFACE=1`) is NOT covered |
+| Guard torch's efficient-SDPA stride-0 K/V defect | none | on (installed at load) | gemma-4-e2b 8k per-layer: first DKV layer 7.6% → 1.8% rel err (noise); 32k first token 2.57 → 0.96 before the harness fix; unit test against the math kernel | Makes K/V contiguous only when a mask is given and the head axis has stride 0; every other call untouched. Upstream fix in torch 2.14. Plain transformers chunk 2050 also broke and does not fit the L % 32 == 1 rule; unexplained |
+| Fidelity harness applies the model's final logit softcap to the DKV arm | none | on | gemma-4 e2b / e4b first token 0.96 / 1.29 → 0.0014 / 0.0044 | Instrument fix; uncapped models unchanged |
+| `benchmarks/diag_prefill_layer_diff.py` | `--chunk --dkv-chunk --unpatch --attn --sdpa-backend` | - | Found defects 2 and 3 | Per-decoder-layer last-position hidden state, plain transformers vs DKV |
+
 ## The key-box router cost 22 points at 131k; residual router restored (2026-11-25)
 
 V11 (below) measured the adaptive block count against fixed K on identical

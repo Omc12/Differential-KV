@@ -2433,6 +2433,8 @@ def resid_attn_weight(manager, block, k_active):
     Hkv = k_active.shape[1] // D
     k = k_active.view(T, Hkv, D).transpose(0, 1).unsqueeze(0).float()      # [1,Hkv,T,D]
     cos, sin = rotary(k, pos.unsqueeze(0))
+    if getattr(block, "layer_idx", None) in (getattr(manager, "_nope_layers", None) or ()):
+        cos, sin = _nope_tables(cos, sin)         # NoPE layer: keys are not rotated
     _, kr = apply_rotary_pos_emb(k, k, cos.float(), sin.float())
     kr = kr[0].repeat_interleave(Hq // Hkv, 0)                              # [Hq,T,D]
     vis = pos.unsqueeze(0) <= P.to(dev).unsqueeze(1)                        # [M,T]
@@ -2501,6 +2503,94 @@ def _apply_rope_single(x, cos, sin):
     x_rot, x_pass = x[..., :rotary_dim], x[..., rotary_dim:]
     x_embed = (x_rot * cos) + (rotate_half(x_rot) * sin)
     return torch.cat([x_embed, x_pass], dim=-1)
+
+
+def install_sdpa_expanded_kv_guard() -> bool:
+    """Work around a torch SDPA defect that corrupts native attention layers.
+
+    torch 2.11's memory-efficient SDPA kernel returns WRONG output when K/V are
+    broadcast views (stride 0 across heads) AND a boolean mask is passed, at
+    some query lengths. Reproduced with no transformers and no DKV: q
+    (1, 8, L, 256) bf16, K/V a single head expanded to 8, sliding-window bool
+    mask, scale 1.0, relative error vs the math kernel:
+
+        L = 513   8.2e-2     L = 1025  5.9e-2      (L = 832/1024/1026/2048: 1.7e-3)
+
+    and the same inputs made contiguous are correct at every L. transformers'
+    repeat_kv produces exactly those views for a ONE-KV-head layer (its reshape
+    of an expand is free when kv_heads == 1), which is gemma-4's sliding layers.
+    DKV's prefill chunk is 1025 (1024 + anchor), so every gemma-4 run hit it in
+    the layers DKV leaves native: the V13 panel's first-token KL of 0.9-2.6 was
+    this, not DKV (per-layer diff: unchanged with DKV's layer put back native,
+    and reproduced on plain transformers at chunk 1025; math backend correct).
+
+    The guard copies K/V to contiguous only in that case (mask given and a
+    stride-0 head axis), so every other call is untouched. Idempotent.
+
+    Upstream: reported as pytorch/pytorch#191937 and fixed by #191984 / #192138,
+    released in torch 2.14.0 (per the issue; not re-measured here). The trigger
+    there is query length L % 32 == 1 at head_dim 256/512 (L % 64 == 1 at 128),
+    which matches 513 / 1025 / 1537 here. Kept unconditional: it costs nothing
+    on other calls, and a plain-transformers chunk-2050 failure seen here does
+    not fit that rule and is unexplained.
+    """
+    import torch.nn.functional as _F
+    if getattr(_F.scaled_dot_product_attention, "_dkv_expanded_kv_guard", False):
+        return False
+    _orig = _F.scaled_dot_product_attention
+
+    def _sdpa(query, key, value, attn_mask=None, *args, **kwargs):
+        if attn_mask is not None and key.dim() == 4 and key.shape[1] > 1:
+            if key.stride(1) == 0:
+                key = key.contiguous()
+            if value.stride(1) == 0:
+                value = value.contiguous()
+        return _orig(query, key, value, attn_mask, *args, **kwargs)
+
+    _sdpa._dkv_expanded_kv_guard = True
+    _sdpa.__wrapped__ = _orig
+    _F.scaled_dot_product_attention = _sdpa
+    torch.nn.functional.scaled_dot_product_attention = _sdpa
+    return True
+
+
+def layer_uses_rope(attn) -> bool:
+    """False for an attention layer that takes no rotary position embedding.
+
+    transformers marks these with `use_rope = False` on the attention module
+    (SmolLM3 and Llama 4 "NoPE" layers: every 4th layer has no positional
+    encoding at all). DKV rotates keys and queries itself, and re-rotates
+    stored (unrotated) history at every read, so it must skip those layers the
+    way the model's own forward does. Rotating them anyway is not a small
+    error: SmolLM3-3B at 32k agreed with dense on 0/5 first tokens, KL 9.2
+    (V13 panel), with every other layer correct.
+    """
+    # Truthiness, not `is False`: SmolLM3 sets it from config.no_rope_layers,
+    # an int list (1 = rotate, 0 = NoPE). The first version tested `is not
+    # False`, never matched the int 0, and the rerun measured the same KL 9.2.
+    v = getattr(attn, "use_rope", None)
+    return True if v is None else bool(v)
+
+
+_NOPE_TABLES: dict = {}
+
+
+def _nope_tables(cos, sin):
+    """Identity rotary tables shaped like (cos, sin): cos = 1, sin = 0, so every
+    rotation site (apply_rotary_pos_emb, _apply_rope_single, the fused kernels)
+    becomes an exact no-op without a per-site branch. Cached and grown, never
+    rebuilt per decode step (a 131k-row table is tens of MB)."""
+    if cos is None or sin is None:
+        return cos, sin
+    n = cos.shape[-2]
+    key = (cos.device, cos.dtype, tuple(cos.shape[:-2]), cos.shape[-1])
+    hit = _NOPE_TABLES.get(key)
+    if hit is None or hit[0].shape[-2] < n:
+        shape = tuple(cos.shape[:-2]) + (max(n, 1), cos.shape[-1])
+        hit = (torch.ones(shape, device=cos.device, dtype=cos.dtype),
+               torch.zeros(shape, device=cos.device, dtype=sin.dtype))
+        _NOPE_TABLES[key] = hit
+    return hit[0].narrow(-2, 0, n), hit[1].narrow(-2, 0, n)
 
 
 _HIST_ROPE_CACHE: dict = {}
@@ -3306,6 +3396,16 @@ def apply_dkv_attention_patch(model, kv_manager):
                     use_cache = True
 
                 bsz, q_len, _ = hidden_states.size()
+                # NoPE layer (use_rope=False): every rotary table this forward
+                # builds is swapped for the identity (_nope_tables), so no site
+                # rotates. Registered on the manager for the code outside this
+                # forward that rotates stored keys (resid_attn_weight).
+                _nope = not layer_uses_rope(self)
+                if _nope:
+                    _nl = getattr(kv_manager, "_nope_layers", None)
+                    if _nl is None:
+                        _nl = kv_manager._nope_layers = set()
+                    _nl.add(captured_layer_idx)
                 # THE MODEL'S OWN ATTENTION SCALE, not 1/sqrt(head_dim).
                 #
                 # That expression is a Llama-ism, and this file asserted it in
@@ -3937,6 +4037,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                         cos, sin = self.rotary_emb(value_states, position_ids)
                 else:
                     cos, sin = position_embeddings
+                if _nope:
+                    cos, sin = _nope_tables(cos, sin)
                 unrot_key_states = key_states.clone()
                 # unrot_query_states holds the PRE-RoPE query.  In DECODE (q_len==1)
                 # the block router reads it (the q_for_routing / raw_q uses, both
@@ -4470,6 +4572,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                                                 cos_all, sin_all = _rot_emb(value_states[b_idx:b_idx+1], hist_pos)
                                                 session_dict["rope_cos"] = cos_all
                                                 session_dict["rope_sin"] = sin_all
+                                            if _nope:        # cache keeps the real table
+                                                cos_all, sin_all = _nope_tables(cos_all, sin_all)
                                             selected_slots = route_blocks_relevance(
                                                 Q              = q_for_routing,
                                                 pool           = pool,
@@ -4804,6 +4908,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                             cos_all, sin_all = _rot_emb_fn(value_states[b_idx:b_idx+1], hist_pos)
                             session_dict["rope_cos"] = cos_all
                             session_dict["rope_sin"] = sin_all
+                        if _nope:            # session cache keeps the real table
+                            cos_all, sin_all = _nope_tables(cos_all, sin_all)
 
                         if anchor_indices is not None and anchor_indices.numel() > 0 and pool is not None:
                             session_dict = kv_manager.decode_workspace.setdefault(sid, {})
@@ -6521,7 +6627,9 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     history_blocks = _sparse_prefill_filter_blocks(
                                         history_blocks, chunk_q, chunk_start=K_b,
                                         rope=lambda _mp, _m=model, _r=value_states[b_idx:b_idx + 1],
-                                        _d=query_states.device: _history_cos_sin(_m, _r, _mp, _d))
+                                        _d=query_states.device, _np=_nope: (
+                                            _nope_tables(*_history_cos_sin(_m, _r, _mp, _d)) if _np
+                                            else _history_cos_sin(_m, _r, _mp, _d)))
 
                                     comp_blocks = []
                                     dense_k = []
@@ -6576,6 +6684,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     hist_pos = torch.arange(max_pos, device=query_states.device, dtype=torch.long).unsqueeze(0)
                                     _rot_emb_fn_inc = _resolve_rotary_emb(model)
                                     cos_all, sin_all = _rot_emb_fn_inc(value_states[b_idx:b_idx+1], hist_pos)
+                                    if _nope:
+                                        cos_all, sin_all = _nope_tables(cos_all, sin_all)
 
                                     if lean_blocks:
                                         out_hist_dense, lse_hist_dense = _dense_history_attend_tiled(
@@ -6833,7 +6943,9 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         history_blocks = _sparse_prefill_filter_blocks(
                                             history_blocks, chunk_q, chunk_start=K_b,
                                             rope=lambda _mp, _m=model, _r=value_states[b_idx:b_idx + 1],
-                                            _d=query_states.device: _history_cos_sin(_m, _r, _mp, _d))
+                                            _d=query_states.device, _np=_nope: (
+                                            _nope_tables(*_history_cos_sin(_m, _r, _mp, _d)) if _np
+                                            else _history_cos_sin(_m, _r, _mp, _d)))
 
                                         comp_blocks = []
                                         dense_k = []
@@ -6880,6 +6992,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         cos_all, sin_all = _history_cos_sin(
                                             model, value_states[b_idx:b_idx + 1],
                                             max_pos, query_states.device)
+                                        if _nope:
+                                            cos_all, sin_all = _nope_tables(cos_all, sin_all)
 
                                         _dbg_mem = os.environ.get("DKV_DBG_MEM") == "1"
                                         if _dbg_mem:
@@ -6888,6 +7002,21 @@ def apply_dkv_attention_patch(model, kv_manager):
                                                   f"peak={torch.cuda.max_memory_allocated()/1e9:.2f} "
                                                   f"exact={len(lean_blocks) or len(dense_k)} comp={len(comp_blocks)}",
                                                   flush=True)
+                                        if os.environ.get("DKV_DBG_HIST") == "1":
+                                            # Token coverage of the history this chunk attends:
+                                            # every position < K_b should appear exactly once.
+                                            _cov = []
+                                            for _b in lean_blocks:
+                                                _a = 0 if _b.active_k is None else int(_b.active_k.shape[2])
+                                                _cov.extend(range(_b.anchor_idx, _b.anchor_idx + 1 + _a))
+                                            _cov.extend(dense_positions_list)
+                                            _cs = set(_cov)
+                                            print(f"[HIST] L{captured_layer_idx} K_b={K_b} c_len={c_len} "
+                                                  f"all={len(blocks)} kept={len(history_blocks)} "
+                                                  f"exact_tok={len(_cov)} uniq={len(_cs)} "
+                                                  f"missing={K_b - len(_cs & set(range(K_b)))} "
+                                                  f"beyond={len([p for p in _cs if p >= K_b])} "
+                                                  f"comp={len(comp_blocks)}", flush=True)
                                         if lean_blocks:
                                             out_hist_dense, lse_hist_dense = _dense_history_attend_tiled(
                                                 chunk_q, lean_blocks, cos_all, sin_all,

@@ -304,6 +304,19 @@ def run_one_arm(args):
     trace = []
     cur = {"L": 0}
 
+    # FINAL LOGIT SOFTCAPPING. The dense control reads model(...).logits, which
+    # the model's own forward caps (gemma-4: tanh(x / 30) * 30) AFTER lm_head;
+    # this hook sits ON lm_head, before the cap. For a capped model the two arms
+    # were therefore compared in different spaces: on gemma-4-e4b-it, one plain
+    # forward's capped logits vs its own lm_head output is KL 0.165 at 2k, and
+    # the V13 panel's first-token "gap" of 0.9-1.3 on gemma (with every decoder
+    # layer matching dense to bf16 noise) was this. Uncapped models: no-op.
+    _tc = getattr(model.config, "text_config", None) or model.config
+    _softcap = getattr(_tc, "final_logit_softcapping", None)
+
+    def _cap(t):
+        return t if not _softcap else torch.tanh(t / _softcap) * _softcap
+
     def _pre(_m, _a, kw):
         ii = kw.get("input_ids")
         if ii is None and _a:
@@ -315,9 +328,9 @@ def run_one_arm(args):
         L = cur["L"]
         trace.append(L)
         if L > 1:                       # prefill chunk -- keep the LAST one
-            grabbed["prefill"] = t[0, -1].float().cpu()
+            grabbed["prefill"] = _cap(t[0, -1].float()).cpu()
         else:                           # decode step -- keep the FIRST one
-            grabbed.setdefault("decode", t[0, -1].float().cpu())
+            grabbed.setdefault("decode", _cap(t[0, -1].float()).cpu())
 
     hp = model.register_forward_pre_hook(_pre, with_kwargs=True)
     h = model.lm_head.register_forward_hook(_hook)
