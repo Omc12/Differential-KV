@@ -90,9 +90,30 @@ def main():
         raise SystemExit("attention module %s has no %s_proj (fused QKV is not "
                          "supported by this capture yet)" % (type(at).__name__, n))
 
+    def fused(li, at):
+        # Fused QKV (Phi-3 / Phi-4 qkv_proj): split the one projection output
+        # into q | k | v by the widths read off the live layer's weights.
+        hd = getattr(at, "head_dim", None)
+        kvh = getattr(at, "num_key_value_heads", None) or getattr(
+            model.config, "num_key_value_heads", None)
+        if not hd or not kvh:
+            raise SystemExit("fused qkv_proj without head_dim / num_key_value_heads")
+        nkv = int(kvh) * int(hd)
+        nq = at.qkv_proj.out_features - 2 * nkv
+        hq, hk, hv = mk(li, "q"), mk(li, "k"), mk(li, "v")
+
+        def hook(m, i, out):
+            hq(m, i, out[..., :nq])          # mk's hook reads out[0]: batch 0
+            hk(m, i, out[..., nq:nq + nkv])
+            hv(m, i, out[..., nq + nkv:])
+        return at.qkv_proj.register_forward_hook(hook)
+
     hs = []
     for li in args.layers:
         at = layers[li].self_attn
+        if getattr(at, "qkv_proj", None) is not None and getattr(at, "k_proj", None) is None:
+            hs.append(fused(li, at))
+            continue
         hs += [src(at, "q").register_forward_hook(mk(li, "q")),
                src(at, "k").register_forward_hook(mk(li, "k")),
                at.v_proj.register_forward_hook(mk(li, "v"))]

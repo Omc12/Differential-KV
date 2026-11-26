@@ -496,10 +496,35 @@ def _greedy_whole_runs(s_np, runs, T, budget):
         # `query` (strict) keeps the old behaviour for A/B: scope even when there
         # was nothing to scope by.
 
+    # BOUNDED CROWD-OUT when the reservation is by error alone (no query
+    # priority). Reserving EVERY run first let a block whose prose carries many
+    # short core spans -- each 'AI', '2010s', 'GPU' of a repeated sentence is
+    # one -- fill the whole budget with runs before any other row was looked
+    # at. Measured on Phi-4-mini at 32k (layer 9, block 0, 128 slots,
+    # `benchmarks/diag_store_recon.py`): the two rows the factor rebuilt WORST
+    # (key error 46.7 / 46.6, ranks 1 and 2 of 1025) got no slot while rows with
+    # error 0.50 did, and at decode those two rows took 66% of a head's
+    # attention (exact: 1%).
+    #
+    # The best run is still always reserved whole (a buried code is typically
+    # its block's worst-reconstructed span, and keeping it whole is what took
+    # the natural sweep from 3/12 to 11/12); further runs may only take up to
+    # DKV_RESIDUAL_RUN_SHARE of the budget (default 0.5, 1 = the old
+    # runs-first fill). The rest goes to the per-row error ranking.
+    _share_cap = budget
+    if not _has_priority:
+        try:
+            _share = float(os.environ.get("DKV_RESIDUAL_RUN_SHARE", "0.5"))
+        except ValueError:
+            _share = 0.5
+        _share_cap = int(budget * min(max(_share, 0.0), 1.0))
+
     front, seen, remaining = [], set(), budget
     for _prio, _sc, lo, hi in ranked:
         rows = [r for r in range(lo, hi) if r not in seen]
         if not rows or len(rows) > remaining:
+            continue
+        if front and len(front) + len(rows) > _share_cap:
             continue
         front.extend(rows)
         seen.update(rows)

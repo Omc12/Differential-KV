@@ -10,6 +10,58 @@ Tiers: **T1** offline screen on captured KV (`benchmarks/tier1_screen.py`),
 **T3** batch confirmation. Guardrails a change must not trade away: store bytes,
 reach (peak memory), decode speed, query-agnosticism, exact prefill = dense.
 
+## Residual rows no longer crowded out by token runs; Phi-4-mini fixed (V15, 2026-11-26)
+
+V13's open defect 4 (Phi-4-mini second-token KL 0.68) was NOT the joint K|V
+factor. `benchmarks/diag_store_recon.py` reads what the decode path actually
+rebuilds (it wraps `reconstruct_blocks` and the routed-block gather) and compares
+it with the exact pre-RoPE K/V from prefill, then attends both with the real
+first decode query. On Phi-4-mini at 32k, layer 9, block 0: two rows (positions
+156 and 172, value-heavy tokens: |dV| 3x the block median) were rebuilt WORSE
+than the anchor alone (key error 1.5x their own delta, ranks 1 and 2 of 1025 by
+both key and value error) and took 66% of head 22's attention (exact: 1%).
+Attention KL over the routed blocks: layer 9 2.43, layer 16 0.84.
+
+Neither row had a residual. The block's 128 slots went to rows with key error as
+low as 0.50, because with no question pinned (the default since the 2026-11-24
+review) `_greedy_whole_runs` reserved EVERY token run first. A run is any span
+with a digit or all-caps word, so each 'AI' / '2010s' / 'GPU' of the repeated
+filler sentence is one, and together they filled the budget before the per-row
+ranking was read. The joint factor makes the miss visible (separate factors never
+rebuild a row past its anchor: worst row 1.00), but the selection defect is
+model-independent: the panel improved on five other models.
+
+Also found: `benchmarks/tier1_screen.py` (the offline store model) predicted
+layer 9 at 4% output error -- it ranks residuals per row with no runs, so it
+could not see this. A model of the store is not the store.
+
+| Change | Switch | Default | Verification | Notes |
+|---|---|---|---|---|
+| Bounded run reservation: the best run is reserved whole, further runs may take at most a share of the budget; the rest goes to the per-row error ranking. Only when no query priority exists | `DKV_RESIDUAL_RUN_SHARE` (0.5; 1 = old runs-first) | **0.5** | Phi-4-mini layer 9 attention KL 2.43 -> 0.0011, layer 16 0.84 -> 0.019; V15 panel below; `test_residual_capture.py` 37 pass (the best-run guarantees behind the 3/12 -> 11/12 sweep still hold) | Query-marked reservation unchanged. First tried: runs competing with single rows on score -- broke the tested guarantee that a buried code is kept whole when filler out-errors it, so dropped |
+| `benchmarks/diag_store_recon.py` | `--layers --ctx --depth` | - | Found the defect | Runtime reconstruction vs exact K/V per block, worst rows, residual membership, and attention with the real decode query |
+| `tier1_capture.py` reads fused `qkv_proj` (Phi-3 / Phi-4) | - | - | Captured Phi-4-mini at 32k | Split by widths from the live layer |
+
+**V15 panel** (`colab/logit_fidelity.py`, 32k, nf4, `mid`, 5 depths; log
+`paper/results/campaign/v15_panel.log`), second-token KL (first compressed
+decode step), V13 -> V15; first-token rows unchanged:
+
+| model | V13 | V15 | top-1 |
+|---|---|---|---|
+| Phi-4-mini | 0.679 | **0.0063** | 4/5 -> 5/5 |
+| SmolLM3-3B | 0.110 | **0.012** | 5/5 |
+| Qwen3.5-2B | 0.034 | 0.0012 | 5/5 |
+| gemma-4-e2b | 0.010 | 0.0036 | 5/5 |
+| Ministral-3-8B | 0.011 | 0.0007 | 5/5 |
+| Qwen3.5-4B | 0.0018 | 0.0007 | 5/5 |
+| Qwen2.5-7B | 0.0000 | 0.0000 | 5/5 |
+| gemma-4-e4b | 0.0001 | 0.0001 | 5/5 |
+| gemma-4-12B | not comparable (step-1 near-tie at depth 0.3) | same | 4/5 first token |
+| granite-4.2-8b | 0.00002 | 0.00000 | 5/5 |
+
+V13 defect 4 is closed. The `DKV_STORE=codes` / `DKV_KV_SPLIT` workarounds are no
+longer needed for Phi-4-mini. RULER (V14) was run before this change and has not
+been rerun.
+
 ## Cross-architecture fidelity panel: 10 models, nothing set per model (V13, 2026-11-25)
 
 Does the method run unchanged on attention layouts it was not developed on?
@@ -21,7 +73,7 @@ preset, 5 needle depths), KL(plain transformers || DKV) on the first generated t
 | model | what it tests | 1st token top-1 / KL | 2nd token top-1 / KL | status |
 |---|---|---|---|---|
 | SmolLM3-3B | Llama-style, NoPE on every 4th layer | 5/5 / 0.00000 (was 0/5, 9.21) | 5/5 / 0.110 | fixed (NoPE) |
-| Phi-4-mini | fused qkv_proj, partial rotary 0.75, LongRoPE | 5/5 / 0.0081 | 4/5 / **0.679** | **open defect** |
+| Phi-4-mini | fused qkv_proj, partial rotary 0.75, LongRoPE | 5/5 / 0.0081 | 4/5 / **0.679** | ~~open defect~~ fixed in V15 (residual selection, 0.0063) |
 | Qwen2.5-7B | dense GQA, qkv bias | 5/5 / 0.0017 | 5/5 / 0.0000 | pass |
 | Qwen3.5-2B | hybrid linear + full | 5/5 / 0.0000 | 5/5 / 0.034 | pass |
 | gemma-4-e2b | sliding + global, KV sharing, 1 KV head | 5/5 / 0.0014 (was 2.57) | 5/5 / 0.010 | fixed (torch + harness) |
@@ -58,7 +110,9 @@ preset, 5 needle depths), KL(plain transformers || DKV) on the first generated t
    "gap": every decoder layer matched dense to bf16 noise at 8k (e4b) and 32k
    (e2b). The harness now applies the model's own softcap. ad2b88d3's gemma
    numbers (0.29 / 0.91 / 1.15 at 8k) carried both errors.
-4. **Phi-4-mini compressed decode is wrong with the low-rank store (open).**
+4. **Phi-4-mini compressed decode is wrong with the low-rank store (closed in
+   V15, above: residual rows crowded out by token runs; the joint-factor
+   conclusion below was wrong).**
    The prefill is clean (0.008), and no block is compressed before decode at
    32k (its 3.29 GB budget holds the whole prompt exact). Bisect at 32k
    (`run_v13d` .. `run_v13n` under `benchmarks/campaigns/`), second-token KL:
