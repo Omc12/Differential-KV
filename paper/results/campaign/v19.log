@@ -1,0 +1,1529 @@
+=== V19 Qwen/Qwen2.5-7B-Instruct ===
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V19_Qwen2.5-7B-Instruct_dkv_32k.jsonl
+[ckpt] 0 recorded, 4 pending (of 4 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\.worktrees\codec\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen2.5-7B-Instruct...
+[DKV] Loading model weights on demand: Qwen/Qwen2.5-7B-Instruct (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Loading weights:   0%|          | 0/339 [00:00<?, ?it/s]Loading weights:   0%|          | 1/339 [00:00<02:00,  2.80it/s]Loading weights:   1%|          | 2/339 [00:00<01:44,  3.22it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   1%|▏         | 5/339 [00:00<00:37,  8.81it/s]Loading weights:   5%|▌         | 17/339 [00:00<00:09, 32.41it/s]Loading weights:   9%|▊         | 29/339 [00:00<00:06, 49.90it/s]Loading weights:  12%|█▏        | 41/339 [00:01<00:04, 63.02it/s]Loading weights:  16%|█▌        | 53/339 [00:01<00:03, 72.09it/s]Loading weights:  19%|█▉        | 65/339 [00:01<00:03, 78.42it/s]Loading weights:  23%|██▎       | 77/339 [00:01<00:03, 83.49it/s]Loading weights:  26%|██▋       | 89/339 [00:01<00:02, 87.16it/s]Loading weights:  30%|██▉       | 101/339 [00:01<00:02, 89.81it/s]Loading weights:  33%|███▎      | 113/339 [00:01<00:02, 91.71it/s]Loading weights:  37%|███▋      | 125/339 [00:01<00:02, 93.61it/s]Loading weights:  40%|████      | 137/339 [00:02<00:02, 94.85it/s]Loading weights:  44%|████▍     | 149/339 [00:02<00:01, 95.45it/s]Loading weights:  47%|████▋     | 161/339 [00:02<00:01, 96.02it/s]Loading weights:  51%|█████     | 173/339 [00:02<00:01, 96.32it/s]Loading weights:  55%|█████▍    | 185/339 [00:02<00:01, 96.83it/s]Loading weights:  58%|█████▊    | 197/339 [00:02<00:01, 97.88it/s]Loading weights:  62%|██████▏   | 209/339 [00:02<00:01, 97.50it/s]Loading weights:  65%|██████▌   | 221/339 [00:02<00:01, 96.55it/s]Loading weights:  69%|██████▊   | 233/339 [00:03<00:01, 96.04it/s]Loading weights:  72%|███████▏  | 245/339 [00:03<00:00, 96.35it/s]Loading weights:  76%|███████▌  | 257/339 [00:03<00:00, 94.94it/s]Loading weights:  79%|███████▉  | 269/339 [00:03<00:00, 94.79it/s]Loading weights:  83%|████████▎ | 281/339 [00:03<00:00, 95.17it/s]Loading weights:  86%|████████▋ | 293/339 [00:03<00:00, 95.23it/s]Loading weights:  90%|████████▉ | 305/339 [00:03<00:00, 94.94it/s]Loading weights:  94%|█████████▎| 317/339 [00:04<00:00, 94.24it/s]Loading weights:  97%|█████████▋| 329/339 [00:04<00:00, 93.57it/s]Loading weights: 100%|██████████| 339/339 [00:04<00:00, 80.97it/s]
+[DKV] Heap trimmed. RSS: 1052 MB → 1052 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 4353.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=8917 (318/layer x 28 layers ~= 325,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 355 KB/slot, budget=3.0 GB (ceiling: 50% of 5.4 GB free VRAM), worst-case 3.2 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV] DKV_KEY_QUANT: CUDA graph capture disabled (the hybrid store decodes through the materialise path).
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=28, kv_H=4, D=128, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1458 MB → 1458 MB (saved 0 MB)
+[Pool] Lazy-allocated 924 slots for ~32628 tokens = 581.7 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 0.
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/4] 32768/niah_multikey_2#0 -> '7538358. However, this number is not listed in the' (27.6s/item, ~1 min left)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+  [2/4] 32768/niah_multivalue#0 -> ':\n\n1. 7263956\n2. 7693979\n3. 8350099\n4. 6122731\n5. ' (30.6s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+  [3/4] 32768/qa_1#0 -> 'Normandy is located in France.' (27.6s/item, ~0 min left)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+  [4/4] 32768/vt#0 -> 'TVGCA OZJQU DDROF QTYFA OZJQU \n\nHowever, there see' (26.7s/item, ~0 min left)
+
+
+=== V19_Qwen2.5-7B-Instruct_dkv_32k.jsonl ===
+Qwen/Qwen2.5-7B-Instruct arm=dkv preset=mid quant=nf4
+              task    32768
+   niah_multikey_2      0.0
+   niah_multivalue     75.0
+                vt     80.0
+              qa_1    100.0
+         RULER avg     63.8
+  ttft nans | decode nan tok/s | peak 8.66 GB | KV 0.650 GB (2.9x)
+=== V19 Qwen/Qwen2.5-7B-Instruct DONE ===
+=== V19 HuggingFaceTB/SmolLM3-3B ===
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V19_SmolLM3-3B_dkv_32k.jsonl
+[ckpt] 0 recorded, 13 pending (of 13 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\.worktrees\codec\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model HuggingFaceTB/SmolLM3-3B...
+[DKV] Loading model weights on demand: HuggingFaceTB/SmolLM3-3B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Loading weights:   0%|          | 0/326 [00:00<?, ?it/s]Loading weights:   0%|          | 1/326 [00:00<02:32,  2.14it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   1%|          | 4/326 [00:00<00:38,  8.38it/s]Loading weights:   4%|▍         | 13/326 [00:00<00:12, 26.01it/s]Loading weights:   6%|▋         | 21/326 [00:00<00:07, 39.04it/s]Loading weights:   9%|▉         | 30/326 [00:00<00:06, 47.23it/s]Loading weights:  12%|█▏        | 39/326 [00:01<00:05, 53.17it/s]Loading weights:  15%|█▍        | 48/326 [00:01<00:04, 57.64it/s]Loading weights:  17%|█▋        | 57/326 [00:01<00:04, 60.34it/s]Loading weights:  20%|██        | 66/326 [00:01<00:04, 62.40it/s]Loading weights:  22%|██▏       | 73/326 [00:01<00:04, 62.90it/s]Loading weights:  25%|██▍       | 80/326 [00:01<00:04, 58.76it/s]Loading weights:  27%|██▋       | 87/326 [00:01<00:04, 56.03it/s]Loading weights:  29%|██▉       | 95/326 [00:02<00:04, 56.31it/s]Loading weights:  32%|███▏      | 103/326 [00:02<00:03, 60.32it/s]Loading weights:  34%|███▍      | 111/326 [00:02<00:03, 63.65it/s]Loading weights:  36%|███▌      | 118/326 [00:02<00:03, 64.25it/s]Loading weights:  38%|███▊      | 125/326 [00:02<00:03, 59.23it/s]Loading weights:  40%|████      | 132/326 [00:02<00:03, 56.97it/s]Loading weights:  43%|████▎     | 139/326 [00:02<00:03, 59.92it/s]Loading weights:  45%|████▌     | 147/326 [00:02<00:02, 64.35it/s]Loading weights:  47%|████▋     | 154/326 [00:02<00:02, 65.07it/s]Loading weights:  49%|████▉     | 161/326 [00:03<00:02, 60.54it/s]Loading weights:  52%|█████▏    | 168/326 [00:03<00:02, 57.38it/s]Loading weights:  54%|█████▎    | 175/326 [00:03<00:02, 60.18it/s]Loading weights:  56%|█████▌    | 183/326 [00:03<00:02, 64.35it/s]Loading weights:  58%|█████▊    | 190/326 [00:03<00:02, 65.57it/s]Loading weights:  60%|██████    | 197/326 [00:03<00:02, 61.42it/s]Loading weights:  63%|██████▎   | 204/326 [00:03<00:02, 58.09it/s]Loading weights:  65%|██████▌   | 212/326 [00:03<00:01, 58.60it/s]Loading weights:  68%|██████▊   | 221/326 [00:04<00:01, 61.41it/s]Loading weights:  71%|███████   | 230/326 [00:04<00:01, 63.44it/s]Loading weights:  73%|███████▎  | 239/326 [00:04<00:01, 64.83it/s]Loading weights:  76%|███████▌  | 248/326 [00:04<00:01, 65.46it/s]Loading weights:  79%|███████▊  | 256/326 [00:04<00:01, 67.03it/s]Loading weights:  81%|████████▏ | 265/326 [00:04<00:00, 67.48it/s]Loading weights:  84%|████████▎ | 273/326 [00:04<00:00, 69.03it/s]Loading weights:  87%|████████▋ | 282/326 [00:04<00:00, 68.56it/s]Loading weights:  89%|████████▉ | 291/326 [00:05<00:00, 67.99it/s]Loading weights:  92%|█████████▏| 300/326 [00:05<00:00, 68.09it/s]Loading weights:  95%|█████████▍| 309/326 [00:05<00:00, 67.99it/s]Loading weights:  98%|█████████▊| 318/326 [00:05<00:00, 67.12it/s]Loading weights: 100%|█████████▉| 325/326 [00:05<00:00, 67.79it/s]Loading weights: 100%|██████████| 326/326 [00:05<00:00, 58.39it/s]
+[DKV] Heap trimmed. RSS: 1017 MB → 1017 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 1669.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=11465 (318/layer x 36 layers ~= 325,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 355 KB/slot, budget=3.9 GB (ceiling: 50% of 8.9 GB free VRAM), worst-case 4.2 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV] DKV_KEY_QUANT: CUDA graph capture disabled (the hybrid store decodes through the materialise path).
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=4, D=128, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[transformers] Ignoring clean_up_tokenization_spaces=True for BPE tokenizer TokenizersBackend. The clean_up_tokenization post-processing step is designed for WordPiece tokenizers and is destructive for BPE (it strips spaces before punctuation). Set clean_up_tokenization_spaces=False to suppress this warning, or set clean_up_tokenization_spaces_for_bpe_even_though_it_will_corrupt_output=True to force cleanup anyway.
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1418 MB → 1418 MB (saved 0 MB)
+[Pool] Lazy-allocated 1188 slots for ~32656 tokens = 747.9 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 0.
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-cwe-0 candidates=30 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/13] 32768/cwe#0 -> '1. bathroom 2. array 3. bathroom 4. array 5. array' (31.7s/item, ~6 min left)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (27 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-fwe-0 candidates=27 router=residual ROUTING RUNS
+  [2/13] 32768/fwe#0 -> 'tgjovi, tvorfz, and ksxqrl.' (23.5s/item, ~4 min left)
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-niah_multikey_1-0 candidates=29 router=residual ROUTING RUNS
+  [3/13] 32768/niah_multikey_1#0 -> ': 8526486. \n\nSpecifically, the text states: "Emmet' (26.0s/item, ~4 min left)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+  [4/13] 32768/niah_multikey_2#0 -> '7618353.' (23.7s/item, ~4 min left)
+[DKV] mutation-out disabled for this session: routing is selective (28 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-niah_multikey_3-0 candidates=28 router=residual ROUTING RUNS
+  [5/13] 32768/niah_multikey_3#0 -> ': 4b400975-c253-4d1e-bb9e-1b2e4e4e4e4.' (22.6s/item, ~3 min left)
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-niah_multiquery-0 candidates=29 router=residual ROUTING RUNS
+  [6/13] 32768/niah_multiquery#0 -> ':\n\n1. For excellent-pence: 6271130\n2. For tricky-b' (23.0s/item, ~3 min left)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+  [7/13] 32768/niah_multivalue#0 -> ':\n\n1. 7264956\n2. 7693979\n3. 8350099\n4. 6229731\n5. ' (24.6s/item, ~2 min left)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-niah_single_1-0 candidates=30 router=residual ROUTING RUNS
+  [8/13] 32768/niah_single_1#0 -> ': 4226067.' (23.6s/item, ~2 min left)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-niah_single_2-0 candidates=30 router=residual ROUTING RUNS
+  [9/13] 32768/niah_single_2#0 -> '5107245. This number is mentioned in the following' (24.8s/item, ~2 min left)
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-niah_single_3-0 candidates=29 router=residual ROUTING RUNS
+  [10/13] 32768/niah_single_3#0 -> ':\n\n663f1c97-9562-49f0-a5d7-b8756dadd6c7\n\nThe text ' (25.4s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+  [11/13] 32768/qa_1#0 -> 'Normandy is located in France.' (24.6s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: routing is selective (28 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-qa_2-0 candidates=28 router=residual ROUTING RUNS
+  [12/13] 32768/qa_2#0 -> 'Scott Derrickson is American, while Ed Wood was Am' (23.9s/item, ~0 min left)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=34 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+  [13/13] 32768/vt#0 -> 'JFITJ TVGCA OZJQU QTYFA DDROF' (23.5s/item, ~0 min left)
+
+
+=== V19_SmolLM3-3B_dkv_32k.jsonl ===
+HuggingFaceTB/SmolLM3-3B arm=dkv preset=mid quant=nf4
+              task    32768
+     niah_single_1    100.0
+     niah_single_2    100.0
+     niah_single_3    100.0
+   niah_multikey_1    100.0
+   niah_multikey_2    100.0
+   niah_multikey_3      0.0
+   niah_multivalue    100.0
+   niah_multiquery    100.0
+                vt    100.0
+               cwe     20.0
+               fwe    100.0
+              qa_1    100.0
+              qa_2      0.0
+         RULER avg     78.5
+  ttft nans | decode nan tok/s | peak 6.00 GB | KV 0.867 GB (2.8x)
+=== V19 HuggingFaceTB/SmolLM3-3B DONE ===
+=== V19 microsoft/Phi-4-mini-reasoning ===
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V19_Phi-4-mini-reasoning_dkv_32k.jsonl
+[ckpt] 0 recorded, 4 pending (of 4 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\.worktrees\codec\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] This model config has set a `rope_parameters['original_max_position_embeddings']` field, to be used together with `max_position_embeddings` to determine a scaling factor. Please set the `factor` field of `rope_parameters`with this ratio instead -- we recommend the use of this field over `original_max_position_embeddings`, as it is compatible with most model architectures.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model microsoft/Phi-4-mini-reasoning...
+[DKV] Loading model weights on demand: microsoft/Phi-4-mini-reasoning (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Loading weights:   0%|          | 0/194 [00:00<?, ?it/s]Loading weights:   1%|          | 1/194 [00:01<03:28,  1.08s/it]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   2%|▏         | 4/194 [00:01<00:47,  4.04it/s]Loading weights:   5%|▌         | 10/194 [00:01<00:17, 10.54it/s]Loading weights:   8%|▊         | 16/194 [00:01<00:11, 16.05it/s]Loading weights:  11%|█▏        | 22/194 [00:01<00:08, 20.68it/s]Loading weights:  14%|█▍        | 28/194 [00:01<00:06, 24.43it/s]Loading weights:  18%|█▊        | 34/194 [00:02<00:05, 27.05it/s]Loading weights:  21%|██        | 40/194 [00:02<00:05, 28.89it/s]Loading weights:  24%|██▎       | 46/194 [00:02<00:04, 30.60it/s]Loading weights:  27%|██▋       | 52/194 [00:02<00:04, 31.74it/s]Loading weights:  30%|██▉       | 58/194 [00:02<00:04, 32.63it/s]Loading weights:  33%|███▎      | 64/194 [00:02<00:03, 33.42it/s]Loading weights:  36%|███▌      | 70/194 [00:03<00:03, 33.07it/s]Loading weights:  39%|███▉      | 76/194 [00:03<00:03, 33.75it/s]Loading weights:  42%|████▏     | 82/194 [00:03<00:03, 34.40it/s]Loading weights:  45%|████▌     | 88/194 [00:03<00:03, 34.95it/s]Loading weights:  48%|████▊     | 94/194 [00:03<00:02, 35.42it/s]Loading weights:  52%|█████▏    | 100/194 [00:03<00:02, 35.55it/s]Loading weights:  55%|█████▍    | 106/194 [00:04<00:02, 34.79it/s]Loading weights:  58%|█████▊    | 112/194 [00:04<00:02, 34.46it/s]Loading weights:  61%|██████    | 118/194 [00:04<00:02, 34.50it/s]Loading weights:  64%|██████▍   | 124/194 [00:04<00:02, 34.97it/s]Loading weights:  67%|██████▋   | 130/194 [00:04<00:01, 35.21it/s]Loading weights:  70%|███████   | 136/194 [00:05<00:01, 35.82it/s]Loading weights:  73%|███████▎  | 142/194 [00:05<00:01, 35.84it/s]Loading weights:  76%|███████▋  | 148/194 [00:05<00:01, 35.90it/s]Loading weights:  79%|███████▉  | 154/194 [00:05<00:01, 35.98it/s]Loading weights:  82%|████████▏ | 160/194 [00:05<00:00, 35.81it/s]Loading weights:  86%|████████▌ | 166/194 [00:05<00:00, 35.61it/s]Loading weights:  89%|████████▊ | 172/194 [00:06<00:00, 35.51it/s]Loading weights:  92%|█████████▏| 178/194 [00:06<00:00, 35.25it/s]Loading weights:  95%|█████████▍| 184/194 [00:06<00:00, 35.54it/s]Loading weights:  98%|█████████▊| 190/194 [00:06<00:00, 36.03it/s]Loading weights: 100%|██████████| 194/194 [00:06<00:00, 29.50it/s]
+[DKV] Heap trimmed. RSS: 1011 MB → 1011 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 2225.4M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (193/layer x 32 layers ~= 197,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 7.9 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV] DKV_KEY_QUANT: CUDA graph capture disabled (the hybrid store decodes through the materialise path).
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=24, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1414 MB → 1414 MB (saved 0 MB)
+[Pool] Lazy-allocated 1056 slots for ~32603 tokens = 1327.9 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 0.
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/4] 32768/niah_multikey_2#0 -> '1904717.' (20.2s/item, ~1 min left)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+  [2/4] 32768/niah_multivalue#0 -> ':\n\n1. 7264956\n2. 7693979\n3. 8350099\n4. 6229731\n5. ' (24.5s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-0 candidates=30 router=residual ROUTING RUNS
+  [3/4] 32768/qa_1#0 -> 'Normandy is located in France.' (22.8s/item, ~0 min left)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+  [4/4] 32768/vt#0 -> 'QTYFA, DDROF, JFITJ, OZJQU, and JYF.\n\nWait, no. Wa' (22.4s/item, ~0 min left)
+
+
+=== V19_Phi-4-mini-reasoning_dkv_32k.jsonl ===
+microsoft/Phi-4-mini-reasoning arm=dkv preset=mid quant=nf4
+              task    32768
+   niah_multikey_2      0.0
+   niah_multivalue    100.0
+                vt     80.0
+              qa_1    100.0
+         RULER avg     70.0
+  ttft nans | decode nan tok/s | peak 9.53 GB | KV 1.484 GB (2.9x)
+=== V19 microsoft/Phi-4-mini-reasoning DONE ===
+=== V19 Qwen/Qwen3.5-2B ===
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V19_Qwen3.5-2B_dkv_32k.jsonl
+[ckpt] 0 recorded, 4 pending (of 4 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\.worktrees\codec\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model Qwen/Qwen3.5-2B...
+[DKV] Loading model weights on demand: Qwen/Qwen3.5-2B (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Loading weights:   0%|          | 0/320 [00:00<?, ?it/s]Loading weights:   0%|          | 1/320 [00:00<05:03,  1.05it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   4%|▍         | 12/320 [00:01<00:20, 15.24it/s]Loading weights:   8%|▊         | 26/320 [00:01<00:08, 34.11it/s]Loading weights:  12%|█▎        | 40/320 [00:01<00:05, 51.54it/s]Loading weights:  16%|█▌        | 51/320 [00:01<00:04, 60.41it/s]Loading weights:  21%|██        | 66/320 [00:01<00:03, 78.55it/s]Loading weights:  25%|██▌       | 80/320 [00:01<00:02, 88.40it/s]Loading weights:  29%|██▉       | 94/320 [00:01<00:02, 98.98it/s]Loading weights:  33%|███▎      | 106/320 [00:01<00:02, 100.57it/s]Loading weights:  38%|███▊      | 120/320 [00:01<00:01, 108.31it/s]Loading weights:  42%|████▏     | 134/320 [00:02<00:01, 114.55it/s]Loading weights:  46%|████▋     | 148/320 [00:02<00:01, 116.27it/s]Loading weights:  52%|█████▏    | 167/320 [00:02<00:01, 129.62it/s]Loading weights:  57%|█████▋    | 181/320 [00:02<00:01, 126.87it/s]Loading weights:  61%|██████    | 195/320 [00:02<00:00, 127.27it/s]Loading weights:  65%|██████▌   | 208/320 [00:02<00:01, 111.21it/s]Loading weights:  70%|███████   | 225/320 [00:02<00:00, 121.87it/s]Loading weights:  75%|███████▍  | 239/320 [00:02<00:00, 124.20it/s]Loading weights:  79%|███████▉  | 253/320 [00:03<00:00, 125.59it/s]Loading weights:  83%|████████▎ | 266/320 [00:03<00:00, 120.03it/s]Loading weights:  87%|████████▋ | 279/320 [00:03<00:00, 120.36it/s]Loading weights:  92%|█████████▏| 293/320 [00:03<00:00, 123.97it/s]Loading weights:  96%|█████████▌| 307/320 [00:03<00:00, 127.19it/s]Loading weights: 100%|██████████| 320/320 [00:03<00:00, 90.18it/s] 
+[DKV] Heap trimmed. RSS: 1125 MB → 1125 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 1195.5M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=7643 (318/layer x 24 layers ~= 325,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 355 KB/slot, budget=2.6 GB (ceiling: 50% of 9.1 GB free VRAM), worst-case 2.8 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV] DKV_KEY_QUANT: CUDA graph capture disabled (the hybrid store decodes through the materialise path).
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 6 attended layers (model has 24); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=8, kv_H=2, D=256, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1534 MB → 1534 MB (saved 0 MB)
+[Pool] Lazy-allocated 198 slots for ~32041 tokens = 124.6 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 3.
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-0 candidates=29 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/4] 32768/niah_multikey_2#0 -> ': **5716623**.' (11.6s/item, ~1 min left)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+  [2/4] 32768/niah_multivalue#0 -> ':\n\n*   **7264956**\n*   **7693979**\n*   **8350099**' (12.6s/item, ~0 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-0 candidates=27 router=residual ROUTING RUNS
+  [3/4] 32768/qa_1#0 -> 'France' (11.6s/item, ~0 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+  [4/4] 32768/vt#0 -> 'AJTWY KTOPF FLAIR KEMDQ AKOAQ\n\n**Step-by-step Deri' (11.8s/item, ~0 min left)
+
+
+=== V19_Qwen3.5-2B_dkv_32k.jsonl ===
+Qwen/Qwen3.5-2B arm=dkv preset=mid quant=nf4
+              task    32768
+   niah_multikey_2    100.0
+   niah_multivalue    100.0
+                vt    100.0
+              qa_1    100.0
+         RULER avg    100.0
+  ttft nans | decode nan tok/s | peak 3.07 GB | KV 0.144 GB (2.8x)
+=== V19 Qwen/Qwen3.5-2B DONE ===
+=== V19 google/gemma-4-e2b-it ===
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V19_gemma-4-e2b-it_dkv_32k.jsonl
+[ckpt] 0 recorded, 4 pending (of 4 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\.worktrees\codec\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model google/gemma-4-e2b-it...
+[DKV] Loading model weights on demand: google/gemma-4-e2b-it (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Loading weights:   0%|          | 0/1951 [00:00<?, ?it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   4%|▎         | 70/1951 [00:00<00:02, 666.13it/s]Loading weights:  10%|▉         | 194/1951 [00:00<00:01, 956.57it/s]Loading weights:  16%|█▌        | 314/1951 [00:00<00:01, 1063.52it/s]Loading weights:  22%|██▏       | 432/1951 [00:00<00:01, 1098.70it/s]Loading weights:  28%|██▊       | 543/1951 [00:00<00:01, 1060.78it/s]Loading weights:  33%|███▎      | 650/1951 [00:00<00:01, 1025.04it/s]Loading weights:  39%|███▊      | 754/1951 [00:01<00:03, 339.77it/s] Loading weights:  42%|████▏     | 828/1951 [00:05<00:17, 63.08it/s] Loading weights:  45%|████▌     | 879/1951 [00:05<00:14, 73.26it/s]Loading weights:  47%|████▋     | 922/1951 [00:05<00:12, 85.06it/s]Loading weights:  49%|████▉     | 960/1951 [00:06<00:10, 97.55it/s]Loading weights:  51%|█████     | 994/1951 [00:06<00:08, 111.05it/s]Loading weights:  53%|█████▎    | 1026/1951 [00:06<00:07, 117.56it/s]Loading weights:  54%|█████▍    | 1053/1951 [00:06<00:07, 116.32it/s]Loading weights:  55%|█████▌    | 1075/1951 [00:06<00:07, 112.36it/s]Loading weights:  56%|█████▌    | 1094/1951 [00:07<00:07, 115.25it/s]Loading weights:  57%|█████▋    | 1111/1951 [00:07<00:07, 113.75it/s]Loading weights:  58%|█████▊    | 1126/1951 [00:07<00:07, 109.39it/s]Loading weights:  58%|█████▊    | 1140/1951 [00:07<00:07, 110.43it/s]Loading weights:  59%|█████▉    | 1153/1951 [00:07<00:07, 111.72it/s]Loading weights:  60%|█████▉    | 1167/1951 [00:07<00:07, 111.95it/s]Loading weights:  61%|██████    | 1181/1951 [00:07<00:06, 110.93it/s]Loading weights:  61%|██████▏   | 1195/1951 [00:07<00:06, 111.89it/s]Loading weights:  62%|██████▏   | 1209/1951 [00:08<00:06, 112.65it/s]Loading weights:  63%|██████▎   | 1223/1951 [00:08<00:06, 110.76it/s]Loading weights:  63%|██████▎   | 1237/1951 [00:08<00:06, 112.30it/s]Loading weights:  64%|██████▍   | 1251/1951 [00:08<00:06, 110.51it/s]Loading weights:  65%|██████▍   | 1265/1951 [00:08<00:06, 110.61it/s]Loading weights:  66%|██████▌   | 1279/1951 [00:08<00:06, 110.33it/s]Loading weights:  66%|██████▌   | 1291/1951 [00:08<00:05, 110.07it/s]Loading weights:  71%|███████   | 1384/1951 [00:08<00:01, 319.69it/s]Loading weights:  77%|███████▋  | 1512/1951 [00:09<00:00, 573.79it/s]Loading weights:  85%|████████▌ | 1660/1951 [00:09<00:00, 820.47it/s]Loading weights:  92%|█████████▏| 1799/1951 [00:09<00:00, 966.31it/s]Loading weights: 100%|█████████▉| 1942/1951 [00:09<00:00, 1096.96it/s]Loading weights: 100%|██████████| 1951/1951 [00:09<00:00, 207.50it/s] 
+[DKV] Heap trimmed. RSS: 1220 MB → 1220 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 3936.0M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=11146 (318/layer x 35 layers ~= 325,632 tokens max context), rank=96 (pool_rank=32), max_residual=128, 355 KB/slot, budget=3.8 GB (ceiling: 50% of 4.4 GB free VRAM), worst-case 4.0 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV] DKV_KEY_QUANT: CUDA graph capture disabled (the hybrid store decodes through the materialise path).
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 1 attended layers (model has 35); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=8, kv_H=1, D=512, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multikey_2-0 candidates=26 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1606 MB → 1606 MB (saved 0 MB)
+[Pool] Lazy-allocated 64 slots for ~32116 tokens = 40.3 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 9.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/4] 32768/niah_multikey_2#0 -> '**3252436**.' (8.3s/item, ~0 min left)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multivalue-0 candidates=27 router=residual ROUTING RUNS
+  [2/4] 32768/niah_multivalue#0 -> ':\n\n1. **7264956** (mentioned in relation to Blackb' (11.0s/item, ~0 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-qa_1-0 candidates=25 router=residual ROUTING RUNS
+  [3/4] 32768/qa_1#0 -> 'France' (9.5s/item, ~0 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-vt-0 candidates=27 router=residual ROUTING RUNS
+  [4/4] 32768/vt#0 -> '**SHRUU OBNRB QAKML JXLDE**' (9.0s/item, ~0 min left)
+
+
+=== V19_gemma-4-e2b-it_dkv_32k.jsonl ===
+google/gemma-4-e2b-it arm=dkv preset=mid quant=nf4
+              task    32768
+   niah_multikey_2    100.0
+   niah_multivalue     75.0
+                vt     80.0
+              qa_1    100.0
+         RULER avg     88.8
+  ttft nans | decode nan tok/s | peak 7.82 GB | KV 0.025 GB (2.7x)
+=== V19 google/gemma-4-e2b-it DONE ===
+=== V19 google/gemma-4-e4b-it ===
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V19_gemma-4-e4b-it_dkv_32k.jsonl
+[ckpt] 0 recorded, 4 pending (of 4 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\.worktrees\codec\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model google/gemma-4-e4b-it...
+[DKV] Loading model weights on demand: google/gemma-4-e4b-it (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Loading weights:   0%|          | 0/2076 [00:00<?, ?it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   3%|▎         | 70/2076 [00:00<00:02, 677.18it/s]Loading weights:   9%|▉         | 194/2076 [00:00<00:01, 974.12it/s]Loading weights:  15%|█▌        | 313/2076 [00:00<00:01, 1043.47it/s]Loading weights:  21%|██        | 429/2076 [00:00<00:01, 1082.72it/s]Loading weights:  26%|██▌       | 538/2076 [00:00<00:01, 1079.10it/s]Loading weights:  31%|███       | 646/2076 [00:00<00:01, 1063.02it/s]Loading weights:  36%|███▋      | 754/2076 [00:01<00:05, 237.88it/s] Loading weights:  40%|███▉      | 829/2076 [00:07<00:25, 47.97it/s] Loading weights:  42%|████▏     | 881/2076 [00:07<00:22, 53.12it/s]Loading weights:  44%|████▍     | 920/2076 [00:08<00:19, 58.49it/s]Loading weights:  46%|████▌     | 950/2076 [00:08<00:18, 61.53it/s]Loading weights:  47%|████▋     | 974/2076 [00:08<00:16, 66.33it/s]Loading weights:  48%|████▊     | 994/2076 [00:08<00:15, 70.55it/s]Loading weights:  49%|████▊     | 1012/2076 [00:09<00:14, 74.37it/s]Loading weights:  50%|████▉     | 1028/2076 [00:09<00:13, 77.15it/s]Loading weights:  50%|█████     | 1042/2076 [00:09<00:13, 77.54it/s]Loading weights:  51%|█████     | 1054/2076 [00:09<00:13, 75.69it/s]Loading weights:  51%|█████▏    | 1065/2076 [00:09<00:13, 75.28it/s]Loading weights:  52%|█████▏    | 1081/2076 [00:09<00:11, 84.67it/s]Loading weights:  53%|█████▎    | 1092/2076 [00:10<00:11, 86.02it/s]Loading weights:  53%|█████▎    | 1102/2076 [00:10<00:12, 78.99it/s]Loading weights:  54%|█████▍    | 1116/2076 [00:10<00:11, 85.61it/s]Loading weights:  55%|█████▍    | 1132/2076 [00:10<00:10, 92.72it/s]Loading weights:  55%|█████▌    | 1142/2076 [00:10<00:10, 92.32it/s]Loading weights:  55%|█████▌    | 1152/2076 [00:10<00:11, 79.78it/s]Loading weights:  56%|█████▌    | 1166/2076 [00:10<00:09, 92.24it/s]Loading weights:  57%|█████▋    | 1176/2076 [00:10<00:09, 90.40it/s]Loading weights:  57%|█████▋    | 1186/2076 [00:11<00:11, 80.31it/s]Loading weights:  58%|█████▊    | 1195/2076 [00:11<00:11, 77.74it/s]Loading weights:  58%|█████▊    | 1208/2076 [00:11<00:10, 84.14it/s]Loading weights:  59%|█████▊    | 1217/2076 [00:11<00:10, 80.78it/s]Loading weights:  59%|█████▉    | 1226/2076 [00:11<00:12, 70.36it/s]Loading weights:  60%|█████▉    | 1237/2076 [00:11<00:11, 74.30it/s]Loading weights:  60%|██████    | 1247/2076 [00:11<00:10, 80.02it/s]Loading weights:  61%|██████    | 1256/2076 [00:12<00:11, 72.09it/s]Loading weights:  61%|██████    | 1265/2076 [00:12<00:11, 72.33it/s]Loading weights:  62%|██████▏   | 1278/2076 [00:12<00:09, 80.09it/s]Loading weights:  62%|██████▏   | 1287/2076 [00:12<00:09, 79.14it/s]Loading weights:  62%|██████▏   | 1296/2076 [00:12<00:11, 69.99it/s]Loading weights:  63%|██████▎   | 1307/2076 [00:12<00:10, 74.86it/s]Loading weights:  64%|██████▎   | 1320/2076 [00:12<00:09, 81.47it/s]Loading weights:  64%|██████▍   | 1329/2076 [00:12<00:09, 77.96it/s]Loading weights:  64%|██████▍   | 1337/2076 [00:13<00:11, 65.99it/s]Loading weights:  65%|██████▍   | 1349/2076 [00:13<00:09, 72.90it/s]Loading weights:  66%|██████▌   | 1362/2076 [00:13<00:08, 79.63it/s]Loading weights:  66%|██████▌   | 1371/2076 [00:13<00:09, 77.73it/s]Loading weights:  66%|██████▋   | 1379/2076 [00:13<00:10, 67.58it/s]Loading weights:  67%|██████▋   | 1391/2076 [00:13<00:09, 73.64it/s]Loading weights:  68%|██████▊   | 1404/2076 [00:13<00:08, 80.80it/s]Loading weights:  68%|██████▊   | 1413/2076 [00:14<00:08, 77.58it/s]Loading weights:  70%|██████▉   | 1452/2076 [00:14<00:04, 151.86it/s]Loading weights:  76%|███████▋  | 1586/2076 [00:14<00:01, 450.43it/s]Loading weights:  83%|████████▎ | 1719/2076 [00:14<00:00, 672.27it/s]Loading weights:  89%|████████▊ | 1842/2076 [00:14<00:00, 819.86it/s]Loading weights:  96%|█████████▌| 1985/2076 [00:14<00:00, 986.41it/s]Loading weights: 100%|██████████| 2076/2076 [00:14<00:00, 140.96it/s]
+[DKV] Heap trimmed. RSS: 1221 MB → 1221 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 5723.7M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=4096 (97/layer x 42 layers ~= 99,328 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=1.9 GB (ceiling: 50% of 1.9 GB free VRAM), worst-case 2.8 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV] DKV_KEY_QUANT: CUDA graph capture disabled (the hybrid store decodes through the materialise path).
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 2 attended layers (model has 42); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=8, kv_H=2, D=512, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-0 candidates=25 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1607 MB → 1607 MB (saved 0 MB)
+[Pool] Lazy-allocated 66 slots for ~32116 tokens = 83.0 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 11.
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multikey_2-0 candidates=25 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/4] 32768/niah_multikey_2#0 -> '**3252436**.' (13.9s/item, ~1 min left)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multivalue-0 candidates=26 router=residual ROUTING RUNS
+  [2/4] 32768/niah_multivalue#0 -> ':\n\n* **7264956** (from the November 2009 article)\n' (19.1s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-0 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-qa_1-0 candidates=24 router=residual ROUTING RUNS
+  [3/4] 32768/qa_1#0 -> 'France' (16.6s/item, ~0 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-0 candidates=26 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-vt-0 candidates=26 router=residual ROUTING RUNS
+  [4/4] 32768/vt#0 -> 'SHRUU OBNRB QAKML JXLDE NQQXU' (16.1s/item, ~0 min left)
+
+
+=== V19_gemma-4-e4b-it_dkv_32k.jsonl ===
+google/gemma-4-e4b-it arm=dkv preset=mid quant=nf4
+              task    32768
+   niah_multikey_2    100.0
+   niah_multivalue    100.0
+                vt    100.0
+              qa_1    100.0
+         RULER avg    100.0
+  ttft nans | decode nan tok/s | peak 10.92 GB | KV 0.100 GB (2.7x)
+=== V19 google/gemma-4-e4b-it DONE ===
+=== V19 google/gemma-4-12B-it ===
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V19_gemma-4-12B-it_dkv_32k.jsonl
+[ckpt] 0 recorded, 4 pending (of 4 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\.worktrees\codec\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model google/gemma-4-12B-it...
+[DKV] Loading model weights on demand: google/gemma-4-12B-it (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+Loading weights:   0%|          | 0/677 [00:00<?, ?it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   0%|          | 3/677 [00:02<07:49,  1.44it/s]Loading weights:   1%|          | 7/677 [00:02<03:01,  3.68it/s]Loading weights:   2%|▏         | 13/677 [00:02<01:22,  8.07it/s]Loading weights:   3%|▎         | 20/677 [00:02<00:48, 13.42it/s]Loading weights:   4%|▎         | 24/677 [00:02<00:44, 14.70it/s]Loading weights:   5%|▌         | 34/677 [00:02<00:27, 23.22it/s]Loading weights:   6%|▌         | 38/677 [00:03<00:28, 22.63it/s]Loading weights:   7%|▋         | 48/677 [00:03<00:20, 30.67it/s]Loading weights:   8%|▊         | 52/677 [00:03<00:22, 27.81it/s]Loading weights:   9%|▉         | 62/677 [00:03<00:17, 35.19it/s]Loading weights:  10%|▉         | 67/677 [00:03<00:19, 32.05it/s]Loading weights:  11%|█         | 76/677 [00:04<00:16, 37.23it/s]Loading weights:  12%|█▏        | 81/677 [00:04<00:17, 33.82it/s]Loading weights:  13%|█▎        | 86/677 [00:04<00:16, 36.29it/s]Loading weights:  13%|█▎        | 90/677 [00:04<00:18, 31.33it/s]Loading weights:  14%|█▍        | 96/677 [00:04<00:16, 36.11it/s]Loading weights:  15%|█▌        | 103/677 [00:04<00:15, 36.57it/s]Loading weights:  16%|█▌        | 107/677 [00:05<00:18, 31.21it/s]Loading weights:  17%|█▋        | 117/677 [00:05<00:14, 38.95it/s]Loading weights:  18%|█▊        | 122/677 [00:05<00:16, 34.68it/s]Loading weights:  19%|█▉        | 131/677 [00:05<00:14, 38.94it/s]Loading weights:  20%|█▉        | 135/677 [00:05<00:16, 32.48it/s]Loading weights:  21%|██▏       | 145/677 [00:06<00:14, 37.53it/s]Loading weights:  22%|██▏       | 149/677 [00:06<00:16, 31.46it/s]Loading weights:  23%|██▎       | 159/677 [00:06<00:13, 37.72it/s]Loading weights:  24%|██▍       | 163/677 [00:06<00:16, 31.74it/s]Loading weights:  25%|██▍       | 169/677 [00:06<00:14, 35.86it/s]Loading weights:  26%|██▌       | 173/677 [00:06<00:17, 29.59it/s]Loading weights:  26%|██▌       | 177/677 [00:07<00:15, 31.40it/s]Loading weights:  27%|██▋       | 186/677 [00:07<00:13, 36.44it/s]Loading weights:  28%|██▊       | 190/677 [00:07<00:16, 30.27it/s]Loading weights:  30%|██▉       | 200/677 [00:07<00:12, 36.84it/s]Loading weights:  30%|███       | 204/677 [00:07<00:15, 30.60it/s]Loading weights:  32%|███▏      | 214/677 [00:08<00:12, 36.97it/s]Loading weights:  32%|███▏      | 218/677 [00:08<00:14, 31.48it/s]Loading weights:  34%|███▎      | 228/677 [00:08<00:12, 37.31it/s]Loading weights:  34%|███▍      | 232/677 [00:08<00:14, 30.58it/s]Loading weights:  35%|███▌      | 239/677 [00:08<00:11, 36.88it/s]Loading weights:  36%|███▌      | 244/677 [00:09<00:15, 27.24it/s]Loading weights:  37%|███▋      | 252/677 [00:09<00:12, 34.56it/s]Loading weights:  38%|███▊      | 257/677 [00:09<00:15, 27.30it/s]Loading weights:  40%|███▉      | 269/677 [00:09<00:11, 36.82it/s]Loading weights:  40%|████      | 274/677 [00:10<00:12, 32.71it/s]Loading weights:  42%|████▏     | 283/677 [00:10<00:10, 36.19it/s]Loading weights:  42%|████▏     | 287/677 [00:10<00:12, 31.21it/s]Loading weights:  44%|████▍     | 297/677 [00:10<00:10, 37.18it/s]Loading weights:  44%|████▍     | 301/677 [00:10<00:11, 31.87it/s]Loading weights:  45%|████▌     | 308/677 [00:10<00:09, 38.30it/s]Loading weights:  46%|████▌     | 313/677 [00:11<00:13, 27.95it/s]Loading weights:  48%|████▊     | 325/677 [00:11<00:09, 36.73it/s]Loading weights:  49%|████▊     | 330/677 [00:11<00:10, 32.45it/s]Loading weights:  49%|████▉     | 335/677 [00:11<00:10, 34.13it/s]Loading weights:  50%|█████     | 339/677 [00:12<00:11, 28.56it/s]Loading weights:  51%|█████     | 343/677 [00:12<00:11, 30.08it/s]Loading weights:  52%|█████▏    | 352/677 [00:12<00:09, 34.71it/s]Loading weights:  53%|█████▎    | 356/677 [00:12<00:11, 29.08it/s]Loading weights:  54%|█████▍    | 366/677 [00:12<00:08, 35.47it/s]Loading weights:  55%|█████▍    | 370/677 [00:12<00:10, 29.49it/s]Loading weights:  56%|█████▌    | 380/677 [00:13<00:08, 35.52it/s]Loading weights:  57%|█████▋    | 384/677 [00:13<00:09, 30.14it/s]Loading weights:  58%|█████▊    | 394/677 [00:13<00:07, 35.84it/s]Loading weights:  59%|█████▉    | 398/677 [00:13<00:09, 30.27it/s]Loading weights:  60%|█████▉    | 405/677 [00:13<00:07, 36.67it/s]Loading weights:  61%|██████    | 410/677 [00:14<00:09, 27.24it/s]Loading weights:  62%|██████▏   | 418/677 [00:14<00:07, 34.31it/s]Loading weights:  62%|██████▏   | 423/677 [00:14<00:09, 26.03it/s]Loading weights:  64%|██████▍   | 435/677 [00:14<00:06, 34.61it/s]Loading weights:  65%|██████▍   | 440/677 [00:15<00:07, 31.08it/s]Loading weights:  66%|██████▋   | 449/677 [00:15<00:06, 34.52it/s]Loading weights:  67%|██████▋   | 453/677 [00:15<00:07, 29.30it/s]Loading weights:  68%|██████▊   | 463/677 [00:15<00:06, 34.87it/s]Loading weights:  69%|██████▉   | 467/677 [00:16<00:07, 29.51it/s]Loading weights:  70%|███████   | 477/677 [00:16<00:05, 35.15it/s]Loading weights:  71%|███████   | 481/677 [00:16<00:06, 29.41it/s]Loading weights:  73%|███████▎  | 491/677 [00:16<00:05, 35.02it/s]Loading weights:  73%|███████▎  | 495/677 [00:16<00:06, 29.67it/s]Loading weights:  74%|███████▍  | 501/677 [00:17<00:05, 32.51it/s]Loading weights:  75%|███████▍  | 505/677 [00:17<00:06, 27.77it/s]Loading weights:  75%|███████▌  | 508/677 [00:17<00:06, 27.56it/s]Loading weights:  77%|███████▋  | 518/677 [00:17<00:04, 34.53it/s]Loading weights:  77%|███████▋  | 522/677 [00:17<00:05, 28.58it/s]Loading weights:  79%|███████▊  | 532/677 [00:17<00:04, 34.28it/s]Loading weights:  79%|███████▉  | 536/677 [00:18<00:04, 29.14it/s]Loading weights:  81%|████████  | 546/677 [00:18<00:03, 34.98it/s]Loading weights:  81%|████████  | 550/677 [00:18<00:04, 29.56it/s]Loading weights:  83%|████████▎ | 560/677 [00:18<00:03, 35.25it/s]Loading weights:  83%|████████▎ | 564/677 [00:19<00:03, 29.19it/s]Loading weights:  85%|████████▍ | 574/677 [00:19<00:02, 34.86it/s]Loading weights:  85%|████████▌ | 578/677 [00:19<00:03, 29.66it/s]Loading weights:  86%|████████▋ | 584/677 [00:19<00:02, 33.14it/s]Loading weights:  87%|████████▋ | 588/677 [00:19<00:03, 28.00it/s]Loading weights:  87%|████████▋ | 592/677 [00:19<00:02, 29.30it/s]Loading weights:  89%|████████▉ | 601/677 [00:20<00:02, 34.05it/s]Loading weights:  89%|████████▉ | 605/677 [00:20<00:02, 28.74it/s]Loading weights:  91%|█████████ | 615/677 [00:20<00:01, 34.30it/s]Loading weights:  91%|█████████▏| 619/677 [00:20<00:02, 26.93it/s]Loading weights:  92%|█████████▏| 626/677 [00:21<00:01, 33.72it/s]Loading weights:  93%|█████████▎| 631/677 [00:21<00:01, 25.48it/s]Loading weights:  95%|█████████▍| 643/677 [00:21<00:00, 34.62it/s]Loading weights:  96%|█████████▌| 648/677 [00:21<00:00, 30.84it/s]Loading weights:  97%|█████████▋| 657/677 [00:21<00:00, 34.06it/s]Loading weights:  98%|█████████▊| 661/677 [00:22<00:00, 28.73it/s]Loading weights:  99%|█████████▊| 667/677 [00:22<00:00, 32.01it/s]Loading weights: 100%|██████████| 677/677 [00:22<00:00, 30.17it/s]
+[DKV] Heap trimmed. RSS: 1214 MB → 1214 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 6487.9M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=10355 (215/layer x 48 layers ~= 220,160 tokens max context), rank=96 (pool_rank=32), max_residual=128, 355 KB/slot, budget=3.5 GB (ceiling: 50% of 3.5 GB free VRAM), worst-case 3.8 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV] DKV_KEY_QUANT: CUDA graph capture disabled (the hybrid store decodes through the materialise path).
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] Pool sized for 7 attended layers (model has 48); hybrid model, the rest hold no compressed blocks.
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=16, kv_H=1, D=512, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-0 candidates=25 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1600 MB → 1600 MB (saved 0 MB)
+[Pool] Lazy-allocated 231 slots for ~32120 tokens = 145.4 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 11.
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multikey_2-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_multikey_2-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-niah_multikey_2-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=41 session=ruler-32768-niah_multikey_2-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=47 session=ruler-32768-niah_multikey_2-0 candidates=25 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/4] 32768/niah_multikey_2#0 -> ': 3252436.' (25.2s/item, ~1 min left)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multivalue-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_multivalue-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-niah_multivalue-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=41 session=ruler-32768-niah_multivalue-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=47 session=ruler-32768-niah_multivalue-0 candidates=25 router=residual ROUTING RUNS
+  [2/4] 32768/niah_multivalue#0 -> ':\n\n1.  **7264956** (mentioned in the section regar' (29.9s/item, ~1 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-0 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-qa_1-0 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-0 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-qa_1-0 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-qa_1-0 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=41 session=ruler-32768-qa_1-0 candidates=24 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=47 session=ruler-32768-qa_1-0 candidates=24 router=residual ROUTING RUNS
+  [3/4] 32768/qa_1#0 -> 'France' (27.5s/item, ~0 min left)
+[DKV] mutation-out disabled for this session: DKV routing is not engaged for this context. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-vt-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-vt-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=35 session=ruler-32768-vt-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=41 session=ruler-32768-vt-0 candidates=25 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=47 session=ruler-32768-vt-0 candidates=25 router=residual ROUTING RUNS
+  [4/4] 32768/vt#0 -> 'SHRUU OBNRB QAKML JXLDE NQQXU' (27.0s/item, ~0 min left)
+
+
+=== V19_gemma-4-12B-it_dkv_32k.jsonl ===
+google/gemma-4-12B-it arm=dkv preset=mid quant=nf4
+              task    32768
+   niah_multikey_2    100.0
+   niah_multivalue     75.0
+                vt    100.0
+              qa_1    100.0
+         RULER avg     93.8
+  ttft nans | decode nan tok/s | peak 10.43 GB | KV 0.176 GB (2.7x)
+=== V19 google/gemma-4-12B-it DONE ===
+=== V19 mistralai/Ministral-3-8B-Instruct-2512-BF16 ===
+[msvc] developer environment imported (11 vars); cl.exe at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64\cl.EXE
+[ckpt] paper\results\ruler\V19_Ministral-3-8B-Instruct-2512-BF16_dkv_32k.jsonl
+[ckpt] 0 recorded, 4 pending (of 4 generated)
+[DKV JIT] Compiling _reconstruct_and_score with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _attend_and_reconstruct_v with backend=inductor, mode=reduce-overhead (dynamic=True) ...
+[DKV JIT] Compiling _prefill_fused_history_attend with backend=inductor, mode=default (dynamic=True) ...
+[DKV DEBUG] Failed to import dkv_core: No module named 'dkv_core'
+Traceback (most recent call last):
+  File "C:\Users\USER\Desktop\Differential KV\.worktrees\codec\ACTIVE_RUNTIME\runtime\dkv_attention.py", line 247, in <module>
+    import dkv_core as _dkv_core
+ModuleNotFoundError: No module named 'dkv_core'
+[transformers] The tokenizer you are loading from 'mistralai/Ministral-3-8B-Instruct-2512-BF16' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\transformers\modeling_utils.py:5198: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  _ = torch.empty(int(byte_count // 2), dtype=torch.float16, device=device, requires_grad=False)
+[DKV] Offline mode active: loading model/tokenizer from local cache only.
+[DKV] Lazy-initializing tokenizer for model mistralai/Ministral-3-8B-Instruct-2512-BF16...
+[DKV] Loading model weights on demand: mistralai/Ministral-3-8B-Instruct-2512-BF16 (device=cuda, dtype=torch.float16)...
+[DKV] 4-bit quantization enabled (BitsAndBytes, requested as 'nf4').
+[DKV] CUDA allocator config: expandable_segments:True
+[DKV] TF32 enabled globally (float32_matmul_precision=high) — speeds fp32 decode reconstruction kernels. DKV_TF32=0 to disable.
+[DKV] mistralai/Ministral-3-8B-Instruct-2512-BF16: not in the AutoModelForCausalLM mapping; loading via AutoModelForImageTextToText and using its text decoder.
+Loading weights:   0%|          | 0/531 [00:00<?, ?it/s]Loading weights:   0%|          | 1/531 [00:01<08:52,  1.01s/it]Loading weights:   0%|          | 2/531 [00:01<08:22,  1.05it/s]C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:213: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+Loading weights:   1%|          | 4/531 [00:02<03:29,  2.51it/s]Loading weights:   1%|          | 6/531 [00:02<02:14,  3.89it/s]Loading weights:   2%|▏         | 13/531 [00:02<00:48, 10.58it/s]Loading weights:   3%|▎         | 15/531 [00:02<00:49, 10.41it/s]Loading weights:   4%|▍         | 22/531 [00:02<00:29, 17.05it/s]Loading weights:   5%|▍         | 25/531 [00:03<00:30, 16.54it/s]Loading weights:   6%|▌         | 31/531 [00:03<00:23, 21.25it/s]Loading weights:   6%|▋         | 34/531 [00:03<00:25, 19.66it/s]Loading weights:   8%|▊         | 40/531 [00:03<00:20, 23.73it/s]Loading weights:   8%|▊         | 43/531 [00:03<00:23, 21.20it/s]Loading weights:   9%|▉         | 49/531 [00:03<00:19, 25.10it/s]Loading weights:  10%|▉         | 52/531 [00:04<00:21, 21.79it/s]Loading weights:  11%|█         | 58/531 [00:04<00:18, 25.64it/s]Loading weights:  11%|█▏        | 61/531 [00:04<00:21, 22.10it/s]Loading weights:  13%|█▎        | 67/531 [00:04<00:18, 25.67it/s]Loading weights:  13%|█▎        | 70/531 [00:04<00:20, 22.42it/s]Loading weights:  14%|█▍        | 76/531 [00:05<00:17, 25.63it/s]Loading weights:  15%|█▍        | 79/531 [00:05<00:20, 22.45it/s]Loading weights:  16%|█▌        | 85/531 [00:05<00:17, 26.04it/s]Loading weights:  17%|█▋        | 88/531 [00:05<00:19, 22.58it/s]Loading weights:  18%|█▊        | 94/531 [00:05<00:16, 25.91it/s]Loading weights:  18%|█▊        | 97/531 [00:05<00:19, 22.62it/s]Loading weights:  19%|█▉        | 103/531 [00:06<00:16, 26.23it/s]Loading weights:  20%|█▉        | 106/531 [00:06<00:18, 22.69it/s]Loading weights:  21%|██        | 112/531 [00:06<00:16, 25.83it/s]Loading weights:  22%|██▏       | 115/531 [00:06<00:18, 22.27it/s]Loading weights:  23%|██▎       | 121/531 [00:06<00:16, 25.49it/s]Loading weights:  23%|██▎       | 124/531 [00:07<00:18, 21.60it/s]Loading weights:  24%|██▍       | 130/531 [00:07<00:16, 24.82it/s]Loading weights:  25%|██▌       | 133/531 [00:07<00:18, 21.25it/s]Loading weights:  26%|██▌       | 139/531 [00:07<00:16, 24.48it/s]Loading weights:  27%|██▋       | 142/531 [00:07<00:18, 21.39it/s]Loading weights:  28%|██▊       | 148/531 [00:08<00:16, 23.91it/s]Loading weights:  28%|██▊       | 151/531 [00:08<00:17, 21.14it/s]Loading weights:  30%|██▉       | 157/531 [00:08<00:15, 24.44it/s]Loading weights:  30%|███       | 160/531 [00:08<00:17, 21.48it/s]Loading weights:  31%|███▏      | 166/531 [00:08<00:14, 24.63it/s]Loading weights:  32%|███▏      | 169/531 [00:09<00:16, 21.34it/s]Loading weights:  33%|███▎      | 175/531 [00:09<00:14, 24.58it/s]Loading weights:  34%|███▎      | 178/531 [00:09<00:16, 21.11it/s]Loading weights:  35%|███▍      | 184/531 [00:09<00:14, 24.57it/s]Loading weights:  35%|███▌      | 187/531 [00:09<00:16, 21.49it/s]Loading weights:  36%|███▋      | 193/531 [00:10<00:13, 24.44it/s]Loading weights:  37%|███▋      | 196/531 [00:10<00:16, 20.78it/s]Loading weights:  38%|███▊      | 202/531 [00:10<00:13, 23.67it/s]Loading weights:  39%|███▊      | 205/531 [00:10<00:16, 20.31it/s]Loading weights:  40%|███▉      | 211/531 [00:10<00:13, 23.43it/s]Loading weights:  40%|████      | 214/531 [00:11<00:15, 20.28it/s]Loading weights:  41%|████▏     | 220/531 [00:11<00:13, 23.25it/s]Loading weights:  42%|████▏     | 223/531 [00:11<00:15, 19.80it/s]Loading weights:  43%|████▎     | 229/531 [00:11<00:13, 22.83it/s]Loading weights:  44%|████▎     | 232/531 [00:11<00:15, 19.70it/s]Loading weights:  45%|████▍     | 238/531 [00:12<00:12, 22.74it/s]Loading weights:  45%|████▌     | 241/531 [00:12<00:14, 20.05it/s]Loading weights:  47%|████▋     | 247/531 [00:12<00:12, 22.62it/s]Loading weights:  47%|████▋     | 250/531 [00:12<00:14, 19.71it/s]Loading weights:  48%|████▊     | 256/531 [00:13<00:12, 22.87it/s]Loading weights:  49%|████▉     | 259/531 [00:13<00:13, 19.75it/s]Loading weights:  50%|████▉     | 265/531 [00:13<00:11, 22.24it/s]Loading weights:  50%|█████     | 268/531 [00:13<00:13, 19.28it/s]Loading weights:  52%|█████▏    | 274/531 [00:13<00:11, 22.49it/s]Loading weights:  52%|█████▏    | 277/531 [00:14<00:12, 19.66it/s]Loading weights:  53%|█████▎    | 283/531 [00:14<00:10, 22.89it/s]Loading weights:  54%|█████▍    | 286/531 [00:14<00:12, 19.76it/s]Loading weights:  55%|█████▍    | 292/531 [00:14<00:10, 22.80it/s]Loading weights:  56%|█████▌    | 295/531 [00:14<00:12, 19.61it/s]Loading weights:  57%|█████▋    | 301/531 [00:15<00:10, 22.58it/s]Loading weights:  57%|█████▋    | 304/531 [00:15<00:11, 19.60it/s]Loading weights:  58%|█████▊    | 310/531 [00:15<00:08, 26.23it/s]Loading weights:  62%|██████▏   | 328/531 [00:15<00:03, 55.46it/s]Loading weights:  66%|██████▌   | 349/531 [00:15<00:02, 87.35it/s]Loading weights:  70%|██████▉   | 370/531 [00:15<00:01, 115.39it/s]Loading weights:  74%|███████▍  | 393/531 [00:15<00:00, 142.83it/s]Loading weights:  78%|███████▊  | 413/531 [00:15<00:00, 154.86it/s]Loading weights:  82%|████████▏ | 436/531 [00:16<00:00, 173.91it/s]Loading weights:  86%|████████▌ | 457/531 [00:16<00:00, 183.20it/s]Loading weights:  90%|█████████ | 479/531 [00:16<00:00, 191.49it/s]Loading weights:  94%|█████████▍| 501/531 [00:16<00:00, 196.77it/s]Loading weights:  98%|█████████▊| 522/531 [00:16<00:00, 196.67it/s]Loading weights: 100%|██████████| 531/531 [00:16<00:00, 32.06it/s] 
+[DKV] Heap trimmed. RSS: 1066 MB → 1066 MB (saved 0 MB)
+[DKV] Auto-detected already quantized model. Skipping torchao post-quantization.
+[DKV] Model parameter count: 4996.4M
+[DKV Memory] Device: cuda (is_mps=False), Preset: mid (is_low=False)
+[DKV Memory] Pool: max_blocks=6199 (182/layer x 34 layers ~= 186,368 tokens max context), rank=96 (pool_rank=32), max_residual=128, 677 KB/slot, budget=4.0 GB (ceiling: 50% of 5.0 GB free VRAM), worst-case 4.3 GB if every slot fills (lazy: only used slots are allocated)
+[DKV Memory] Effective per-layer rank actually stored: 32  (ceiling rank=96; schedule wanted 32-96, r_proj cap clamps to 32)
+[DKV] DKV_KEY_QUANT: CUDA graph capture disabled (the hybrid store decodes through the materialise path).
+[DKV] CUDA graph capture DISABLED (mutable routing state prevents correct replay; the compatibility opt-in is still ABI-guarded).
+[DKV kT] Feature 1 — TieredBlockStore enabled (evict_thresh=80%, batch=32)
+[DKV kT] Feature 2 — BlockPrefetchEngine enabled (lookahead=1, active=True)
+DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+[DKV] torch.compile disabled.
+[DKV] CUDAGraphDecodeRunner initialized (capture disabled — eager mode)
+[DKV] Pre-warming decode JIT for ranks [32, 48, 96] (H=32, kv_H=8, D=128, block_size=64) ...
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] Heap trimmed. RSS: 1477 MB → 1477 MB (saved 0 MB)
+[Pool] Lazy-allocated 1122 slots for ~32627 tokens = 1410.9 MB (device=cuda)
+[DKV] Factual store: DISABLED (set DKV_FACTUAL_STORE=1 to enable)
+[DKV] REMAT ACTIVE — materialise-then-attend (MLX's decode form) is running on layer 0.
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-niah_multikey_2-0 candidates=30 router=residual ROUTING RUNS
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\bitsandbytes\backends\cuda\ops.py:468: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  torch._check_is_size(blocksize)
+  [1/4] 32768/niah_multikey_2#0 -> '**8371524**.' (65.2s/item, ~3 min left)
+C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-niah_multivalue-0 candidates=30 router=residual ROUTING RUNS
+  [2/4] 32768/niah_multivalue#0 -> ':\n\n1. **7264956**\n2. **7693979**\n3. **8350099**\n4.' (149.1s/item, ~5 min left)
+[DKV] mutation-out disabled for this session: routing is selective (29 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-qa_1-0 candidates=29 router=residual ROUTING RUNS
+  [3/4] 32768/qa_1#0 -> 'France' (119.7s/item, ~2 min left)
+[DKV] mutation-out disabled for this session: routing is selective (30 compressed blocks > K=16), so a frozen routed set would drift. No routed graph will be captured, and deferring the forward's mutation would cost without buying anything.
+[DKV] ROUTE PROBE layer=0 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=1 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=2 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=3 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=4 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=5 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=6 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=7 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=8 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=9 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=10 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=11 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=12 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=13 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=14 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=15 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=16 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=17 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=18 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=19 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=20 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=21 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=22 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=23 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=24 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=25 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=26 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=27 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=28 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=29 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=30 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=31 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=32 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+[DKV] ROUTE PROBE layer=33 session=ruler-32768-vt-0 candidates=30 router=residual ROUTING RUNS
+  [4/4] 32768/vt#0 -> '**BVKUY, AWOMY, HKXVN, TUXMH, MKRUS**.' (120.7s/item, ~0 min left)
+
+
+=== V19_Ministral-3-8B-Instruct-2512-BF16_dkv_32k.jsonl ===
+mistralai/Ministral-3-8B-Instruct-2512-BF16 arm=dkv preset=mid quant=nf4
+              task    32768
+   niah_multikey_2    100.0
+   niah_multivalue    100.0
+                vt    100.0
+              qa_1    100.0
+         RULER avg    100.0
+  ttft nans | decode nan tok/s | peak 13.24 GB | KV 1.659 GB (2.8x)
+=== V19 mistralai/Ministral-3-8B-Instruct-2512-BF16 DONE ===
+V19 COMPLETE

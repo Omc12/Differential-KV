@@ -120,9 +120,9 @@ def test_plugin_codec_runs_the_whole_store(monkeypatch, how):
     for b, (k0, v0, ak, av) in zip(blocks, orig):
         idx = torch.tensor([b.pool_idx], device=DEV)
         kd = pool.get_key_deltas(idx)[0, :T].float().cpu()
-        vd = pool.get_value_deltas(idx)[0, :T].float().cpu()
+        vd = pool.get_values(idx)[0, :T].float().cpu()
         assert ((kd + ak) - k0).norm() / (k0 - ak).norm() < 0.02      # int8
-        assert ((vd + av) - v0).norm() / (v0 - av).norm() < 0.02
+        assert (vd - v0).norm() / v0.norm() < 0.02                     # values as they are
     # residual keys for the router come from the codec, at the stored rows
     idx = torch.tensor([blocks[0].pool_idx], device=DEV)
     rk = pool.get_residual_k(idx)[0].float().cpu()

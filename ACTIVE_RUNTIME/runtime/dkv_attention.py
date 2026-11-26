@@ -641,7 +641,7 @@ def _coarse_scale_kv(kv_manager, sid, layer_idx, pool, cos_all, sin_all,
                    res_pos=g["res_pos"] if has_res else None,
                    res_v=g["res_v"] if has_res else None,
                    res_pos_v=g["res_pos_v"] if has_res else None,
-                   k_delta=g.get("k_delta"), v_delta=g.get("v_delta"))
+                   k_delta=g.get("k_delta"), v_values=g.get("v_values"))
         return K, V, g["seq_lens"].clone(), drop_fine
     except Exception:                                            # noqa: BLE001
         return None
@@ -1306,7 +1306,7 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
             res_pos=_g["res_pos"] if _has_res else None,
             res_v=_g["res_v"] if _has_res else None,
             res_pos_v=_g["res_pos_v"] if _has_res else None,
-            k_delta=_g.get("k_delta"), v_delta=_g.get("v_delta"))
+            k_delta=_g.get("k_delta"), v_values=_g.get("v_values"))
         if _g.get("raw_k") and anchor_indices is not None and cos_all is not None:
             # ── EVERY KEY AT ITS OWN POSITION, which is MLX's form ───────────
             # _Km is now R-free: anchor_raw + delta_recon_raw + res_raw, one
@@ -1356,7 +1356,7 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
                     res_pos=_g2["res_pos"] if _g2.get("has_res") else None,
                     res_v=_g2["res_v"] if _g2.get("has_res") else None,
                     res_pos_v=_g2["res_pos_v"] if _g2.get("has_res") else None,
-                    k_delta=_g2.get("k_delta"), v_delta=_g2.get("v_delta"))
+                    k_delta=_g2.get("k_delta"), v_values=_g2.get("v_values"))
         return _Km, _Vm, _g
 
     # ── Incremental refresh (DKV_REMAT_ARENA, fast path only) ───────────────

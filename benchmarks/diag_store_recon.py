@@ -93,7 +93,15 @@ def main():
             def hv(_m, _i, out, li=li):
                 if out.shape[1] > 1:
                     exact[li]["v"].append(out[0].detach().half().cpu())
-            hooks += [ksrc.register_forward_hook(hk), at.v_proj.register_forward_hook(hv)]
+
+            qsrc = getattr(at, "q_norm", None) or at.q_proj
+
+            def hq(_m, _i, out, li=li):
+                # first decode step's query, pre-RoPE, flattened to [Hq * D]
+                if out.shape[-2 if out.dim() == 4 else 1] == 1 and "q" not in exact[li]:
+                    exact[li]["q"] = out[0].reshape(-1).detach().float().cpu()
+            hooks += [ksrc.register_forward_hook(hk), at.v_proj.register_forward_hook(hv),
+                      qsrc.register_forward_hook(hq)]
 
     for i, l in enumerate(layers):
         hooks.append(l.register_forward_pre_hook(
@@ -181,8 +189,8 @@ def _attention_check(li, q, K, V, blocks, model, layers, P):
     at = layers[li].self_attn
     hd, kvh = _proj_widths(at, model.config)
     hq = q.numel() // hd
-    rotary = next(m for _n, m in model.named_modules()
-                  if type(m).__name__.endswith("RotaryEmbedding"))
+    from runtime.dkv_attention import _resolve_rotary_emb
+    rotary = _resolve_rotary_emb(model)            # the TEXT decoder's (not a vision tower's)
     dev = next(model.parameters()).device
     pos = torch.arange(P + 1, device=dev)[None]
     cos, sin = rotary(torch.zeros(1, 1, 1, device=dev), pos)
@@ -216,6 +224,60 @@ def _attention_check(li, q, K, V, blocks, model, layers, P):
     ok = torch.einsum("hn,nhd->hd", ph, Ve[:, kv_of])                  # keys' share
     rel = ((oh - oe).norm(dim=-1) / oe.norm(dim=-1).clamp_min(1e-9))
     relk = ((ok - oe).norm(dim=-1) / oe.norm(dim=-1).clamp_min(1e-9))
+    # The same exact blocks through KIVI-4's quantizer, two ways: on POST-RoPE
+    # keys (what a KIVI cache holds) and on PRE-RoPE keys rotated afterwards
+    # (DKV's choice). If DKV's stored blocks are worse than both, the loss is
+    # in DKV's store path, not in the 4-bit layout.
+    def _kivi_k(x, G=32):                          # [N, H, D], per channel / G tokens
+        n = x.shape[0] // G * G
+        g = x[:n].float().view(-1, G, *x.shape[1:])
+        lo, hi = g.amin(1, keepdim=True), g.amax(1, keepdim=True)
+        s = (hi - lo).clamp_min(1e-8) / 15
+        q = (torch.round((g - lo) / s).clamp(0, 15) * s + lo).view(n, *x.shape[1:])
+        return torch.cat([q, x[n:].float()])
+    def _kivi_v(x, G=32):                          # per token / G channels
+        g = x.float().view(*x.shape[:-1], -1, G)
+        lo, hi = g.amin(-1, keepdim=True), g.amax(-1, keepdim=True)
+        s = (hi - lo).clamp_min(1e-8) / 15
+        return (torch.round((g - lo) / s).clamp(0, 15) * s + lo).view(x.shape)
+    Kraw = torch.cat([K[ai:ai + bk[0].shape[0]].view(-1, kvh, hd)
+                      for ai, bk in sorted(blocks.items()) if ai + bk[0].shape[0] <= P])
+    # The runtime (DKV and the KIVI baseline alike) holds rebuilt keys in the
+    # model dtype; "+md" rounds the float rebuild there, before and after RoPE,
+    # so a float32 reference cannot look better only for skipping that.
+    md = next(model.parameters()).dtype
+    md = md if md.is_floating_point else torch.bfloat16
+    snap = lambda x: x.to(md).float()
+    variants = {"kivi4 post-RoPE": (_kivi_k(Ke), _kivi_v(Ve)),
+                "kivi4 pre-RoPE": (_apply_rope_single(_kivi_k(Kraw), c, s), _kivi_v(Ve)),
+                "kivi4 post +md": (snap(_kivi_k(Ke)), snap(_kivi_v(Ve))),
+                "kivi4 pre +md": (snap(_apply_rope_single(snap(_kivi_k(Kraw)), c, s)),
+                                  snap(_kivi_v(Ve)))}
+    for name, (Kq, Vq) in variants.items():
+        lq = torch.einsum("hd,nhd->hn", qr, Kq[:, kv_of]) * scale
+        pq = lq.softmax(-1)
+        klq = (pe * (pe.clamp_min(1e-30).log() - pq.clamp_min(1e-30).log())).sum(-1)
+        oq = torch.einsum("hn,nhd->hd", pq, Vq[:, kv_of])
+        relq = ((oq - oe).norm(dim=-1) / oe.norm(dim=-1).clamp_min(1e-9))
+        print(f"    {name:<16} attn KL mean {float(klq.mean()):.4f} max {float(klq.max()):.4f}"
+              f"  out rel err {float(relq.mean()):.4f}", flush=True)
+    # The same comparison against what the MODEL computes: exact keys rotated
+    # in the model dtype (HF's apply_rotary_pos_emb casts cos/sin to it), DKV's
+    # rebuilt pre-RoPE keys rotated the same way (the runtime's own rotation),
+    # and KIVI quantizing those post-RoPE keys and dequantizing into the dtype.
+    def _rope_md(x):
+        return _apply_rope_single(x.to(md), c.to(md), s.to(md)).float()
+    Ke_m = _rope_md(torch.cat([K[ai:ai + bk[0].shape[0]].view(-1, kvh, hd)
+                               for ai, bk in sorted(blocks.items()) if ai + bk[0].shape[0] <= P]))
+    Kh_m = _rope_md(torch.cat([bk[0].view(-1, kvh, hd)
+                               for ai, bk in sorted(blocks.items()) if ai + bk[0].shape[0] <= P]))
+    pe_m = (torch.einsum("hd,nhd->hn", qr, Ke_m[:, kv_of]) * scale).softmax(-1)
+    for name, Kq in (("dkv (md rope)", Kh_m), ("kivi4 post (md)", snap(_kivi_k(Ke_m))),
+                     ("kivi4 pre (md)", _rope_md(_kivi_k(Kraw)))):
+        pq = (torch.einsum("hd,nhd->hn", qr, Kq[:, kv_of]) * scale).softmax(-1)
+        klq = (pe_m * (pe_m.clamp_min(1e-30).log() - pq.clamp_min(1e-30).log())).sum(-1)
+        print(f"    vs md-ref {name:<16} attn KL mean {float(klq.mean()):.4f} "
+              f"max {float(klq.max()):.4f}", flush=True)
     h = int(kl.argmax())
     dl = (lh[h] - le[h])
     top = torch.topk(dl.abs(), 3).indices.tolist()

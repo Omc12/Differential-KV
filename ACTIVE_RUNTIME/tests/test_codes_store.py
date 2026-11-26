@@ -7,7 +7,7 @@ Checks, from the storage format outwards:
      bits, within half a step;
   3. the pool allocates, writes, grows and reads both code arrays; the factor
      is rank 1, no value residual is stored, value residuals read zero;
-  4. reconstruct_blocks takes values from v_delta;
+  4. reconstruct_blocks takes values from v_values;
   5. the fused history tile with value codes equals plain attention over the
      dequantized keys and values.
 """
@@ -92,10 +92,10 @@ def test_pool_codes_write_read_grow(monkeypatch, bits):
         pool_indices=slots, U=torch.randn(N, S, 1, device=DEV),
         V=torch.randn(N, 1, 2 * H * D, device=DEV),
         anchor_K=torch.randn(N, H, D, device=DEV), anchor_V=torch.randn(N, H, D, device=DEV),
-        scales=torch.ones(N, device=DEV), seq_len=S, key_deltas=kd, value_deltas=vd,
+        scales=torch.ones(N, device=DEV), seq_len=S, key_deltas=kd, values=vd,
         res_K_positions=pos, res_K_values=torch.randn(N, 8, H, D, device=DEV),
         res_V_positions=pos, res_V_values=torch.randn(N, 8, H, D, device=DEV))
-    got_v = pool.get_value_deltas(slots).float()[:, :S]
+    got_v = pool.get_values(slots).float()[:, :S]
     assert torch.allclose(got_v, _ref_value_quant(vd, bits), atol=2e-3)
     assert (pool.residual_V_positions[slots] == -1).all()       # no value residual
     assert (pool.residual_K_positions[slots, :3] >= 0).all()    # router keeps its rows
@@ -122,7 +122,7 @@ def test_pool_codes_write_read_grow(monkeypatch, bits):
     importlib.reload(nbp)
 
 
-def test_reconstruct_uses_v_delta():
+def test_reconstruct_uses_v_values():
     from native_core.sparse_decode.remat_cache import reconstruct_blocks
     N, S, R, H, D = 2, 10, 1, 2, 8
     aK, aV = torch.randn(N, H, D, device=DEV), torch.randn(N, H, D, device=DEV)
@@ -130,8 +130,9 @@ def test_reconstruct_uses_v_delta():
     K, V = reconstruct_blocks(torch.randn(N, S, R, device=DEV), torch.zeros(N, R, H, D, device=DEV),
                               torch.randn(N, R, H, D, device=DEV), aK, aV,
                               torch.ones(N, device=DEV), torch.ones(N, device=DEV), R,
-                              k_delta=kd, v_delta=vd)
-    assert torch.allclose(V[:, 1:].float(), (vd + aV.unsqueeze(1)).float(), atol=1e-5)
+                              k_delta=kd, v_values=vd)
+    # value codes hold the values themselves, not anchor-relative deltas
+    assert torch.allclose(V[:, 1:].float(), vd.float(), atol=1e-5)
     assert torch.allclose(V[:, 0].float(), aV.float())
 
 
@@ -166,8 +167,8 @@ def test_sdpa_tile_value_codes(bits):
     out = history_attend_sdpa_tile(q, kw, g, bits, 32, bits, 32)
     K = torch.cat([aK.unsqueeze(1), aK.unsqueeze(1)
                    + dequantize_keys_per_channel(*kc, bits, 32, torch.float32)], 1)
-    V = torch.cat([aV.unsqueeze(1), aV.unsqueeze(1)
-                   + dequantize_values_per_token(*vc, bits, 32, torch.float32)], 1)
+    V = torch.cat([aV.unsqueeze(1),
+                   dequantize_values_per_token(*vc, bits, 32, torch.float32)], 1)
     K = K.reshape(N * (1 + S), Hk, D).transpose(0, 1).repeat_interleave(g, 0)   # [H, M, D]
     V = V.reshape(N * (1 + S), Hk, D).transpose(0, 1).repeat_interleave(g, 0)
     w = torch.softmax(q[0].float() @ K.transpose(1, 2) * D ** -0.5, -1)
@@ -278,9 +279,9 @@ def test_compress_codes_store_end_to_end(monkeypatch):
     for b, (k0, v0, ak, av) in zip(blocks, orig):
         idx = torch.tensor([b.pool_idx])
         kd = pool.get_key_deltas(idx)[0, :T].float()            # [T, H, D]
-        vd = pool.get_value_deltas(idx)[0, :T].float()
+        vd = pool.get_values(idx)[0, :T].float()
         ek = ((kd + ak.float()) - k0).norm() / (k0 - ak).norm()
-        ev = ((vd + av.float()) - v0).norm() / (v0 - av).norm()
+        ev = (vd - v0).norm() / v0.norm()                       # values as they are
         assert ek < 0.15 and ev < 0.15, (float(ek), float(ev))   # 4-bit codes
     for v in ("DKV_STORE", "DKV_MAX_RESIDUAL_TOKENS"):
         monkeypatch.delenv(v, raising=False)

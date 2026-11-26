@@ -1,7 +1,10 @@
 """Pluggable KV codecs: how a compressed block stores its K and V rows.
 
-DKV's store keeps, per block, an EXACT anchor token and the other rows as
-anchor-relative DELTAS. A codec decides how those deltas are held:
+DKV's store keeps, per block, an EXACT anchor token and the other rows.
+Keys reach a codec as anchor-relative DELTAS (pre-RoPE, in the anchor's
+frame); values reach it AS THEY ARE -- they carry no RoPE, and subtracting an
+outlier anchor would widen every row's quantization range. A codec decides
+how those rows are held:
 
     codes    (default)  keys per-channel and values per-token, both
                         DKV_QUANT_BITS wide -- KIVI's layout
@@ -25,7 +28,7 @@ ANY object with `encode` and `decode` (a module, a class, a namespace).
 
 WRITING A CODEC: two functions
 ------------------------------
-    def encode(x):      # x [n, T, H, D] float32 anchor-relative deltas
+    def encode(x):      # x [n, T, H, D] float32: key deltas or values
         s = x.abs().amax(-1, keepdim=True).clamp(min=1e-8) / 127
         return {"q": (x / s).round().to(torch.int8), "s": s.half()}
 
@@ -44,7 +47,9 @@ For control the function form does not give (a cheap single-row key decode
 for the router, data-dependent layouts), subclass `DeltaCodec` instead.
 
 Contract (checked by tests/test_kv_codecs.py for every registered codec):
-  * deltas arrive as [N, S, H, D] (S <= max_seq_len rows actually written);
+  * rows arrive as [N, S, H, D] (S <= max_seq_len rows actually written);
+    decode_keys returns the anchor-relative key deltas, decode_values the
+    values themselves;
     decode returns [n, max_seq_len, H, D]; rows past a slot's length are
     never read, so their content is free.
   * `encode` must fully overwrite the slots it is given (slots are reused).
@@ -92,9 +97,10 @@ class DeltaCodec:
 
     # ── data ────────────────────────────────────────────────────────────────
     def encode(self, state: Dict[str, torch.Tensor], pidx: torch.Tensor,
-               key_deltas: Optional[torch.Tensor], value_deltas: Optional[torch.Tensor],
+               key_deltas: Optional[torch.Tensor], values: Optional[torch.Tensor],
                write_seq: int) -> None:
-        """Write [N, S, H, D] anchor-relative deltas into slots `pidx`."""
+        """Write [N, S, H, D] anchor-relative key deltas and/or values (as
+        they are) into slots `pidx`."""
 
     def decode_keys(self, rows: Dict[str, torch.Tensor], dtype) -> torch.Tensor:
         raise NotImplementedError(f"{self.name} does not hold keys")
@@ -170,7 +176,7 @@ class HybridCodec(_KeyCodesMixin, DeltaCodec):
     def state_spec(self):
         return self._key_spec()
 
-    def encode(self, state, pidx, key_deltas, value_deltas, write_seq):
+    def encode(self, state, pidx, key_deltas, values, write_seq):
         if key_deltas is None:
             raise ValueError("hybrid codec: the compressor passed no key deltas")
         self._encode_keys(state, pidx, key_deltas, write_seq)
@@ -204,16 +210,16 @@ class KiviCodec(_KeyCodesMixin, DeltaCodec):
             "vq_zero": ((self.T, self.H, self.D // self.vq_group), torch.float16)})
         return s
 
-    def encode(self, state, pidx, key_deltas, value_deltas, write_seq):
+    def encode(self, state, pidx, key_deltas, values, write_seq):
         # Either half may come alone (the pool's legacy per-half writers); the
         # pool's batched write checks that both arrive.
         if key_deltas is not None:
             self._encode_keys(state, pidx, key_deltas, write_seq)
-        if value_deltas is None:
+        if values is None:
             return
         from runtime.native_block_pool import quantize_values_per_token
         codes, scale, zero = quantize_values_per_token(
-            value_deltas[:, :write_seq], self.value_bits, self.vq_group)
+            values[:, :write_seq], self.value_bits, self.vq_group)
         state["vq_codes"][pidx] = 0
         state["vq_scale"][pidx] = 0.0
         state["vq_zero"][pidx] = 0.0
@@ -231,7 +237,8 @@ class KiviCodec(_KeyCodesMixin, DeltaCodec):
 class FunctionCodec(DeltaCodec):
     """A codec from two plain functions -- the easiest way to plug one in.
 
-        encode(x)    x: [n, T, H, D] float32 anchor-relative deltas
+        encode(x)    x: [n, T, H, D] float32 key deltas (anchor-relative) or
+                     values (as they are)
                      -> {name: tensor [n, ...]}   (any dtypes / trailing shapes)
         decode(st)   st: that dict, for any n blocks
                      -> [n, T, H, D]
@@ -277,11 +284,11 @@ class FunctionCodec(DeltaCodec):
             dst = state[f"{half}_{n}"]
             dst[pidx] = t.to(device=dst.device, dtype=dst.dtype)
 
-    def encode(self, state, pidx, key_deltas, value_deltas, write_seq):
+    def encode(self, state, pidx, key_deltas, values, write_seq):
         if self.holds_keys and key_deltas is not None:
             self._encode_half("k", state, pidx, key_deltas, write_seq)
-        if self.holds_values and value_deltas is not None:
-            self._encode_half("v", state, pidx, value_deltas, write_seq)
+        if self.holds_values and values is not None:
+            self._encode_half("v", state, pidx, values, write_seq)
 
     def _decode_half(self, half, rows, dtype):
         p = half + "_"

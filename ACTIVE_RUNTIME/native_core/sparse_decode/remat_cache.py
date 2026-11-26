@@ -211,7 +211,7 @@ def reconstruct_blocks(
     res_v: Optional[torch.Tensor] = None,       # [N, MAX_RES, H, D]
     res_pos_v: Optional[torch.Tensor] = None,   # [N, MAX_RES]  -1 padded
     k_delta: Optional[torch.Tensor] = None,     # [N, S, H, D] hybrid store keys
-    v_delta: Optional[torch.Tensor] = None,     # [N, S, H, D] codes store values
+    v_values: Optional[torch.Tensor] = None,    # [N, S, H, D] codes store values
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Materialise routed blocks to dense K/V.
 
@@ -257,9 +257,10 @@ def reconstruct_blocks(
         # (exact rows replace their twins), so there is no small-delta-on-large-
         # anchor addition for half precision to round away.
         dt = V_V.dtype
-        if v_delta is not None:
-            # Codes store: values come from their codes too; no factor is read.
-            V = v_delta[:, :S].to(dt) + anchors_V.unsqueeze(1).to(dt)
+        if v_values is not None:
+            # Codes store: values come from their codes too (the values
+            # themselves, not anchor-relative); no factor is read.
+            V = v_values[:, :S].to(dt)
         else:
             Uh = U[:, :, :r].to(dt)
             if U_scale is not None:

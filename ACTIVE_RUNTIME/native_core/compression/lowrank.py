@@ -2737,11 +2737,14 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
             key_deltas=(delta_K_all.reshape(N_blocks, T_active, pool.V_KV.shape[3],
                                             pool.V_KV.shape[4])
                         if _ph(pool, "keys") else None),
-            # Codes store: the exact anchor-relative values, kept per-token
-            # quantized; the factor's value half is then never read.
-            value_deltas=(delta_V_all.reshape(N_blocks, T_active, pool.V_KV.shape[3],
-                                              pool.V_KV.shape[4])
-                          if _ph(pool, "values") else None),
+            # Codes store: the exact values AS THEY ARE, not anchor-relative:
+            # a per-token quantizer's range is the row's own, and subtracting
+            # an outlier anchor widens every row's range to the anchor's
+            # (Qwen2.5-7B: attention-output error 10x KIVI-4's). Values carry
+            # no RoPE, so the anchor frame buys nothing for them.
+            values=(flat_batch[:, :, half_d:].float().reshape(
+                        N_blocks, T_active, pool.V_KV.shape[3], pool.V_KV.shape[4])
+                    if _ph(pool, "values") else None),
         )
         if _key_boxes is not None:
             from native_core.srl.key_box import record as _kb_record

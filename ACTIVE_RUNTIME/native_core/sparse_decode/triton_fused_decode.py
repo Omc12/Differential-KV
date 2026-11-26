@@ -1552,6 +1552,7 @@ def history_attend_sdpa_tile(q, kw, groups, kq_bits=0, kq_group=32, vq_bits=0, v
     # kq_codes / vq_codes keywords are the built-in codecs' older form.
     rows = ({k[6:]: v for k, v in kw.items() if k.startswith("codec:")}
             if codec is not None else None)
+    v_coded = (codec is not None and codec.holds_values) or "vq_codes" in kw
     if codec is not None and codec.holds_values:
         dv = codec.decode_values(rows, dt)[:, :S]
     elif "vq_codes" in kw:
@@ -1589,7 +1590,8 @@ def history_attend_sdpa_tile(q, kw, groups, kq_bits=0, kq_group=32, vq_bits=0, v
     aK = kw["anchors_K"][:, sl].to(dt).unsqueeze(1)          # [N, 1, Hk, D]
     aV = kw["anchors_V"][:, sl].to(dt).unsqueeze(1)
     K = torch.cat([aK, aK + dk], dim=1)                       # [N, 1+S, Hk, D]
-    V = torch.cat([aV, aV + dv], dim=1)
+    # Value codes hold the values themselves; the factor holds deltas.
+    V = torch.cat([aV, dv if v_coded else aV + dv], dim=1)
     cos = kw["cos_sliced"].to(dt)                             # [N, 1+S, 1, D]
     sin = kw["sin_sliced"].to(dt)
     h = D // 2
@@ -2159,9 +2161,9 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     if _kd is not None and do_rot:
         _kd = _partial_rope_apply(_kd, cos_anc.to(_kd.dtype), sin_anc.to(_kd.dtype))
     g["k_delta"] = _kd
-    # Codes store (DKV_VALUE_QUANT): the routed blocks' anchor-relative values.
+    # Codes store: the routed blocks' values (as they are, not anchor-relative).
     # Values carry no RoPE, so no frame applies. None when the store is off.
-    g["v_delta"] = (base_pool.get_value_deltas(indices)
+    g["v_values"] = (base_pool.get_values(indices)
                     if _ph(base_pool, "values") else None)
 
     res_pos = getattr(base_pool, "residual_K_positions", None)

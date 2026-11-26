@@ -1075,12 +1075,12 @@ class NativeBlockPool:
         """Encode anchor-relative keys [N, S, H, D] into the slots `pidx`."""
         self.codec.encode(self.codec_state, pidx, key_deltas, None, write_seq)
 
-    def write_value_codes(self, pidx: torch.Tensor, value_deltas: torch.Tensor, write_seq: int):
-        """Encode anchor-relative values [N, S, H, D] into the slots `pidx`."""
-        self.codec.encode(self.codec_state, pidx, None, value_deltas, write_seq)
+    def write_value_codes(self, pidx: torch.Tensor, values: torch.Tensor, write_seq: int):
+        """Encode values [N, S, H, D] (as they are) into the slots `pidx`."""
+        self.codec.encode(self.codec_state, pidx, None, values, write_seq)
 
-    def get_value_deltas(self, indices) -> Optional[torch.Tensor]:
-        """Decoded anchor-relative values [N, S, H, D] for slots `indices`, or
+    def get_values(self, indices) -> Optional[torch.Tensor]:
+        """Decoded values [N, S, H, D] (not anchor-relative) for slots `indices`, or
         None when the codec does not hold values."""
         if not self.codec.holds_values:
             return None
@@ -1777,7 +1777,7 @@ class NativeBlockPool:
         layer_idx=-1,            # int — which layer these blocks belong to
         basis_rows=None,         # [N] long — rows from a prior assign_basis()
         key_deltas=None,         # [N, S, kv, hd] anchor-relative keys (hybrid store)
-        value_deltas=None,       # [N, S, kv, hd] anchor-relative values (codes store)
+        values=None,             # [N, S, kv, hd] values as they are (codes store)
     ):
         """Vectorized equivalent of N write_block() calls that share seq_len.
 
@@ -1878,13 +1878,13 @@ class NativeBlockPool:
         if self.codec.holds_keys and key_deltas is None:
             raise ValueError(f"codec {self.codec.name!r} holds keys but the compressor "
                              "passed no key_deltas: the slot would hold no keys")
-        if self.codec.holds_values and value_deltas is None:
+        if self.codec.holds_values and values is None:
             raise ValueError(f"codec {self.codec.name!r} holds values but the compressor "
-                             "passed no value_deltas: the slot would hold no values")
+                             "passed no values: the slot would hold no values")
         if self.codec.holds_keys or self.codec.holds_values:
             self.codec.encode(self.codec_state, pidx,
                               key_deltas.to(dev) if self.codec.holds_keys else None,
-                              value_deltas.to(dev) if self.codec.holds_values else None,
+                              values.to(dev) if self.codec.holds_values else None,
                               write_seq)
 
         # Sanitize non-finite scales exactly like write_block's per-block guard.

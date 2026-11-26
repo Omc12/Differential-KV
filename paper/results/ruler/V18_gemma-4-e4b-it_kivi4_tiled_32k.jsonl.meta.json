@@ -1,0 +1,21 @@
+{
+  "answer_prefix": "separate-field",
+  "arm": "kivi4_tiled",
+  "baseline_params": {},
+  "data_dir": "C:\\Users\\USER\\Desktop\\Differential KV\\paper\\results\\ruler_data\\gemma-4-e4b-it",
+  "decode_defaults": null,
+  "dkv_decode_rev": null,
+  "dkv_env": {
+    "DKV_STORE": "codes"
+  },
+  "dkv_store": null,
+  "min_length": 32768,
+  "model": "google/gemma-4-e4b-it",
+  "per_task": 1,
+  "prefill_attn": "sdpa",
+  "preset": null,
+  "prompt_template": "model-chat-template",
+  "protocol": "ruler-official-generators",
+  "quant": "nf4",
+  "thinking": false
+}

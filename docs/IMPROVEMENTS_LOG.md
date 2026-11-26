@@ -10,6 +10,41 @@ Tiers: **T1** offline screen on captured KV (`benchmarks/tier1_screen.py`),
 **T3** batch confirmation. Guardrails a change must not trade away: store bytes,
 reach (peak memory), decode speed, query-agnosticism, exact prefill = dense.
 
+## Value codes hold the values, not anchor deltas; the Qwen2.5-7B gap explained (V18-V19c, 2026-11-26)
+
+Asked: is Qwen2.5-7B struggling because of something model-specific in DKV?
+Audit: no model-name branches anywhere in the runtime; head geometry, sliding
+windows, rotary and NoPE layers are all read from the live model. What was
+found instead, in order:
+
+| Finding | Evidence | Action |
+|---|---|---|
+| **Bug (generic): values were coded anchor-relative.** A per-token quantizer's range is the row's own; subtracting the block's anchor widens every row's range to the anchor's, so an outlier anchor ruins its whole block. KIVI codes values as they are, and values carry no RoPE, so the anchor frame bought nothing | `diag_store_recon.py`, Qwen2.5-7B 32k, every block, real first decode query: attention-output error at layer 5 **1.245 -> 0.119** (KIVI-4 0.120); layers 12/17/24 0.34/0.26/0.37 -> 0.068/0.067/0.104 (KIVI 0.07-0.14) | fixed: the compressor hands the codec the values themselves; decode reads them without adding the anchor. Codec contract: keys arrive as anchor-relative deltas, values as they are (`runtime/kv_codecs.py`); `get_value_deltas` is now `get_values` |
+| Keys: DKV's stored blocks are better than KIVI-4's | same diagnostic against the model's own arithmetic (keys rotated in bf16, as HF does): attention KL layer 0 0.0045 vs 0.0121, layer 5 0.0010 vs 0.0012, layer 27 0.0109 vs 0.0188 (KIVI post-RoPE, dequantized into bf16). A float32 reference had shown DKV worse at layer 27; that reference sits below bf16's grid at Qwen2.5's key magnitudes (k_proj bias up to 414 at layer 27, 171 at layer 0) | none; the diagnostic now prints both references |
+| **The 4-bit store is not the remaining gap.** A lossless codec (`examples/lossless_codec.py`: key deltas fp32, values bf16) through the whole DKV pipeline, every block read | decode KL vs dense 0.0418 vs 4-bit codes 0.0467 (KIVI-4 0.0155) | the lossless codec is kept as the instrument for "store or machinery?" |
+| **Qwen2.5-7B's prefill is numerically fragile on its own.** First-token KL of DKV's exact prefill is 0.42 / 0.23 on two of four prompts, identical for every store (so not compression) | `diag_prefill_layer_diff.py` 32k: DKV vs dense (SDPA) layer-0 rel err 0.066, worst 0.14; dense EAGER vs dense SDPA, same weights: 0.039, layers 2-9 **0.17-0.22**. Two correct dense implementations differ more than DKV does | none; not a DKV defect. KIVI's baseline runs HF's own kernels, which is why it tracks the SDPA reference more closely on this model |
+| Routing is the largest share of what is left | RULER 32k (4 items): routed 63.8, every block read 88.8, KIVI-4 100. Fidelity KL routed 0.101 vs every block 0.047; granite routed 0.111 vs every block **0.0013 (KIVI 0.0066)** | open. Reading every block is no slower at 32k on Qwen2.5 (10.7 vs 10.2 tok/s) but 5x slower on Phi-4-mini (2.0 vs 9.8), so it is not a default |
+
+**V19** (`benchmarks/campaigns/run_v19_ruler_raw_values.cmd`): V18's DKV arm
+again after the fix, same items; KIVI-4 arms from V18. RULER 32k, DKV codes /
+KIVI-4 tiled:
+
+| model | V18 DKV (pre-fix) | **V19 DKV** | KIVI-4 |
+|---|---|---|---|
+| SmolLM3-3B (13 tasks) | 76.2 | **78.5** | 86.9 |
+| Qwen2.5-7B | 63.8 | 63.8 | 100 |
+| Phi-4-mini | 70 | 70 | 70 |
+| Qwen3.5-2B | 100 | 100 | 100 |
+| gemma-4-e2b | 88.8 | 88.8 | 88.8 |
+| gemma-4-e4b | 100 | 100 | 100 |
+| gemma-4-12B | 100 | 93.8 | 93.8 |
+| Ministral-3-8B | 100 | 100 | 100 |
+
+One item per task (n=4, SmolLM3 n=13): a one-item move is 6-25 points, so only
+Qwen2.5-7B's gap is outside noise, and V19b puts most of it on routing.
+Logs: `paper/results/campaign/v18.log`, `v19.log`, `v19b.log`,
+`v19c_lossless.log`.
+
 ## vLLM backend: DKV codec pages in vLLM 0.34.0 (2026-11-26)
 
 `integrations/vllm/` (pip package `dkv-vllm`, `vllm.general_plugins` entry
@@ -76,7 +111,9 @@ step; paired difference vs tiled KIVI-4 with a bootstrap 95% CI;
   DKV codes is at or below KIVI-4 on 6 of 6 non-gemma models (granite 0.0014
   vs 0.0066). The losses on Qwen2.5-7B and granite come from the router
   skipping blocks: all of granite's gap, half of Qwen2.5-7B's (the other half,
-  0.053 vs 0.016 with every block read, is open).
+  0.053 vs 0.016 with every block read, was traced on 2026-11-26 to the
+  model's own numerics, not the store: see "Value codes hold the values"
+  above).
 - **Decode is 1.4-2.7x faster than tiled KIVI-4** wherever DKV fits the card.
 - **Memory is the cost.** Exact prefill holds the whole prompt in 16 bits, so
   DKV peaks higher than KIVI and the two 8B models SPILL at 32k on a 12.9 GB
