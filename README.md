@@ -1,11 +1,22 @@
-# Differential-KV (DKV): Anchor + Low-Rank KV-Cache Compression
+# Differential-KV (DKV): Routed, Compressed KV Cache for Long-Context Inference
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21539110.svg)](https://doi.org/10.5281/zenodo.21539110)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey.svg)](BUILD.md)
-[![Backend](https://img.shields.io/badge/Backend-MLX%20%7C%20PyTorch%20%7C%20CUDA%20%7C%20C%2B%2B17-blueviolet.svg)](ACTIVE_RUNTIME/README.md)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20WSL2-lightgrey.svg)](BUILD.md)
+[![Backend](https://img.shields.io/badge/Backend-PyTorch%20%2B%20Triton%20(CUDA)%20%7C%20vLLM-blueviolet.svg)](ACTIVE_RUNTIME/README.md)
 
-**Differential-KV (DKV)** is a sparse KV-cache inference runtime designed for high-efficiency, memory-bounded long-context Large Language Model (LLM) inference across Apple Silicon (MLX) and CUDA GPUs.
+**Differential-KV (DKV)** keeps a long prompt's KV cache in compressed blocks and,
+at each decode step, reads only the blocks the query routes to plus an exact
+recent window. Each block keeps one exact anchor token; how the other rows are
+stored is a pluggable **codec**: by default KIVI's 4-bit layout, optionally a
+joint low-rank factor with exact residual rows (about a third of the bytes, at
+lower quality), or any codec you write in two functions. It runs on Hugging Face
+`transformers` on CUDA, and as a [vLLM attention backend](integrations/vllm/).
+
+> **Status (2026-11).** The CUDA runtime (`ACTIVE_RUNTIME/`, PyTorch + Triton)
+> is the maintained path and the source of every current number below. The
+> Apple Silicon (MLX) runtime and the C++ engine (`dkv_native/`) are earlier
+> work, not kept current; sections measured on them are labelled.
 
 ResearchGate: https://www.researchgate.net/publication/410864213
 
@@ -20,17 +31,18 @@ Paper: https://doi.org/10.5281/zenodo.21539110
 
 The Key-Value (KV) cache is the primary memory bottleneck in long-context LLM inference: its memory footprint scales linearly $O(L)$ with sequence length $L$, causing commodity hardware to run out of memory (OOM) during prefill or generation long before model weights exhaust VRAM.
 
-Differential-KV addresses this by partitioning the KV cache into fixed micro-blocks of size $B_s = 256$ tokens and decomposing each block into four complementary components:
+Differential-KV partitions the KV cache into fixed blocks (1,024 tokens by default on CUDA) and keeps, per block:
 
-1. **Anchor Token ($a_k, a_v$):** The first token in the block, preserved in exact precision to serve as an anchor reference.
-2. **Joint $K \mid V$ Low-Rank SVD Delta:** A truncated Singular Value Decomposition (SVD) of rank $r = 32$ (with layer-adaptive variation: early layers $0.75r$, mid layers $1.5r$, late layers $0.5r$) capturing shared structural variation across key and value projections ($U \in \mathbb{R}^{(B_s-1) \times r}$, $V_K, V_V \in \mathbb{R}^{r \times d_{\text{head}}}$).
-3. **Exact Residual Tokens ($R = 128$ default budget):** Tokens with high reconstruction error or key semantic structures (digits, mathematical formulas, entity names, relational connectives) kept uncompressed.
-4. **Bounded Dense Recency Window:** A sliding window holding the most recent sequence tokens uncompressed.
+1. **Anchor Token ($a_k, a_v$):** The first token in the block, preserved in exact precision.
+2. **The block's other rows, in a codec** (`DKV_STORE`, see [Pluggable KV codecs](#-pluggable-kv-codecs)):
+   * **`codes` (default):** KIVI's layout, 4-bit. Keys are quantized per channel over 32-token groups, as deltas from the anchor (a per-channel range does not change under that shift). Values are quantized per token over 32-channel groups, as they are.
+   * **`lowrank` (opt-in, `DKV_LOWRANK=1`):** a joint $K \mid V$ truncated SVD of the anchor-relative deltas plus **exact residual rows** for the tokens the factor reconstructs worst (whole digit/name runs kept together). About a third of the codes store's bytes, at clearly lower quality (table below).
+3. **Bounded Dense Recency Window:** the most recent tokens, uncompressed.
 
-### Decode & Prefill Innovations
-* **Low-Rank Space Query Scoring:** Scores queries directly in the low-rank subspace ($O(r \cdot d_{\text{head}})$ dot products per block) without ever decompressing or materializing the full Key matrix $K$.
-* **Flash-Style LSE Combine:** Merges sparse low-rank/residual attention scores with the dense recency window using numerically stable fp32 log-sum-exp (LSE) accumulation and fp16 operands.
-* **Sub-Quadratic Prefill:** Uses block-sparse attention during prefill, reducing prompt processing complexity from $O(L^2)$ down to $O(L \cdot K)$, enabling prefill crossover where Differential-KV prefilling outperforms dense baselines at long contexts ($\ge 32\text{k}$).
+### Decode & Prefill
+* **Routed decode:** each step scores the blocks with the current query and attends the top-$K$ (`DKV_TOPK_BLOCKS`, 16) plus the window; `DKV_TOPK_BLOCKS=0` reads every block, the quality ceiling. Partial attentions merge by fp32 log-sum-exp.
+* **Exact prefill (default):** the prompt is attended exactly and compressed afterwards, so the first token matches dense. `DKV_STREAMING_COMPRESS=1` compresses during prefill instead, which fits longer prompts on a small card at some quality cost.
+* **Codec-agnostic machinery:** routing, the paged pool, tiered CPU offload, prefill tiling and the decode kernels never look inside a codec.
 
 ---
 
@@ -267,8 +279,9 @@ DKV_STORE=mypackage.mycodec:MY_CODEC    # your own, imported on demand
 
 or from Python: `DKVHFWrapper(model_id, config={"codec": MY_CODEC, ...})`.
 
-Writing one takes two functions. `x` is a block's anchor-relative deltas,
-`[blocks, tokens, kv_heads, head_dim]` float32:
+Writing one takes two functions. `x` is `[blocks, tokens, kv_heads, head_dim]`
+float32: a block's keys as deltas from its anchor, or its values as they are
+(subtracting an outlier anchor would widen every value row's range):
 
 ```python
 import torch
@@ -294,6 +307,9 @@ is this codec as a module (`DKV_STORE=examples.int8_codec:INT8`). For more
 control, such as a cheap single-row key decode for the router, subclass
 `DeltaCodec` in [`runtime/kv_codecs.py`](ACTIVE_RUNTIME/runtime/kv_codecs.py).
 `tests/test_kv_codecs.py` checks the contract.
+[`examples/lossless_codec.py`](ACTIVE_RUNTIME/examples/lossless_codec.py) stores
+everything exactly: run it as an arm to tell whether a gap to dense comes from
+the store or from the rest of the pipeline.
 
 ## ⚙️ Key Environment Knobs
 
@@ -304,13 +320,15 @@ Differential-KV runtime behaviors can be fine-tuned using environment variables:
 | `DKV_STORE` | `codes` (since 2026-11-26) | CUDA | Which store compressed history lives in. `codes`: KIVI-4's layout (keys per-channel, values per-token, 4-bit; `DKV_QUANT_BITS=2` for 2-bit) read through DKV's routed, tiled decode. `lowrank`: the joint low-rank K/V factor + int8 residual rows, about a third of the bytes, so more context on a small card, at lower quality. `hybrid`: 4-bit keys, low-rank values. Any other value is a registered or importable codec (see Pluggable KV codecs above). A head_dim that is not a multiple of 32 falls back to `lowrank` unless `codes` was asked for explicitly. |
 | `DKV_LOWRANK` | `0` | CUDA | `1` = the one-switch opt-in to the low-rank store (same as `DKV_STORE=lowrank`; an explicit `DKV_STORE` wins). |
 | `DKV_RESIDUAL_RUN_SHARE` | `0.5` | CUDA | With no question pinned, the best token run per block is kept whole and further runs may take at most this share of the residual budget; the rest goes to the worst-reconstructed rows. `1` = the old runs-first fill (V15, `docs/IMPROVEMENTS_LOG.md`). |
+| `DKV_QUANT_BITS` | `4` | CUDA | Bit width of the `codes` store (`2` for 2-bit). |
+| `DKV_STREAMING_COMPRESS` | `0` | CUDA | `1` compresses history during prefill instead of after it, so the prompt never sits in 16 bits whole: longer prompts fit a small card (the two 8B models at 32k on 12.9 GB), at some quality cost on some models. The one prefill switch; exact prefill is the default. |
 | `DKV_COMPRESSED_DECODE` | `auto` | MLX | Controls sparse decode (`on`, `off`, `auto`). Auto engages sparse decode at sequence lengths $\ge 8\text{k}$. |
 | `DKV_ENGAGE_THRESHOLD` | Budget-gated | Native / MLX | Context length at which sparse decode engages. Keeps dense decode for short contexts where dense fits. |
 | `DKV_HIGH_QUALITY_ROUTING` | `0` | Cross-runtime | `0` = Fast bounded-K pruning (attends top-$K$ blocks, context-independent speed). `1` = High-Quality routing (dynamic candidate routing). |
 | `DKV_CACHE_LIMIT_GB` | `1` | MLX | Buffer-cache allocation cap in GB (halves peak prefill RAM). |
 | `DKV_TOPK_BLOCKS` | `16` | Both engines | Number of compressed micro-blocks routed per decode step. |
 | `DKV_MAX_RESIDUAL` | `128` MLX / `40` CUDA | Both engines | Exact residual token rows per block. CUDA `mid`/`ultra`/`low` use 40, `high` keeps 128; MLX is flat 128. The budget measured **inert** on four benchmarks including a digit-table one, and the pool allocates these slots on *every* block, so 40 is a straight saving. |
-| `DKV_ROTATED_POOL` | `1` everywhere (`0` on CUDA `ultra` only) | CUDA / MLX | `1` stores POST-RoPE keys, baking in the position a block held at **compression** time. `0` stores PRE-RoPE keys and rotates them to their absolute positions at read. **Worth it on CUDA** (40/48 → 47/48 distractor retrieval over 48 seeds, matching dense, for 18–24% of decode). **NOT worth it on MLX, measured:** 9/24 either way at 16k over 24 seeds — the same score *and the same predicted answer on all 24 seeds* — while costing ~39% of decode and a second dense-window buffer per attended layer. The knob is implemented and correct (the pool, the SVD basis and the decode logits all demonstrably change), it simply buys nothing here, so it stays **off by default on MLX and is not part of MLX's `ultra`**. On MLX it also requires `DKV_DECODE_CACHE=1` — only that path materialises the keys, so the low-rank scorer **refuses** rather than scoring unrotated keys against a rotated query. Judge it with `colab/linkbench_mlx.py`, never the needle sweep, which has no confusable distractors and cannot see it. |
+| `DKV_ROTATED_POOL` | CUDA: `0` on `mid`/`high`/`ultra`, `1` on `low`; MLX: `1` | CUDA / MLX | `1` stores POST-RoPE keys, baking in the position a block held at **compression** time. `0` stores PRE-RoPE keys and rotates them to their absolute positions at read. **Worth it on CUDA** (40/48 → 47/48 distractor retrieval over 48 seeds, matching dense, for 18–24% of decode). **NOT worth it on MLX, measured:** 9/24 either way at 16k over 24 seeds — the same score *and the same predicted answer on all 24 seeds* — while costing ~39% of decode and a second dense-window buffer per attended layer. The knob is implemented and correct (the pool, the SVD basis and the decode logits all demonstrably change), it simply buys nothing here, so it stays **off by default on MLX and is not part of MLX's `ultra`**. On MLX it also requires `DKV_DECODE_CACHE=1` — only that path materialises the keys, so the low-rank scorer **refuses** rather than scoring unrotated keys against a rotated query. Judge it with `colab/linkbench_mlx.py`, never the needle sweep, which has no confusable distractors and cannot see it. |
 | `DKV_SHARED_BASIS` | `0` (opt-in) | CUDA; MLX on branch `mlx-shared-basis` | Blocks whose delta subspaces agree read **one** basis row instead of each storing its own $V$. $V$ is 39% of a pool slot and the item adjacent blocks of a document most nearly agree on. Measured on Qwen2.5-1.5B @8k, `mid`, `frac=0.50`: pool **91.4 → 69.8 MB (−23.6%)** with 2.58× sharing, 463 voluntary joins, **zero forced**, retained delta energy **0.969**. `_bytes_per_block` amortises $V$ by the same fraction, so the budget holds proportionally **more blocks** rather than the same context in less memory. **That capacity framing is the only one the measurement supports.** Pool bytes and peak measured in the SAME process on CUDA (`colab/bench_shared_basis_peak.py`, pool summed from its real tensors, peak from `torch.cuda.max_memory_allocated`): at 8k pool 95.9 → 73.2 MB (−23.7%) for a peak of 3619 → 3598 MB (**−0.6%**), and at 32k pool 366.1 → 279.4 MB (−23.7%) for a peak of 4614 → 4533 MB (**−1.8%**). Weights alone are 3087 MB of every one of those peaks, which is why the pool is not where the memory is. MLX independently measured 1.1% and 3.4%; do not quote the −23.6% as a memory saving. **Prefill cost is not resolvable**: paired, interleaved, A/A-calibrated (`colab/bench_prefill_paired.py`, 8 rounds @8k) puts it at +36.0 ms on a ~2.7 s prefill, 95% CI [−13.9, +85.9] — a point estimate of +1.3% with an upper bound of +3.2%, against a harness resolution of ±1.9%. **Requires fp16 KV — see `DKV_SHARED_BASIS_FRAC` for the q4_0 trap.** Not a preset default, but it is no longer UNVALIDATED: it has now been run through all three accuracy harnesses at `frac=0.50` and none of them can resolve a regression — needle suite 4/4 (unchanged), multifact multi-needle 3/3 and **relational 4/4** (the binding test, unchanged), first-token KL 0.00024 (identical) and decode-step KL 0.00125 → 0.00146. Synthesis moves 13.3 → 10.0, inside the ±15-point RSVD-seed band this metric carries and far below its ≥30 bar, which this model does not clear with the feature off either. The accuracy instrument (`colab/logit_fidelity.py`) shows no measurable harm. It was previously reported as unable to resolve a small change "because the DKV baseline already sits far from dense (KL 10.58, dense's top-1 at rank 1255)" — **that number was an instrument defect, not a property of DKV**. The harness captured the LAST `lm_head` call, which at `max_new_tokens=1` is a decode forward, and scored it against a control captured one token earlier; it was comparing token *N+2* against token *N+1*. Re-measured against a true dense control (plain `transformers`, DKV never loaded) at the same position, the DKV baseline reads **KL 2.4e-4 with 5/5 top-1 agreement and 896 compressed blocks engaged**. The harness now carries a `dense_true/dec` self-check row that contains no compression at all and must read 0. Also requires exact-form residuals (the default); under `DKV_RESIDUAL_EXACT_KEYS=0` the pool **refuses** and says so, since correction-form residuals are defined against a block's own reconstruction. **Requires an UNROTATED pool, and this is the sharpest trap in the feature.** Sharing compares *subspaces*, and RoPE rotates every key by its absolute position, so blocks holding the same text at different offsets have subspaces rotated apart. Measured on MLX, same document and block size, only `DKV_ROTATED_POOL` differing: best-partner retained energy **0.486 → 0.972**, voluntary joins **10 → 520**, forced **186 → 0**. CUDA is exposed only on `low`, its one rotated preset — every preset it enables sharing on (`mid`/`high`/`ultra`) is already unrotated, which is why CUDA never saw this. **The pool now REFUSES the rotated combination** at construction and names the setting to change; `DKV_SHARED_BASIS_ALLOW_ROTATED=1` keeps the bad configuration measurable. Refusing rather than warning is deliberate: the failure produces no error and no shape change. As with the q4_0 trap, **pool MB is identical either way**, so a rotated run reports the full memory win with fidelity quietly bought by forced joins. **On MLX the V store halves exactly as designed, but the saving is 1-3% of PEAK** — measured in one process: pool 65.2 → 58.3 MB at 8k and 221.7 → 198.3 MB at 32k, against a peak of 5.7 / 6.6 GB dominated by weights and prefill activations. Peak is unchanged (7.12 GB across six runs). Recall is clean — `mlx_needle_parity.py --long` is **9/9 with sharing on, including `32k@0.9`** — but decode is slower in 3/3 paired rounds at a **0.5-0.65x** ratio (absolute tok/s here cannot be resolved below ~20%, so only the paired ratio is quoted). **Opt-in, and on this model there is no operating point where it currently pays.** |
 | `DKV_SHARED_BASIS_FRAC` | `0.50` | CUDA; MLX on branch | Basis rows allocated, as a fraction of block slots — a **capacity contract**, not a prediction. When the store fills, blocks force-join their nearest group, so a document that shares worse than assumed degrades in *fidelity*, never in correctness. Deeper settings are a different trade and should be argued for as one: retained energy `0.50 → 0.969`, `0.25 → 0.905`, `0.125 → 0.759`. **Do not pair with 4-bit KV.** On `low` (`kv_quant=q4_0`) quantisation noise destroys the subspace agreement entirely — **zero** voluntary joins, 294 forced, retained energy **0.685** — while pool MB is *identical*, because the saving comes from allocating fewer basis rows and not from grouping succeeding. That makes the failure invisible in memory numbers; the pool warns at construction, and `pool.basis_stats()['joined'] == 0` is the signature. |
 | `DKV_POOL_ATTENDED_ONLY` | `1` | MLX | Size each session's pool by the layers that actually own a KV cache. On hybrid models (Qwen3.5: **6 of 24** layers) the rest can never hold a block, and allocating for them cost 406.9 MB of a 542.5 MB pool at 11.4k. Set `0` to restore the old full-width allocation. No-op on dense-attention models. |
@@ -340,13 +358,75 @@ Differential-KV runtime behaviors can be fine-tuned using environment variables:
 
 ---
 
-## 📊 Measured Paper Benchmarks
+## 📊 Current Results (CUDA, 2026-11)
 
-All benchmark results are empirically measured on a single host: **Apple M3 with 8.6 GB unified memory**, evaluating **Qwen2.5-1.5B-Instruct (int4)** using rank $r=32$, residual budget $R=128$, micro-block size $B_s=256$, top-$K=16$, and residual-key router (raw logs preserved in `benchmarks/results/results_latest.json`).
+One RTX 4070 SUPER (12.9 GB), Windows 11, `transformers` 5.14.1, `torch` 2.11,
+nf4 weights, 32k-token RULER prompts. Every row is paired against dense and
+tiled KIVI-4 run in the same harness. Full tables, logs and the commands that
+produce them: [`docs/IMPROVEMENTS_LOG.md`](docs/IMPROVEMENTS_LOG.md).
+
+**Decode fidelity** (`benchmarks/decode_fidelity.py`): dense's own answer is
+forced through each arm and the per-step KL to dense is averaged (lower is
+better). 4 prompts, 32 decode tokens each.
+
+| model | KIVI-4 (tiled) | DKV codes (default, routed) | DKV codes, every block read | DKV low rank | decode tok/s, KIVI-4 / DKV |
+|---|---|---|---|---|---|
+| SmolLM3-3B | 0.0077 | **0.0055** | 0.0041 | 0.128 | 3.6 / **8.0** |
+| Phi-4-mini | 0.0223 | **0.0077** | 0.0052 | 0.211 | 3.8 / **9.8** |
+| Qwen3.5-2B | 0.0071 | **0.0016** | 0.0022 | 0.0042 | 11.9 / **16.3** |
+| Ministral-3-8B | **0.0013** | 0.0020 | 0.0020 | 0.324 | 3.7 / 1.9 (spills) |
+| Qwen2.5-7B | **0.0155** | 0.101 | 0.047 | 0.789 | 4.8 / **10.2** |
+| granite-4.2-8b | 0.0066 | 0.111 | **0.0013** | 0.372 | 3.1 / 1.9 (spills) |
+
+Qwen2.5-7B and granite were rerun after the 2026-11-26 value-store fix; the other
+rows predate it. Reading it:
+
+* With every block read, the default store is below KIVI-4 on 4 of these 6
+  models and tied on Ministral (0.0020 vs 0.0013; the routed arm's paired 95%
+  CI spans zero). Where DKV loses,
+  routing is most of the loss (granite: 0.111 routed, 0.0013 reading everything).
+* Qwen2.5-7B's remaining gap is the model's numerics, not the store: a lossless
+  codec through the same pipeline scores 0.042, and the model's own dense eager
+  and dense SDPA prefills differ more than DKV and dense do.
+* DKV decodes 1.4-2.7x faster than tiled KIVI-4 in this harness (both without
+  CUDA graphs) wherever it fits the card. Its
+  cost is memory: exact prefill holds the prompt in 16 bits, so the two 8B models
+  spill past 12.9 GB at 32k (`DKV_STREAMING_COMPRESS=1` fits them).
+* The gemma-4 models are left out: their DKV arms are not yet comparable.
+
+**RULER 32k** (`benchmarks/run_ruler_cuda.py`, official generators; one item
+per task, so one item moves a score by 6-25 points):
+
+| model | dense | KIVI-4 (tiled) | DKV codes (default) | DKV low rank |
+|---|---|---|---|---|
+| SmolLM3-3B (13 tasks) | 84.6 | 86.9 | 78.5 | 64.7 |
+| Qwen2.5-7B | 95 | 100 | 63.8 (88.8 reading every block) | 63.8 |
+| Phi-4-mini | 70 | 70 | 70 | 68.8 |
+| Qwen3.5-2B | 100 | 100 | 100 | 100 |
+| gemma-4-e2b | 88.8 | 88.8 | 88.8 | 88.8 |
+| gemma-4-e4b | 100 | 100 | 100 | 100 |
+| gemma-4-12B | 100 | 93.8 | 93.8 | 75 |
+| Ministral-3-8B | 100 | 100 | 100 | 75 |
+
+**vLLM** ([`integrations/vllm`](integrations/vllm/), vLLM 0.34.0, Qwen2.5-1.5B,
+CUDA graphs on every arm): DKV's `k8v4` codec pages hold **2.01x** stock's KV
+tokens at 32k and decode at 107.8 tok/s (stock 102.4), needle 6/6, and track
+stock's greedy output more closely than vLLM's own TurboQuant k8v4. Routed decode
+over pages did not pay at 16k-32k there and stays opt-in. One model, one GPU.
+
+**What DKV does not do yet:** routing costs quality on some models (above); the
+low-rank store is well below KIVI-4 on quality; MLX and the C++ engine trail the
+CUDA runtime.
+
+## 📊 Earlier Measurements (MLX and the low-rank store)
+
+Results in this section predate the codes default and, unless labelled CUDA,
+were measured on the MLX runtime: a single **Apple M3 with 8.6 GB unified memory**, evaluating **Qwen2.5-1.5B-Instruct (int4)** using rank $r=32$, residual budget $R=128$, micro-block size $B_s=256$, top-$K=16$, and residual-key router (raw logs preserved in `benchmarks/results/results_latest.json`). They are kept as a record, not as current claims.
 
 ### 0. CUDA Runtime — Preset Accuracy and the Cost of `ultra`
 
-Separate host and runtime from the MLX numbers below: **RTX-class CUDA GPU,
+Measured on the low-rank store, when `mid` still stored rotated keys (it no
+longer does). Separate host and runtime from the MLX numbers below: **RTX-class CUDA GPU,
 Qwen3.5-2B, 32k context**, `transformers` 5.14.1 / `torch` 2.11.0+cu130. **A dense
 control was run in the same process generation as every DKV number** — absolute
 scores here are not comparable to scores taken in another environment, and this
@@ -401,35 +481,13 @@ first difference is **one ULP at step 1**, and the greedy argmax flips around st
 32. A CUDA graph makes no bit-identity promise, so that is a *distribution*
 difference of the same kind `DKV_DETERMINISTIC` already exists to manage — not a
 quality one. Accuracy is unchanged: digit-table 24/24 and linkbench 23/48 with it
-on, both identical to off.
+on, both identical to off. (An earlier sweep that found it 2x slower at 4k
+measured the three fallback bugs above, since fixed.)
 
-**Speed — what the un-rotated pool costs**, paired and in-process, 8 rounds, 32k:
-
-| model | attended layers | `mid` | `ultra` | cost |
-|---|---|---|---|---|
-| Qwen3.5-2B | 6 of 24 | 38.63 ms/tok | 43.02 ms/tok | **+11.5%** |
-| Qwen2.5-1.5B | 28 of 28 | 51.28 ms/tok | 65.10 ms/tok | **+26.5%** |
-
-**`--fastdc`, swept 4k-64k** (Qwen2.5-1.5B, `DKV_DETERMINISTIC=1`, eager vs replayed):
-
-| context | eager | `--fastdc` | output | verdict |
-|---|---|---|---|---|
-| 4k | 5.1 s | 10.1 s | **differs** | 2.0x SLOWER |
-| 8k | 6.2 s | 11.1 s | **differs** | 1.8x slower |
-| 16k | 9.0 s | 6.5 s | **differs** | 1.4x faster |
-| 32k | 14.9 s | 14.9 s | identical | no effect |
-| 64k | 30.4 s | 30.8 s | identical | no effect |
-
-**It is not a default, and the sweep is why.** It costs 2x at short context, and
-where it is faster it does not reproduce eager's output — the replay freezes
-routing. The 32k/64k rows are identical only because the selectivity gate
-declines the graph there, so nothing replays. It is also model-dependent: the
-same 16k point IS byte-exact on the hybrid Qwen3.5-2B. Measure your own model and
-context before enabling it.
-
-The cost is the rotation applied at read on every attended layer, so it scales
+The un-rotated pool's cost is the rotation applied at read on every attended layer, so it scales
 with attended-layer count — **a figure for one model tells you nothing about
-another.** That is why `mid` stays rotated by default and `ultra` is opt-in.
+another.** Since these measurements `mid`, `high` and `ultra` all store keys
+un-rotated (the preset ladder above); `low` keeps the rotated pool for the speed.
 
 ### 1. Context Length Sweep (DKV vs. Dense Baselines)
 
@@ -497,7 +555,7 @@ using less memory for the same context.
 
 ### 4. THUDM LongBench & NVIDIA RULER Benchmark Suites (32k Context)
 
-Evaluated on **Qwen2.5-1.5B-Instruct (int4)** under up to $32,768$ context length using DKV active runtime ($r=32$, $R=128$, $B_s=256$):
+Evaluated on **Qwen2.5-1.5B-Instruct (int4)** under up to $32,768$ context length using DKV active runtime ($r=32$, $R=128$, $B_s=256$). These predate the current RULER protocol (official generators, chat template, answer prefix, dense and KIVI-4 controls; 2026-10-20 onward) and have no dense control, so they are not comparable with the current RULER table above:
 
 #### NVIDIA RULER Benchmark Suite
 | Task Category | Task | Evaluated Metric | DKV Score |
