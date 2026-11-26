@@ -54,6 +54,10 @@ ARMS = {
     "dense_true": {},          # handled specially: plain HF, DKV never loaded
     "dense_arm":  {"DKV_COMPRESSED_DECODE": "0"},
     "baseline":   {},
+    # Stores. `baseline` is the shipped default, the codes store since
+    # 2026-11-26; the low-rank-specific arms below pin DKV_STORE=lowrank, since
+    # on the codes store their switches have nothing to act on.
+    "lowrank":    {"DKV_STORE": "lowrank"},
     # Bisect arms for the compressed-decode gap. `allblocks` attends EVERY
     # compressed block (DKV_TOPK_BLOCKS=0, query_router.py:983) with one chunk,
     # so the reduction path is unchanged and only the ROUTED SET differs.
@@ -81,16 +85,16 @@ ARMS = {
     # decode gap shrinks with capacity it is approximation error and the
     # operating point is the story; if it is flat, extra capacity is buying
     # nothing, which no correct reconstruction does -- that is a defect.
-    "rank96":     {},
-    "rank128":    {},
+    "rank96":     {"DKV_STORE": "lowrank"},
+    "rank128":    {"DKV_STORE": "lowrank"},
     "resid200":   {"DKV_MAX_RESIDUAL": "200"},
     "resid0":     {"DKV_MAX_RESIDUAL": "0"},
     # Rotated pool (keys stored post-RoPE, never re-rotated at read) under the
     # shipped mid preset, which is unrotated -- isolates read-time rotation.
     "rot1":       {"DKV_ROTATED_POOL": "1"},
-    "colscale":   {"DKV_U_COLSCALE": "1"},           # per-column U scale before int8
-    "kvsplit":    {"DKV_KV_SPLIT": "16,16"},          # separate K and V factors
-    "energy1":    {"DKV_SVD_ENERGY": "1.0"},          # joint factor, no energy truncation
+    "colscale":   {"DKV_STORE": "lowrank", "DKV_U_COLSCALE": "1"},           # per-column U scale before int8
+    "kvsplit":    {"DKV_STORE": "lowrank", "DKV_KV_SPLIT": "16,16"},          # separate K and V factors
+    "energy1":    {"DKV_STORE": "lowrank", "DKV_SVD_ENERGY": "1.0"},          # joint factor, no energy truncation
     "rot1_dense": {"DKV_ROTATED_POOL": "1", "DKV_COMPRESSED_DECODE": "0"},
     # Two INDEPENDENT implementations of the same compressed read: `noremat`
     # takes the Triton project-then-attend kernel (s = s_anchor + (q.V_K).U.scale)
@@ -118,9 +122,9 @@ ARMS = {
     # instead of the write path, so a frame error shows up as a LARGE change
     # here while a genuine approximation error barely moves.
     "unrot":      {"DKV_ROTATED_POOL": "0", "DKV_DECODE_CACHE": "1"},
-    "basis0.50":  {"DKV_SHARED_BASIS": "1", "DKV_SHARED_BASIS_FRAC": "0.50"},
-    "basis0.25":  {"DKV_SHARED_BASIS": "1", "DKV_SHARED_BASIS_FRAC": "0.25"},
-    "basis0.125": {"DKV_SHARED_BASIS": "1", "DKV_SHARED_BASIS_FRAC": "0.125"},
+    "basis0.50":  {"DKV_STORE": "lowrank", "DKV_SHARED_BASIS": "1", "DKV_SHARED_BASIS_FRAC": "0.50"},
+    "basis0.25":  {"DKV_STORE": "lowrank", "DKV_SHARED_BASIS": "1", "DKV_SHARED_BASIS_FRAC": "0.25"},
+    "basis0.125": {"DKV_STORE": "lowrank", "DKV_SHARED_BASIS": "1", "DKV_SHARED_BASIS_FRAC": "0.125"},
 }
 
 # Arms that change the WRAPPER CONFIG rather than the environment.
@@ -135,7 +139,7 @@ _ARM_KEYS = ("DKV_SHARED_BASIS", "DKV_SHARED_BASIS_FRAC", "DKV_COMPRESSED_DECODE
              "DKV_REMAT_CACHE", "DKV_ROTATED_POOL", "DKV_DECODE_CACHE",
              "DKV_REMAT_FP32", "DKV_STREAMING_COMPRESS", "DKV_PREFILL_LOWMEM",
              "DKV_FAST_ATTEND", "DKV_ROUTE_ADAPTIVE", "DKV_ROUTE_ADAPTIVE_P",
-             "DKV_REMAT_ARENA")
+             "DKV_REMAT_ARENA", "DKV_STORE")
 
 
 def _run_dense_true(args):

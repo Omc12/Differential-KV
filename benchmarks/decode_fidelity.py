@@ -192,6 +192,8 @@ def run_dkv(args, dense_path, out_path):
                 pass
             w.active_session = sid
             torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
+            t_start = time.perf_counter()
             w.generate(prompt, max_new_tokens=len(toks), temperature=0.0, top_p=1.0,
                        repetition_penalty=1.0)
             peak = torch.cuda.max_memory_allocated() / 1e9
@@ -213,7 +215,10 @@ def run_dkv(args, dense_path, out_path):
                    "kl0": kls[0] if kls else None,
                    "kl": kls[1:], "top1": top1[1:], "dnll": dn[1:],
                    "peak_gb": peak,
-                   "dec_tps": ((len(ts) - 1) / (ts[-1] - ts[0])) if len(ts) > 2 else None}
+                   "dec_tps": ((len(ts) - 1) / (ts[-1] - ts[0])) if len(ts) > 2 else None,
+                   # prompt in -> first decode step out: prefill, building the
+                   # store, and one decode step (same span as the KIVI arm's)
+                   "ttfd_s": (ts[0] - t_start) if ts else None}
             row.update({k: kv.get(k) for k in ("kv_physical_gb", "kv_compression_x",
                                                 "kv_error") if k in kv})
             row["resid_attn_used"] = getattr(w.manager, "_qres_used", 0)
@@ -233,6 +238,98 @@ def run_dkv(args, dense_path, out_path):
         json.dump(rows, f)
 
 
+# ────────────────────────────────────────────────────────────── kivi ──
+def run_kivi(args, dense_path, out_path):
+    """KIVI-4 reference arm (kv_baselines._kivi_chunked): the same prompts,
+    dense's own tokens forced step by step, scored like the DKV arms. Tiled
+    (4-bit history read tile by tile, KIVI's speed form) where the model's
+    attention allows it; models with a sliding window or softcap fall back to
+    the chunked form, whose arithmetic is the same (only speed differs), and
+    the row says which ran."""
+    import torch
+    import kv_baselines as KB
+    from run_longbench_cuda import load_plain
+    rec = torch.load(dense_path)
+    tok, model = load_plain(args.model, args.quant, False)
+    items = build_items(tok, args.model, args.lb, args.ruler, args.max_length)
+    bits = int(os.environ.get("KIVI_BITS", "4"))
+    # KIVI_RESIDUAL: the 16-bit recent window (KIVI's 128 by default). "dkv"
+    # gives KIVI the window DKV keeps exact at decode -- the manager's formula,
+    # max(512, round_up_512(layers * head_dim * DKV_DENSE_WINDOW_FACTOR)) -- so
+    # a quality gap between the two cannot come from window size.
+    _rw = os.environ.get("KIVI_RESIDUAL", "128")
+    if _rw == "dkv":
+        cfg = getattr(model.config, "text_config", None) or model.config
+        hd = getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
+        f = float(os.environ.get("DKV_DENSE_WINDOW_FACTOR", "0.25"))
+        raw = int(cfg.num_hidden_layers * hd * f)
+        resid = max(512, (raw + 511) // 512 * 512)
+    else:
+        resid = int(_rw)
+    print("  kivi window: %d tokens" % resid, flush=True)
+    rows = []
+    for key, prompt in items:
+        d = rec[key]
+        toks = d["tokens"]
+        ids = tok(prompt).input_ids
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
+        t_start = time.perf_counter()
+        form = "tiled"
+        try:
+            past, last, phys, _ = KB._kivi_chunked(model, ids, "cuda", 1024, 32, resid,
+                                                   tiled=True, bits=bits)
+        except NotImplementedError:
+            form = "chunked"
+            prev = model.__dict__.pop("_kivi_prev_attn", None)
+            if prev:
+                model.set_attn_implementation(prev)
+            torch.cuda.empty_cache()
+            past, last, phys, _ = KB._kivi_chunked(model, ids, "cuda", 1024, 32, resid,
+                                                   tiled=False, bits=bits)
+        lps, ts, cur = [torch.log_softmax(last.float(), -1)], [], len(ids)
+        with torch.no_grad():
+            for j in range(len(toks) - 1):
+                out = model(input_ids=torch.tensor([[toks[j]]], device="cuda"),
+                            position_ids=torch.tensor([[cur]], device="cuda"),
+                            past_key_values=past, use_cache=True)
+                lps.append(torch.log_softmax(out.logits[0, -1].float(), -1))
+                torch.cuda.synchronize()
+                ts.append(time.perf_counter())
+                cur += 1
+        prev = model.__dict__.pop("_kivi_prev_attn", None)
+        if prev:
+            model.set_attn_implementation(prev)
+        peak = torch.cuda.max_memory_allocated() / 1e9
+        kls, top1, dn = [], [], []
+        for j, lpa in enumerate(lps):
+            lpd = d["lp"][j].float().to(lpa.device)
+            kls.append(float((lpd.exp() * (lpd - lpa)).sum()))
+            top1.append(int(int(lpa.argmax()) == toks[j]))
+            dn.append(float(lpd[toks[j]] - lpa[toks[j]]))
+        rows.append({"key": key, "ntok": d["ntok"], "steps": len(lps), "kivi_form": form, "kivi_window": resid,
+                     "kl0": kls[0], "kl": kls[1:], "top1": top1[1:], "dnll": dn[1:],
+                     "peak_gb": peak, "kv_physical_gb": phys,
+                     "dec_tps": ((len(ts) - 1) / (ts[-1] - ts[0])) if len(ts) > 2 else None,
+                     "ttfd_s": (ts[0] - t_start) if ts else None})
+        print("  kivi%d(%s) %s: kl %.4f  top1 %.2f  peak %.2f" % (
+            bits, form, key, sum(kls[1:]) / max(1, len(kls) - 1),
+            sum(top1[1:]) / max(1, len(top1) - 1), peak), flush=True)
+        # The tiled path keeps a module-level handle on the cache it registered;
+        # without dropping it every prompt's 4-bit history stayed resident and
+        # KIVI's peak climbed prompt by prompt (8.0 -> 12.0 GB on Ministral).
+        KB._KIVI_TILED_CACHE["cache"] = None
+        out = last = None          # the last forward output holds the cache too
+        del past
+        # The patched cache layers hold bound methods of themselves: a
+        # reference CYCLE, freed only by the collector, not by empty_cache.
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+    with open(out_path, "w") as f:
+        json.dump(rows, f)
+
+
 # ──────────────────────────────────────────────────────────── driver ──
 def summarize(name, rows):
     import statistics as S
@@ -242,6 +339,7 @@ def summarize(name, rows):
     kv = [r["kv_physical_gb"] for r in rows if r.get("kv_physical_gb")]
     cmpx = [r["kv_compression_x"] for r in rows if r.get("kv_compression_x")]
     tps = [r["dec_tps"] for r in rows if r.get("dec_tps")]
+    ttfd = [r["ttfd_s"] for r in rows if r.get("ttfd_s")]
     kl0 = [r["kl0"] for r in rows if r.get("kl0") is not None]
     return {"arm": name, "steps": len(kl),
             "kl": S.mean(kl) if kl else None,
@@ -253,6 +351,7 @@ def summarize(name, rows):
             "cmp": S.mean(cmpx) if cmpx else None,
             "peak_gb": max(r["peak_gb"] for r in rows) if rows else None,
             "dec_tps": S.mean(tps) if tps else None,
+            "ttfd_s": S.mean(ttfd) if ttfd else None,
             "resid_attn_used": max((r.get("resid_attn_used") or 0) for r in rows) if rows else 0}
 
 
@@ -278,6 +377,8 @@ def main():
         return run_dense(args, args.json)
     if args.role == "dkv":
         return run_dkv(args, args.dense, args.json)
+    if args.role == "kivi":
+        return run_kivi(args, args.dense, args.json)
 
     os.makedirs(args.out, exist_ok=True)
     tag = args.model.split("/")[-1]
@@ -308,7 +409,9 @@ def main():
             print("[arm %s] already done, reusing %s" % (name, js), flush=True)
             p = subprocess.CompletedProcess([], 0)
         else:
-            p = subprocess.run([sys.executable, __file__, "--role", "dkv", "--dense", dense,
+            # An arm named kivi* is the KIVI reference, not a DKV config.
+            role = "kivi" if name.startswith("kivi") else "dkv"
+            p = subprocess.run([sys.executable, __file__, "--role", role, "--dense", dense,
                                 "--json", js] + common, env=env)
         if p.returncode or not os.path.exists(js):
             print("[arm %s] FAILED" % name, flush=True)
@@ -318,13 +421,14 @@ def main():
         s["env"], s["wall_s"] = envs, round(time.time() - t0)
         summ.append(s)
     print("\n%-12s %6s %8s %8s %6s %7s %6s %6s %7s %7s" % (
-        "arm", "steps", "KL", "KLmed", "top1", "dNLL", "kvGB", "cmp", "peak", "dec/s"))
+        "arm", "steps", "KL", "KLmed", "top1", "dNLL", "kvGB", "cmp", "peak", "dec/s") + "   ttfd")
     for s in summ:
         f = lambda v, p: ("%" + p) % v if v is not None else "-"      # noqa: E731
         print("%-12s %6d %8s %8s %6s %7s %6s %6s %7s %7s" % (
             s["arm"], s["steps"], f(s["kl"], ".4f"), f(s["kl_median"], ".4f"),
             f(s["top1"], ".3f"), f(s["dnll"], "+.3f"), f(s["kv_gb"], ".3f"),
-            f(s["cmp"], ".2f"), f(s["peak_gb"], ".2f"), f(s["dec_tps"], ".1f")))
+            f(s["cmp"], ".2f"), f(s["peak_gb"], ".2f"), f(s["dec_tps"], ".1f"))
+              + "  %6s" % f(s.get("ttfd_s"), ".1f"))
         if s.get("resid_attn_used"):
             print("%-12s   resid-attn weighted blocks: %d" % ("", s["resid_attn_used"]))
     # Paired against the first arm, step by step (same prompt, same forced

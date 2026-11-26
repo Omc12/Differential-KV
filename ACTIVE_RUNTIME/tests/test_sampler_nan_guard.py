@@ -17,6 +17,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+import pytest  # noqa: E402
+pytest.importorskip("mlx.core", reason="MLX runtime test: needs Apple mlx")
 from serving.mlx_dkv_wrapper import _sanitize_logits          # noqa: E402
 
 

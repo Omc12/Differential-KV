@@ -806,7 +806,7 @@ def _remat_attend(kv_manager, sid, captured_layer_idx, current_version,
     global _HYBRID_FALLBACK_WARNED
     out = _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
                              pool, block_indices, anchor_indices, *args, **kwargs)
-    if (out is None and getattr(pool, "kq_codes", None) is not None
+    if (out is None and _pool_holds(pool, "keys")
             and block_indices is not None and block_indices.numel() > 0
             and not _HYBRID_FALLBACK_WARNED):
         _HYBRID_FALLBACK_WARNED = True
@@ -902,7 +902,7 @@ def _remat_attend_impl(kv_manager, sid, captured_layer_idx, current_version,
     # this materialise path reads and the project-then-attend kernel does not.
     # So it serves the hybrid even with the cache off (streaming turns it off to
     # bound memory) -- rebuilding every step and storing nothing.
-    _hybrid = getattr(pool, "kq_codes", None) is not None
+    _hybrid = _pool_holds(pool, "keys")
     _nostore = False
     if not _REMAT_ENABLED or os.environ.get("DKV_REMAT_CACHE") == "0":
         if not _hybrid:
@@ -2347,18 +2347,29 @@ def _get_prefill_chunk_size(kv_manager, session_id: str, device) -> int:
 
 
 
+def _pool_holds(pool, half: str) -> bool:
+    """Whether the pool's codec holds "keys" / "values" (runtime/kv_codecs.py)."""
+    from runtime.native_block_pool import pool_holds
+    return pool_holds(pool, half)
+
+
 def _resid_attn_enabled() -> bool:
     from runtime.native_block_pool import resid_attn_enabled
     return resid_attn_enabled()
 
 
 def _find_rotary(model):
-    """The model's rotary-embedding module, found by role, not by family:
-    the first submodule whose class name ends in 'RotaryEmbedding'."""
-    for _n, m in model.named_modules():
-        if type(m).__name__.endswith("RotaryEmbedding"):
-            return m
-    return None
+    """The TEXT decoder's rotary module, via _resolve_rotary_emb.
+
+    This used to take the first submodule whose class name ends in
+    'RotaryEmbedding'. On a vision-language model (Ministral-3 /
+    mistral3) that is the VISION tower's 2-D rotary, whose tables are sized for
+    image patches: text positions past them raised a device-side "gather index
+    out of bounds" at 32k (every codes-store arm on Ministral failed), and
+    shorter prompts were silently weighted with the wrong rotation.
+    _resolve_rotary_emb already prefers the decoder's own module, skips
+    vision/audio towers and binds gemma-4's per-layer-type argument."""
+    return _resolve_rotary_emb(model)
 
 
 def _qres_sample(mgr, model, session_ids, layer, q, position_ids, scale,
@@ -3753,11 +3764,18 @@ def apply_dkv_attention_patch(model, kv_manager):
 
                     # Cache-aware RoPE slicing to eliminate redundant GPU gathers per layer
                     anchors_tuple = tuple(b.anchor_idx for b in comp_blocks)
+                    # Keyed on the layer's NoPE flag too. The cache is per SESSION
+                    # and shared across layers, so a NoPE layer (SmolLM3 / Llama 4
+                    # use_rope=0) read the RoPE tables a rotary layer had cached for
+                    # the same blocks and rotated keys that must stay unrotated:
+                    # 60% hidden-state error from SmolLM3's first NoPE layer
+                    # whenever prefill attended compressed history (streaming).
+                    _rope_key = (anchors_tuple, bool(_nope))
                     session_dict = kv_manager.decode_workspace.setdefault(sid, {})
                     prefill_cos_cache = session_dict.setdefault("prefill_cos_sliced", {})
                     prefill_sin_cache = session_dict.setdefault("prefill_sin_sliced", {})
-                    cos_sliced = prefill_cos_cache.get(anchors_tuple)
-                    sin_sliced = prefill_sin_cache.get(anchors_tuple)
+                    cos_sliced = prefill_cos_cache.get(_rope_key)
+                    sin_sliced = prefill_sin_cache.get(_rope_key)
 
                     if cos_sliced is None or sin_sliced is None:
                         if _pool_rotated_k():
@@ -3774,8 +3792,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 (N_blocks, 1 + max_seq_len, 1, head_dim),
                                 device=q.device, dtype=q.dtype)
                             sin_sliced = torch.zeros_like(cos_sliced)
-                            prefill_cos_cache[anchors_tuple] = cos_sliced
-                            prefill_sin_cache[anchors_tuple] = sin_sliced
+                            prefill_cos_cache[_rope_key] = cos_sliced
+                            prefill_sin_cache[_rope_key] = sin_sliced
                             block_anchors = None
                         else:
                             block_anchors = torch.tensor(anchors_tuple, device=q.device, dtype=torch.long)
@@ -3804,13 +3822,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 [sin_gathered, torch.zeros(_pad_shape, device=sin_gathered.device, dtype=sin_gathered.dtype)], dim=-1)
                         cos_sliced = cos_gathered.view(N_blocks, 1 + max_seq_len, 1, head_dim)
                         sin_sliced = sin_gathered.view(N_blocks, 1 + max_seq_len, 1, head_dim)
-                        prefill_cos_cache[anchors_tuple] = cos_sliced
-                        prefill_sin_cache[anchors_tuple] = sin_sliced
+                        prefill_cos_cache[_rope_key] = cos_sliced
+                        prefill_sin_cache[_rope_key] = sin_sliced
 
                     # Evict stale prefill sliced RoPE cache entries in O(1) without scanning other keys.
                     # Outside the build branch: both branches above write the cache, and a block
                     # set that changes every chunk would otherwise grow it without bound.
-                    stale_keys = [k for k in list(prefill_cos_cache.keys()) if k != anchors_tuple]
+                    stale_keys = [k for k in list(prefill_cos_cache.keys()) if k[0] != anchors_tuple]
                     for k in stale_keys:
                         prefill_cos_cache.pop(k, None)
                         prefill_sin_cache.pop(k, None)
@@ -3839,33 +3857,30 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # torch.jit.script'ed and TorchScript cannot read os.environ.
                         exact_residual = _exact_residual_semantics(q.device),
                     )
-                    # Hybrid store (DKV_KEY_QUANT): hand the COMPACT key codes in,
-                    # sliced per block tile with everything else, and dequantize
-                    # per tile in _with_key_deltas -- dequantizing the whole
-                    # history at once would undo the block tiling's memory bound.
-                    if getattr(pool, "kq_codes", None) is not None:
-                        _hist_kw["kq_codes"] = pool.kq_codes[pool_indices_t]
-                        _hist_kw["kq_scale"] = pool.kq_scale[pool_indices_t]
-                        _hist_kw["kq_zero"]  = pool.kq_zero[pool_indices_t]
-                    # Codes store (DKV_VALUE_QUANT): the values too, compact.
-                    if getattr(pool, "vq_codes", None) is not None:
-                        _hist_kw["vq_codes"] = pool.vq_codes[pool_indices_t]
-                        _hist_kw["vq_scale"] = pool.vq_scale[pool_indices_t]
-                        _hist_kw["vq_zero"]  = pool.vq_zero[pool_indices_t]
+                    # Codec (runtime/kv_codecs.py): hand its COMPACT state in,
+                    # one "codec:<name>" entry per tensor, so the block tiling
+                    # slices it with everything else and each tile decodes only
+                    # its own blocks -- decoding the whole history at once would
+                    # undo the tiling's memory bound.
+                    _codec = getattr(pool, "codec", None)
+                    _codec_on = bool(_codec is not None
+                                     and (_codec.holds_keys or _codec.holds_values))
+                    if _codec_on:
+                        for _cn, _ct in pool.codec_rows(pool_indices_t).items():
+                            _hist_kw["codec:" + _cn] = _ct
 
                     def _with_key_deltas(kw):
-                        if "vq_codes" in kw:
-                            # Only the fused tile reads value codes; the paths
-                            # below would attend the (unused) factor instead.
-                            raise RuntimeError("DKV_VALUE_QUANT needs the fused "
-                                               "history tile (DKV_PREFILL_SDPA=1)")
-                        if "kq_codes" not in kw:
+                        if not _codec_on:
                             return kw
-                        from runtime.native_block_pool import dequantize_keys_per_channel
+                        if _codec.holds_values:
+                            # Only the fused tile reads codec values; the paths
+                            # below would attend the (unused) factor instead.
+                            raise RuntimeError(f"codec {_codec.name!r} holds values: it "
+                                               "needs the fused history tile "
+                                               "(DKV_PREFILL_SDPA=1)")
                         kw = dict(kw)
-                        _kd = dequantize_keys_per_channel(
-                            kw.pop("kq_codes"), kw.pop("kq_scale"), kw.pop("kq_zero"),
-                            pool.key_quant_bits, pool.kq_group, q.dtype)   # [n, S, kv, D]
+                        _rows = {k[6:]: kw.pop(k) for k in list(kw) if k.startswith("codec:")}
+                        _kd = _codec.decode_keys(_rows, q.dtype)           # [n, S, kv, D]
                         kw["key_deltas"] = repeat_kv(
                             _kd.permute(0, 2, 1, 3), num_key_value_groups
                         ).permute(0, 2, 1, 3)                              # [n, S, H, D]
@@ -3883,13 +3898,10 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # 2.9x at 131k, same reach, peak equal or lower.
                         from native_core.sparse_decode.triton_fused_decode import (
                             history_attend_block_tiled, history_attend_sdpa_tile)
-                        _kqb = int(getattr(pool, "key_quant_bits", 0) or 0)
-                        _kqg = int(getattr(pool, "kq_group", 32) or 32)
-                        _vqb = int(getattr(pool, "value_quant_bits", 0) or 0)
-                        _vqg = int(getattr(pool, "vq_group", 32) or 32)
                         result = history_attend_block_tiled(
                             lambda kw: history_attend_sdpa_tile(
-                                q, kw, num_key_value_groups, _kqb, _kqg, _vqb, _vqg),
+                                q, kw, num_key_value_groups,
+                                codec=_codec if _codec_on else None),
                             _hist_kw, int(os.environ.get("DKV_PREFILL_SDPA_TILE", "64")),
                             q.dtype)
                     elif os.environ.get("DKV_PREFILL_LOWMEM", "1") != "0":

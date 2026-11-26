@@ -46,20 +46,85 @@ KEY_QUANT_GROUP = 32
 def store_mode() -> str:
     """DKV_STORE: which store DKV builds, in exact and streaming mode alike.
 
-      lowrank (default) -- joint low-rank K/V factor + int8 residual rows.
+    DEFAULT: codes (since 2026-11-26; was lowrank). KIVI-4's layout won on
+    quality everywhere it was measured against the low-rank store (V5-C,
+    V10, V13), and DKV's routed read keeps decode faster than tiled KIVI-4.
+    DKV_LOWRANK=1 is the one-switch opt-in to the smaller low-rank store
+    (about a third of the bytes, so more context on a small card); an
+    explicit DKV_STORE always wins over it.
+
+      lowrank           -- joint low-rank K/V factor + int8 residual rows.
       hybrid            -- keys per-channel 4-bit (KIVI layout), values low rank
                            with residual rows ranked by error x attention
                            received. Shorthand for DKV_KEY_QUANT=pc4 +
                            DKV_RESID_ATTN=1; either switch set explicitly wins.
-      codes             -- keys per-channel and values per-token, both
+      codes (default)   -- keys per-channel and values per-token, both
                            DKV_QUANT_BITS wide (4 default, or 2): KIVI's layout
                            as a DKV store. No factor is read and no value
                            residual is kept; the residual positions remain, for
                            the router. Shorthand for DKV_KEY_QUANT=pc<bits> +
                            DKV_VALUE_QUANT=pt<bits> + DKV_RESID_ATTN=1.
     """
-    s = (os.environ.get("DKV_STORE", "lowrank") or "lowrank").strip().lower()
-    return s if s in ("lowrank", "hybrid", "codes") else "lowrank"
+    raw = (os.environ.get("DKV_STORE", "") or "").strip()
+    s = raw.lower()
+    if not s:
+        # DKV_KEY_QUANT / DKV_VALUE_QUANT predate the codes default and compose
+        # onto a LOW-RANK base (DKV_KEY_QUANT=pc4 alone is how the hybrid store
+        # was selected). Set without DKV_STORE they keep that meaning; under a
+        # codes base, pc4 would silently quantize values too, and =off would
+        # leave value codes without key codes (a ValueError at pool init).
+        legacy = any((os.environ.get(k) or "").strip()
+                     for k in ("DKV_KEY_QUANT", "DKV_VALUE_QUANT"))
+        s = ("lowrank" if legacy or os.environ.get("DKV_LOWRANK", "0") == "1"
+             else "codes")
+    if s in ("lowrank", "hybrid", "codes"):
+        return s
+    from runtime.kv_codecs import is_registered
+    if is_registered(raw):
+        # A plugged-in codec (runtime/kv_codecs.py). Returned as written: a
+        # package.module:Attr path is case-sensitive.
+        return raw
+    raise ValueError(f"DKV_STORE={raw!r} is not a registered codec")
+
+
+def build_codec(max_seq_len, num_kv_heads, head_dim, device, dtype):
+    """The codec this process stores blocks with (runtime/kv_codecs.py).
+
+    The legacy composable switches map to exactly the codec they selected
+    before codecs existed: DKV_VALUE_QUANT (or DKV_STORE=codes) -> KIVI codes,
+    DKV_KEY_QUANT alone (or DKV_STORE=hybrid) -> key codes + low-rank values,
+    neither -> low rank. Any other DKV_STORE is a registered or importable
+    codec."""
+    from runtime import kv_codecs as KC
+    kb, vb = _key_quant_bits_from_env(), _value_quant_bits_from_env()
+    geo = (max_seq_len, num_kv_heads, head_dim, device)
+    if vb:
+        if not kb:
+            raise ValueError("DKV_VALUE_QUANT needs key codes as well "
+                             "(DKV_STORE=codes, or DKV_KEY_QUANT)")
+        return KC.KiviCodec(*geo, dtype=dtype, key_bits=kb, value_bits=vb,
+                            kq_group=KEY_QUANT_GROUP, vq_group=VALUE_QUANT_GROUP)
+    if kb:
+        return KC.HybridCodec(*geo, dtype=dtype, key_bits=kb, kq_group=KEY_QUANT_GROUP)
+    mode = store_mode()
+    if mode in ("lowrank", "hybrid", "codes"):
+        return KC.LowRankCodec(*geo, dtype=dtype)
+    return KC.resolve_factory(mode)(*geo, dtype=dtype)
+
+
+def pool_holds(pool, half: str) -> bool:
+    """Whether `pool`'s codec holds the "keys" or "values" outside the
+    low-rank factor. False for a pool without a codec (other pool types)."""
+    c = getattr(pool, "codec", None)
+    return bool(c is not None and getattr(c, "holds_" + half, False))
+
+
+def store_explicit() -> bool:
+    """True when the user CHOSE the store (DKV_STORE or DKV_LOWRANK set), so a
+    geometry the default cannot serve may fall back instead of failing."""
+    return bool((os.environ.get("DKV_STORE") or "").strip()) or \
+        os.environ.get("DKV_LOWRANK", "0") == "1" or \
+        any((os.environ.get(k) or "").strip() for k in ("DKV_KEY_QUANT", "DKV_VALUE_QUANT"))
 
 
 def quant_bits() -> int:
@@ -76,7 +141,7 @@ def resid_attn_enabled() -> bool:
     v = os.environ.get("DKV_RESID_ATTN")
     if v is not None:
         return v == "1"
-    return store_mode() in ("hybrid", "codes")
+    return store_mode() != "lowrank"
 
 
 def _key_quant_bits_from_env() -> int:
@@ -449,33 +514,44 @@ class NativeBlockPool:
         # docs/IMPROVEMENTS_LOG.md: keys limit real decode, and this layout holds
         # the attention pattern at KIVI-4's accuracy. Off: nothing below exists
         # and the pool is byte-identical to before.
-        self.key_quant_bits = _key_quant_bits_from_env()
-        self.kq_group = KEY_QUANT_GROUP
-        _kq_bytes = 0
-        if self.key_quant_bits:
-            _res_bytes = _res_bytes // 2      # K residual values come from the codes
-            _ng_t = (max_seq_len + self.kq_group - 1) // self.kq_group
-            _kq_bytes = (max_seq_len * num_kv_heads * head_dim * self.key_quant_bits // 8
-                         + 2 * _ng_t * num_kv_heads * head_dim * 2)
-        # ── Codes store (DKV_STORE=codes): values per-token quantized too ────
-        # The codes are then the whole block: the factor is never read (rank 1
-        # keeps its allocation negligible) and no value residual is stored.
-        # Residual POSITIONS stay -- the router scores the key codes there.
-        self.value_quant_bits = _value_quant_bits_from_env()
-        self.vq_group = VALUE_QUANT_GROUP
+        #
+        # The DEFAULT codes store groups value channels by VALUE_QUANT_GROUP, so
+        # a head_dim it does not divide (80, 112, ...) cannot use it. When the
+        # store was not chosen explicitly, fall back to low rank for the whole
+        # process (every store_mode() reader then agrees) instead of failing a
+        # model that loaded fine. An explicit DKV_STORE=codes still raises below.
+        if (store_mode() == "codes" and not store_explicit()
+                and head_dim % VALUE_QUANT_GROUP):
+            os.environ["DKV_STORE"] = "lowrank"
+            print(f"[DKV] head_dim {head_dim} is not a multiple of {VALUE_QUANT_GROUP}: "
+                  f"the default codes store cannot group it, using the low-rank "
+                  f"store (DKV_STORE=lowrank).", flush=True)
+        # ── The codec (runtime/kv_codecs.py): which halves leave the factor ──
+        # A codec holding KEYS replaces the factor's key half (K residual values
+        # are then read from the codec); one holding VALUES too is the whole
+        # block: the factor is never read (rank 1 keeps its allocation
+        # negligible) and no value residual is stored. Residual POSITIONS stay
+        # -- the router scores the codec's keys there.
+        self.codec = build_codec(max_seq_len, num_kv_heads, head_dim, device, self.dtype)
+        _why = self.codec.supports()
+        if not _why and self.codec.holds_values and not self.codec.holds_keys:
+            # Holding values drops the factor to rank 1, which cannot carry keys.
+            _why = "a codec that holds values must hold keys too"
+        if _why:
+            raise ValueError(f"KV codec {self.codec.name!r}: {_why}")
+        self.codec_state = {}
+        self.key_quant_bits = int(self.codec.key_bits) if self.codec.holds_keys else 0
+        self.value_quant_bits = int(self.codec.value_bits) if self.codec.holds_values else 0
+        self.kq_group = int(getattr(self.codec, "kq_group", KEY_QUANT_GROUP))
+        self.vq_group = int(getattr(self.codec, "vq_group", VALUE_QUANT_GROUP))
+        _kq_bytes = self.codec.slot_bytes()   # every codec state tensor, per slot
         _vq_bytes = 0
-        if self.value_quant_bits:
-            if not self.key_quant_bits:
-                raise ValueError("DKV_VALUE_QUANT needs key codes as well "
-                                 "(DKV_STORE=codes, or DKV_KEY_QUANT)")
-            if head_dim % self.vq_group:
-                raise ValueError(f"DKV_VALUE_QUANT: head_dim {head_dim} is not a "
-                                 f"multiple of the group {self.vq_group}")
+        if self.codec.holds_keys:
+            _res_bytes = _res_bytes // 2      # K residual values come from the codec
+        if self.codec.holds_values:
             rank = 1
             self.rank = 1
             _res_bytes = 0
-            _vq_bytes = (max_seq_len * num_kv_heads * head_dim * self.value_quant_bits // 8
-                         + 2 * max_seq_len * num_kv_heads * (head_dim // self.vq_group) * 2)
             # The hybrid's keys are rebuilt by the materialise-then-attend
             # decode path; a CUDA graph captured on the project-then-attend
             # kernel would read keys the pool no longer stores in factor form.
@@ -949,8 +1025,7 @@ class NativeBlockPool:
             self._residual_K_values = (None if self.key_quant_bits else torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype))
             self._residual_V_values = (None if self.value_quant_bits else torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype))
 
-        self.kq_codes, self.kq_scale, self.kq_zero = self._alloc_key_codes(n_blocks)
-        self.vq_codes, self.vq_scale, self.vq_zero = self._alloc_value_codes(n_blocks)
+        self.codec_state = self._alloc_codec_state(n_blocks)
 
         # Fact Anchors (Solution 3) — CPU-compress path only; None on the CUDA
         # GPU path so the decode kernel gets HAS_FACT=False instead of looping
@@ -977,87 +1052,60 @@ class NativeBlockPool:
         if self.W_proj is not None and self.W_proj.device != torch.device("cpu"):
             pass  # W_proj is a [DESC_DIM, head_dim] matrix — shape is independent of n_blocks
 
-    # ── Hybrid store: per-channel quantized keys ─────────────────────────────
-    def _alloc_key_codes(self, n_blocks: int):
-        """(codes, scale, zero) for DKV_KEY_QUANT, or (None, None, None)."""
-        if not getattr(self, "key_quant_bits", 0):
-            return None, None, None
-        T, H, D = self.max_seq_len, self.num_kv_heads, self.head_dim
-        G = (T + self.kq_group - 1) // self.kq_group
-        width = D * self.key_quant_bits // 8
-        codes = torch.zeros((n_blocks, T, H, width), device=self.device, dtype=torch.uint8)
-        scale = torch.zeros((n_blocks, G, H, D), device=self.device, dtype=torch.float16)
-        zero = torch.zeros((n_blocks, G, H, D), device=self.device, dtype=torch.float16)
-        return codes, scale, zero
+    # ── Codec state (runtime/kv_codecs.py) ─────────────────────────────────────
+    def _alloc_codec_state(self, n_blocks: int) -> dict:
+        """One zeroed block-first tensor per entry of the codec's state_spec."""
+        return {name: torch.zeros((n_blocks,) + tuple(shape), device=self.device, dtype=dt)
+                for name, (shape, dt) in self.codec.state_spec().items()}
+
+    def codec_rows(self, indices) -> dict:
+        """The codec state of slots `indices`, gathered (block-first)."""
+        return {k: v[indices] for k, v in self.codec_state.items()}
+
+    # Legacy names: kernels, the tiered store and tests read the built-in
+    # codecs' tensors by these. None when the codec has no such tensor.
+    kq_codes = property(lambda self: self.__dict__.get("codec_state", {}).get("kq_codes"))
+    kq_scale = property(lambda self: self.__dict__.get("codec_state", {}).get("kq_scale"))
+    kq_zero = property(lambda self: self.__dict__.get("codec_state", {}).get("kq_zero"))
+    vq_codes = property(lambda self: self.__dict__.get("codec_state", {}).get("vq_codes"))
+    vq_scale = property(lambda self: self.__dict__.get("codec_state", {}).get("vq_scale"))
+    vq_zero = property(lambda self: self.__dict__.get("codec_state", {}).get("vq_zero"))
 
     def write_key_codes(self, pidx: torch.Tensor, key_deltas: torch.Tensor, write_seq: int):
-        """Quantize anchor-relative keys [N, S, H, D] into the slots `pidx`."""
-        codes, scale, zero = quantize_keys_per_channel(
-            key_deltas[:, :write_seq], self.key_quant_bits, self.kq_group)
-        self.kq_codes[pidx] = 0
-        self.kq_codes[pidx, :write_seq] = codes
-        g = scale.shape[1]
-        self.kq_scale[pidx] = 0.0
-        self.kq_zero[pidx] = 0.0
-        self.kq_scale[pidx, :g] = scale
-        self.kq_zero[pidx, :g] = zero
-
-    def _alloc_value_codes(self, n_blocks: int):
-        """(codes, scale, zero) for DKV_VALUE_QUANT, or (None, None, None)."""
-        if not getattr(self, "value_quant_bits", 0):
-            return None, None, None
-        T, H, D = self.max_seq_len, self.num_kv_heads, self.head_dim
-        codes = torch.zeros((n_blocks, T, H, D * self.value_quant_bits // 8),
-                            device=self.device, dtype=torch.uint8)
-        scale = torch.zeros((n_blocks, T, H, D // self.vq_group), device=self.device, dtype=torch.float16)
-        zero = torch.zeros((n_blocks, T, H, D // self.vq_group), device=self.device, dtype=torch.float16)
-        return codes, scale, zero
+        """Encode anchor-relative keys [N, S, H, D] into the slots `pidx`."""
+        self.codec.encode(self.codec_state, pidx, key_deltas, None, write_seq)
 
     def write_value_codes(self, pidx: torch.Tensor, value_deltas: torch.Tensor, write_seq: int):
-        """Quantize anchor-relative values [N, S, H, D] into the slots `pidx`."""
-        codes, scale, zero = quantize_values_per_token(
-            value_deltas[:, :write_seq], self.value_quant_bits, self.vq_group)
-        self.vq_codes[pidx] = 0
-        self.vq_scale[pidx] = 0.0
-        self.vq_zero[pidx] = 0.0
-        self.vq_codes[pidx, :write_seq] = codes
-        self.vq_scale[pidx, :write_seq] = scale
-        self.vq_zero[pidx, :write_seq] = zero
+        """Encode anchor-relative values [N, S, H, D] into the slots `pidx`."""
+        self.codec.encode(self.codec_state, pidx, None, value_deltas, write_seq)
 
     def get_value_deltas(self, indices) -> Optional[torch.Tensor]:
-        """Dequantized anchor-relative values [N, S, H, D] for slots `indices`,
-        or None when the codes store is off."""
-        if getattr(self, "vq_codes", None) is None:
+        """Decoded anchor-relative values [N, S, H, D] for slots `indices`, or
+        None when the codec does not hold values."""
+        if not self.codec.holds_values:
             return None
-        return dequantize_values_per_token(
-            self.vq_codes[indices], self.vq_scale[indices], self.vq_zero[indices],
-            self.value_quant_bits, self.vq_group, self.dtype)
+        return self.codec.decode_values(self.codec_rows(indices), self.dtype)
 
     def _residual_k_from_codes(self, indices=None) -> torch.Tensor:
-        """Hybrid store: the K residual values [N, MAX_RES, H, D] are the key
-        codes dequantized at the residual positions (zero where -1), so they
-        are never stored twice. Only the gathered rows are dequantized."""
+        """K residual values [N, MAX_RES, H, D] for a codec holding keys: the
+        codec's keys at the residual positions (zero where -1), so they are
+        never stored twice. Only the gathered rows are decoded."""
         if indices is None:
-            indices = torch.arange(self.kq_codes.shape[0], device=self.kq_codes.device)
+            indices = torch.arange(self.residual_K_positions.shape[0],
+                                   device=self.residual_K_positions.device)
         pos = self.residual_K_positions[indices].long()                   # [N, R]
         valid = pos >= 0
-        p = pos.clamp(min=0)
-        n = torch.arange(p.shape[0], device=p.device).unsqueeze(1)
-        codes = _unpack_codes(self.kq_codes[indices][n, p], self.key_quant_bits)  # [N, R, H, D]
-        g = p // self.kq_group
-        vals = (codes.float() * self.kq_scale[indices][n, g].float()
-                + self.kq_zero[indices][n, g].float())                    # [N, R, H, D]
+        vals = self.codec.decode_key_rows(self.codec_rows(indices), pos.clamp(min=0),
+                                          torch.float32)                  # [N, R, H, D]
         return torch.where(valid.unsqueeze(-1).unsqueeze(-1), vals,
                            torch.zeros_like(vals)).to(self.dtype)
 
     def get_key_deltas(self, indices) -> Optional[torch.Tensor]:
-        """Dequantized anchor-relative keys [N, S, H, D] for slots `indices`,
-        or None when the hybrid store is off."""
-        if self.kq_codes is None:
+        """Decoded anchor-relative keys [N, S, H, D] for slots `indices`, or
+        None when the codec does not hold keys."""
+        if not self.codec.holds_keys:
             return None
-        return dequantize_keys_per_channel(
-            self.kq_codes[indices], self.kq_scale[indices], self.kq_zero[indices],
-            self.key_quant_bits, self.kq_group, self.dtype)
+        return self.codec.decode_keys(self.codec_rows(indices), self.dtype)
 
     @property
     def residual_K_values(self):
@@ -1087,7 +1135,7 @@ class NativeBlockPool:
     def get_residual_k(self, indices=None) -> Optional[torch.Tensor]:
         """Unified interface for retrieving K residuals for specified block indices."""
         self._ensure()
-        if getattr(self, "kq_codes", None) is not None:
+        if self.codec.holds_keys:
             return self._residual_k_from_codes(indices)
         if self.residual_quant in ("int4", "int8"):
             if getattr(self, "comp_res_k_q", None) is None:
@@ -1117,12 +1165,13 @@ class NativeBlockPool:
     def get_residual_v(self, indices=None) -> Optional[torch.Tensor]:
         """Unified interface for retrieving V residuals for specified block indices."""
         self._ensure()
-        if getattr(self, "vq_codes", None) is not None:
-            # Codes store: no value residual exists (every position is -1), so
-            # readers get zeros for the slots they gathered and add nothing.
-            n = self.vq_codes.shape[0] if indices is None else int(indices.numel())
+        if self.codec.holds_values:
+            # The codec holds every value: no value residual exists (every
+            # position is -1), so readers get zeros and add nothing.
+            n = (self.residual_V_positions.shape[0] if indices is None
+                 else int(indices.numel()))
             return torch.zeros((n, self.max_residual_tokens, self.num_kv_heads, self.head_dim),
-                               device=self.vq_codes.device, dtype=self.dtype)
+                               device=self.residual_V_positions.device, dtype=self.dtype)
         if self.residual_quant in ("int4", "int8"):
             if getattr(self, "comp_res_v_q", None) is None:
                 return None
@@ -1164,12 +1213,13 @@ class NativeBlockPool:
                  "comp_res_k_q", "comp_res_k_s", "comp_res_k_b",
                  "comp_res_v_q", "comp_res_v_s", "comp_res_v_b",
                  "U_sem", "U_sem_scale", "U_fact", "n_semantic",
-                 "fact_anchors_K", "fact_anchors_V", "fact_anchor_positions",
-                 "kq_codes", "kq_scale", "kq_zero", "vq_codes", "vq_scale", "vq_zero")
+                 "fact_anchors_K", "fact_anchors_V", "fact_anchor_positions")
         for attr in attrs:
             t = getattr(self, attr, None)
             if t is not None:
                 total += t.numel() * t.element_size()
+        for t in getattr(self, "codec_state", {}).values():
+            total += t.numel() * t.element_size()
         return total / 1024 ** 2
 
 
@@ -1251,21 +1301,10 @@ class NativeBlockPool:
             new_res_K_val = (None if self.key_quant_bits else torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype))
             new_res_V_val = (None if self.value_quant_bits else torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype))
 
-        new_vq_codes, new_vq_scale, new_vq_zero = self._alloc_value_codes(new_blocks)
-        if new_vq_codes is not None:
-            new_vq_codes[:old_blocks] = self.vq_codes
-            new_vq_scale[:old_blocks] = self.vq_scale
-            new_vq_zero[:old_blocks] = self.vq_zero
-            del self.vq_codes, self.vq_scale, self.vq_zero
-        self.vq_codes, self.vq_scale, self.vq_zero = new_vq_codes, new_vq_scale, new_vq_zero
-
-        new_kq_codes, new_kq_scale, new_kq_zero = self._alloc_key_codes(new_blocks)
-        if new_kq_codes is not None:
-            new_kq_codes[:old_blocks] = self.kq_codes
-            new_kq_scale[:old_blocks] = self.kq_scale
-            new_kq_zero[:old_blocks] = self.kq_zero
-            del self.kq_codes, self.kq_scale, self.kq_zero
-        self.kq_codes, self.kq_scale, self.kq_zero = new_kq_codes, new_kq_scale, new_kq_zero
+        _new_state = self._alloc_codec_state(new_blocks)
+        for _k, _t in _new_state.items():
+            _t[:old_blocks] = self.codec_state[_k]
+        self.codec_state = _new_state
 
         new_fact_anc_K = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype) if _legacy else None
         new_fact_anc_V = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype) if _legacy else None
@@ -1525,8 +1564,8 @@ class NativeBlockPool:
         if _kbt is not None:
             _kbt.invalidate(int(pool_idx))     # stale router box (srl/key_box.py)
         _bump_slot_epoch(self, int(pool_idx))  # stale decode arena rows
-        if getattr(self, "kq_codes", None) is not None:
-            # The hybrid store's keys arrive only through the batched GPU path
+        if self.codec.holds_keys or self.codec.holds_values:
+            # A codec's rows arrive only through the batched GPU path
             # (write_blocks_batched(key_deltas=...)). A slot written here would
             # hold no keys and decode as anchor copies: fail loudly instead.
             raise RuntimeError("DKV_KEY_QUANT: write_block (per-block/CPU path) "
@@ -1836,16 +1875,17 @@ class NativeBlockPool:
 
         # Hybrid store: every key, per-channel quantized. The caller zeroed the
         # K half of the factorization, so these codes ARE the keys.
-        if self.kq_codes is not None:
-            if key_deltas is None:
-                raise ValueError("DKV_KEY_QUANT is on but the compressor passed no "
-                                 "key_deltas: the slot would hold no keys")
-            self.write_key_codes(pidx, key_deltas.to(dev), write_seq)
-        if getattr(self, "vq_codes", None) is not None:
-            if value_deltas is None:
-                raise ValueError("DKV_VALUE_QUANT is on but the compressor passed no "
-                                 "value_deltas: the slot would hold no values")
-            self.write_value_codes(pidx, value_deltas.to(dev), write_seq)
+        if self.codec.holds_keys and key_deltas is None:
+            raise ValueError(f"codec {self.codec.name!r} holds keys but the compressor "
+                             "passed no key_deltas: the slot would hold no keys")
+        if self.codec.holds_values and value_deltas is None:
+            raise ValueError(f"codec {self.codec.name!r} holds values but the compressor "
+                             "passed no value_deltas: the slot would hold no values")
+        if self.codec.holds_keys or self.codec.holds_values:
+            self.codec.encode(self.codec_state, pidx,
+                              key_deltas.to(dev) if self.codec.holds_keys else None,
+                              value_deltas.to(dev) if self.codec.holds_values else None,
+                              write_seq)
 
         # Sanitize non-finite scales exactly like write_block's per-block guard.
         sc = scales.to(device=dev).float()
@@ -1922,7 +1962,7 @@ class NativeBlockPool:
 
         # Codes store: the value codes are every value; no residual is kept.
         if (res_V_positions is not None and res_V_positions.numel() > 0
-                and getattr(self, "vq_codes", None) is None):
+                and not self.codec.holds_values):
             mr = min(res_V_positions.shape[1], self.max_residual_tokens)
             self.residual_V_positions[pidx, :mr] = res_V_positions[:, :mr].to(device=dev, dtype=torch.int16)
             v_val = res_V_values[:, :mr].to(device=dev, dtype=self.dtype)
@@ -1994,11 +2034,11 @@ class NativeBlockPool:
         attrs = ("U", "U_scale", "V_KV", "anchors_KV", "scales", "seq_lens", "desc",
                  "residual_K_positions", "residual_K_values", "residual_V_positions", "residual_V_values",
                  "U_sem", "U_sem_scale", "U_fact", "n_semantic",
-                 "fact_anchors_K", "fact_anchors_V", "fact_anchor_positions",
-                 "kq_codes", "kq_scale", "kq_zero", "vq_codes", "vq_scale", "vq_zero")
+                 "fact_anchors_K", "fact_anchors_V", "fact_anchor_positions")
         for attr in attrs:
             if hasattr(self, attr):
                 delattr(self, attr)
+        self.codec_state = {}
         gc.collect()
         _empty_cache(self.device)
 

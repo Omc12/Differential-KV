@@ -39,6 +39,12 @@ import torch
 from native_core.srl.chunk_descriptor import compute_query_descriptor
 
 
+def _pool_holds_keys(pool) -> bool:
+    """Whether the pool's codec holds the keys (runtime/kv_codecs.py)."""
+    from runtime.native_block_pool import pool_holds
+    return pool_holds(pool, "keys")
+
+
 def _rope_partial(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """RoPE honouring partial rotary (rotary_dim may be < head_dim).
 
@@ -1360,7 +1366,7 @@ def route_blocks_relevance(
     if _res_k_subset:
         res_k = (pool.get_residual_k(slots_long)
                  if (getattr(pool, "comp_res_k_q", None) is not None
-                     or getattr(pool, "kq_codes", None) is not None) else None)
+                     or _pool_holds_keys(pool)) else None)
     else:
         res_k = getattr(pool, "residual_K_values", None)
     res_pos = getattr(pool, "residual_K_positions", None)

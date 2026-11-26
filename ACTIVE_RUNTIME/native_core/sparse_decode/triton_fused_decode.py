@@ -1517,7 +1517,8 @@ def history_attend_block_tiled(attend_fn, kw, tile, out_dtype):
                        dim=0)
 
 
-def history_attend_sdpa_tile(q, kw, groups, kq_bits=0, kq_group=32, vq_bits=0, vq_group=32):
+def history_attend_sdpa_tile(q, kw, groups, kq_bits=0, kq_group=32, vq_bits=0, vq_group=32,
+                             codec=None):
     """Prefill history attention for one block tile through a fused attention
     kernel (DKV_PREFILL_SDPA=1, default off). Same inputs and the same stacked
     [out, lse] result as _prefill_fused_history_attend, same arithmetic up to
@@ -1546,14 +1547,23 @@ def history_attend_sdpa_tile(q, kw, groups, kq_bits=0, kq_group=32, vq_bits=0, v
     def _lowrank(VX):                             # [N, R, H, D] -> [N, S, Hk, D]
         return torch.bmm(Us, VX[:, :, sl].reshape(N, R, Hk * D).to(dt)).view(N, S, Hk, D) * sc
 
-    if "vq_codes" in kw:
+    # A codec (runtime/kv_codecs.py) decodes the halves it holds from its own
+    # state rows ("codec:<name>" entries, already sliced to this tile). The
+    # kq_codes / vq_codes keywords are the built-in codecs' older form.
+    rows = ({k[6:]: v for k, v in kw.items() if k.startswith("codec:")}
+            if codec is not None else None)
+    if codec is not None and codec.holds_values:
+        dv = codec.decode_values(rows, dt)[:, :S]
+    elif "vq_codes" in kw:
         # Codes store: values from their per-token codes; the factor is unused.
         from runtime.native_block_pool import dequantize_values_per_token
         dv = dequantize_values_per_token(kw["vq_codes"], kw["vq_scale"], kw["vq_zero"],
                                          vq_bits, vq_group, dt)[:, :S]
     else:
         dv = _lowrank(kw["V_V"])
-    if "kq_codes" in kw:
+    if codec is not None and codec.holds_keys:
+        dk = codec.decode_keys(rows, dt)[:, :S]
+    elif "kq_codes" in kw:
         from runtime.native_block_pool import dequantize_keys_per_channel
         dk = dequantize_keys_per_channel(kw["kq_codes"], kw["kq_scale"], kw["kq_zero"],
                                          kq_bits, kq_group, dt)[:, :S]
@@ -2144,22 +2154,22 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     # the pool's per-channel codes, anchor-relative, in the same frame as V_K
     # (raw when raw_k, else rotated at the anchor like V_K). Only the
     # materialise path reads it; None when the store is off.
-    _kd = (base_pool.get_key_deltas(indices)
-           if getattr(base_pool, "kq_codes", None) is not None else None)
+    from runtime.native_block_pool import pool_holds as _ph
+    _kd = (base_pool.get_key_deltas(indices) if _ph(base_pool, "keys") else None)
     if _kd is not None and do_rot:
         _kd = _partial_rope_apply(_kd, cos_anc.to(_kd.dtype), sin_anc.to(_kd.dtype))
     g["k_delta"] = _kd
     # Codes store (DKV_VALUE_QUANT): the routed blocks' anchor-relative values.
     # Values carry no RoPE, so no frame applies. None when the store is off.
     g["v_delta"] = (base_pool.get_value_deltas(indices)
-                    if getattr(base_pool, "vq_codes", None) is not None else None)
+                    if _ph(base_pool, "values") else None)
 
     res_pos = getattr(base_pool, "residual_K_positions", None)
     res_pos_v = getattr(base_pool, "residual_V_positions", None)
     has_res_pool = (
         # Hybrid store: K residual values come from the key codes. Checked FIRST:
         # the residual_K_values fallback below would dequantize the whole pool.
-        (getattr(base_pool, "kq_codes", None) is not None) or
+        _ph(base_pool, "keys") or
         (getattr(base_pool, "comp_res_k_q", None) is not None) or
         (getattr(base_pool, "_residual_K_values", None) is not None) or
         (getattr(base_pool, "residual_K_values", None) is not None)

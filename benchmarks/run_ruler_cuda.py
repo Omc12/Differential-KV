@@ -68,6 +68,19 @@ RULER_13 = list(TASK_FAMILY)
 MSVC_OK = False
 
 
+
+def _resolved_store():
+    """The store DKV will build (runtime.native_block_pool.store_mode())."""
+    import sys as _s
+    _active = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ACTIVE_RUNTIME")
+    if _active not in _s.path:
+        _s.path.insert(0, _active)
+    try:
+        from runtime.native_block_pool import store_mode
+        return store_mode()
+    except Exception:                                            # noqa: BLE001
+        return os.environ.get("DKV_STORE") or "unknown"
+
 def official_metric_fns():
     sys.path.insert(0, os.path.join(OFFICIAL, "eval", "synthetic"))
     import constants as C                                        # noqa: N813
@@ -406,6 +419,10 @@ def main():
 
     cfg = {"model": args.model, "arm": args.arm, "quant": args.quant,
            "preset": args.preset if args.arm == "dkv" else None,
+           # The store the run RESOLVED to (codes became the default on
+           # 2026-11-26: an unset DKV_STORE meant lowrank before that day and
+           # codes after it, so the env alone no longer names the store).
+           "dkv_store": (_resolved_store() if args.arm == "dkv" else None),
            "baseline_params": json.loads(args.baseline_params),
            "data_dir": os.path.abspath(data_dir),
            "min_length": args.min_length or None,
@@ -425,7 +442,7 @@ def main():
                         "DKV_STREAM_PROFILE",
                         # store / schedule switches (2026-10-04); recorded only
                         # when set, so default stores keep matching
-                        "DKV_STORE", "DKV_KEY_QUANT", "DKV_VALUE_QUANT", "DKV_QUANT_BITS", "DKV_RESIDUAL_NO_QUERY", "DKV_RESIDUAL_QUERY", "DKV_RESID_ATTN",
+                        "DKV_STORE", "DKV_LOWRANK", "DKV_CODES_STREAM", "DKV_KEY_QUANT", "DKV_VALUE_QUANT", "DKV_QUANT_BITS", "DKV_RESIDUAL_NO_QUERY", "DKV_RESIDUAL_QUERY", "DKV_RESID_ATTN",
                         "DKV_ROUTE_BOX", "DKV_STREAM_ELASTIC_POLICY", "DKV_STREAM_EXACT_TOKENS",
                         "DKV_ROUTE_ADAPTIVE", "DKV_ROUTE_ADAPTIVE_P", "DKV_ROUTE_ADAPTIVE_KMAX", "DKV_ROUTE_ADAPTIVE_MIN_BLOCKS",
                         "DKV_FAST_ATTEND", "DKV_REMAT_ARENA", "DKV_LAZY_SLICED_ROPE",

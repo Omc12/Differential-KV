@@ -24,13 +24,13 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARTS = {
-    "z": r"benchmarks\campaigns\run_v4_z_smoke.cmd",
-    "a": r"benchmarks\campaigns\run_v4_a_qwen.cmd",
-    "b": r"benchmarks\campaigns\run_v4_b_qwen131k.cmd",
-    "c": r"benchmarks\campaigns\run_v4_c_granite.cmd",
-    "f": r"benchmarks\campaigns\run_v4_f_reach.cmd",
-    "g": r"benchmarks\campaigns\run_v4_g_longbench.cmd",
-    "e": r"benchmarks\campaigns\run_v4_e_qwen64k.cmd",
+    "z": r"benchmarks\campaigns\archive\run_v4_z_smoke.cmd",
+    "a": r"benchmarks\campaigns\archive\run_v4_a_qwen.cmd",
+    "b": r"benchmarks\campaigns\archive\run_v4_b_qwen131k.cmd",
+    "c": r"benchmarks\campaigns\archive\run_v4_c_granite.cmd",
+    "f": r"benchmarks\campaigns\archive\run_v4_f_reach.cmd",
+    "g": r"benchmarks\campaigns\archive\run_v4_g_longbench.cmd",
+    "e": r"benchmarks\campaigns\archive\run_v4_e_qwen64k.cmd",
 }
 ORDER = ["z", "a", "b", "c", "f", "g", "e"]
 

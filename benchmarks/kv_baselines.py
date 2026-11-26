@@ -751,6 +751,8 @@ class _KiviLayerMixin:
             rk, rv = rk[..., n_q:, :].contiguous(), rv[..., n_q:, :].contiguous()
         st["rk"], st["rv"] = rk, rv
         st["n"] += key_states.shape[-2]
+        if hasattr(self, "cumulative_length"):     # never-full sliding layer
+            self.cumulative_length += key_states.shape[-2]
         dt = rk.dtype
         ks_ = [(_unpack4(p).to(dt) * s + z).flatten(2, 3) for p, s, z in st["k"]]
         vs_ = [_unpack4(p).to(dt) * s + z for p, s, z in st["v"]]
@@ -840,7 +842,27 @@ def _kivi_tiled_update(self, key_states, value_states, *args, **kwargs):
     st["rk"] = key_states if st["rk"] is None else torch.cat([st["rk"], key_states], -2)
     st["rv"] = value_states if st["rv"] is None else torch.cat([st["rv"], value_states], -2)
     st["n"] += key_states.shape[-2]
+    if hasattr(self, "cumulative_length"):         # never-full sliding layer
+        self.cumulative_length += key_states.shape[-2]
     return st["rk"], st["rv"]
+
+
+def _kv_source_layer(module, n_cache_layers):
+    """The cache layer whose KV this attention module reads.
+
+    KV-sharing models (gemma-4 / gemma-3n: `is_kv_shared_layer`) have no cache
+    entry for their later layers, which reuse the KV of the LAST non-sharing
+    layer of the same type. Under tiled KIVI that layer's update() returns only
+    its 16-bit window, so a sharing layer must read the source's 4-bit history
+    too, or it attends the window alone (and indexing its own cache entry is
+    out of range)."""
+    idx = int(module.layer_idx)
+    if not getattr(module, "is_kv_shared_layer", False) and idx < n_cache_layers:
+        return idx
+    cfg = module.config
+    first = cfg.num_hidden_layers - int(getattr(cfg, "num_kv_shared_layers", 0) or 0)
+    types = list(cfg.layer_types)
+    return max(i for i in range(min(first, n_cache_layers)) if types[i] == types[idx])
 
 
 def _kivi_tiled_attention(module, query, key, value, attention_mask,
@@ -848,10 +870,19 @@ def _kivi_tiled_attention(module, query, key, value, attention_mask,
                           softcap=None, **kwargs):
     """Attention over [4-bit history tiles] + [16-bit window], LSE-merged.
     query [B, H, Q, D]; key/value = the 16-bit window [B, Hk, n_res, D]."""
-    if sliding_window is not None or softcap is not None or dropout:
-        raise NotImplementedError("kivi4_tiled: sliding window / softcap / dropout")
     cache = _KIVI_TILED_CACHE["cache"]
-    lyr = cache.layers[module.layer_idx]
+    lyr = cache.layers[_kv_source_layer(module, len(cache.layers))]
+    _is_kivi = (getattr(lyr, "kivi_patched", False) or hasattr(lyr, "kivi_group")
+                or "_kivi" in lyr.__dict__)
+    if not _is_kivi:
+        # A real sliding-window layer, kept native and exact (_kivi_chunked).
+        from transformers.integrations.sdpa_attention import sdpa_attention_forward
+        return sdpa_attention_forward(module, query, key, value, attention_mask,
+                                      dropout=dropout, scaling=scaling,
+                                      sliding_window=sliding_window, softcap=softcap,
+                                      **kwargs)
+    if softcap is not None or dropout:
+        raise NotImplementedError("kivi4_tiled: softcap / dropout")
     st = lyr.__dict__.get("_kivi")
     _bits = getattr(lyr, "kivi_bits", 4)
     unpack = None if _bits == 16 else _PACK[_bits][1]
@@ -928,8 +959,21 @@ def _kivi_chunked(model, ids: List[int], device: str, chunk: int,
     cache = DynamicCache(config=model.config)
     n_patched = 0
     import types
+    # Sliding-window layers (transformers' DynamicSlidingWindowLayer subclasses
+    # DynamicLayer) build their attention mask from `cumulative_length`, which
+    # only their own update() advances. Patching them with KIVI's update left it
+    # at 0, so mask and keys disagreed: first-token KL 3.8-17 on Phi-4-mini,
+    # which declares a 262,144-token window on every layer. Now: a window the
+    # run can actually fill stays NATIVE and exact (DKV leaves those layers
+    # native too; KIVI quantizes full attention), and a window longer than the
+    # run is quantized as full attention, with cumulative_length kept current.
+    _span = len(ids) + 1024                     # prompt + generous decode room
     for lyr in cache.layers:
+        _sw = getattr(lyr, "sliding_window", None)
+        if isinstance(lyr, DynamicLayer) and _sw is not None and int(_sw) < _span:
+            continue                            # a real sliding window: native
         if isinstance(lyr, DynamicLayer):
+            lyr.kivi_patched = True
             # Bound per instance: re-classing the layer is refused by CPython
             # ("object layout differs") for these ABC-derived classes.
             lyr.kivi_group, lyr.kivi_residual, lyr.kivi_bits = group, residual, bits

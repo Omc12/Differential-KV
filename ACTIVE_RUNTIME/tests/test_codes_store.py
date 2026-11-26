@@ -173,3 +173,144 @@ def test_sdpa_tile_value_codes(bits):
     w = torch.softmax(q[0].float() @ K.transpose(1, 2) * D ** -0.5, -1)
     ref = w @ V
     assert torch.allclose(out[0, 0].float(), ref, atol=2e-2), (out[0, 0].float() - ref).abs().max()
+
+
+# ── Default store selection (codes default since 2026-11-26) ────────────────
+def _fresh_nbp(monkeypatch, **env):
+    for v in ("DKV_STORE", "DKV_LOWRANK", "DKV_KEY_QUANT", "DKV_VALUE_QUANT",
+              "DKV_QUANT_BITS"):
+        monkeypatch.delenv(v, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("DKV_DISABLE_CUDA_GRAPH", "1")
+    import runtime.native_block_pool as nbp
+    importlib.reload(nbp)
+    return nbp
+
+
+def test_default_store_is_codes(monkeypatch):
+    nbp = _fresh_nbp(monkeypatch)
+    assert nbp.store_mode() == "codes" and not nbp.store_explicit()
+    assert nbp._key_quant_bits_from_env() == 4 and nbp._value_quant_bits_from_env() == 4
+    assert nbp.resid_attn_enabled()
+
+
+def test_lowrank_is_one_flip(monkeypatch):
+    nbp = _fresh_nbp(monkeypatch, DKV_LOWRANK="1")
+    assert nbp.store_mode() == "lowrank" and nbp.store_explicit()
+    assert nbp._key_quant_bits_from_env() == 0 and nbp._value_quant_bits_from_env() == 0
+
+
+def test_explicit_store_beats_the_flip(monkeypatch):
+    nbp = _fresh_nbp(monkeypatch, DKV_LOWRANK="1", DKV_STORE="codes")
+    assert nbp.store_mode() == "codes"
+
+
+def test_default_falls_back_on_ungroupable_head_dim(monkeypatch):
+    # head_dim 80 is not a multiple of the 32-channel value group: the DEFAULT
+    # must load (as low rank), not raise.
+    nbp = _fresh_nbp(monkeypatch)
+    pool = nbp.NativeBlockPool(max_blocks=8, num_kv_heads=2, head_dim=80, rank=8,
+                               max_seq_len=96, device=DEV, initial_blocks=2,
+                               num_layers=1, lazy=False, max_residual_tokens=8,
+                               residual_quant="int8")
+    assert nbp.store_mode() == "lowrank"
+    assert pool.key_quant_bits == 0 and pool.value_quant_bits == 0
+    monkeypatch.delenv("DKV_STORE", raising=False)      # the fallback set it
+    importlib.reload(nbp)
+
+
+def test_explicit_codes_still_raises_on_ungroupable_head_dim(monkeypatch):
+    nbp = _fresh_nbp(monkeypatch, DKV_STORE="codes")
+    with pytest.raises(ValueError):
+        nbp.NativeBlockPool(max_blocks=8, num_kv_heads=2, head_dim=80, rank=8,
+                            max_seq_len=96, device=DEV, initial_blocks=2,
+                            num_layers=1, lazy=False, max_residual_tokens=8,
+                            residual_quant="int8")
+    monkeypatch.delenv("DKV_STORE", raising=False)
+    importlib.reload(nbp)
+
+
+def test_prefill_is_exact_by_default_on_every_store(monkeypatch):
+    # One predictable default: exact prefill whatever the store; streaming is
+    # the single explicit switch (DKV_STREAMING_COMPRESS=1).
+    from native_core.kv_runtime_manager import KVRuntimeManager
+    for env in ({}, {"DKV_LOWRANK": "1"}, {"DKV_STORE": "hybrid"}):
+        _fresh_nbp(monkeypatch, **env)
+        m = KVRuntimeManager.__new__(KVRuntimeManager)
+        assert m.streaming_compress_active("s") is False, env
+    monkeypatch.setenv("DKV_STREAMING_COMPRESS", "1")
+    assert KVRuntimeManager.__new__(KVRuntimeManager).streaming_compress_active("s") is True
+
+
+# ── The compressor on the codes store: codes written, no factor computed ─────
+def test_compress_codes_store_end_to_end(monkeypatch):
+    import types
+    nbp = _fresh_nbp(monkeypatch, DKV_STORE="codes", DKV_MAX_RESIDUAL_TOKENS="16")
+    import native_core.compression.lowrank as LR
+    N, T, H, D = 3, 255, 2, 64
+    pool = nbp.NativeBlockPool(max_blocks=16, num_kv_heads=H, head_dim=D, rank=32,
+                               max_seq_len=256, device="cpu", dtype=torch.float16,
+                               initial_blocks=16, num_layers=1, lazy=False,
+                               max_residual_tokens=16, residual_quant="int8")
+    pool.ensure_allocated(N * 256)
+    mgr = types.SimpleNamespace(native_pool=pool, rank=32, tokenizer=None,
+                                _streaming_mgr=None, device="cpu")
+    blocks, orig = [], []
+    for i in range(N):
+        g = torch.Generator().manual_seed(7 + i)
+        b = types.SimpleNamespace(
+            active_k=torch.randn(1, H, T, D, generator=g),
+            active_v=torch.randn(1, H, T, D, generator=g),
+            anchor_kv=torch.randn(1, 2, H, D, generator=g), pool_idx=None,
+            session_id="s", layer_idx=0, anchor_idx=i * 256, token_indices=[],
+            state="SUBMITTED", dirty=False, micro_block_size=T)
+        b.token_count = lambda T=T: T
+        orig.append((b.active_k[0].permute(1, 0, 2).clone(), b.active_v[0].permute(1, 0, 2).clone(),
+                     b.anchor_kv[0, 0].clone(), b.anchor_kv[0, 1].clone()))
+        blocks.append(b)
+    calls = {"svd": 0}
+    _eigh = torch.linalg.eigh
+    monkeypatch.setattr(torch.linalg, "eigh",
+                        lambda *a, **k: (calls.__setitem__("svd", calls["svd"] + 1), _eigh(*a, **k))[1])
+    assert LR.compress_layer_blocks_gpu(blocks, 32, manager=mgr) is True
+    assert calls["svd"] == 0, "codes store must not factorize"
+    for b, (k0, v0, ak, av) in zip(blocks, orig):
+        idx = torch.tensor([b.pool_idx])
+        kd = pool.get_key_deltas(idx)[0, :T].float()            # [T, H, D]
+        vd = pool.get_value_deltas(idx)[0, :T].float()
+        ek = ((kd + ak.float()) - k0).norm() / (k0 - ak).norm()
+        ev = ((vd + av.float()) - v0).norm() / (v0 - av).norm()
+        assert ek < 0.15 and ev < 0.15, (float(ek), float(ev))   # 4-bit codes
+    for v in ("DKV_STORE", "DKV_MAX_RESIDUAL_TOKENS"):
+        monkeypatch.delenv(v, raising=False)
+    importlib.reload(nbp)
+
+
+# ── Low-rank stays exactly what it was before the codes default ─────────────
+@pytest.mark.parametrize("env", [{"DKV_LOWRANK": "1"}, {"DKV_STORE": "lowrank"}])
+def test_lowrank_defaults_unchanged(monkeypatch, env):
+    nbp = _fresh_nbp(monkeypatch, **env)
+    from native_core.kv_runtime_manager import KVRuntimeManager
+    assert nbp.store_mode() == "lowrank"
+    assert nbp._key_quant_bits_from_env() == 0 and nbp._value_quant_bits_from_env() == 0
+    assert not nbp.resid_attn_enabled()
+    m = KVRuntimeManager.__new__(KVRuntimeManager)
+    assert m.streaming_compress_active("s") is False      # exact prefill, as before
+
+
+def test_legacy_key_quant_keeps_its_lowrank_base(monkeypatch):
+    # DKV_KEY_QUANT=pc4 alone selected the hybrid (4-bit keys, LOW-RANK values)
+    nbp = _fresh_nbp(monkeypatch, DKV_KEY_QUANT="pc4")
+    assert nbp.store_mode() == "lowrank"
+    assert nbp._key_quant_bits_from_env() == 4 and nbp._value_quant_bits_from_env() == 0
+    # =off alone must not leave value codes without key codes
+    nbp = _fresh_nbp(monkeypatch, DKV_KEY_QUANT="off")
+    assert nbp._key_quant_bits_from_env() == 0 and nbp._value_quant_bits_from_env() == 0
+    pool = nbp.NativeBlockPool(max_blocks=8, num_kv_heads=2, head_dim=64, rank=8,
+                               max_seq_len=96, device=DEV, initial_blocks=2,
+                               num_layers=1, lazy=False, max_residual_tokens=8,
+                               residual_quant="int8")
+    assert pool.value_quant_bits == 0
+    monkeypatch.delenv("DKV_KEY_QUANT", raising=False)
+    importlib.reload(nbp)

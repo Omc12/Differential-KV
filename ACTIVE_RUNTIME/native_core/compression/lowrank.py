@@ -1500,7 +1500,8 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     # Taken from the POOL, not the environment: zeroing the key factor is only
     # safe when the pool is the one storing the keys instead.
     _kq_pool = getattr(manager, "native_pool", None) if manager is not None else None
-    _kq_bits = int(getattr(_kq_pool, "key_quant_bits", 0) or 0)
+    from runtime.native_block_pool import pool_holds as _ph
+    _kq_bits = _ph(_kq_pool, "keys")          # the codec holds the keys
     if _kq_bits:
         # From the ORIGINAL deltas: the V gain above has already scaled
         # deltas_svd's V half, and with the gain dropped it would not be undone.
@@ -1590,7 +1591,24 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     if r_proj < 1:
         return False
 
-    if _kv_split is not None:
+    # CODES STORE: no factor. The pool keeps every key AND value as codes and
+    # never reads the factor (it allocates it at rank 1), so the randomized SVD
+    # of the values here was prefill time spent on nothing. A zero rank-1 factor
+    # leaves recon = 0, so the row errors below are the anchor-relative deltas
+    # themselves; they only rank the residual POSITIONS the router scores.
+    # DKV_CODES_FACTOR=1 restores the old (unread) factorization, for A/B.
+    _codes_nofactor = (_kq_bits and _ph(_kq_pool, "values")
+                       and _local_os.environ.get("DKV_CODES_FACTOR", "0") != "1")
+    if _codes_nofactor:
+        U = torch.zeros(N_blocks, T_active, 1, device=gpu_device)
+        Vh = torch.zeros(N_blocks, 1, feat_dim, device=gpu_device)
+        S = torch.ones(N_blocks, 1, device=gpu_device)
+        token_norms = torch.ones(N_blocks, T_active, device=gpu_device)
+        _v_gain = None
+        r_proj = 1
+        block_ranks = [1] * N_blocks
+
+    if _kv_split is not None and not _codes_nofactor:
         # Separate K and V factors, assembled as U = [U_K | U_V] (already scaled
         # by singular values and token norms) with a block-diagonal factor. S
         # and token_norms are then ones, so the shared finalization below
@@ -1610,7 +1628,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         block_ranks = [r_proj] * N_blocks
 
     try:
-        if _kv_split is not None:
+        if _kv_split is not None or _codes_nofactor:
             raise _SkipJointSVD()
         Omega = _rsvd_omega(N_blocks, feat_dim, r_proj, device=gpu_device, dtype=torch.float32)
         Y = torch.matmul(deltas_normalized, Omega)                         # [N, T, r_proj]
@@ -1700,6 +1718,8 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     k = torch.where(trunc, k_trunc, block_ranks_t)
     k = torch.minimum(k, torch.full_like(k, int(T_active)))
     ranks = k.tolist()
+    if _codes_nofactor:
+        ranks = [1] * N_blocks           # the energy rule's floor of 4 > the 1 column
 
     # 5. Conversion and Sanitization
     U_fp16 = U.to(torch.float16)
@@ -2716,12 +2736,12 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
             # pool keeps them per-channel quantized (None when the store is off).
             key_deltas=(delta_K_all.reshape(N_blocks, T_active, pool.V_KV.shape[3],
                                             pool.V_KV.shape[4])
-                        if int(getattr(pool, "key_quant_bits", 0) or 0) else None),
+                        if _ph(pool, "keys") else None),
             # Codes store: the exact anchor-relative values, kept per-token
             # quantized; the factor's value half is then never read.
             value_deltas=(delta_V_all.reshape(N_blocks, T_active, pool.V_KV.shape[3],
                                               pool.V_KV.shape[4])
-                          if int(getattr(pool, "value_quant_bits", 0) or 0) else None),
+                          if _ph(pool, "values") else None),
         )
         if _key_boxes is not None:
             from native_core.srl.key_box import record as _kb_record

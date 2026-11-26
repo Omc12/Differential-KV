@@ -13,6 +13,8 @@ implementations the same way would slip past an agreement test.
 import os
 import sys
 
+import pytest  # noqa: E402
+pytest.importorskip("mlx.core", reason="MLX runtime test: needs Apple mlx")
 import mlx.core as mx
 import numpy as np
 import pytest

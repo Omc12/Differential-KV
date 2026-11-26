@@ -35,6 +35,14 @@ def _ref_quant(x, bits, group=32):
     return out
 
 
+@pytest.fixture(autouse=True)
+def _lowrank_store(monkeypatch):
+    # These tests exercise the low-rank (and hybrid) pool. The codes store
+    # became the default on 2026-11-26 and allocates its factor at rank 1, so
+    # the store under test is named here rather than taken from the default.
+    monkeypatch.setenv("DKV_STORE", "lowrank")
+
+
 @pytest.mark.parametrize("bits", [4, 8])
 @pytest.mark.parametrize("S", [64, 1000])
 def test_roundtrip_matches_reference(bits, S):

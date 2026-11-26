@@ -16,6 +16,8 @@ to avoid it.
 import os
 import sys
 
+import pytest  # noqa: E402
+pytest.importorskip("mlx.core", reason="MLX runtime test: needs Apple mlx")
 import mlx.core as mx
 import pytest
 

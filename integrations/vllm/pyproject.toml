@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dkv-vllm"
+version = "0.1.0"
+description = "Differential-KV attention backend for vLLM (pinned to vLLM 0.34.0)"
+requires-python = ">=3.10"
+# vLLM's backend interfaces are unversioned (vllm-project/vllm#57566): this
+# plugin is checked against exactly this release.
+dependencies = ["vllm==0.34.0"]
+
+[project.entry-points."vllm.general_plugins"]
+dkv = "dkv_vllm:register"
+
+[tool.setuptools]
+packages = ["dkv_vllm"]

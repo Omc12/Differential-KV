@@ -10,6 +10,83 @@ Tiers: **T1** offline screen on captured KV (`benchmarks/tier1_screen.py`),
 **T3** batch confirmation. Guardrails a change must not trade away: store bytes,
 reach (peak memory), decode speed, query-agnosticism, exact prefill = dense.
 
+## vLLM backend: DKV codec pages in vLLM 0.34.0 (2026-11-26)
+
+`integrations/vllm/` (pip package `dkv-vllm`, `vllm.general_plugins` entry
+point, `--attention-backend CUSTOM`). Measured on one model and GPU (Qwen2.5-
+1.5B, RTX 4070 SUPER under WSL2, CUDA graphs on for every arm); full table in
+`integrations/vllm/README.md`.
+
+| Phase | What | Gate | Result |
+|---|---|---|---|
+| 1 | backend delegates to vLLM's Triton backend | token-identical to stock on 20 prompts, backend verified in use | 20/20 PASS |
+| 2 | `k8v4` codec pages (8-bit per-token keys, KIVI 4-bit values; page size set through `customize_spec`), fused Triton store + split-K decode kernels, CUDA-graph capturable decode | capacity, quality, speed vs stock and vLLM's own TurboQuant k8v4 | 32k: 2.01x KV tokens, needle 6/6, decode 107.8 vs stock 102.4 tok/s; greedy agreement with stock 29.4/48 vs TurboQuant 23.9 |
+| 3 | routed decode over pages (per-page key bounds, Quest's bound, Triton score kernel) | faster than reading every page, no quality loss | NOT met at 16k-32k (99.9 vs 107.8 tok/s, needle 5/6): opt-in, `DKV_VLLM_ROUTE_TOKENS` |
+
+Bugs found on the way, each with its fix: padding rows of a page's tail
+indexed past the chunk (device assert); persistent page bounds reallocated
+after CUDA-graph capture, so captured decode routed against bounds nothing
+wrote (needle 2/6 under graphs, 6/6 eager; now grow-only); routing gathered
+`[batch, pages, heads, D]` bounds (OOM at vLLM's 512-batch capture; now a
+Triton score kernel); the reference prefill's temporaries were invisible to
+vLLM's memory profiling (OOM at 32k; now tiled with `enable_gqa`).
+
+## Codes (KIVI-4 layout) is the default store; pluggable codecs; vLLM backend (V16-V17b, 2026-11-26)
+
+**What changed, and the evidence for each**
+
+| Change | Switch | Default | Verification |
+|---|---|---|---|
+| The default store is KIVI-4's layout (keys per-channel, values per-token, 4-bit), read through DKV's routed decode | `DKV_STORE=codes`; `DKV_LOWRANK=1` (or `DKV_STORE=lowrank`) opts back | **codes** (was lowrank) | V17b below: quality beats low rank on every model where both ran, at the same decode speed; 2.3x the store bytes |
+| Pluggable codecs: a codec owns the K and/or V deltas of a block; the runtime (pool, growth, offload, prefill tiling, gather, router) is codec-agnostic. Built-ins re-expressed as codecs, bit-identical | `DKV_STORE=<name>` or `package.module:Attr`; `config={"codec": ...}`; `register_codec(name, encode=, decode=)` | - | `tests/test_kv_codecs.py` (12): built-ins bit-identical to the old quantizers; an outside two-function codec (`examples/int8_codec.py`) runs compress, growth, router residual keys, tiered paging and the prefill tile; prefill tile through a codec == through the old keywords, bit for bit |
+| The codes store no longer runs the (never read) low-rank SVD of the values | `DKV_CODES_FACTOR=1` restores it | off | V17b `codes_factor` vs `codes`: same quality on all 8 models, 0.3 s less to first token on SmolLM3 |
+| Hybrid-era switches keep their low-rank base when `DKV_STORE` is unset (`DKV_KEY_QUANT=pc4` alone is the hybrid again; `=off` no longer leaves value codes without key codes) | - | - | `test_legacy_key_quant_keeps_its_lowrank_base` |
+| head_dim not a multiple of 32: the default falls back to low rank (an explicit `DKV_STORE=codes` still raises) | - | - | `test_default_falls_back_on_ungroupable_head_dim` |
+| Run metadata records the RESOLVED store (`dkv_store`), and `DKV_LOWRANK` | - | - | an unset `DKV_STORE` meant lowrank before this day and codes after it |
+| **Bug: NoPE layers rotated in streaming prefill.** The prefill RoPE-slice cache was keyed on block anchors only and shared across layers, so a NoPE layer (SmolLM3, Llama 4) reused a rotary layer's tables whenever prefill attended compressed history | - | fixed | SmolLM3 8k per-layer diff: first NoPE layer 0.60 -> 0.017 rel err, last layer 1.22 -> 0.055; any store |
+| **Bug: residual weighting used the VISION tower's rotary on VLMs.** `_find_rotary` took the first `*RotaryEmbedding`; on Ministral-3 that is Pixtral's 2-D table: a device-side gather out of bounds at 32k (every codes arm failed), silently wrong rotation below it; on gemma-4-e2b it raised inside a try and the weighting was skipped | - | fixed (uses `_resolve_rotary_emb`) | Ministral 32k codes: crash -> clean; `tests/test_rotary_resolution.py` |
+| Fidelity harness gains a KIVI-4 reference arm (`kivi4`, tiled where the model allows) and `kivi4w` (KIVI given DKV's 16-bit window, so a gap cannot come from window size); decode tok/s and time-to-first-decode recorded | `decode_fidelity.py --arms kivi4 kivi4w:KIVI_RESIDUAL=dkv` | - | three harness bugs found and fixed on the way: sliding-window cache layers (Phi-4's declared 262k window: KL 3.8-17 from a mask/length mismatch), gemma-4 KV-shared layers (index out of range; must read the source layer's history), and a cache leak across prompts (a reference cycle; KIVI's peak climbed 8 -> 12 GB). KIVI peaks in the table below for SmolLM3, Qwen2.5-7B and Phi-4 predate the last fix and are high; their KL is unaffected |
+
+Removed after measurement: a "KIVI-style" streaming default for the codes
+store (`DKV_CODES_STREAM`: compress each block at once, no elastic window, no
+sparse prefill). It lowered peak memory but lost on quality and prefill time
+on every model, and an automatic exact/stream switch misjudged the card in
+both directions. One default instead: **exact prefill** on every store, with
+streaming as the single explicit switch (`DKV_STREAMING_COMPRESS=1`).
+
+**V17b** (`benchmarks/campaigns/run_v17b_routing.cmd`, `decode_fidelity.py`,
+RULER 32k prompts, dense's own answer forced through each arm, KL per decode
+step; paired difference vs tiled KIVI-4 with a bootstrap 95% CI;
+`paper/results/campaign/v17b.log`):
+
+| model | KIVI-4 | DKV codes | paired vs KIVI | codes, every block read | DKV low rank | decode tok/s KIVI / codes | peak GB KIVI / codes |
+|---|---|---|---|---|---|---|---|
+| SmolLM3-3B | 0.0077 | 0.0055 | -0.002 [-0.008, +0.003] tie | 0.0041 | 0.128 | 3.6 / 8.0 | 4.4* / 6.1 |
+| Qwen2.5-7B | 0.0155 | 0.101 | **+0.085 [+0.027, +0.161] worse** | 0.053 (+0.038) | 0.789 | 4.6 / 10.9 | 7.5* / 8.7 |
+| Phi-4-mini | 0.0223 | 0.0077 | **-0.021 [-0.031, -0.011] better** | 0.0052 | 0.211 | 3.8 / 9.8 | 7.7* / 9.5 |
+| Qwen3.5-2B | 0.0071 | 0.0016 | **-0.0055 [-0.0094, -0.0022] better** | 0.0022 | 0.0042 | 11.9 / 16.3 | 2.7 / 3.1 |
+| Ministral-3-8B | 0.0013 | 0.0020 | +0.0007 [-0.0008, +0.0021] tie | 0.0020 | 0.324 | 3.7 / 1.9 (spill) | 8.1 / 13.3 |
+| granite-4.2-8b | 0.0066 | 0.101 | **+0.095 [+0.007, +0.209] worse** | **0.0014 (-0.005, better)** | 0.372 | 3.1 / 2.0 (spill) | 7.9 / 13.9 |
+| gemma-4-e2b | 0.171 | 0.012 | -0.108 [-0.325, +0.007] | 0.012 | 0.016 | 8.0 / 12.1 | 8.0 / 7.9 |
+| gemma-4-e4b | 0.0048 | 0.067 | +0.062 [+0.027, +0.106] | 0.067 | 0.068 | 7.1 / 7.1 | 10.7 / 10.9 |
+
+(* KIVI peak from a run with the leak.) Reading it:
+
+- **The codes store is not the problem; routing is.** With every block read,
+  DKV codes is at or below KIVI-4 on 6 of 6 non-gemma models (granite 0.0014
+  vs 0.0066). The losses on Qwen2.5-7B and granite come from the router
+  skipping blocks: all of granite's gap, half of Qwen2.5-7B's (the other half,
+  0.053 vs 0.016 with every block read, is open).
+- **Decode is 1.4-2.7x faster than tiled KIVI-4** wherever DKV fits the card.
+- **Memory is the cost.** Exact prefill holds the whole prompt in 16 bits, so
+  DKV peaks higher than KIVI and the two 8B models SPILL at 32k on a 12.9 GB
+  card (13.3 / 13.9 GB; decode then 1.9-2.0 tok/s). `DKV_STREAMING_COMPRESS=1`
+  fits them (10.2-10.4 GB) at equal quality on Ministral and a cost on
+  granite (0.148).
+- **gemma is not comparable yet.** Every DKV arm, low rank included, lands on
+  the same KL on both gemma models, so DKV's gemma result does not come from
+  the store at all; the e2b KIVI number (0.171) is also out of line. Open.
+
 ## Residual rows no longer crowded out by token runs; Phi-4-mini fixed (V15, 2026-11-26)
 
 V13's open defect 4 (Phi-4-mini second-token KL 0.68) was NOT the joint K|V
@@ -59,8 +136,13 @@ decode step), V13 -> V15; first-token rows unchanged:
 | granite-4.2-8b | 0.00002 | 0.00000 | 5/5 |
 
 V13 defect 4 is closed. The `DKV_STORE=codes` / `DKV_KV_SPLIT` workarounds are no
-longer needed for Phi-4-mini. RULER (V14) was run before this change and has not
-been rerun.
+longer needed for Phi-4-mini.
+
+RULER rerun with the fix (V15, `benchmarks/campaigns/run_v15_ruler_dkv.cmd`,
+low-rank store pinned, same items as V14): identical to V14 on 7 of 8 models;
+SmolLM3 71.7 -> 64.7, one item (`niah_multikey_2`, 7615230 for 7618353: the
+answer's run was no longer reserved whole -- the cost side of the bounded
+reservation, at n = 1). Fidelity improved and retrieval did not.
 
 ## Cross-architecture fidelity panel: 10 models, nothing set per model (V13, 2026-11-25)
 
@@ -237,7 +319,7 @@ attend compressed history through the router. V12 p1 measures its quality.
 | Adaptive block count runs on either router | `DKV_ROUTE_ADAPTIVE` as before | **on** past 32 candidates | Unit tests (the caller's top-k is the floor; no table / explicit K / small N / switch off fall back); V12 | `query_router._adaptive_select`: the residual router's top-16 (after edge propagation) is always routed and the key moments add blocks by estimated mass. Key boxes and moments are recorded whenever either needs them (`key_box.boxes_recorded`) |
 | `benchmarks/diag_key_box_frame.py` | - | - | Ran (above) | Recorded box vs true post-RoPE box per block and layer |
 
-**V12** (`benchmarks/campaigns/run_v12_router.cmd`, `run_v12b_fixedk.cmd`,
+**V12** (`benchmarks/campaigns/archive/run_v12_router.cmd`, `run_v12b_fixedk.cmd`,
 `run_v12c_auto.cmd`, `run_v12d_repeatable.cmd`, `run_v12e_projected.cmd`;
 Qwen3.5-4B, RULER 131k with the answer prefix, paired
 bootstrap over shared items):
@@ -413,7 +495,7 @@ allocated 10.45 -> 9.96 GB, peak 10.74 -> 10.21. The rotated-window buffers fell
 takes part of the room back by design (0.81 -> 0.94 GB, more layers kept), so
 the store's reach past 65k is checked directly in V11 p3.
 
-**V11** (`benchmarks/campaigns/run_v11_adaptive.cmd`): Qwen3.5-4B RULER at 131k,
+**V11** (`benchmarks/campaigns/archive/run_v11_adaptive.cmd`): Qwen3.5-4B RULER at 131k,
 5 items per task (65), adaptive vs fixed K on identical code, both on the
 key-box router; granite codes store at 65k.
 
@@ -827,7 +909,7 @@ Fix: the incremental branch uses the same tiled raw-history attention
 (`_dense_history_attend_tiled`) under DKV_EXACT_LEAN (default on, CUDA). Same
 arithmetic. Unit tests 27/27.
 
-Check (benchmarks/campaigns/run_inc_tiled_check.cmd): Qwen auto streaming 131,072 ok **10.10 GB**,
+Check (benchmarks/campaigns/archive/run_inc_tiled_check.cmd): Qwen auto streaming 131,072 ok **10.10 GB**,
 196,608 ok **10.37 GB** (were: spill at 131k, 18.58 GB). Elastic now borrows up to
 ~3.5 GB of headroom by design, so the peak sits above the pre-elastic 6.7 GB but under
 the spill line.
@@ -861,7 +943,7 @@ width, rotates per tile, folds the GQA group into the query axis, attends with t
 efficient kernel and merges tiles by log-sum-exp; and turns on the decode-cache memory
 gate (`DKV_REMAT_GATE`). Same arithmetic up to rounding. Expected: exact ceiling close
 to the preallocated dense one; it cannot pass it (exact prefill must hold the raw KV).
-Tests written (tests/test_exact_lean.py, 5) and benchmarks/campaigns/run_exact_lean.cmd (unit
+Tests written (tests/test_exact_lean.py, 5) and benchmarks/campaigns/archive/run_exact_lean.cmd (unit
 tests, tier 2 vs default exact, exact ladders granite 16k-28k, Qwen 98k-131k).
 
 Results (2026-10-11):
@@ -951,7 +1033,7 @@ T2, Qwen3.5-4B, 6 prompts / 65 forced steps (`paper/results/diag/fidelity_codes_
 | codes, 2 bits | **0.0127** | **0.985** | 0.156 | 2.92 | 4.89 | 12.4 |
 
 Paired vs lowrank: codes4 dKL -0.728 [-1.163, -0.377], codes2 -0.716 [-1.150, -0.366];
-neither has a step with KL > 0.5 (lowrank: 16). V5 campaign: `benchmarks/campaigns/run_v5_codes.cmd`.
+neither has a step with KL > 0.5 (lowrank: 16). V5 campaign: `benchmarks/campaigns/archive/run_v5_codes.cmd`.
 
 V5 results (RULER on the paper's prompt, no answer prefix; 12-task averages, vt excluded):
 
@@ -980,7 +1062,7 @@ low-rank store's smaller pool leaves room for. Open.
 
 ## Fairness controls (V6, 2026-10-21)
 
-`benchmarks/campaigns/run_v6_fairness.cmd`. p1: a 16-bit cache read through DKV's tiled,
+`benchmarks/campaigns/archive/run_v6_fairness.cmd`. p1: a 16-bit cache read through DKV's tiled,
 LSE-merged history attention (`dense_tiled`), ladders, 128-token answers.
 
 | model | dense_tiled clean to | spills at | peak there (alloc / reserved, prefill) | streaming DKV past it | preallocated dense |
@@ -1007,7 +1089,7 @@ DKV's lead over eviction does not come from seeing the question (no change witho
 it). Eviction recovers once its ranking knows the question before the prompt is read,
 and then what it keeps serves that question alone; DKV's records are built without it.
 
-V7 (`benchmarks/campaigns/run_v7_fill.cmd`), the dense reference past dense's preallocated
+V7 (`benchmarks/campaigns/archive/run_v7_fill.cmd`), the dense reference past dense's preallocated
 ceiling and DKV on granite from 4k, RULER on the paper's prompt:
 
 | run | RULER | paired |
@@ -1019,7 +1101,7 @@ ceiling and DKV on granite from 4k, RULER on the paper's prompt:
 Tiled KIVI-4 is at dense quality at long context; the low-rank store pays 16-20
 points there for the fewest bytes.
 
-V8 (`benchmarks/campaigns/run_v8_fill.cmd`, 2026-10-26), granite between 32k and 114k and its
+V8 (`benchmarks/campaigns/archive/run_v8_fill.cmd`, 2026-10-26), granite between 32k and 114k and its
 eviction arms at dense's lengths (RULER items generated at 65,536, 5/task):
 
 | run | RULER | paired |
@@ -1034,7 +1116,7 @@ On granite every cache that fits loses ground past 32k (DKV 49.0 -> 41.7 -> 28.2
 32k / 65k / 114k; tiled KIVI-4 63.1 -> 45.3), and within dense's limit DKV and SnapKV
 tie at about 9.7 points below dense.
 
-V9 (`benchmarks/campaigns/run_v9_noquery.cmd`, 2026-10-26), DKV's question look-ahead
+V9 (`benchmarks/campaigns/archive/run_v9_noquery.cmd`, 2026-10-26), DKV's question look-ahead
 (`DKV_RESIDUAL_NO_QUERY=1`) off on granite, current code:
 
 | run | score | paired (off - on) |
@@ -1044,7 +1126,7 @@ V9 (`benchmarks/campaigns/run_v9_noquery.cmd`, 2026-10-26), DKV's question look-
 | RULER 4k / 8k / 16k, look-ahead off, 10/task | 72.0 / 57.7 / 57.0 | +0.61 [-0.92, +2.17] vs V7 (360 items) |
 
 With Qwen3.5-4B at 131k (+0.17 [-2.33, +2.67]), turning the look-ahead off moves
-no measured score. V10 (`benchmarks/campaigns/run_v10_prefix.cmd`) re-runs the past-the-limit
+no measured score. V10 (`benchmarks/campaigns/archive/run_v10_prefix.cmd`) re-runs the past-the-limit
 comparisons with RULER's answer prefix at 10 items per task.
 
 V10 (2026-10-27, three power cuts, resumed by `run_v10_prefix.cmd resume`): RULER
@@ -1089,7 +1171,7 @@ that the paper had quoted; the ladder rows record 0.9999.
 
 **E2 larger prefill chunks -- no code.** `DKV_PREFILL_CHUNK_SIZE` already sets it
 (rounded up to whole blocks: 2048 -> 2050 = 2 blocks per chunk). Measurement queued
-(benchmarks/campaigns/run_e2_chunks.cmd): tier 2 at 2048/4096 exact and streaming, and 32k prefill
+(benchmarks/campaigns/archive/run_e2_chunks.cmd): tier 2 at 2048/4096 exact and streaming, and 32k prefill
 time. An older single-seed note in config.py links chunk 2048 to a lower score; tier 2
 decides.
 - Result (granite hybrid, 374 steps; paired vs chunk 1024): exact 2k +0.026 [-0.002,
@@ -1186,7 +1268,7 @@ packed hybrid + `DKV_RESID_ATTN` on granite and on Qwen2.5-7B.
 | Date | Fix | Why |
 |---|---|---|
 | 2026-10-22 | **Cloud campaign Y1** (`benchmarks/cloud/`, runbook `docs/CLOUD_CAMPAIGN.md`): 1,123 jobs (140 smoke configs + 983 real, ~734 GPU-h estimated; every series paperdata.py reads has a cloud twin with the recipe its .meta.json recorded, plus dense past 65k, 262k, Qwen3.5-9B, concurrency) across many GPU machines, coordinated only by the orphan branch `cloud-results` (claim = atomic push). Each worker runs a logit-fidelity preflight per model, pushes outputs every 10 min, and resumes a dead machine's job from its pushed rows. RULER data is generated per machine and hash-checked against the paper's items. Quality DKV arms set `DKV_STREAM_ELASTIC_RESERVE_GB` so the elastic window's line falls at the 12.878 GB card's 8.605 GB (`dkv_native` keeps the big card's own line). `bench_concurrency_cuda.py --timeout` (was a hardcoded 2 h per arm); `decode_fidelity.py` reads RULER items from `DKV_RULER_DATA` when set | The sponsored GPUs answer the limitations section: n of 5-10 per task beyond the exact limit, no dense reference past 65k, no datacenter-GPU systems numbers, no serving concurrency, two models. Without the reserve, DKV's elastic window on 80 GB would keep nearly everything exact and measure something other than the paper's method. Regenerated Qwen3.5-4B 4k data was byte-identical to the paper's. tests/test_cloud_queue.py (9, CPU) |
-| 2026-10-21 | **Fairness controls (V6, `benchmarks/campaigns/run_v6_fairness.cmd`)**: `dense_tiled` arm (a 16-bit cache held in chunks, read by the tiled LSE-merged attention tiled KIVI uses: the dense ceiling with no history-sized transient); `snapkv_chunked_q` arm (chunk-wise eviction scored by the post-RoPE queries of the prompt's last 64 tokens, captured once at their true positions: the same look-ahead DKV's residual ordering has); `DKV_RESIDUAL_NO_QUERY=1` (residual runs ordered with no question information, neither the extracted span nor the tail) | Blind review: the reach ratios used a dense baseline that still had a history-sized transient, and DKV's store sees the question while the eviction arms do not. tests/test_dense_tiled.py (3, equals plain attention, 16-bit bytes); CPU check of `snapkv_chunked_q`: holds every layer at the budget, equals dense when nothing is evicted |
+| 2026-10-21 | **Fairness controls (V6, `benchmarks/campaigns/archive/run_v6_fairness.cmd`)**: `dense_tiled` arm (a 16-bit cache held in chunks, read by the tiled LSE-merged attention tiled KIVI uses: the dense ceiling with no history-sized transient); `snapkv_chunked_q` arm (chunk-wise eviction scored by the post-RoPE queries of the prompt's last 64 tokens, captured once at their true positions: the same look-ahead DKV's residual ordering has); `DKV_RESIDUAL_NO_QUERY=1` (residual runs ordered with no question information, neither the extracted span nor the tail) | Blind review: the reach ratios used a dense baseline that still had a history-sized transient, and DKV's store sees the question while the eviction arms do not. tests/test_dense_tiled.py (3, equals plain attention, 16-bit bytes); CPU check of `snapkv_chunked_q`: holds every layer at the budget, equals dense when nothing is evicted |
 | 2026-10-21 | **KV accounting v3: residual rows at their stored width** (`dkv_kv_bytes`) | It charged every residual row at 16 bits (K+V; V for the hybrid) while the pool stores them int8 with an fp16 scale and offset per 64 channels (`DKVConfig.residual_quant` default int8): 4,096 vs 2,176 B per row on granite, 4,096 vs 2,176 on Qwen3.5-4B. Every recorded DKV byte count was high: LongBench DKV/mid 0.525 -> 0.431 GB, Qwen3.5-4B 131k 0.772 -> 0.524, granite 114k 3.32 -> 2.24; store growth on granite 0.029 -> 0.019 GB per 1k tokens. Recorded totals rebuild exactly from each row's own fields, so the paper's loader (`paperdata._correct_dkv_bytes`) corrects old rows exactly. Found by a blind reviewer recomputing the 676 KB record (true: 436 KB at the full 128-row budget). tests/test_kv_accounting.py gains an int8 case |
 | 2026-10-20 | **RULER answer prefix attached** (`run_ruler_cuda.build_ruler_prompt`; switch `RULER_ANSWER_PREFIX`, default 1, 0 restores the old prompt; stores record `answer_prefix`, so old and new rows cannot merge) | RULER's generator stores the answer prefix BESIDE the input, and the harness only re-attached it when the input ended with it, so no task ever got one. Models opened with a preamble ("Based on the text provided, here is...") that spent variable tracking's 30-token budget: vt scored ~0 for every arm, dense included. With the prefix, dense answers vt exactly (pilot, Qwen3.5-4B 4k). Every RULER store before 2026-10-20 is on the old prompt; the V4 campaign re-runs all of them. Paired deltas between old stores stay valid (same prompt for every arm) but absolute scores and averages were depressed |
 | 2026-10-20 | New baseline options: `kivi2_tiled` arm (KIVI-2 as published: per-channel keys in groups of 32, per-token values, 128-token 16-bit window, tiled attention like `kivi4_tiled`; 4-bit path bit-identical); dense `{"offload": true}` (exact KV in host memory, transformers' offloaded DynamicCache); SnapKV/H2O post-hoc `{"defrag": true}` (the allocator fix dense gets) | Review asked for a properly configured 2-bit baseline, an offloading baseline, and SnapKV given the same allocator treatment as dense. Smoke-tested on both models (`run_v4_z_smoke.cmd`): correct answers, 2-bit packing round-trips |

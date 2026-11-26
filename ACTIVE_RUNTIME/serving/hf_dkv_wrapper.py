@@ -544,6 +544,15 @@ class PyTorchDKVHFWrapper:
     ):
         self.model_id = model_id
         self.config = config or {}
+        # config={"codec": ...}: the KV codec (runtime/kv_codecs.py) -- a
+        # registered name, "package.module:Attr", a DeltaCodec subclass, or any
+        # object with encode/decode. Same as DKV_STORE; set before the pool is
+        # built, so it applies to this process.
+        _codec = self.config.get("codec")
+        if _codec is not None:
+            from runtime.kv_codecs import register_codec
+            os.environ["DKV_STORE"] = (_codec if isinstance(_codec, str) else
+                                       register_codec(f"user_{id(_codec):x}", _codec))
         self._quantization_config = quantization_config
         self._torch_dtype_arg = torch_dtype
         self.device = device if device is not None else _get_best_device()

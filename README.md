@@ -252,12 +252,58 @@ available and is the right dial to reach for first if VRAM regresses at 32k+.
 
 ---
 
+## 🔌 Pluggable KV codecs
+
+DKV's runtime (routing, the paged pool, tiered offload, prefill tiling, decode)
+is independent of how a compressed block's K and V are encoded. That encoding
+is a **codec**, and you can swap it with one setting:
+
+```bash
+DKV_STORE=codes      # default: KIVI-4 layout (4-bit keys per-channel, values per-token)
+DKV_STORE=lowrank    # joint low-rank factor + exact residual rows: ~3x fewer bytes, lower quality
+DKV_STORE=hybrid     # 4-bit keys, low-rank values
+DKV_STORE=mypackage.mycodec:MY_CODEC    # your own, imported on demand
+```
+
+or from Python: `DKVHFWrapper(model_id, config={"codec": MY_CODEC, ...})`.
+
+Writing one takes two functions. `x` is a block's anchor-relative deltas,
+`[blocks, tokens, kv_heads, head_dim]` float32:
+
+```python
+import torch
+from runtime.kv_codecs import register_codec
+
+def encode(x):
+    s = x.abs().amax(-1, keepdim=True).clamp(min=1e-8) / 127
+    return {"q": (x / s).round().to(torch.int8), "s": s.half()}
+
+def decode(state):
+    return state["q"].float() * state["s"].float()
+
+register_codec("int8", encode=encode, decode=decode)     # DKV_STORE=int8
+```
+
+DKV infers the storage layout from one `encode` call and handles allocation,
+growth, offload, gathering, tiling and routing. The pair codes both keys and
+values; `values=False` codes keys only (values stay in the low-rank factor),
+and `encode_values=` / `decode_values=` give values their own pair.
+Anything with `encode` and `decode` attributes works the same way: a module, a
+class, a namespace. [`ACTIVE_RUNTIME/examples/int8_codec.py`](ACTIVE_RUNTIME/examples/int8_codec.py)
+is this codec as a module (`DKV_STORE=examples.int8_codec:INT8`). For more
+control, such as a cheap single-row key decode for the router, subclass
+`DeltaCodec` in [`runtime/kv_codecs.py`](ACTIVE_RUNTIME/runtime/kv_codecs.py).
+`tests/test_kv_codecs.py` checks the contract.
+
 ## ⚙️ Key Environment Knobs
 
 Differential-KV runtime behaviors can be fine-tuned using environment variables:
 
 | Variable | Default | Scope | Description |
 |---|---|---|---|
+| `DKV_STORE` | `codes` (since 2026-11-26) | CUDA | Which store compressed history lives in. `codes`: KIVI-4's layout (keys per-channel, values per-token, 4-bit; `DKV_QUANT_BITS=2` for 2-bit) read through DKV's routed, tiled decode. `lowrank`: the joint low-rank K/V factor + int8 residual rows, about a third of the bytes, so more context on a small card, at lower quality. `hybrid`: 4-bit keys, low-rank values. Any other value is a registered or importable codec (see Pluggable KV codecs above). A head_dim that is not a multiple of 32 falls back to `lowrank` unless `codes` was asked for explicitly. |
+| `DKV_LOWRANK` | `0` | CUDA | `1` = the one-switch opt-in to the low-rank store (same as `DKV_STORE=lowrank`; an explicit `DKV_STORE` wins). |
+| `DKV_RESIDUAL_RUN_SHARE` | `0.5` | CUDA | With no question pinned, the best token run per block is kept whole and further runs may take at most this share of the residual budget; the rest goes to the worst-reconstructed rows. `1` = the old runs-first fill (V15, `docs/IMPROVEMENTS_LOG.md`). |
 | `DKV_COMPRESSED_DECODE` | `auto` | MLX | Controls sparse decode (`on`, `off`, `auto`). Auto engages sparse decode at sequence lengths $\ge 8\text{k}$. |
 | `DKV_ENGAGE_THRESHOLD` | Budget-gated | Native / MLX | Context length at which sparse decode engages. Keeps dense decode for short contexts where dense fits. |
 | `DKV_HIGH_QUALITY_ROUTING` | `0` | Cross-runtime | `0` = Fast bounded-K pruning (attends top-$K$ blocks, context-independent speed). `1` = High-Quality routing (dynamic candidate routing). |

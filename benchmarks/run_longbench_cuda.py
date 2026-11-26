@@ -95,6 +95,19 @@ FIRST_LINE_ONLY = {"trec", "triviaqa", "samsum", "lsht"}
 # Official assets
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def _resolved_store():
+    """The store DKV will build (runtime.native_block_pool.store_mode())."""
+    import sys as _s
+    _active = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ACTIVE_RUNTIME")
+    if _active not in _s.path:
+        _s.path.insert(0, _active)
+    try:
+        from runtime.native_block_pool import store_mode
+        return store_mode()
+    except Exception:                                            # noqa: BLE001
+        return os.environ.get("DKV_STORE") or "unknown"
+
 def official_config():
     with open(os.path.join(OFFICIAL, "config", "dataset2prompt.json"), encoding="utf-8") as f:
         prompts = json.load(f)
@@ -335,8 +348,17 @@ def dkv_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
     # scale and zero per channel per group; the factor holds the value half only
     # (_halves == 1) and K residual values are read from the codes, so a
     # residual row costs only its V half.
-    _kqb = int(getattr(pool, "key_quant_bits", 0) or 0)
+    # A plugged-in codec (runtime/kv_codecs.py) is charged its own state
+    # tensors per block, exactly as the pool allocates them; the built-in
+    # codecs keep the closed forms below.
+    _codec = getattr(pool, "codec", None)
+    _plugin = (_codec is not None and _codec.name not in ("lowrank", "codes", "hybrid")
+               and (_codec.holds_keys or _codec.holds_values))
+    _kqb = 0 if _plugin else int(getattr(pool, "key_quant_bits", 0) or 0)
     res_tok = 2 * _row_half
+    if _plugin:
+        lowrank_block += int(_codec.slot_bytes())
+        res_tok = 0 if _codec.holds_values else _row_half
     if _kqb:
         _g = int(getattr(pool, "kq_group", 32) or 32)
         lowrank_block += B * Hkv * d * _kqb // 8 + ((B + _g - 1) // _g) * Hkv * d * fp16 * 2
@@ -344,7 +366,7 @@ def dkv_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
     # Codes store (DKV_STORE=codes): values per-token quantized as well, one
     # fp16 scale and zero per token per group of channels; no value residual is
     # stored, so a residual row costs nothing beyond its position.
-    _vqb = int(getattr(pool, "value_quant_bits", 0) or 0)
+    _vqb = 0 if _plugin else int(getattr(pool, "value_quant_bits", 0) or 0)
     if _vqb:
         _vg = int(getattr(pool, "vq_group", 32) or 32)
         lowrank_block += B * Hkv * d * _vqb // 8 + B * Hkv * (d // _vg) * fp16 * 2
@@ -759,6 +781,10 @@ def main():
     cfg = {"model": args.model, "arm": args.arm, "quant": args.quant,
            "max_length": args.max_length, "num_samples": args.num_samples,
            "preset": args.preset if args.arm == "dkv" else None,
+           # The store the run RESOLVED to (codes became the default on
+           # 2026-11-26: an unset DKV_STORE meant lowrank before that day and
+           # codes after it, so the env alone no longer names the store).
+           "dkv_store": (_resolved_store() if args.arm == "dkv" else None),
            "baseline_params": json.loads(args.baseline_params),
            "thinking": bool(args.thinking),
            "query_first": bool(args.query_first),
@@ -775,7 +801,7 @@ def main():
                         "DKV_DECODE_RESIDUALS", "DKV_STREAM_AUTO_TOKENS",
                         "DKV_STREAM_PROFILE",
                         # store / schedule switches (2026-10-04)
-                        "DKV_STORE", "DKV_KEY_QUANT", "DKV_VALUE_QUANT", "DKV_QUANT_BITS", "DKV_RESIDUAL_NO_QUERY", "DKV_RESIDUAL_QUERY", "DKV_RESID_ATTN",
+                        "DKV_STORE", "DKV_LOWRANK", "DKV_CODES_STREAM", "DKV_KEY_QUANT", "DKV_VALUE_QUANT", "DKV_QUANT_BITS", "DKV_RESIDUAL_NO_QUERY", "DKV_RESIDUAL_QUERY", "DKV_RESID_ATTN",
                         "DKV_ROUTE_BOX", "DKV_STREAM_ELASTIC_POLICY", "DKV_STREAM_EXACT_TOKENS",
                         "DKV_ROUTE_ADAPTIVE", "DKV_ROUTE_ADAPTIVE_P", "DKV_ROUTE_ADAPTIVE_KMAX", "DKV_ROUTE_ADAPTIVE_MIN_BLOCKS",
                         "DKV_FAST_ATTEND", "DKV_REMAT_ARENA", "DKV_LAZY_SLICED_ROPE",

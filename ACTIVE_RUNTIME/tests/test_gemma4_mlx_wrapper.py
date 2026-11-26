@@ -5,6 +5,8 @@ import os
 import sys
 import types
 import pytest
+import pytest  # noqa: E402
+pytest.importorskip("mlx.core", reason="MLX runtime test: needs Apple mlx")
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np

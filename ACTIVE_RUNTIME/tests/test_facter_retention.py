@@ -12,6 +12,14 @@ from native_core.compression.lowrank import compress_lowrank, pack_int4, unpack_
 from native_core.srl.factual_store import FactualExactStore, FactEntry
 from native_core.sparse_decode.triton_fused_decode import _pytorch_vectorized_sparse_attn_decode, fused_decode_mps
 
+
+@pytest.fixture(autouse=True)
+def _lowrank_store(monkeypatch):
+    # These tests exercise the low-rank (and hybrid) pool. The codes store
+    # became the default on 2026-11-26 and allocates its factor at rank 1, so
+    # the store under test is named here rather than taken from the default.
+    monkeypatch.setenv("DKV_STORE", "lowrank")
+
 def test_residual_scaling_and_quantization():
     device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"Testing on device: {device}")

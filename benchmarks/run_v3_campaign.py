@@ -15,11 +15,11 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARTS = {
-    "a": (r"benchmarks\campaigns\run_v3_a_dkv_stream.cmd", []),
-    "b": (r"benchmarks\campaigns\run_v3_b_kivi_tiled.cmd", []),
-    "c1": (r"benchmarks\campaigns\run_v3_c_hybrid.cmd", ["c1"]),
-    "c2": (r"benchmarks\campaigns\run_v3_c_hybrid.cmd", ["c2"]),
-    "s": (r"benchmarks\campaigns\run_v3_s_systems.cmd", []),
+    "a": (r"benchmarks\campaigns\archive\run_v3_a_dkv_stream.cmd", []),
+    "b": (r"benchmarks\campaigns\archive\run_v3_b_kivi_tiled.cmd", []),
+    "c1": (r"benchmarks\campaigns\archive\run_v3_c_hybrid.cmd", ["c1"]),
+    "c2": (r"benchmarks\campaigns\archive\run_v3_c_hybrid.cmd", ["c2"]),
+    "s": (r"benchmarks\campaigns\archive\run_v3_s_systems.cmd", []),
 }
 
 

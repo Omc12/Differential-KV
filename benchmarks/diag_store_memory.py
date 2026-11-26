@@ -176,7 +176,7 @@ def main():
     accounted = sum(rows.values())
     out = {
         "model": args.model, "ctx": args.ctx,
-        "store": os.environ.get("DKV_STORE", "lowrank"),
+        "store": __import__("runtime.native_block_pool", fromlist=["store_mode"]).store_mode(),
         "weights_gb": weights / 1e9, "alloc_gb": alloc / 1e9, "peak_gb": peak / 1e9,
         "kv_alloc_gb": (alloc - weights) / 1e9,
         "other_gb": (alloc - weights - accounted) / 1e9,
