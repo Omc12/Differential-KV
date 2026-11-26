@@ -40,7 +40,7 @@ Differential-KV partitions the KV cache into fixed blocks (1,024 tokens by defau
 3. **Bounded Dense Recency Window:** the most recent tokens, uncompressed.
 
 ### Decode & Prefill
-* **Routed decode:** each step scores the blocks with the current query (each query head votes by its own softmax over the blocks) and attends the top-$K$ (`DKV_TOPK_BLOCKS`, 16), plus more blocks while the estimated attention mass they hold is under 0.8, plus the window; `DKV_TOPK_BLOCKS=0` reads every block, the quality ceiling. Partial attentions merge by fp32 log-sum-exp.
+* **Routed decode:** each step scores the blocks with the current query and attends the top-$K$ (`DKV_TOPK_BLOCKS`, 16), plus more blocks while the estimated attention mass they hold is under 0.8, plus the window; `DKV_TOPK_BLOCKS=0` reads every block, the quality ceiling. Partial attentions merge by fp32 log-sum-exp.
 * **Exact prefill (default):** the prompt is attended exactly and compressed afterwards, so the first token matches dense. `DKV_STREAMING_COMPRESS=1` compresses during prefill instead, which fits longer prompts on a small card at some quality cost.
 * **Codec-agnostic machinery:** routing, the paged pool, tiered CPU offload, prefill tiling and the decode kernels never look inside a codec.
 
@@ -371,25 +371,27 @@ better). 4 prompts, 32 decode tokens each.
 
 | model | KIVI-4 (tiled) | DKV codes (default, routed) | DKV codes, every block read | DKV low rank | decode tok/s, KIVI-4 / DKV |
 |---|---|---|---|---|---|
-| SmolLM3-3B | 0.0077 | **0.0055** | 0.0041 | 0.128 | 3.6 / **8.0** |
-| Phi-4-mini | 0.0223 | **0.0077** | 0.0052 | 0.211 | 3.8 / **9.8** |
-| Qwen3.5-2B | 0.0071 | **0.0016** | 0.0022 | 0.0042 | 11.9 / **16.3** |
-| Ministral-3-8B | **0.0013** | 0.0020 | 0.0020 | 0.324 | 3.7 / 1.9 (spills) |
-| Qwen2.5-7B | **0.0155** | 0.060 | 0.047 | 0.789 | 4.8 / **10.2** |
-| granite-4.2-8b | 0.0066 | 0.075 | **0.0013** | 0.372 | 3.1 / 1.9 (spills) |
+| SmolLM3-3B | 0.0077 | **0.0060** | 0.0041 | 0.128 | 3.6 / **7.8** |
+| Phi-4-mini | 0.0223 | **0.0069** | 0.0052 | 0.211 | 3.8 / **11.1** |
+| Qwen3.5-2B | 0.0071 | **0.0012** | 0.0022 | 0.0042 | 11.9 / **14.8** |
+| Ministral-3-8B | **0.0013** | 0.0021 | 0.0020 | 0.324 | 3.7 / 1.9 (spills) |
+| Qwen2.5-7B | **0.0155** | 0.036 | 0.047 | 0.789 | 4.8 / **10.4** |
+| granite-4.2-8b | 0.0066 | 0.105 | **0.0013** | 0.372 | 3.1 / 1.6 (spills) |
 
-Qwen2.5-7B and granite were rerun after the 2026-11-26 value-store fix and the
-2026-11-27 router changes (heads vote; adaptive growth at any block count;
-before them 0.101 and 0.111); the other rows predate both. Reading it:
+The routed column is the current default (2026-11-27: value-store fix, and
+adaptive block growth at any block count; before it Qwen2.5-7B 0.101, granite
+0.111). The every-block and low-rank columns predate the value fix except for
+Qwen2.5-7B and granite. Reading it:
 
 * With every block read, the default store is below KIVI-4 on 4 of these 6
   models and tied on Ministral (0.0020 vs 0.0013; the routed arm's paired 95%
   CI spans zero). Where DKV loses, routing is most of the loss
-  (granite: 0.075 routed, 0.0013 reading everything).
+  (granite: 0.105 routed, 0.0013 reading everything; `DKV_ROUTE_HEADS=vote`
+  gets granite to 0.066 but costs SmolLM3, so it is opt-in).
 * Qwen2.5-7B's remaining gap is the model's numerics, not the store: a lossless
   codec through the same pipeline scores 0.042, and the model's own dense eager
   and dense SDPA prefills differ more than DKV and dense do.
-* DKV decodes 1.4-2.7x faster than tiled KIVI-4 in this harness (both without
+* DKV decodes 1.2-2.9x faster than tiled KIVI-4 in this harness (both without
   CUDA graphs) wherever it fits the card. Its
   cost is memory: exact prefill holds the prompt in 16 bits, so the two 8B models
   spill past 12.9 GB at 32k (`DKV_STREAMING_COMPRESS=1` fits them).
@@ -401,7 +403,7 @@ per task, so one item moves a score by 6-25 points):
 | model | dense | KIVI-4 (tiled) | DKV codes (default) | DKV low rank |
 |---|---|---|---|---|
 | SmolLM3-3B (13 tasks) | 84.6 | 86.9 | 78.5 | 64.7 |
-| Qwen2.5-7B | 95 | 100 | 82.5 (63.8 before the 2026-11-27 router changes; 88.8 reading every block) | 63.8 |
+| Qwen2.5-7B | 95 | 100 | 95.0 (63.8 before the 2026-11-27 router change; 88.8 reading every block) | 63.8 |
 | Phi-4-mini | 70 | 70 | 70 | 68.8 |
 | Qwen3.5-2B | 100 | 100 | 100 | 100 |
 | gemma-4-e2b | 88.8 | 88.8 | 88.8 | 88.8 |
