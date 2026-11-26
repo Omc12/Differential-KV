@@ -143,8 +143,12 @@ def test_adaptive_select_keeps_the_callers_floor(monkeypatch):
     assert sel is not None
     assert set(floor) <= set(sel.tolist())
     assert len(set(sel.tolist())) == sel.numel() >= k
-    # Not enough candidates, an explicit K, or no table: the fixed top-k applies.
+    # Grows at any block count by default (the 2K cutoff was removed, V21).
+    assert qr._adaptive_select(Q, t, torch.arange(N), rel, k, 2 * k, None, 0.25) is not None
+    # At or below an explicit cutoff, an explicit K, or no table: fixed top-k.
+    monkeypatch.setenv("DKV_ROUTE_ADAPTIVE_MIN_BLOCKS", str(2 * k))
     assert qr._adaptive_select(Q, t, torch.arange(N), rel, k, 2 * k, None, 0.25) is None
+    monkeypatch.delenv("DKV_ROUTE_ADAPTIVE_MIN_BLOCKS")
     assert qr._adaptive_select(Q, t, torch.arange(N), rel, k, N, "16", 0.25) is None
     assert qr._adaptive_select(Q, None, torch.arange(N), rel, k, N, None, 0.25) is None
     monkeypatch.setenv("DKV_ROUTE_ADAPTIVE", "0")

@@ -10,6 +10,30 @@ Tiers: **T1** offline screen on captured KV (`benchmarks/tier1_screen.py`),
 **T3** batch confirmation. Guardrails a change must not trade away: store bytes,
 reach (peak memory), decode speed, query-agnosticism, exact prefill = dense.
 
+## Router: heads vote instead of the largest raw logit; adaptive growth at any block count (V20-V21, 2026-11-27)
+
+Two architectural defects in the block router, found on Qwen2.5-7B and granite;
+neither change looks at the model.
+
+| Change | Switch | Default | Evidence |
+|---|---|---|---|
+| **Heads combined by softmax votes.** The router ranked a block by the largest raw `q.k` of ANY head. Softmax is per head, so a raw logit means nothing outside its head, and the head with the largest logit scale chose every block: on Qwen2.5-7B (k_proj bias to 414) one head decided all 16 kept blocks in most layers; at layer 27 its logits span -4493..643. Now each (head, query) row spreads one vote over the candidate blocks by its own softmax, and blocks are ranked by the mean vote (an estimate of mean per-head attention mass, the quantity the oracle ranks by) | `DKV_ROUTE_HEADS=vote\|max` | **vote** (was max) | real router at one decode step, whole-layer attention-output error, mean over 28 layers (`benchmarks/diag_route_runtime.py`): Qwen2.5-7B two items max 0.079 / 0.134, vote 0.056 / 0.076, oracle 0.045 / 0.056; layer 27 0.43 -> 0.03. Decode KL (V21): granite **0.111 -> 0.066**, Qwen2.5-7B 0.101 -> 0.106 (wins on 2 prompts, loses 1), Phi-4-mini 0.0019 -> 0.0012 (1 prompt) |
+| Rejected first: normalise each head, then the max | (V20) | - | exact keys said yes (`diag_route_oracle.py`, missed mass 0.087 -> 0.061), real decode said no: Qwen2.5-7B KL **0.101 -> 0.217**, RULER 63.8 -> 57.5. From the anchor plus <=64 residual rows the router sees, some heads are badly estimated and a max lets the worst one win (layer 0 output error 0.03 -> 0.36). Votes bound each head's influence. Lesson: score routing rules on the runtime's own view, not on exact keys |
+| **Adaptive growth at any block count.** The grow-only block count (`_adaptive_select`) only ran above 2K = 32 candidate blocks, i.e. never at 32k. The cutoff came from a LOW-RANK store measurement (extra blocks added reconstruction error); on the codes store extra blocks only help | `DKV_ROUTE_ADAPTIVE_MIN_BLOCKS` | **0** (was 2K) | decode KL, vote router: Qwen2.5-7B **0.106 -> 0.060** (every block 0.047, KIVI-4 0.016), granite 0.066 -> 0.075 (one prompt carries both); Phi-4-mini decode 11.7 vs 11.6 tok/s (growth is bounded by the estimated mass, P=0.80) |
+| Residual rows as the router's view: kept | - | - | under the codes store the rows hold no values (keys are read back from the codes) and exist only for routing, so their choice is free to change. Per-head rows by deviation from the block's mean key, same count: 0.057 vs current 0.054 output error (vote, one item). The current ranking (joint error x the prompt's own attention, runs first) stays |
+
+With both defaults, the real router's mean layer output error on
+niah_multikey_2 is 0.046 (old rule 0.058, oracle 0.036). RULER 32k, Qwen2.5-7B,
+V19's 4 items: **63.8 -> 82.5** (every block read 88.8, KIVI-4 100);
+niah_multikey_2 now answers exactly (`paper/results/ruler/V21_*`,
+`paper/results/campaign/v21_ruler.log`). Short checks only:
+V21 decode_fidelity, 4 prompts (`benchmarks/campaigns/run_v21_head_vote.cmd`,
+`paper/results/campaign/v21.log`); Phi-4-mini 1 prompt
+(`paper/results/diag/v21_phi4/`). V20's codes_v19 / codes_v20 arms in the
+summaries were the rejected rule; the summaries keep V19b's rows and one
+`codes_v20_hnorm` row. Granite's decode speeds are unreliable (spills past the
+card at 13.96 GB).
+
 ## Value codes hold the values, not anchor deltas; the Qwen2.5-7B gap explained (V18-V19c, 2026-11-26)
 
 Asked: is Qwen2.5-7B struggling because of something model-specific in DKV?
@@ -23,7 +47,7 @@ found instead, in order:
 | Keys: DKV's stored blocks are better than KIVI-4's | same diagnostic against the model's own arithmetic (keys rotated in bf16, as HF does): attention KL layer 0 0.0045 vs 0.0121, layer 5 0.0010 vs 0.0012, layer 27 0.0109 vs 0.0188 (KIVI post-RoPE, dequantized into bf16). A float32 reference had shown DKV worse at layer 27; that reference sits below bf16's grid at Qwen2.5's key magnitudes (k_proj bias up to 414 at layer 27, 171 at layer 0) | none; the diagnostic now prints both references |
 | **The 4-bit store is not the remaining gap.** A lossless codec (`examples/lossless_codec.py`: key deltas fp32, values bf16) through the whole DKV pipeline, every block read | decode KL vs dense 0.0418 vs 4-bit codes 0.0467 (KIVI-4 0.0155) | the lossless codec is kept as the instrument for "store or machinery?" |
 | **Qwen2.5-7B's prefill is numerically fragile on its own.** First-token KL of DKV's exact prefill is 0.42 / 0.23 on two of four prompts, identical for every store (so not compression) | `diag_prefill_layer_diff.py` 32k: DKV vs dense (SDPA) layer-0 rel err 0.066, worst 0.14; dense EAGER vs dense SDPA, same weights: 0.039, layers 2-9 **0.17-0.22**. Two correct dense implementations differ more than DKV does | none; not a DKV defect. KIVI's baseline runs HF's own kernels, which is why it tracks the SDPA reference more closely on this model |
-| Routing is the largest share of what is left | RULER 32k (4 items): routed 63.8, every block read 88.8, KIVI-4 100. Fidelity KL routed 0.101 vs every block 0.047; granite routed 0.111 vs every block **0.0013 (KIVI 0.0066)** | open. Reading every block is no slower at 32k on Qwen2.5 (10.7 vs 10.2 tok/s) but 5x slower on Phi-4-mini (2.0 vs 9.8), so it is not a default |
+| Routing is the largest share of what is left | RULER 32k (4 items): routed 63.8, every block read 88.8, KIVI-4 100. Fidelity KL routed 0.101 vs every block 0.047; granite routed 0.111 vs every block **0.0013 (KIVI 0.0066)** | addressed in V21 (top section). Was open. Reading every block is no slower at 32k on Qwen2.5 (10.7 vs 10.2 tok/s) but 5x slower on Phi-4-mini (2.0 vs 9.8), so it is not a default |
 
 **V19** (`benchmarks/campaigns/run_v19_ruler_raw_values.cmd`): V18's DKV arm
 again after the fix, same items; KIVI-4 arms from V18. RULER 32k, DKV codes /

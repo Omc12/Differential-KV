@@ -111,6 +111,13 @@ _TOPIC_SWITCH_THRESHOLD = float(os.environ.get("DKV_SRL_TOPIC_SWITCH_THRESHOLD",
 # `mid` builds -- see the note at the fold site.
 _ROUTER_EXACT_KEY = os.environ.get("DKV_ROUTER_EXACT_KEY", "1") != "0"
 
+# DKV_ROUTE_HEADS -- how the block router combines heads: "vote" (default:
+# each head spreads one vote by its own softmax) or "max" (largest raw logit of
+# any head, the rule before 2026-11-27). See route_blocks_relevance.
+_ROUTE_HEADS = os.environ.get("DKV_ROUTE_HEADS", "vote").strip().lower()
+if _ROUTE_HEADS not in ("vote", "max"):
+    _ROUTE_HEADS = "vote"
+
 
 # ── Level-1 Anchor Screening ──────────────────────────────────────────────────
 
@@ -1055,9 +1062,18 @@ def _adaptive_select(Q, kbt, slots_long, relevance, k_eff, N, topk_env, scale):
     until the routed set holds DKV_ROUTE_ADAPTIVE_P of it, up to
     DKV_ROUTE_ADAPTIVE_KMAX. Returns positions into the candidates, or None when
     the fixed top-k applies: no moments recorded, DKV_TOPK_BLOCKS set, top-p on,
-    or N <= DKV_ROUTE_ADAPTIVE_MIN_BLOCKS (default 2 k_eff -- at 32k, 31 blocks,
-    growth measured no gain in real decode: decode-step KL 0.0041 fixed vs 0.0052
-    grown to 17.8 blocks; at 64k it covers 0.92 of the attention mass vs 0.79).
+    or N <= DKV_ROUTE_ADAPTIVE_MIN_BLOCKS (default 0: grow whenever there is
+    anything to grow into).
+
+    The cutoff was 2 k_eff, so growth never ran below ~64 blocks (64k at the
+    1024-token block). It came from a LOW-RANK store measurement (Qwen2.5-1.5B,
+    32k: decode-step KL 0.0041 fixed vs 0.0052 grown), where each extra block
+    added reconstruction error. On the codes store extra blocks only help
+    (every block read: Qwen2.5-7B 0.047 vs 0.101 routed, granite 0.0013 vs
+    0.111). V21, 32k, vote router: Qwen2.5-7B decode KL 0.106 -> 0.060 with the
+    cutoff removed (every block 0.047), granite 0.066 -> 0.075 (one prompt
+    carries it), Phi-4-mini decode 11.7 vs 11.6 tok/s (growth is bounded by
+    DKV_ROUTE_ADAPTIVE_P of the estimated mass and _KMAX).
 
     Router-agnostic on purpose. The floor came from the key-box router at first,
     and at 131k that router lost niah items the residual router answers (its
@@ -1072,9 +1088,9 @@ def _adaptive_select(Q, kbt, slots_long, relevance, k_eff, N, topk_env, scale):
         if not adaptive_routing_enabled():
             return None
         try:
-            ada_min = int(os.environ.get("DKV_ROUTE_ADAPTIVE_MIN_BLOCKS", str(2 * k_eff)))
+            ada_min = int(os.environ.get("DKV_ROUTE_ADAPTIVE_MIN_BLOCKS", "0"))
         except ValueError:
-            ada_min = 2 * k_eff
+            ada_min = 0
         if N <= ada_min:
             return None
         mom = kbt.gather_moments(slots_long)
@@ -1573,9 +1589,35 @@ def route_blocks_relevance(
     else:
         relevance = s_anc
 
-    # relevance has shape [H_kv, gpk, L, N]
-    # Max-reduce over L (dim=1) and H (dim=0 after reshape)
-    relevance = relevance.reshape(H_kv * gpk, L, N).max(dim=1).values.max(dim=0).values   # [N]
+    # HOW HEADS ARE COMBINED (DKV_ROUTE_HEADS: "vote", the default, or "max").
+    #
+    # Softmax is per head, so a raw logit means nothing outside its own head.
+    # "max" (the rule until 2026-11-27) ranked blocks by the largest raw logit
+    # of ANY head, which hands every block to the head with the largest logit
+    # SCALE. On Qwen2.5-7B (k_proj bias to 414) one head chose all 16 kept
+    # blocks in most layers; at layer 27 its logits span -4493..643 and its
+    # blocks gave 0.43 attention-output error (whole layer, real decode step).
+    #
+    # "vote": each (head, query) row spreads ONE vote over the candidate blocks
+    # by its own softmax over their scores, and blocks are ranked by the mean
+    # vote. That estimates the mean per-head attention mass, the quantity the
+    # best selection ranks by, and bounds any one head's influence. The
+    # obvious alternative, normalising each head and keeping the max, was
+    # tried first and made decode WORSE (Qwen2.5-7B KL 0.101 -> 0.217): from
+    # the anchor plus <=64 residual rows the router sees, some heads' scores
+    # are badly estimated, and a max lets the worst-estimated head win (layer
+    # 0 output error 0.03 -> 0.36). benchmarks/diag_route_runtime.py, real
+    # router, two RULER items, mean layer output error: max 0.079 / 0.134,
+    # normalise-then-max 0.069 / 0.083, vote 0.056 / 0.076 (oracle 0.045 /
+    # 0.056). Relevance is then a share in [0, 1] per block; every consumer
+    # below uses it for ORDER only (edge propagation is shift/scale-equivariant
+    # in order, top-k, the adaptive floor), except opt-in top-p (select_by_mass),
+    # which softmaxes it again and so wants "max".
+    relevance = relevance.float().reshape(H_kv * gpk, L, N)
+    if _ROUTE_HEADS == "vote":
+        relevance = torch.softmax(relevance, dim=-1).nan_to_num(0.0).mean(dim=(0, 1))  # [N]
+    else:
+        relevance = relevance.max(dim=1).values.max(dim=0).values                      # [N]
 
     # ── Edge-aware routing propagation (MLX parity) ──────────────────────────
     # MLX applies this to the SAME relevance vector, between scoring and top-K:
