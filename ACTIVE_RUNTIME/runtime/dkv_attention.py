@@ -2538,12 +2538,16 @@ def install_sdpa_expanded_kv_guard() -> bool:
     The guard copies K/V to contiguous only in that case (mask given and a
     stride-0 head axis), so every other call is untouched. Idempotent.
 
-    Upstream: reported as pytorch/pytorch#191937 and fixed by #191984 / #192138,
-    released in torch 2.14.0 (per the issue; not re-measured here). The trigger
-    there is query length L % 32 == 1 at head_dim 256/512 (L % 64 == 1 at 128),
-    which matches 513 / 1025 / 1537 here. Kept unconditional: it costs nothing
-    on other calls, and a plain-transformers chunk-2050 failure seen here does
-    not fit that rule and is unexplained.
+    Upstream: reported as pytorch/pytorch#191937 and fixed by #191984 / #192138.
+    The trigger is query length L % 32 == 1 at head_dim 256/512 (L % 64 == 1 at
+    128), which matches 513 / 1025 / 1537 here. The plain-transformers
+    chunk-2050 failure is the same rule: an 8007-token prompt at chunk 2050
+    leaves a last chunk of 1857 (1857 % 32 == 1), and that chunk's last row is
+    the one the layer diff reads (torch 2.11: last row rel err 1.4-2.1, other
+    rows 1.7e-3; 1856 and 1858 clean). Kernel-level repro clean on torch
+    2.15.0+cu132 (separate venv, 2026-11-27); the in-model run on 2.15 was not
+    done. Kept unconditional: it costs a copy only on the calls that trigger
+    the bug and nothing on any other.
     """
     import torch.nn.functional as _F
     if getattr(_F.scaled_dot_product_attention, "_dkv_expanded_kv_guard", False):
